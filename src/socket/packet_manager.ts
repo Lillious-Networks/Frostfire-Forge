@@ -318,4 +318,9 @@ export const packetManager = {
       )
     ] as any[];
   },
+  consoleMessage: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CONSOLE_MESSAGE", data })),
+    ] as any[];
+  },
 };

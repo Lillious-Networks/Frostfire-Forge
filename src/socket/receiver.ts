@@ -401,7 +401,8 @@ export default async function packetReceiver(
         };
 
         if (!musicData.data) {
-          sendPacket(ws, packetManager.notify({ message: `Music file not found: ${musicData.name}` }));
+          sendPacket(ws, packetManager.consoleMessage({ type: "error", message: `Music file not found: ${musicData.name}` }));
+          //sendPacket(ws, packetManager.notify({ message: `Music file not found: ${musicData.name}` }));
         } else {
           sendPacket(ws, packetManager.music(musicData));
         }

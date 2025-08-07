@@ -1,4 +1,10 @@
-/* Hide the scroll bars */
+:root {
+  --green : #029656;
+  --red : #974747;
+  --orange: #db933b;
+  --blue: #0D80D8;
+}
+
 /* Load font from file */
 @font-face {
   font-family: 'Comic Relief';
@@ -1223,4 +1229,34 @@ input[type=range]:disabled {
   white-space: pre-wrap;
   word-break: break-all;
   user-select: none;
+}
+
+.notification {
+  position: fixed;
+  bottom: 25px;
+  right: 25px;
+  background: rgba(57, 43, 68, 1);
+  color: #DCBEAC;
+  padding: 5px 10px;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+  z-index: 100000000000;
+  border-right: 5px solid transparent;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.notification-info {
+  border-right: 5px solid var(--blue);
+}
+
+.notification-error {
+  border-right: 5px solid var(--red);
+}
+
+.notification-success {
+  border-right: 5px solid var(--green);
+}
+
+.notification-warning {
+  border-right: 5px solid var(--orange);
 }

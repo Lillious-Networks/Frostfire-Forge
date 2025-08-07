@@ -426,6 +426,11 @@ socket.onmessage = async (event) => {
   const data = JSON.parse(packet.decode(event.data))["data"];
   const type = JSON.parse(packet.decode(event.data))["type"];
   switch (type) {
+    case "CONSOLE_MESSAGE": {
+      if (!data || !data.message) return;
+      window.Notify(data.type, data.message);
+      break;
+    }
     case "INVITATION": {
       // Show the invitation modal
       createInvitationPopup(data);
