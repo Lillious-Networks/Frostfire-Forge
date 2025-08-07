@@ -1,3 +1,4 @@
+const isCryptoSupported = typeof window?.crypto?.subtle === "object" && Object.keys(window.crypto.subtle).length !== 0;
 let cachedPlayerId: string | null = null;
 const socket = new WebSocket(`__VAR.WEBSOCKETURL__`);
 let sentRequests = 0;
@@ -1100,7 +1101,7 @@ socket.onmessage = async (event) => {
 }
 
 function updateXp(xp: number, level: number, max_xp: number) {
-  const xscale = Math.max(0, Math.min(1, xp / max_xp));
+  const xscale = Math.max(0, Math.min(1, xp / max_xp)) || 0;
   xpBar.animate([
     { transform: `scaleX(${xscale})` }
   ], {
@@ -1350,7 +1351,7 @@ async function handleEnterKey() {
 
 async function handleCommand(message: string) {
   const command = message.substring(1);
-  if (window?.crypto?.subtle) {
+  if (isCryptoSupported) {
     const chatDecryptionKey = sessionStorage.getItem("chatDecryptionKey");
     if (!chatDecryptionKey) return;
     const encryptedMessage = await encryptRsa(chatDecryptionKey, command || " ");
@@ -1368,7 +1369,8 @@ async function handleCommand(message: string) {
 }
 
 async function handleChatMessage(message: string) {
-  if (window?.crypto?.subtle) {
+
+  if (isCryptoSupported) {
     const chatDecryptionKey = sessionStorage.getItem("chatDecryptionKey");
     if (!chatDecryptionKey) return;
     
@@ -2109,7 +2111,7 @@ window.addEventListener("blur", () => {
 
 // Helper function to update health bar styling
 function updateHealthBar(bar: HTMLDivElement, healthPercent: number) {
-  const xscale = Math.max(0, Math.min(1, healthPercent / 100));
+  const xscale = Math.max(0, Math.min(1, healthPercent / 100)) || 0;
   bar.animate([
     { transform: `scaleX(${xscale})` }
   ], {
@@ -2143,7 +2145,7 @@ function updateHealthBar(bar: HTMLDivElement, healthPercent: number) {
 }
 
 function updateStaminaBar(bar: HTMLDivElement, staminaPercent: number) {
-  const xscale = Math.max(0, Math.min(1, staminaPercent / 100));
+  const xscale = Math.max(0, Math.min(1, staminaPercent / 100)) || 0;
   bar.animate([
     { transform: `scaleX(${xscale})` }
   ], {
