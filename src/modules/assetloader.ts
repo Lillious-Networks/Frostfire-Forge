@@ -14,6 +14,7 @@ import generate from "../modules/sprites";
 import zlib from "zlib";
 import query from "../controllers/sqldatabase";
 import * as settings from "../../config/settings.json";
+const defaultMap = settings.default_map?.replace(".json", "") || "main";
 // Warm up the database connection
 await query("SELECT 1 + 1 AS solution -- Warm up the database connection");
 
@@ -193,8 +194,8 @@ function loadAllMaps() {
     }
   }
 
-  const mainMap = maps.find((m) => m.name === "main.json");
-  if (!mainMap) throw new Error("Main map not found");
+  const mainMap = maps.find((m) => m.name === `${defaultMap}.json`);
+  if (!mainMap) throw new Error(`Default map ${defaultMap} not found in the maps directory`);
 
   assetCache.add("maps", maps);
   assetCache.add("mapProperties", mapProperties);

@@ -400,7 +400,11 @@ export default async function packetReceiver(
             .find((a: SoundData) => a.name === "music_entry"),
         };
 
-        sendPacket(ws, packetManager.music(musicData));
+        if (!musicData.data) {
+          sendPacket(ws, packetManager.notify({ message: `Music file not found: ${musicData.name}` }));
+        } else {
+          sendPacket(ws, packetManager.music(musicData));
+        }
         break;
       }
       // TODO:Move this to the logout packet
