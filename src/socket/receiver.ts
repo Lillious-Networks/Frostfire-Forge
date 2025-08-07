@@ -1919,10 +1919,12 @@ export default async function packetReceiver(
                 }
                 await permissions.add(targetPlayer.username, permissionsArray);
                 // Update the player cache
-                targetPlayer.permissions = permissionsArray;
-                cache.set(targetPlayer.id, targetPlayer);
+                if (targetPlayer.ws) {
+                  targetPlayer.permissions = permissionsArray;
+                  cache.set(targetPlayer.id, targetPlayer);
+                }
                 const notifyData = {
-                  message: `Permissions added to ${targetPlayer.username.charAt(0).toUpperCase() + targetPlayer.username.slice(1)}`,
+                  message: `Permissions \`${permissionsArray.join(", ")}\` added to ${targetPlayer.username.charAt(0).toUpperCase() + targetPlayer.username.slice(1)}`,
                 };
                 sendPacket(ws, packetManager.notify(notifyData));
                 break;
@@ -1953,8 +1955,10 @@ export default async function packetReceiver(
                   permissionsArray
                 );
                 // Update the player cache
-                targetPlayer.permissions = permissionsArray;
-                cache.set(targetPlayer.id, targetPlayer);
+                if (targetPlayer.ws) {
+                  targetPlayer.permissions = permissionsArray;
+                  cache.set(targetPlayer.id, targetPlayer);
+                }
                 const notifyData = {
                   message: `Permissions removed from ${targetPlayer.username.charAt(0).toUpperCase() + targetPlayer.username.slice(1)}`,
                 };
@@ -1984,8 +1988,10 @@ export default async function packetReceiver(
                 }
                 await permissions.set(targetPlayer.username, permissionsArray);
                 // Update the player cache
-                targetPlayer.permissions = permissionsArray;
-                cache.set(targetPlayer.id, targetPlayer);
+                if (targetPlayer.ws) {
+                  targetPlayer.permissions = permissionsArray;
+                  cache.set(targetPlayer.id, targetPlayer);
+                }
                 const notifyData = {
                   message: `Permissions set for ${targetPlayer.username.charAt(0).toUpperCase() + targetPlayer.username.slice(1)}`,
                 };
@@ -2016,7 +2022,10 @@ export default async function packetReceiver(
                 await permissions.clear(targetPlayer.username);
                 // Update the player cache
                 targetPlayer.permissions = [];
-                cache.set(targetPlayer.id, targetPlayer);
+                const p = cache.get(targetPlayer.id);
+                if (p.ws) {
+                  cache.set(targetPlayer.id, targetPlayer);
+                }
                 const notifyData = {
                   message: `Permissions cleared for ${targetPlayer.username.charAt(0).toUpperCase() + targetPlayer.username.slice(1)}`,
                 };

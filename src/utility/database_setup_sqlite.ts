@@ -264,14 +264,17 @@ const createPermissionTypesTable = async () => {
         name TEXT NOT NULL UNIQUE PRIMARY KEY
     );
     INSERT OR IGNORE INTO permission_types (name) VALUES
+      ('admin.*'),
       ('admin.ban'),
       ('admin.disconnect'),
       ('admin.permission'),
       ('admin.respawn'),
       ('admin.unban'),
+      ('permission.*'),
       ('permission.add'),
       ('permission.list'),
       ('permission.remove'),
+      ('server.*'),
       ('server.admin'),
       ('server.notify'),
       ('server.restart'),

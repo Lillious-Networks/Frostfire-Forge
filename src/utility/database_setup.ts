@@ -220,14 +220,17 @@ const createPermissionTypesTable = async () => {
   // Then insert the default permissions
   const insertPermissionsSql = `
     INSERT IGNORE INTO permission_types (name) VALUES
+      ('admin.*'),
       ('admin.ban'),
       ('admin.disconnect'),
       ('admin.permission'),
       ('admin.respawn'),
       ('admin.unban'),
+      ('permission.*'),
       ('permission.add'),
       ('permission.list'),
       ('permission.remove'),
+      ('server.*'),
       ('server.admin'),
       ('server.notify'),
       ('server.restart'),
