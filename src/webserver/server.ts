@@ -87,7 +87,7 @@ const routes = {
 } as Record<string, any>;
 
 Bun.serve({
-  port: _https ? 443 : 80,
+  port: _https ? (process.env.WEBSRV_PORTSSL || 443) : (process.env.WEBSRV_PORT || 80),
   routes: {
     "/docs": routes["/docs"],
     "/benchmark": routes["/benchmark"],
@@ -148,11 +148,13 @@ Bun.serve({
 // If HTTPS is enabled, also start an HTTP server that redirects to HTTPS
 if (_https) {
   Bun.serve({
-    port: 80,
+    port: process.env.WEBSRV_PORT || 80,
     fetch(req: Request) {
       const url = new URL(req.url);
       // Always redirect to https with same host/path/query
-      return Response.redirect(`https://${url.host}${url.pathname}${url.search}`, 301);
+      // If the port is 443, don't include it in the redirect
+      const port = process.env.WEBSRV_PORTSSL === "443" ? "" : `:${process.env.WEBSRV_PORTSSL || 443}`;
+      return Response.redirect(`https://${url.hostname}${port}${url.pathname}${url.search}`, 301);
     }
   });
 }

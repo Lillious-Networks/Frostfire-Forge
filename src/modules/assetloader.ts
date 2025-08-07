@@ -243,41 +243,58 @@ function extractAndCompressLayers(map: MapData) {
       noPvpZones.push(layer.data);
     }
 
-    // Warps
-    if (layer?.name.toLowerCase() === "warps") {
+    // Check if layer is an object group
+    if (layer.type === "objectgroup") {
       const objects = layer.objects;
       objects.forEach((obj: any) => {
-        const _map = obj.properties?.find((p: any) => p.name === "map")?.value;
-        const x = obj.properties?.find((p: any) => p.name === "x")?.value;
-        const y = obj.properties?.find((p: any) => p.name === "y")?.value;
-        // Normalize position: top-left (map) is (0,0), canvas center is (0,0)
-        const mapWidth = map.data.width * map.data.tilewidth;
-        const mapHeight = map.data.height * map.data.tileheight;
-        const posX = Math.floor(obj.x - mapWidth / 2);
-        const posY = Math.floor(obj.y - mapHeight / 2);
-        const width = Math.floor(obj.width);
-        const height = Math.floor(obj.height);
+        // UI references "class" but JSON references "type"
+        // They are the same thing in Tiled, but we check both for compatibility
+        const type = obj?.class?.toLowerCase() || obj?.type?.toLowerCase();
+        if (!type) {
+          log.warn(`Object in map ${map.name} has no type or class: ${JSON.stringify(obj)}`);
+          return;
+        }
+        switch (type) {
+          // Warp objects
+          case "warp":
+            const _map = obj.properties?.find((p: any) => p.name === "map")?.value;
+            const x = obj.properties?.find((p: any) => p.name === "x")?.value;
+            const y = obj.properties?.find((p: any) => p.name === "y")?.value;
 
-        if (_map && x !== undefined && y !== undefined) {
-          warps.push({
-            name: obj.name,
-            map: _map,
-            x: x,
-            y: y,
-            position: {
-              x: posX,
-              y: posY,
-            },
-            size: {
-              width: width,
-              height: height,
-            },
-          });
-        } else {
-          log.warn(`Invalid warp object in map ${map.name}: ${JSON.stringify(obj)}`);
+            // Normalize position: top-left (map) is (0,0), canvas center is (0,0)
+            const mapWidth = map.data.width * map.data.tilewidth;
+            const mapHeight = map.data.height * map.data.tileheight;
+            const posX = Math.floor(obj.x - mapWidth / 2);
+            const posY = Math.floor(obj.y - mapHeight / 2);
+            const width = Math.floor(obj.width);
+            const height = Math.floor(obj.height);
+
+            if (_map && x !== undefined && y !== undefined) {
+              warps.push({
+                name: obj.name,
+                map: _map,
+                x: x,
+                y: y,
+                position: {
+                  x: posX,
+                  y: posY,
+                },
+                size: {
+                  width: width,
+                  height: height,
+                },
+              });
+            } else {
+              log.warn(`Invalid warp object in map ${map.name}: ${JSON.stringify(obj)}`);
+            }
+          break;
+          default:
+            log.warn(`Unknown object or object type in map ${map.name}: ${JSON.stringify(obj)}`);
         }
       });
+
       if (warps.length > 0) {
+        log.debug(`Found ${warps.length} warp(s) in map ${map.name}`);
         const _map = mapProperties.find(m => m.name.replace(".json", "") === map.name.replace(".json", "")) as MapProperties | undefined;
         if (!_map) {
           log.error(`Map properties not found for ${map.name}`);
@@ -295,7 +312,7 @@ function extractAndCompressLayers(map: MapData) {
         }, {} as { [key: string]: { map: string; position: any; x: number; y: number; size: { width: number; height: number; }; } });
         log.debug(`Extracted ${warps.length} warp(s) from map ${map.name}`);
       }
-    }
+    }    
   });
 
   let width: number | null = null;
