@@ -256,8 +256,8 @@ function extractAndCompressLayers(map: MapData) {
         }
         switch (type) {
           // Warp objects
-          case "warp":
-            const _map = obj.properties?.find((p: any) => p.name === "map")?.value;
+          case "warp": {
+                        const _map = obj.properties?.find((p: any) => p.name === "map")?.value;
             const x = obj.properties?.find((p: any) => p.name === "x")?.value;
             const y = obj.properties?.find((p: any) => p.name === "y")?.value;
 
@@ -287,6 +287,7 @@ function extractAndCompressLayers(map: MapData) {
             } else {
               log.warn(`Invalid warp object in map ${map.name}: ${JSON.stringify(obj)}`);
             }
+          }
           break;
           default:
             log.warn(`Unknown object or object type in map ${map.name}: ${JSON.stringify(obj)}`);
