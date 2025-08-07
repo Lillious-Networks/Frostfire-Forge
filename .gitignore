@@ -27,6 +27,7 @@ assets/maps/*
 assets/sfx/*
 !assets/sfx/attack_sword.mp3
 !assets/sfx/music_morning_dew.mp3
+!assets/sfx/music_entry.mp3
 
 assets/tilesets/*
 !assets/tilesets/tiles.png
