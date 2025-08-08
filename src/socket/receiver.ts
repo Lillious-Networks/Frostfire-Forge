@@ -94,319 +94,281 @@ export default async function packetReceiver(
       }
       // TODO:Move this to the auth packet
       case "AUTH": {
-        // Set the session id for the player
-        const auth = await player.setSessionId(data.toString(), ws.data.id);
-        if (!auth) {
-          sendPacket(ws, packetManager.loginFailed());
-          ws.close(1008, "Already logged in");
-          break;
-        }
-
-        const getUsername = (await player.getUsernameBySession(
-          ws.data.id
-        )) as any[];
-
-        const username = getUsername[0]?.username as string;
-        ws.data.username = username;
-        const id = getUsername[0]?.id as string;
-
-        // Get permissions for the player
-        const access = (await permissions.get(username)) as string;
-
-        // Retrieve the player's inventory
-        const items = (await inventory.get(username)) || [];
-        if (items.length > 30) {
-          items.length = 30;
-        }
-
-        sendPacket(ws, packetManager.inventory(items));
-
-        // Retrieve the player's quest log
-        const questLog = (await questlog.get(username)) || [];
-        const incompleteQuest = questLog.incomplete;
-        const completedQuest = questLog.completed;
-
-        // Send the player's quest log
-        sendPacket(ws, packetManager.questlog(completedQuest, incompleteQuest));
-
-        // Get the player's stats
-        const stats = await player.getStats(username);
-
-        // Get the player's currency
-        const playerCurrency = await currency.get(username) as Currency;
-
-        // Get the player's friends list
-        const friendsList = await friends.list(username);
-
-        // Check if the player has a party
-        const partyId = await parties.getPartyId(username);
-        const partyMembers: string[] = [];
-
-        if (partyId) {
-            const members = await parties.getPartyMembers(partyId);
-            partyMembers.push(...members);
-        }
-
-        // Get client configuration
-        const clientConfig = (await player.getConfig(username)) as any[];
-        sendPacket(ws, packetManager.clientConfig(clientConfig));
-
-        const location = (await player.getLocation({
-          username: username,
-        })) as LocationData | null;
-
-        const isAdmin = await player.isAdmin(username);
-        const isGuest = await player.isGuest(username);
-        let isStealth = await player.isStealth(username);
-        let isNoclip = await player.isNoclip(username);
-
-        // Turn off stealth mode if the player is not an admin and is in stealth mode
-        if (!isAdmin && isStealth) {
-          await player.toggleStealth(username);
-          isStealth = false;
-        }
-        if (!isAdmin && isNoclip) {
-          await player.toggleNoclip(username);
-          isNoclip = false;
-        }
-
-        const position = location?.position as unknown as PositionData;
-        let spawnLocation;
-        if (
-          !location ||
-          (!position?.x && position.x.toString() != "0") ||
-          (!position?.y && position.y.toString() != "0")
-        ) {
-          spawnLocation = { map: `${defaultMap}.json`, x: 0, y: 0 };
-        } else {
-          spawnLocation = {
-            map: `${location.map}.json`,
-            x: position.x || 0,
-            y: position.y || 0,
-            direction: position.direction,
-          };
-        }
-        const map =
-          (maps as any[]).find(
-            (map: MapData) => map.name === spawnLocation?.map
-          ) ||
-          (maps as any[]).find(
-            (map: MapData) => map.name === `${defaultMap}.json`
-          );
-
-        if (!map) return;
-
-        spawnLocation.map = map.name;
-        await player.setLocation(
-          ws.data.id,
-          spawnLocation.map.replace(".json", ""),
-          { x: spawnLocation.x, y: spawnLocation.y, direction: "down" }
-        );
-
-        cache.add(ws.data.id, {
-          username,
-          animation: null,
-          isAdmin,
-          isStealth,
-          isNoclip,
-          id: ws.data.id,
-          userid: id,
-          location: {
-            map: spawnLocation.map.replace(".json", ""),
-            position: {
-              x: spawnLocation.x || 0,
-              y: spawnLocation.y || 0,
-              direction: "down",
-            },
-          },
-          language: parsedMessage?.language || "en",
-          ws,
-          stats,
-          friends: friendsList,
-          attackDelay: 0,
-          lastMovementPacket: null,
-          permissions: typeof access === "string" ? access.split(",") : [],
-          movementInterval: null,
-          pvp: false,
-          last_attack: null,
-          invitations: [],
-          party: partyMembers,
-          currency: playerCurrency,
-          isGuest,
-        });
-        log.debug(
-          `Spawn location for ${username}: ${spawnLocation.map.replace(
-            ".json",
-            ""
-          )} at ${spawnLocation.x},${spawnLocation.y}`
-        );
-        const mapData = [
-          map?.compressed,
-          spawnLocation?.map,
-          position?.x || 0,
-          position?.y || 0,
-          position?.direction || "down",
-        ];
-
-        sendPacket(ws, packetManager.loadMap(mapData));
-
-        // Load NPCs for the current map only
-        const npcsInMap = npcs.filter(
-          (npc: Npc) => npc.map === spawnLocation.map.replace(".json", "")
-        );
-
-        const npcPackets = npcsInMap.reduce((packets: any[], npc: Npc) => {
-          const particleArray =
-            typeof npc.particles === "string"
-              ? (npc.particles as string)
-                  .split(",")
-                  .map((name) =>
-                    particles.find((p: Particle) => p.name === name.trim())
-                  )
-                  .filter(Boolean)
-              : [];
-
-          const npcData = {
-            id: npc.id,
-            last_updated: npc.last_updated,
-            location: {
-              x: npc.position.x,
-              y: npc.position.y,
-              direction: "down",
-            },
-            script: npc.script,
-            hidden: npc.hidden,
-            dialog: npc.dialog,
-            particles: particleArray,
-            quest: npc.quest,
-            map: npc.map,
-            position: npc.position,
-          };
-          return [...packets, ...packetManager.createNpc(npcData)];
-        }, [] as any[]);
-
-        sendPacket(ws, npcPackets);
-
-        const allPlayers = cache.list() as Record<string, any>; // Make it clear it's a dictionary
-        const currentPlayerData = allPlayers[ws.data.id];
-
-        // Notify all *existing* players about the new player's online status
-        for (const [, player] of Object.entries(allPlayers)) {
-          if (player.ws.id !== ws.data.id) {
-            // Check if they are even friends
-            const isFriend = currentPlayerData.friends.some(
-              (friend: any) => friend === player.username
-            );
-            if (!isFriend) continue;
-            // Send the online status update to both players
-            sendPacket(player.ws, packetManager.updateOnlineStatus({
-              online: true,
-              username: currentPlayerData.username,
-            }));
-            sendPacket(currentPlayerData.ws, packetManager.updateOnlineStatus({
-              online: true,
-              username: player.username,
-            }));
-          }
-        }
-
-        // Notify the *new* player about all existing players who are already online
-        for (const [, player] of Object.entries(allPlayers)) {
-          if (player.ws !== ws) {
-            // Check if they are even friends
-            const isFriend = currentPlayerData.friends.some(
-              (friend: any) => friend.username === player.username
-            );
-            if (!isFriend) continue;
-            sendPacket(ws, packetManager.updateOnlineStatus({
-              online: true,
-              username: player.username,
-            }));
-          }
-        }
-
-        // Filter players by the current map
-        const players = filterPlayersByMap(spawnLocation.map);
-
-        const playerData = [] as any[];
-
-        players.forEach((player) => {
-          const spawnData = {
-            id: ws.data.id,
-            userid: id,
-            location: {
-              map: spawnLocation.map,
-              x: position.x || 0,
-              y: position.y || 0,
-              direction: position.direction,
-            },
-            username,
-            isAdmin,
-            isGuest,
-            isStealth,
-            stats,
-            animation: null,
-          };
-
-          if (player.ws === ws) {
-            sendPacket(player.ws, packetManager.spawnPlayer({
-              ...spawnData,
-              friends: friendsList,
-              party: partyMembers,
-              currency: playerCurrency,
-            }));
-          } else {
-            sendPacket(player.ws, packetManager.spawnPlayer(spawnData));
-          }
-
-          if (spawnLocation.direction) {
-            sendPositionAnimation(player.ws, spawnLocation.direction, false);
-          }
-
-          const data = {
-            id: player.id,
-            userid: player.userid,
-            location: {
-              map: player.location.map,
-              x: player.location.position.x || 0,
-              y: player.location.position.y || 0,
-              direction: player.location.position.direction,
-            },
-            username: player.username,
-            isAdmin: player.isAdmin,
-            isGuest: player.isGuest,
-            isStealth: player.isStealth,
-            stats: player.stats,
-            animation: null,
-          };
-
-          playerData.push(data);
-        });
-      
-        sendPacket(ws, packetManager.loadPlayers(playerData));
-        // Send animations for all loadedPlayers
-        if (playerData.length > 0) {
-          playerData.forEach((player) => {
-            if (player.id !== ws.data.id && player.location.direction) {
-              sendAnimation(ws, getAnimationNameForDirection(player.location.direction, false), player.id);
-            }
-          });
-        }
-
-        const musicData = {
-          name: "music_entry",
-          data: assetCache
-            .get("audio")
-            .find((a: SoundData) => a.name === "music_entry"),
-        };
-
-        if (!musicData.data) {
-          sendPacket(ws, packetManager.consoleMessage({ type: "error", message: `Music file not found: ${musicData.name}` }));
-          //sendPacket(ws, packetManager.notify({ message: `Music file not found: ${musicData.name}` }));
-        } else {
-          sendPacket(ws, packetManager.music(musicData));
-        }
-        break;
+              const auth = await player.setSessionId(data.toString(), ws.data.id);
+              if (!auth) {
+                sendPacket(ws, packetManager.loginFailed());
+                ws.close(1008, "Already logged in");
+                break;
+              }
+              const getUsername = (await player.getUsernameBySession(ws.data.id)) as any[];
+              const username = getUsername[0]?.username as string;
+              ws.data.username = username;
+              const id = getUsername[0]?.id as string;
+              const [
+                access,
+                itemsRaw,
+                questLogRaw,
+                stats,
+                playerCurrency,
+                friendsList,
+                partyId,
+                clientConfig,
+                location,
+                isAdmin,
+                isGuest,
+                isStealthInitial,
+                isNoclipInitial
+              ] = await Promise.all([
+                permissions.get(username),
+                inventory.get(username),
+                questlog.get(username),
+                player.getStats(username),
+                currency.get(username),
+                friends.list(username),
+                parties.getPartyId(username),
+                player.getConfig(username),
+                player.getLocation({ username }),
+                player.isAdmin(username),
+                player.isGuest(username),
+                player.isStealth(username),
+                player.isNoclip(username)
+              ]);
+              const items = (itemsRaw || []).slice(0, 30);
+              const incompleteQuest = questLogRaw?.incomplete || [];
+              const completedQuest = questLogRaw?.completed || [];
+              let isStealth = isStealthInitial;
+              let isNoclip = isNoclipInitial;
+              if (!isAdmin && isStealth) {
+                await player.toggleStealth(username);
+                isStealth = false;
+              }
+              if (!isAdmin && isNoclip) {
+                await player.toggleNoclip(username);
+                isNoclip = false;
+              }
+              let partyMembers: string[] = [];
+              if (partyId) {
+                partyMembers = await parties.getPartyMembers(partyId);
+              }
+              sendPacket(ws, packetManager.inventory(items));
+              sendPacket(ws, packetManager.questlog(completedQuest, incompleteQuest));
+              sendPacket(ws, packetManager.clientConfig(clientConfig));
+              const position = location?.position as PositionData;
+              let spawnLocation;
+              if (
+                !location ||
+                (!position?.x && position.x !== 0) ||
+                (!position?.y && position.y !== 0)
+              ) {
+                spawnLocation = { map: `${defaultMap}.json`, x: 0, y: 0 };
+              } else {
+                spawnLocation = {
+                  map: `${location.map}.json`,
+                  x: position.x || 0,
+                  y: position.y || 0,
+                  direction: position.direction,
+                };
+              }
+              const map =
+                maps.find((m: MapData) => m.name === spawnLocation.map) ||
+                maps.find((m: MapData) => m.name === `${defaultMap}.json`);
+              if (!map) return;
+              spawnLocation.map = map.name;
+              await player.setLocation(ws.data.id, spawnLocation.map.replace(".json", ""), {
+                x: spawnLocation.x,
+                y: spawnLocation.y,
+                direction: spawnLocation.direction || "down"
+              });
+              cache.add(ws.data.id, {
+                username,
+                animation: null,
+                isAdmin,
+                isStealth,
+                isNoclip,
+                id: ws.data.id,
+                userid: id,
+                location: {
+                  map: spawnLocation.map.replace(".json", ""),
+                  position: {
+                    x: spawnLocation.x || 0,
+                    y: spawnLocation.y || 0,
+                    direction: spawnLocation.direction || "down",
+                    moving: false,
+                  },
+                },
+                language: parsedMessage?.language || "en",
+                ws,
+                stats,
+                friends: friendsList || [],
+                attackDelay: 0,
+                lastMovementPacket: null,
+                permissions: typeof access === "string" ? access.split(",") : [],
+                movementInterval: null,
+                pvp: false,
+                last_attack: null,
+                invitations: [],
+                party: partyMembers,
+                currency: playerCurrency,
+                isGuest,
+              });
+              log.debug(
+                `Spawn location for ${username}: ${spawnLocation.map.replace(".json", "")} at ${spawnLocation.x},${spawnLocation.y}`
+              );
+              const mapData = [
+                map?.compressed,
+                spawnLocation?.map,
+                position?.x || 0,
+                position?.y || 0,
+                position?.direction || "down",
+              ];
+              sendPacket(ws, packetManager.loadMap(mapData));
+              const allPlayers = cache.list() as Record<string, any>;
+              const currentPlayerData = allPlayers[ws.data.id];
+              const playersOnMap = filterPlayersByMap(spawnLocation.map);
+              const playerDataForLoad: any[] = [];
+              for (const p of playersOnMap) {
+                playerDataForLoad.push({
+                  id: p.id,
+                  userid: p.userid,
+                  location: {
+                    map: p.location.map,
+                    x: p.location.position.x || 0,
+                    y: p.location.position.y || 0,
+                    direction: p.location.position.direction,
+                  },
+                  username: p.username,
+                  isAdmin: p.isAdmin,
+                  isGuest: p.isGuest,
+                  isStealth: p.isStealth,
+                  stats: p.stats,
+                  animation: null
+                });
+              }
+              sendPacket(ws, packetManager.loadPlayers(playerDataForLoad));
+              const spawnDataForAll = {
+                id: ws.data.id,
+                userid: id,
+                location: {
+                  map: spawnLocation.map,
+                  x: spawnLocation.x || 0,
+                  y: spawnLocation.y || 0,
+                  direction: spawnLocation.direction,
+                },
+                username,
+                isAdmin,
+                isGuest,
+                isStealth,
+                stats,
+                animation: null,
+                friends: friendsList,
+                party: partyMembers,
+                currency: playerCurrency,
+              };
+              for (const p of playersOnMap) {
+                if (!p || !p.ws) continue;
+                if (p.ws === ws) {
+                  sendPacket(p.ws, packetManager.spawnPlayer(spawnDataForAll));
+                } else {
+                  const spawnForOther = {
+                    id: ws.data.id,
+                    userid: id,
+                    location: {
+                      map: spawnLocation.map,
+                      x: spawnLocation.x || 0,
+                      y: spawnLocation.y || 0,
+                      direction: spawnLocation.direction,
+                    },
+                    username,
+                    isAdmin,
+                    isGuest,
+                    isStealth,
+                    stats,
+                    animation: null
+                  };
+                  sendPacket(p.ws, packetManager.spawnPlayer(spawnForOther));
+                }
+                if (position.direction && ws.data.id === p.id) {
+                  sendPositionAnimation(p.ws, position.direction, false);
+                }
+              }
+              if (playerDataForLoad.length > 0) {
+                playerDataForLoad.forEach((pl) => {
+                  if (pl.id !== ws.data.id && pl.location.direction) {
+                    const pcache = cache.get(pl.id);
+                    sendAnimation(ws, getAnimationNameForDirection(pl.location.direction, pcache?.moving), pl.id);
+                  }
+                });
+              }
+              setImmediate(() => {
+                for (const [, p] of Object.entries(allPlayers)) {
+                  const playerObj = p as any;
+                  if (!playerObj.ws || playerObj.ws.id === ws.data.id) continue;
+                  const isFriendOfNew = (currentPlayerData.friends || []).some((f: any) => f === playerObj.username);
+                  const isFriendOfOther = (playerObj.friends || []).some((f: any) => f === currentPlayerData.username);
+                  if (isFriendOfNew) {
+                    sendPacket(playerObj.ws, packetManager.updateOnlineStatus({
+                      online: true,
+                      username: currentPlayerData.username,
+                    }));
+                  }
+                  if (isFriendOfOther) {
+                    sendPacket(currentPlayerData.ws, packetManager.updateOnlineStatus({
+                      online: true,
+                      username: playerObj.username,
+                    }));
+                  }
+                }
+              });
+              setImmediate(() => {
+                const npcsInMap = npcs.filter(
+                  (npc: Npc) => npc.map === spawnLocation.map.replace(".json", "")
+                );
+                const npcPackets = npcsInMap.reduce((packets: any[], npc: Npc) => {
+                  const particleArray =
+                    typeof npc.particles === "string"
+                      ? (npc.particles as string)
+                          .split(",")
+                          .map((name) =>
+                            particles.find((p: Particle) => p.name === name.trim())
+                          )
+                          .filter(Boolean)
+                      : [];
+                  const npcData = {
+                    id: npc.id,
+                    last_updated: npc.last_updated,
+                    location: {
+                      x: npc.position.x,
+                      y: npc.position.y,
+                      direction: "down",
+                    },
+                    script: npc.script,
+                    hidden: npc.hidden,
+                    dialog: npc.dialog,
+                    particles: particleArray,
+                    quest: npc.quest,
+                    map: npc.map,
+                    position: npc.position,
+                  };
+                  return [...packets, ...packetManager.createNpc(npcData)];
+                }, [] as any[]);
+                if (npcPackets.length) {
+                  sendPacket(ws, npcPackets);
+                }
+              });
+              setImmediate(() => {
+                const musicData = {
+                  name: "music_entry",
+                  data: assetCache
+                    .get("audio")
+                    .find((a: SoundData) => a.name === "music_entry"),
+                };
+                if (!musicData.data) {
+                  sendPacket(ws, packetManager.consoleMessage({ type: "error", message: `Music file not found: ${musicData.name}` }));
+                } else {
+                  sendPacket(ws, packetManager.music(musicData));
+                }
+              });
+              break;
       }
       // TODO:Move this to the logout packet
       case "LOGOUT": {
@@ -436,6 +398,7 @@ export default async function packetReceiver(
         const targetFPS = 60;
         const frameTime = 1000 / targetFPS;
         const lastDirection = currentPlayer.location.position.direction || "down";
+        currentPlayer.moving = true;
 
         const direction = data.toString().toLowerCase();
 
@@ -448,6 +411,8 @@ export default async function packetReceiver(
           if (currentPlayer.movementInterval) {
             clearInterval(currentPlayer.movementInterval);
             currentPlayer.movementInterval = null;
+            currentPlayer.moving = false;
+            cache.set(currentPlayer.id, currentPlayer);
             sendPositionAnimation(ws, lastDirection, false);
           }
           return;
@@ -468,6 +433,7 @@ export default async function packetReceiver(
         const movePlayer = async () => {
           if (running) return;
           running = true;
+          currentPlayer.moving = true;
 
           const currentTime = performance.now();
           const deltaTime = currentTime - lastTime;
@@ -497,6 +463,8 @@ export default async function packetReceiver(
           const offset = directionOffsets[direction];
           if (!offset) {
             running = false;
+            currentPlayer.moving = false;
+            cache.set(currentPlayer.id, currentPlayer);
             return;
           }
 
@@ -585,6 +553,7 @@ export default async function packetReceiver(
         };
 
         movePlayer(); // Immediate first step
+
         currentPlayer.movementInterval = setInterval(movePlayer, 1);
         break;
       }
@@ -2112,6 +2081,7 @@ export default async function packetReceiver(
                   player.location.x || 0,
                   player.location.y || 0,
                   player.location.direction || "down",
+                  player.location.moving || false
                 ];
                 sendPacket(player.ws, packetManager.loadMap(mapData));
               });
