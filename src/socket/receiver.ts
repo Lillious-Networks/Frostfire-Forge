@@ -2632,10 +2632,7 @@ function sendAnimation(ws: any, name: string, playerId?: string) {
   if (!currentPlayer) return;
 
   const animationData = getAnimation(name);
-  if (!animationData) {
-    console.log("Animation not found");
-    return;
-  }
+  if (!animationData) return;
 
   currentPlayer.animation = {
     frames: animationData?.data,
