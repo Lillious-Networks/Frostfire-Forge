@@ -459,12 +459,14 @@ socket.onmessage = async (event) => {
     case "ANIMATION": {
       let apng: any;
       try {
-          if (animationCache.has(data.name)) {
-              const inflatedData = animationCache.get(data.name)!;
+          if (animationCache.has(data?.name)) {
+              const inflatedData = animationCache.get(data?.name)!;
+              if (!inflatedData) return;
               apng = parseAPNG(inflatedData);
           } else {
               // @ts-expect-error - pako is not defined because it is loaded in the index.html
-              const inflatedData = pako.inflate(new Uint8Array(data.data.data));
+              const inflatedData = pako.inflate(new Uint8Array(data?.data?.data));
+              if (!inflatedData) return;
               apng = parseAPNG(inflatedData.buffer);
               animationCache.set(data.name, inflatedData.buffer);
           }
@@ -474,12 +476,14 @@ socket.onmessage = async (event) => {
                   const player = players.find(p => p.id === data.id);
                   if (player) {
                       player.animation = {
-                          frames: apng.frames,
+                          frames: apng?.frames,
                           currentFrame: 0,
                           lastFrameTime: performance.now()
                       };
                       // Initialize the frames' images
-                      apng.frames.forEach((frame: any) => frame.createImage());
+                      if (apng.frames && apng.frames.length > 0) {
+                        apng.frames.forEach((frame: any) => frame.createImage());
+                      }
                   } else {
                       // Retry after a short delay
                       await new Promise(resolve => setTimeout(resolve, 100));

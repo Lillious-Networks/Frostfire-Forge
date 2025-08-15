@@ -2629,6 +2629,7 @@ function sendPacket(ws: any, packets: any[]) {
 
 function sendAnimation(ws: any, name: string, playerId?: string) {
   const currentPlayer = cache.get(playerId || ws.data.id);
+  if (!currentPlayer) return;
 
   const animationData = getAnimation(name);
   if (!animationData) {
@@ -2637,15 +2638,15 @@ function sendAnimation(ws: any, name: string, playerId?: string) {
   }
 
   currentPlayer.animation = {
-    frames: animationData.data,
+    frames: animationData?.data,
     currentFrame: 0,
-    lastFrameTime: performance.now(),
+    lastFrameTime: performance?.now(),
   };
 
   const animationPacketData = {
-    id: currentPlayer.id,
+    id: currentPlayer?.id,
     name: name,
-    data: animationData.data,
+    data: animationData?.data,
   };
 
   cache.set(currentPlayer.id, currentPlayer);
