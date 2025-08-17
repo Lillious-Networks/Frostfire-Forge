@@ -1,0 +1,15 @@
+# /etc/systemd/system/frostfire-forge-production.service
+[Unit]
+Description=Frostfire Forge Production Service
+After=network.target
+
+[Service]
+ExecStart=/root/.bun/bin/bun production
+Restart=always
+RestartSec=5
+WorkingDirectory=/root/Frostfire-Forge
+User=root
+Environment=PATH=/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+[Install]
+WantedBy=multi-user.target
