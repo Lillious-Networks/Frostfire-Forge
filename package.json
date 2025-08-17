@@ -35,7 +35,7 @@
     "start-client": "cd ./Frostfire-Forge-Client && npm i && npm start",
     "package-client": "cd ./Frostfire-Forge-Client && npm i && npm run package",
     "service:start": "./src/utility/start-service.sh",
-    "service:stop": "sudo systemctl stop frostfire-forge-production",
+    "service:stop": "./src/utility/stop-service.sh",
     "service:restart": "sudo systemctl restart frostfire-forge-production",
     "service:status": "systemctl status frostfire-forge-production --no-pager",
     "service:logs": "journalctl -u frostfire-forge-production -f"
