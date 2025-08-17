@@ -1239,7 +1239,7 @@ chatInput.addEventListener("input", () => {
 });
 
 const cooldowns: { [key: string]: number } = {};
-const COOLDOWN_DURATION = 1000; // milliseconds
+const COOLDOWN_DURATION = 500; // milliseconds
 
 // Keyboard event handler configuration
 
@@ -1355,7 +1355,6 @@ async function handleEnterKey() {
   }
 
   chatInput.value = "";
-  chatInput.blur();
 }
 
 async function handleCommand(message: string) {
