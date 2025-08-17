@@ -18,19 +18,24 @@ function getSqlCert() {
   }
 }
 
-const pool = mysql.createPool({
-  host: process.env.DATABASE_HOST,
-  user: process.env.DATABASE_USER,
-  password: process.env.DATABASE_PASSWORD,
-  waitForConnections: true,
-  database: process.env.DATABASE_NAME,
-  ssl: getSqlCert(),
-  port: parseInt(process.env.DATABASE_PORT || "3306"),
-} as mysql.PoolOptions);
+let pool: mysql.Pool;
+if (_databaseEngine === "mysql") {
+  pool = mysql.createPool({
+    host: process.env.DATABASE_HOST,
+    user: process.env.DATABASE_USER,
+    password: process.env.DATABASE_PASSWORD,
+    waitForConnections: true,
+    database: process.env.DATABASE_NAME,
+    ssl: getSqlCert(),
+    port: parseInt(process.env.DATABASE_PORT || "3306"),
+  } as mysql.PoolOptions);
+}
+
 
 let _sqlitedb: sqlite.Database;
 if (_databaseEngine === "sqlite") {
   _sqlitedb = new sqlite.Database("database.sqlite");
+  _sqlitedb.exec("PRAGMA journal_mode = WAL;"); // enable Write-Ahead journaling - https://bun.com/docs/api/sqlite#wal-mode
 }
 
 const query = (sql: string, values?: any[]) => {
