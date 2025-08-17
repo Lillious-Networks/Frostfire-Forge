@@ -2,7 +2,7 @@
 set -e
 
 SERVICE_NAME=frostfire-forge-production
-PROJECT_DIR=/root/Frostfire-Forge
+PROJECT_DIR=/root/Frostfire-Forge/src/utility/
 SERVICE_FILE=$PROJECT_DIR/$SERVICE_NAME.service
 
 echo "🔗 Linking $SERVICE_NAME service..."
