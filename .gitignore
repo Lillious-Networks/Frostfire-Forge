@@ -35,6 +35,8 @@ assets/tilesets/*
 src/webserver/www/game/js/*.js
 src/webserver/www/public/js/*.js
 *.sqlite
+*.sqlite-wal
+*.sqlite-shm
 src/utility/*.md
 .VSCodeCounter
 bun.lockb

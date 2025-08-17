@@ -10,11 +10,14 @@ const createDatabase = async () => {
   await query(sql);
 };
 
+const useDatabase = async () => {
+  const useDatabaseSql = `USE ${database};`;
+  await query(useDatabaseSql);
+};
+
 // Create accounts table if it doesn't exist
 const createAccountsTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating accounts table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS accounts (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -46,9 +49,7 @@ const createAccountsTable = async () => {
 
 // Create allowed_ips table if it doesn't exist
 const createAllowedIpsTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating allowed_ips table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS allowed_ips (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -60,9 +61,7 @@ const createAllowedIpsTable = async () => {
 
 // Create blocked_ips table if it doesn't exist
 const createBlockedIpsTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating blocked_ips table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS blocked_ips (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -74,9 +73,7 @@ const createBlockedIpsTable = async () => {
 
 // Insert 127.0.0.1 and ::1 as allowed IPs if they doesn't exist
 const insertLocalhost = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Inserting localhost and ::1 as allowed IPs...");
-  await query(useDatabaseSql);
   const sql = `
     INSERT IGNORE INTO allowed_ips (ip) VALUES ('127.0.0.1'), ('::1');
     `;
@@ -85,9 +82,7 @@ const insertLocalhost = async () => {
 
 // Create inventory table if it doesn't exist
 const createInventoryTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating inventory table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS inventory (
         id INT AUTO_INCREMENT PRIMARY KEY UNIQUE NOT NULL,
@@ -101,9 +96,7 @@ const createInventoryTable = async () => {
 
 // Create items table if it doesn't exist
 const createItemsTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating items table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS items (
         id INT AUTO_INCREMENT PRIMARY KEY UNIQUE NOT NULL,
@@ -117,9 +110,7 @@ const createItemsTable = async () => {
 };
 
 const createStatsTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating stats table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS stats (
         id INT AUTO_INCREMENT PRIMARY KEY UNIQUE NOT NULL,
@@ -137,9 +128,7 @@ const createStatsTable = async () => {
 };
 
 const createClientConfig = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating clientconfig table...");
-  await query(useDatabaseSql);
   const sql = `
       CREATE TABLE IF NOT EXISTS clientconfig (
         id INT AUTO_INCREMENT PRIMARY KEY UNIQUE NOT NULL,
@@ -154,9 +143,7 @@ const createClientConfig = async () => {
 };
 
 const createWeaponsTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating weapons table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS weapons (
       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
@@ -173,9 +160,7 @@ const createWeaponsTable = async () => {
 };
 
 const createSpellsTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating spells table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS spells (
       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
@@ -192,9 +177,7 @@ const createSpellsTable = async () => {
 };
 
 const createPermissionsTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating permissions table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS permissions (
       username VARCHAR(255) NOT NULL UNIQUE PRIMARY KEY,
@@ -205,9 +188,7 @@ const createPermissionsTable = async () => {
 };
 
 const createPermissionTypesTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating permission_types table...");
-  await query(useDatabaseSql);
   
   // First create the table
   const createTableSql = `
@@ -240,9 +221,7 @@ const createPermissionTypesTable = async () => {
 };
 
 const createNpcTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating npcs table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS npcs (
       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
@@ -261,9 +240,7 @@ const createNpcTable = async () => {
 };
 
 const createParticleTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating particles table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS particles (
       name VARCHAR(255) NOT NULL UNIQUE PRIMARY KEY,
@@ -286,9 +263,7 @@ const createParticleTable = async () => {
 };
 
 const createWeatherTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating weather table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS weather (
       name VARCHAR(100) NOT NULL UNIQUE PRIMARY KEY,
@@ -304,9 +279,7 @@ const createWeatherTable = async () => {
 }
 
 const createDefaultWeather = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating default weather...");
-  await query(useDatabaseSql);
   const sql = `
     INSERT IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('clear', 0, 'none', 0, 30, 68, 0);
   `;
@@ -314,9 +287,7 @@ const createDefaultWeather = async () => {
 }
 
 const createWorldTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating world table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS worlds (
       name VARCHAR(100) NOT NULL UNIQUE PRIMARY KEY,
@@ -329,9 +300,7 @@ const createWorldTable = async () => {
 };
 
 const createDefaultWorld = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating default world...");
-  await query(useDatabaseSql);
   const sql = `
     INSERT IGNORE INTO worlds (name, weather, max_players, default_map) VALUES ('default', 'clear', 100, 'main');
   `;
@@ -339,9 +308,7 @@ const createDefaultWorld = async () => {
 }
 
 const createQuestsTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating quests table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS quests (
       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
@@ -357,9 +324,7 @@ const createQuestsTable = async () => {
 };
 
 const createQuestLogTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating quest log table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS quest_log (
       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
@@ -372,9 +337,7 @@ const createQuestLogTable = async () => {
 };
 
 const createFriendsListTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating friends list table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS friendslist (
       username VARCHAR(255) NOT NULL PRIMARY KEY UNIQUE,
@@ -385,9 +348,7 @@ const createFriendsListTable = async () => {
 };
 
 const createPartiesTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating parties table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS parties (
       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
@@ -399,9 +360,7 @@ const createPartiesTable = async () => {
 }
 
 const createCurrencyTable = async () => {
-  const useDatabaseSql = `USE ${database};`;
   log.info("Creating currency table...");
-  await query(useDatabaseSql);
   const sql = `
     CREATE TABLE IF NOT EXISTS currency (
       username VARCHAR(255) NOT NULL PRIMARY KEY UNIQUE,
@@ -416,6 +375,7 @@ const createCurrencyTable = async () => {
 // Run the database setup
 const setupDatabase = async () => {
   await createDatabase();
+  await useDatabase();
   await createAccountsTable();
   await createAllowedIpsTable();
   await createBlockedIpsTable();
