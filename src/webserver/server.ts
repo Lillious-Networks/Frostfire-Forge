@@ -71,7 +71,10 @@ const routes = {
     if (req.method !== "GET") {
       return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
     }
-    const url = new URL(req.url);
+    const url = tryParseURL(req.url);
+    if (!url) {
+      return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
+    }
     const tilesetName = url.searchParams.get("name");
     if (!tilesetName) {
       return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
@@ -106,7 +109,10 @@ Bun.serve({
     "/tileset": routes["/tileset"],
   },
   async fetch(req: Request, server: any) {
-    const url = new URL(req.url);
+    const url = tryParseURL(req.url);
+    if (!url) {
+      return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
+    }
     const address = server.requestIP(req);
     if (!address) {
       return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
@@ -150,7 +156,10 @@ if (_https) {
   Bun.serve({
     port: process.env.WEBSRV_PORT || 80,
     fetch(req: Request) {
-      const url = new URL(req.url);
+      const url = tryParseURL(req.url);
+      if (!url) {
+        return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
+      }
       // Always redirect to https with same host/path/query
       // If the port is 443, don't include it in the redirect
       const port = process.env.WEBSRV_PORTSSL === "443" ? "" : `:${process.env.WEBSRV_PORTSSL || 443}`;
@@ -165,7 +174,10 @@ async function authenticate(req: Request, server: any) {
   if (b_ips.includes(ip) && !w_ips.includes(ip)) {
     return new Response(JSON.stringify({ message: "Invalid request" }), { status: 403 });
   }
-  const url = new URL(req.url);
+  const url = tryParseURL(req.url);
+  if (!url) {
+    return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
+  }
   const email = url.searchParams.get("email");
   const token = url.searchParams.get("token");
   const code = url.searchParams.get("code");
@@ -463,6 +475,14 @@ function validateUsername(username: string): boolean {
 function validateEmail(email: string): boolean {
   const regex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,100}$/;
   return regex.test(email);
+}
+
+function tryParseURL(url: string) : URL | null {
+  try {
+    return new URL(url);
+  } catch {
+    return null;
+  }
 }
 
 const readyTimeMs = performance.now() - now;

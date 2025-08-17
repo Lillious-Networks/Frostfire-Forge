@@ -7,13 +7,16 @@ const permissions = {
         await query("UPDATE permissions SET permissions = NULL WHERE username = ?", [username]);
         log.info(`Permissions cleared for ${username}`);
     },    
-    set: async (username: string, permissions: string[]) => {
+    set: async (username: string, permissions: string | string[]) => {
         // Set permissions for a player
+        const perms = typeof permissions === "string" ? [permissions] : permissions;
+        // Remove duplicates
+        const uniquePerms = Array.from(new Set(perms));
         await query(
             "INSERT INTO permissions (username, permissions) VALUES (?, ?) ON DUPLICATE KEY UPDATE permissions = ?",
-            [username, permissions.join(","), permissions.join(",")]
+            [username, uniquePerms.join(","), uniquePerms.join(",")]
         );
-        log.info(`Permissions ${permissions.join(",")} set for ${username}`);
+        log.info(`Permissions ${uniquePerms.join(",")} set for ${username}`);
     },
     get: async (username: string) => {
         // Get permissions for a player
@@ -24,7 +27,8 @@ const permissions = {
     add: async (username: string, permission: string) => {
         // Get permissions for a player
         const response = await permissions.get(username) as string;
-        const access = response.split(",");
+        const access = response.includes(",") ? response.split(",") : response.length ? [response] : [];
+        if (access.includes(permission)) return;
         access.push(permission);
         await permissions.set(username, access);
         log.info(`Permission ${permission} added to ${username}`);
@@ -32,7 +36,8 @@ const permissions = {
     remove: async (username: string, permission: string) => {
         // Get permissions for a player
         const response = await permissions.get(username) as string;
-        const access = response.split(",");
+        const access = response.includes(",") ? response.split(",") : response.length ? [response] : [];
+        if (!access.includes(permission)) return;
         access.splice(access.indexOf(permission), 1);
         await permissions.set(username, access);
         log.info(`Permission ${permission} removed from ${username}`);

@@ -167,7 +167,7 @@ export const packetManager = {
             sprite: data.sprite,
             ...(data.friends ? { friends: data.friends } : {}),
             ...(data.party ? { party: data.party } : {}),
-            ...(data.currency ? { currency: data.currency } : { copper: 0, silver: 0, gold: 0 }),
+            ...(data.currency ? { currency: data.currency } : { copper: 0, silver: 0, gold: 0 })
           },
         })
       )
@@ -316,6 +316,11 @@ export const packetManager = {
           data,
         })
       )
+    ] as any[];
+  },
+  consoleMessage: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CONSOLE_MESSAGE", data })),
     ] as any[];
   },
 };

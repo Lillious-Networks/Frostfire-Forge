@@ -332,15 +332,27 @@ listener.on("onConnection", (data) => {
 listener.on("onDisconnect", async (data) => {
   if (!data) return;
 
-  const playerData = cache.get(data.id);
-  if (!playerData) return;
+  try {
+    const playerData = cache.get(data.id);
+    if (!playerData) return;
 
-  // Save player stats and location
-  await player.setStats(playerData.username, playerData.stats);
-  await player.setLocation(playerData.id, playerData.location.map, playerData.location.position);
-  cache.remove(playerData.id);
-  await player.clearSessionId(playerData.id);
-  log.debug(`Disconnected: ${playerData.username}`);
+    if (!playerData.isGuest) {
+        // Save player stats and location
+        if (playerData?.stats) {
+            await player.setStats(playerData.username, playerData.stats);
+        }
+
+        if (playerData?.id && playerData?.location) {
+            await player.setLocation(playerData.id, playerData.location.map, playerData.location.position);
+        }
+    }
+
+    await player.clearSessionId(playerData.id);
+    cache.remove(playerData.id);
+    log.debug(`Disconnected: ${playerData.username}`);
+  } catch (e) {
+    log.error(e as string);
+  }
 });
 
 // Save loop
@@ -350,12 +362,24 @@ listener.on("onSave", async () => {
     if (!playerCache[p]) continue;
     if (playerCache[p]?.isGuest) continue; // Skip guests
     // Save player stats and location
-    await player.setStats(playerCache[p].username, playerCache[p].stats);
-    await player.setLocation(
-      p,
-      playerCache[p].location.map,
-      playerCache[p].location.position,
-    );
+    try {
+      if (playerCache[p]?.stats) {
+          await player.setStats(playerCache[p].username, playerCache[p].stats);
+      } else {
+          log.warn(`No stats found for player ID ${p} during save.`);
+      }
+      if (playerCache[p]?.location) {
+          await player.setLocation(
+              p,
+              playerCache[p].location.map,
+              playerCache[p].location.position,
+          );
+      } else {
+          log.warn(`No location found for player ID ${p} during save.`);
+      }
+    } catch (e) {
+      log.error(e as string);
+    }
   }
 });
 

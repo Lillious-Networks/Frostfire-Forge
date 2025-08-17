@@ -6,6 +6,7 @@ declare global {
 }
 
 function Notify(type: string, message: string, time?: number): void {
+	console.log(`Notification: ${type} - ${message}`);
 	const notification = document.createElement("div") as HTMLDivElement;
 	notification.classList.add("notification");
 	notification.classList.add(`notification-${type}`);

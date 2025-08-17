@@ -426,6 +426,11 @@ socket.onmessage = async (event) => {
   const data = JSON.parse(packet.decode(event.data))["data"];
   const type = JSON.parse(packet.decode(event.data))["type"];
   switch (type) {
+    case "CONSOLE_MESSAGE": {
+      if (!data || !data.message) return;
+      window.Notify(data.type, data.message);
+      break;
+    }
     case "INVITATION": {
       // Show the invitation modal
       createInvitationPopup(data);
@@ -454,12 +459,14 @@ socket.onmessage = async (event) => {
     case "ANIMATION": {
       let apng: any;
       try {
-          if (animationCache.has(data.name)) {
-              const inflatedData = animationCache.get(data.name)!;
+          if (animationCache.has(data?.name)) {
+              const inflatedData = animationCache.get(data?.name)!;
+              if (!inflatedData) return;
               apng = parseAPNG(inflatedData);
           } else {
               // @ts-expect-error - pako is not defined because it is loaded in the index.html
-              const inflatedData = pako.inflate(new Uint8Array(data.data.data));
+              const inflatedData = pako.inflate(new Uint8Array(data?.data?.data));
+              if (!inflatedData) return;
               apng = parseAPNG(inflatedData.buffer);
               animationCache.set(data.name, inflatedData.buffer);
           }
@@ -469,12 +476,14 @@ socket.onmessage = async (event) => {
                   const player = players.find(p => p.id === data.id);
                   if (player) {
                       player.animation = {
-                          frames: apng.frames,
+                          frames: apng?.frames,
                           currentFrame: 0,
                           lastFrameTime: performance.now()
                       };
                       // Initialize the frames' images
-                      apng.frames.forEach((frame: any) => frame.createImage());
+                      if (apng.frames && apng.frames.length > 0) {
+                        apng.frames.forEach((frame: any) => frame.createImage());
+                      }
                   } else {
                       // Retry after a short delay
                       await new Promise(resolve => setTimeout(resolve, 100));
@@ -1230,7 +1239,7 @@ chatInput.addEventListener("input", () => {
 });
 
 const cooldowns: { [key: string]: number } = {};
-const COOLDOWN_DURATION = 1000; // milliseconds
+const COOLDOWN_DURATION = 500; // milliseconds
 
 // Keyboard event handler configuration
 
@@ -1346,7 +1355,6 @@ async function handleEnterKey() {
   }
 
   chatInput.value = "";
-  chatInput.blur();
 }
 
 async function handleCommand(message: string) {
@@ -1705,31 +1713,53 @@ function createNPC(data: any) {
   }).call(npc);
 }
 
-async function createPlayer(data: any) {
-  positionText.innerText = `Position: ${data.location.x}, ${data.location.y}`;
-  updateFriendOnlineStatus(data.username, true);
+async function initializeAnimationWithWorker(animationData: any): Promise<any> {
+  if (!animationData?.data?.data) return null;
 
-  // Add this helper function inside createPlayer
-  const initializeAnimation = async (animationData: any) => {
-    if (!animationData?.data?.data) return null;
-    try {
-      // @ts-expect-error - pako is loaded in index.html
-      const inflatedData = pako.inflate(new Uint8Array(animationData.data.data));
-      const apng = parseAPNG(inflatedData.buffer);
-      if (!(apng instanceof Error)) {
-        // Initialize the frames' images
-        apng.frames.forEach(frame => frame.createImage());
-        return {
-          frames: apng.frames,
+  return new Promise((resolve) => {
+    const worker = new Worker('animationWorker.js');
+
+    worker.onmessage = (event) => {
+      const { framesInfo, error } = event.data;
+      if (error) {
+        console.error('Animation Worker error:', error);
+        resolve(null);
+      } else {
+        // Now create actual Image elements *on the main thread* to avoid worker complexity
+        // We'll create empty Image objects for each frame as a placeholder
+        // You can enhance this by sending URLs or blobs from server or worker
+
+        const frames = framesInfo.map((frame : any) => {
+          const img = new Image(frame.width, frame.height);
+          // You will need to assign img.src somewhere after
+          // For now, leave blank or assign a placeholder
+          return {
+            imageElement: img,
+            width: frame.width,
+            height: frame.height,
+            delay: frame.delay
+          };
+        });
+
+        resolve({
+          frames,
           currentFrame: 0,
           lastFrameTime: performance.now()
-        };
+        });
       }
-    } catch (error) {
-      console.error('Failed to initialize animation:', error);
-    }
-    return null;
-  };
+      worker.terminate();
+    };
+
+    worker.postMessage(animationData);
+  });
+}
+
+async function createPlayer(data: any) {
+  if (data.id === cachedPlayerId) {
+    positionText.innerText = `Position: ${data.location.x}, ${data.location.y}`;
+  }
+
+  updateFriendOnlineStatus(data.username, true);
 
   console.log(`
     Username: ${data.username}
@@ -1743,15 +1773,15 @@ async function createPlayer(data: any) {
     Guest: ${data.isGuest ? "Yes" : "No"}
     Party: ${data.party ? data.party.join(", ") : "None"}
     Stats: ${JSON.stringify(data.stats, null, 2)}
-  `)
+  `);
 
-  console.log(data.currency)
+  const animationPromise = initializeAnimationWithWorker(data.animation);
 
   const player = {
     id: data.id,
     username: data.username,
     userid: data.userid,
-    animation: await initializeAnimation(data.animation),
+    animation: null as null | Awaited<ReturnType<typeof initializeAnimationWithWorker>>,
     friends: data.friends || [],
     position: {
       x: canvas.width / 2 + data.location.x,
@@ -1761,7 +1791,7 @@ async function createPlayer(data: any) {
     isStealth: data.isStealth,
     isAdmin: data.isAdmin,
     isGuest: data.isGuest || false,
-    _adminColorHue: Math.floor(Math.random() * 360), // Add this property
+    _adminColorHue: Math.floor(Math.random() * 360),
     targeted: false,
     stats: data.stats,
     typing: false,
@@ -1771,7 +1801,6 @@ async function createPlayer(data: any) {
     showChat: function (context: CanvasRenderingContext2D) {
       if (this.chat) {
         if (this.chat.trim() !== "") {
-          // Draw the player's chat message
           context.fillStyle = "black";
           context.fillStyle = "white";
           context.textAlign = "center";
@@ -1779,23 +1808,20 @@ async function createPlayer(data: any) {
           context.shadowColor = "black";
           context.shadowOffsetX = 1;
           context.shadowOffsetY = 1;
-          // Set font and size
           context.font = "14px 'Comic Relief'";
           const lines = getLines(context, this.chat, 500).reverse();
           let startingPosition = this.position.y;
 
           for (let i = 0; i < lines.length; i++) {
             startingPosition -= 20;
-            // Draw background
             const textWidth = context.measureText(lines[i]).width;
             context.fillStyle = "rgba(0, 0, 0, 0.2)";
             context.fillRect(
-              this.position.x + 16 - textWidth/2 - 5, // Center background
-              startingPosition - 17, // Slightly above text
-              textWidth + 10, // Add padding
-              20 // Height of background
+              this.position.x + 16 - textWidth/2 - 5,
+              startingPosition - 17,
+              textWidth + 10,
+              20
             );
-            // Draw text
             context.fillStyle = "white";
             context.fillText(lines[i], this.position.x + 16, startingPosition);
           }
@@ -2051,9 +2077,9 @@ async function createPlayer(data: any) {
 
   players.push(player);
 
-  // Current player
+  player.animation = await animationPromise;
+
   if (data.id === cachedPlayerId) {
-    // Initialize camera position immediately for the current player
     cameraX = player.position.x - window.innerWidth / 2 + 8;
     cameraY = player.position.y - window.innerHeight / 2 + 48;
     window.scrollTo(cameraX, cameraY);
@@ -2061,11 +2087,6 @@ async function createPlayer(data: any) {
     createPartyUI(data.party || []);
     updateXp(data.stats.xp, data.stats.level, data.stats.max_xp);
   }
-
-  // Update player dots on the full map if it is open
-  // if (fullmap.style.display === "block") {
-  //   updatePlayerDots();
-  // }
 }
 
 function getLines(ctx: any, text: string, maxWidth: number) {
