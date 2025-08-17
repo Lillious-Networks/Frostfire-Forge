@@ -37,7 +37,8 @@
     "service:start": "./src/utility/start-service.sh",
     "service:stop": "sudo systemctl stop frostfire-forge-production",
     "service:restart": "sudo systemctl restart frostfire-forge-production",
-    "service:status": "systemctl status frostfire-forge-production --no-pager"
+    "service:status": "systemctl status frostfire-forge-production --no-pager",
+    "service:logs": "journalctl -u frostfire-forge-production -f"
   },
   "type": "module"
 }
