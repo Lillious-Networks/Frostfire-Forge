@@ -21,7 +21,6 @@ const cc = {
 const ctrl = new MySQLPoolController(`mysql://${cc.user}:${cc.password}@${cc.host}:${cc.port}/${cc.database}`);
 
 
-
 bench("MySQL fetch version", async () => {
     let i = 0
     const r = await ctrl.queryAsync("SELECT version() as Version, ? as i", [i++]);
