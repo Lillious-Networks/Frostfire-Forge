@@ -1,4 +1,3 @@
-import log from "../modules/logger";
 import { getSqlCert } from "./utils";
 
 import { SQLController } from "./types";
