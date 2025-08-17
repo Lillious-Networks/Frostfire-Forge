@@ -26,7 +26,6 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
 > **Requirements**:
 > - [Bun](https://bun.sh/)
 > - [MySQL](https://www.mysql.com/downloads/)
-> - [Node.js](https://nodejs.org/en/download/) (Optional)
 
 <h3>Setting up the development environment</h3>
 
@@ -69,10 +68,10 @@ bun setup-production
 bun production
 ```
 
-<h4>- Running the server as a daemon (PM2)</h4>
+<h4>- Running the server as a service</h4>
 
 ```
-pm2 start ./src/utility/daemon.js --name "Game Server"
+bun service:start
 ```
 
 

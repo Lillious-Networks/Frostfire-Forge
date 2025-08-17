@@ -12,7 +12,6 @@
     "mysql2": "^3.14.2",
     "nodemailer": "^6.10.1",
     "openai": "^4.104.0",
-    "pm2": "^5.4.3",
     "sharp": "^0.33.5",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3",
@@ -35,7 +34,12 @@
     "setup-development": "bun create-config && bun setup-sqlite",
     "setup-production": "bun create-config && bun setup",
     "start-client": "cd ./Frostfire-Forge-Client && npm i && npm start",
-    "package-client": "cd ./Frostfire-Forge-Client && npm i && npm run package"
+    "package-client": "cd ./Frostfire-Forge-Client && npm i && npm run package",
+    "service:start": "./src/utility/start-service.sh",
+    "service:stop": "./src/utility/stop-service.sh",
+    "service:restart": "sudo systemctl restart frostfire-forge-production",
+    "service:status": "systemctl status frostfire-forge-production --no-pager",
+    "service:logs": "journalctl -u frostfire-forge-production -f"
   },
   "type": "module"
 }
