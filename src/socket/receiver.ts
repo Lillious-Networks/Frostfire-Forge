@@ -509,9 +509,10 @@ export default async function packetReceiver(
                   y: warp.position.y || 0,
                   direction: currentPlayer.location.position.direction,
                 }
-              ) as { affectedRows: number } | null;
+              );
 
-              if (result?.affectedRows !== 0) {
+              // Only proceed if result is an object with affectedRows property
+              if (result && typeof result === "object" && "affectedRows" in result && (result as { affectedRows: number }).affectedRows !== 0) {
                 currentPlayer.location = {
                   map: warp.map.replace(".json", ""),
                   x: warp.position.x || 0,
@@ -808,12 +809,13 @@ export default async function packetReceiver(
           sendPacket(ws, packetManager.notify({ message: "Please create an account to use that feature." }));
           return;
         }
-        if (currentPlayer?.attackDelay > performance.now()) return;
+        if (currentPlayer.attackDelay > performance.now()) return;
         if (currentPlayer.stats.stamina < 10) return;
+
         const _data = data as any;
         const target = cache.get(_data.id);
         if (!target) return;
-        
+
         if (target.isGuest) {
           sendPacket(ws, packetManager.notify({ message: "You cannot attack guests." }));
           return;
@@ -821,31 +823,24 @@ export default async function packetReceiver(
 
         // Check if in the same party
         if (currentPlayer.party.includes(target.username)) {
-          sendPacket(ws, packetManager.notify({message: "You cannot attack your party members"}));
+          sendPacket(ws, packetManager.notify({ message: "You cannot attack your party members" }));
           return;
         }
 
         const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-        const playersNearBy = filterPlayersByDistance(
-          ws,
-          700,
-          currentPlayer.location.map
-        );
-        const playersInAttackRange = filterPlayersByDistance(
-          ws,
-          60,
-          currentPlayer.location.map
-        );
+        const playersNearBy = filterPlayersByDistance(ws, 700, currentPlayer.location.map);
+        const playersInAttackRange = filterPlayersByDistance(ws, 60, currentPlayer.location.map);
         const playersInMapAdminNearBy = playersNearBy.filter((p) => p.isAdmin);
 
         const canAttack = player.canAttack(currentPlayer, target, {
           width: 24,
           height: 40,
-        }) as { value: boolean, reason: string } | null;
-        // Check if targetted player is included in the playersNearBy array and if the player can attack
+        }) as { value: boolean; reason: string } | null;
+
+        // Check if target is in range and can be attacked
         if (!playersInAttackRange.includes(target) || !canAttack?.value) {
           if (canAttack?.reason == "nopvp") {
-            sendPacket(ws, packetManager.notify({message: "You are not in a PvP area"}));
+            sendPacket(ws, packetManager.notify({ message: "You are not in a PvP area" }));
           }
           return;
         }
@@ -859,7 +854,7 @@ export default async function packetReceiver(
 
         target.stats.health = Math.round(target.stats.health - damage);
         currentPlayer.stats.stamina -= stamina;
-        
+
         // Ensure stamina doesn't go below 0
         if (currentPlayer.stats.stamina < 0) {
           currentPlayer.stats.stamina = 0;
@@ -874,79 +869,76 @@ export default async function packetReceiver(
           timestamp: performance.now(),
         };
 
-        // Check if player is currently in stealth mode
-        // If the player is in stealth mode, only send an audio packet to admins
+        // Audio packet rules (stealth vs normal)
         if (currentPlayer.isStealth) {
           playersInMapAdminNearBy.forEach((player) => {
             sendPacket(player.ws, packetManager.audio(audioData));
           });
         } else {
-            playersNearBy.forEach((player) => {
-              sendPacket(player.ws, packetManager.audio(audioData));
-            });
-          // Dead player
-            if (target.stats.health <= 0) {
-              target.stats.health = target.stats.max_health;
-              target.stats.stamina = target.stats.max_stamina;
-              target.location.position = { x: 0, y: 0, direction: "down" };
-              // Give the attacker xp
-              const xp = 10;
-              const updatedStats = await player.increaseXp(currentPlayer.username, xp) as StatsData;
-              currentPlayer.stats.xp = updatedStats.xp;
-              currentPlayer.stats.level = updatedStats.level;
-              currentPlayer.stats.max_xp = updatedStats.max_xp;
-              // Send the current player's updated xp to the current player
-              const updateXpData = {
-                id: currentPlayer.id,
-                xp: currentPlayer.stats.xp,
-                level: currentPlayer.stats.level, 
-                max_xp: currentPlayer.stats.max_xp,
-              };
-
-              sendPacket(ws, packetManager.updateXp(updateXpData));
-
-              playersInMap.forEach((player) => {
-                const moveXYData = {
-                  id: target.id,
-                  _data: target.location.position,
-                };
-                
-                sendPacket(player.ws, packetManager.moveXY(moveXYData));
-
-                const reviveData = {
-                  id: target.id,
-                  target: target.id,
-                  stats: target.stats,
-                };
-                sendPacket(player.ws, packetManager.revive(reviveData));
-              });
-            } else {
-              playersInMap.forEach((player) => {
-                const updateStatsData = {
-                  id: ws.data.id,
-                  target: target.id,
-                  stats: target.stats,
-                };
-
-                const currentPlayerUpdateStatsData = {
-                  id: currentPlayer.id,
-                  target: currentPlayer.id,
-                  stats: currentPlayer.stats,
-                };
-
-                sendPacket(player.ws, packetManager.updateStats(updateStatsData));
-                sendPacket(player.ws, packetManager.updateStats(currentPlayerUpdateStatsData));
-              });
-            }
+          playersNearBy.forEach((player) => {
+            sendPacket(player.ws, packetManager.audio(audioData));
+          });
         }
+
+        // Handle death
+        if (target.stats.health <= 0) {
+          target.stats.health = target.stats.max_health;
+          target.stats.stamina = target.stats.max_stamina;
+          target.location.position = { x: 0, y: 0, direction: "down" };
+
+          // Give the attacker xp
+          const xp = 10;
+          const updatedStats = await player.increaseXp(currentPlayer.username, xp) as StatsData;
+          currentPlayer.stats.xp = updatedStats.xp;
+          currentPlayer.stats.level = updatedStats.level;
+          currentPlayer.stats.max_xp = updatedStats.max_xp;
+
+          // Send XP update to attacker
+          sendPacket(ws, packetManager.updateXp({
+            id: currentPlayer.id,
+            xp: currentPlayer.stats.xp,
+            level: currentPlayer.stats.level,
+            max_xp: currentPlayer.stats.max_xp,
+          }));
+
+          playersInMap.forEach((player) => {
+            sendPacket(player.ws, packetManager.moveXY({
+              id: target.id,
+              _data: target.location.position,
+            }));
+
+            sendPacket(player.ws, packetManager.revive({
+              id: target.id,
+              target: target.id,
+              stats: target.stats,
+            }));
+          });
+        } else {
+          // Always send updated stats to all players in map
+          playersInMap.forEach((player) => {
+            sendPacket(player.ws, packetManager.updateStats({
+              id: ws.data.id,
+              target: target.id,
+              stats: target.stats,
+            }));
+
+            sendPacket(player.ws, packetManager.updateStats({
+              id: currentPlayer.id,
+              target: currentPlayer.id,
+              stats: currentPlayer.stats,
+            }));
+          });
+        }
+
+        // PVP flags + cooldown
         currentPlayer.pvp = true;
         target.pvp = true;
         currentPlayer.last_attack = performance.now();
         target.last_attack = performance.now();
 
+        // Simple cooldown (no await/setTimeout, no reset to 0)
         currentPlayer.attackDelay = performance.now() + 1000;
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        currentPlayer.attackDelay = 0;
+
         break;
       }
       case "QUESTDETAILS": {
@@ -2152,9 +2144,9 @@ export default async function packetReceiver(
                   y: 0,
                   direction: currentPlayer.location.position.direction,
                 }
-              ) as { affectedRows: number } | null;
-              // Check affected rows
-              if (result?.affectedRows != 0) {
+              );
+              // Check affected rows only if result is an object with affectedRows property
+              if (result && typeof result === "object" && "affectedRows" in result && (result as { affectedRows: number }).affectedRows != 0) {
                 currentPlayer.location = {
                   map: mapName,
                   x: 0,
