@@ -3,7 +3,7 @@ import log from "../modules/logger";
 import { getSqlCert } from "./utils";
 
 async function createSQLController(): Promise<any> {
-    const _databaseEngine = process.env.DATABASE_ENGINE || "mysql";
+    const _databaseEngine = process.env.DATABASE_ENGINE || "mysql" as DatabaseEngine;
     if (_databaseEngine === "mysql") {
         if (!process.env.DATABASE_HOST || !process.env.DATABASE_USER || !process.env.DATABASE_PASSWORD || !process.env.DATABASE_NAME) {
             throw new Error("MySQL connection parameters are not set in environment variables.");

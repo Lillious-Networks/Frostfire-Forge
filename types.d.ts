@@ -1,5 +1,8 @@
 type Nullable<T> = T | null;
 
+// Define Database Engines
+type DatabaseEngine = "mysql" | "postgres" | "sqlite";
+
 // Define the packet structure
 declare interface Packet {
   type: PacketType;
