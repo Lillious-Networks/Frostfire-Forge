@@ -2,8 +2,6 @@
   "name": "frostfire-forge",
   "module": "./src/webserver/server.ts",
   "dependencies": {
-    "frostfire-forge": ".",
-    "frostfire-forge": ".",
     "nodemailer": "^6.10.1",
     "openai": "^4.104.0",
     "sharp": "^0.33.5",
