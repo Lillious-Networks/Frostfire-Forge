@@ -1,5 +1,9 @@
 {
   "compilerOptions": {
+    "types": [
+      "node",
+      "bun"
+    ],
     // Enable latest features
     "lib": ["ESNext", "DOM"],
     "target": "es2022",

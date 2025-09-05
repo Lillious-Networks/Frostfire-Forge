@@ -2,6 +2,8 @@
   "name": "frostfire-forge",
   "module": "./src/webserver/server.ts",
   "dependencies": {
+    "frostfire-forge": ".",
+    "frostfire-forge": ".",
     "nodemailer": "^6.10.1",
     "openai": "^4.104.0",
     "sharp": "^0.33.5",
@@ -16,7 +18,7 @@
     "@types/node": "^22.18.1",
     "@types/nodemailer": "^7.0.1",
     "@types/uglify-js": "^3.17.5",
-    "eslint": "^9.34.0",
+    "eslint": "^9.35.0",
     "husky": "^9.1.7",
     "typescript-eslint": "^8.42.0"
   },

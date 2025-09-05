@@ -1,15 +1,17 @@
+// @ts-check
 import eslint from '@eslint/js';
+import { defineConfig } from 'eslint/config';
 import tseslint from 'typescript-eslint';
 
-export default tseslint.config(
+export default defineConfig(
     {
+        rules: {
+            "@typescript-eslint/no-explicit-any": "off"
+        },
+        files: ["**/*.ts"],
         extends: [
             eslint.configs.recommended,
             ...tseslint.configs.recommended,
         ],
-        files: ["**/*.ts"],
-        rules: {
-            "@typescript-eslint/no-explicit-any": "off"
-        }
     }
 );
