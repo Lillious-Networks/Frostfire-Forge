@@ -655,13 +655,9 @@ export default async function packetReceiver(
         const translations: Record<string, string> = {};
 
         playersInMap.forEach(async (player) => {
-          if (!translations[player.language]) {
-            // Skip translation if target language matches source language
-            translations[player.language] =
-              player.language === currentPlayer.language
-                ? decryptedMessage
-                : await language.translate(decryptedMessage, player.language);
-          }
+            if (!translations[player.language]) {
+            translations[player.language] = await language.translate(decryptedMessage, player.language);
+            }
 
           const chatData = {
             id: ws.data.id,
