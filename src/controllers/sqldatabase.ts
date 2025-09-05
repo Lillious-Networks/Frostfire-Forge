@@ -15,14 +15,13 @@ async function createSQLController(): Promise<any> {
             username: process.env.DATABASE_USER,
             password: process.env.DATABASE_PASSWORD,
             database: process.env.DATABASE_NAME,
-            ssl: "prefer",
             port: parseInt(process.env.DATABASE_PORT || "3306"),
             tls: getSqlCert(),
             max: 20,
             idleTimeout: 30,
             maxLifetime: 0,
             connectionTimeout: 30
-        } as any);
+        });
         
         return db;
     }
@@ -40,14 +39,12 @@ async function createSQLController(): Promise<any> {
             username: process.env.DATABASE_USER,
             password: process.env.DATABASE_PASSWORD,
             database: process.env.DATABASE_NAME,
-            tls: {
-                cert: getSqlCert()
-            },
+            tls: getSqlCert(),
             connectionTimeout: 30,
             idleTimeout: 30,
             maxLifetime: 0,
             max: 20,
-        } as any);
+        });
 
         return db;
     } 
@@ -56,7 +53,7 @@ async function createSQLController(): Promise<any> {
         const db = new SQL({
             adapter: "sqlite",
             filename: process.env.DATABASE_NAME ? `${process.env.DATABASE_NAME}.sqlite` : "./database.sqlite",
-        } as any);
+        });
         return db;
     }
 }
