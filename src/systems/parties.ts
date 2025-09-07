@@ -137,7 +137,7 @@ const parties = {
 
             const members = [leader, username].join(", ");
             const result = await query("INSERT INTO parties (leader, members) VALUES (?, ?)", [leader, members]) as any;
-            const partyId = result.insertId;
+            const partyId = result.lastInsertRowid;
 
             // Update the accounts table to set the party_id for both users
             await query("UPDATE accounts SET party_id = ? WHERE username IN (?, ?)", [partyId, leader, username]);

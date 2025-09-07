@@ -13,26 +13,20 @@ let userHasInteracted = false;
 socket.binaryType = "arraybuffer";
 const players = [] as any[];
 const npcs = [] as any[];
-
-// Extend the Window interface for mapLayerCanvases
 declare global {
   interface Window {
     mapLayerCanvases?: Array<{ canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, zIndex: number }>;
     playerZIndex?: number;
+    mapChunks?: any; 
   }
 }
-
 const userInteractionListener = () => {
   if (!userHasInteracted) {
     userHasInteracted = true;
-    // Remove event listener after first interaction
     document.removeEventListener("mousedown", userInteractionListener);
   }
 };
-
 document.addEventListener("mousedown", userInteractionListener);
-
-// const mapScale = 0.1;
 const audioCache = new Map<string, string>();
 const npcImage = new Image();
 npcImage.src = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACMAAAAmCAYAAABOFCLqAAABhGlDQ1BJQ0MgcHJvZmlsZQAAKJF9kT1Iw0AcxV9TxQ8qDq0g4pChioNdVMSxVLEIFkpboVUHk0u/oElDkuLiKLgWHPxYrDq4OOvq4CoIgh8g7oKToouU+L+k0CLGg+N+vLv3uHsHCI0KU82uKKBqlpGKx8RsblXseYWAPgQxgSGJmXoivZiB5/i6h4+vdxGe5X3uzzGg5E0G+ETiKNMNi3iDeHbT0jnvE4dYSVKIz4knDbog8SPXZZffOBcdFnhmyMik5olDxGKxg+UOZiVDJZ4hDiuqRvlC1mWF8xZntVJjrXvyFwby2kqa6zRHEccSEkhChIwayqjAQoRWjRQTKdqPefhHHH+SXDK5ymDkWEAVKiTHD/4Hv7s1C9NTblIgBnS/2PbHGNCzCzTrtv19bNvNE8D/DFxpbX+1Acx9kl5va+EjYHAbuLhua/IecLkDDD/pkiE5kp+mUCgA72f0TTkgeAv0r7m9tfZx+gBkqKvlG+DgEBgvUva6x7t7O3v790yrvx+jlHK64ZQ6gAAAAAZiS0dEAAAAAAAA+UO7fwAAAAlwSFlzAAAuIwAALiMBeKU/dgAAAAd0SU1FB+kCCRMwEsjIppIAAAAZdEVYdENvbW1lbnQAQ3JlYXRlZCB3aXRoIEdJTVBXgQ4XAAAB50lEQVRYw+2YvWvCYBDGn7xk0yRUKtqIiBBaUAoOznXv6B9b6GhnN3GRDErQRG2U1w9cStNB35hEjV/5sOBNuYRcft7de88h95LPW7gR4wHg/fURkrCMDYLOE/hofYMAgCQsQeeJ2EBYIgi7OS5UMS3VI4Oi8wSmpTrGhaq7TACgTBpQUYOyyZIkLJESg2+nyYyz46uGCWXS2IVhQKxsfSqhT7fPkuTHvl788mf7TstJ1PU9ZsTvVyTJjyvoNXZKLN7vZfuEOZrsat+nJwluyO4w/wKGPzaY9l0H4Z8MQ72nIUQJ2FsmNVWz5SBs0WRaOC3VoaZquzDpXhOmYUam3pKwhGmYSPea7jKxbEie8Ry2KZMGILB+Wq1hirlFrKcoJS6A1iYzn+0HyGJ8C99gxgHQ1z0ji9bmRjwgLBF2A8uihVWxgg6XiQSiw2WwKlZcFXFNYK2rI0lHkcAk6QhaVz889J6tISC6Uxdqaazh8Qksixa+2sb2COafrgZQtW0W3srZ87UpCAhvLCfUWTCsVN6yXeOrl6wQQWbl1Lj35eoOE9jaqWo64Gg2r3Zd6quaDvmcOTOYcZvBFPwUlsvZgxOe+KloWHZoSyB+Kho2kHdLIH4qGrZ5twTeT0XDNueWAADcLf3B+AfAy/vU2Mt7LwAAAABJRU5ErkJggg==';
@@ -60,18 +54,12 @@ const healthBar = document.getElementById(
 const staminaBar = document.getElementById(
   "stamina-progress-bar"
 ) as HTMLDivElement;
-// const targetStats = document.getElementById(
-//   "target-stats-container"
-// ) as HTMLDivElement;
 const targetHealthBar = document.getElementById(
   "target-health-progress-bar"
 ) as HTMLDivElement;
 const targetStaminaBar = document.getElementById(
   "target-stamina-progress-bar"
 ) as HTMLDivElement;
-//const map = document.getElementById("map") as HTMLDivElement;
-//const fullmap = document.getElementById("full-map") as HTMLDivElement;
-//const mapPosition = document.getElementById("position") as HTMLDivElement;
 const pauseMenu = document.getElementById(
   "pause-menu-container"
 ) as HTMLDivElement;
@@ -94,39 +82,22 @@ let toggleInventory = false;
 let toggleSpellBook = false;
 let toggleFriendsList = false;
 const times = [] as number[];
-let lastFrameTime = 0; // Track the time of the last frame
+let lastFrameTime = 0; 
 let controllerConnected = false;
-
-// Adjust these values near the top with other declarations
 let cameraX = 0;
 let cameraY = 0;
-
-// Add this variable with other declarations at the top
 let lastSentDirection = "";
-
-// Add near the top with other canvas declarations
-// const mapCanvas = document.createElement('canvas');
-// document.body.appendChild(mapCanvas);
-// mapCanvas.style.position = 'absolute';
-// mapCanvas.style.zIndex = '1';
 canvas.style.position = 'absolute';
-
-let lastUpdate = performance.now(); // Declare outside function
-
+let lastUpdate = performance.now(); 
 function lerp(start: number, end: number, amount: number) {
   return start + (end - start) * amount;
 }
-
-// Event listener for gamepad connection
 window.addEventListener("gamepadconnected", () => {
   controllerConnected = true;
 });
-
-// Event listener for gamepad disconnection
 window.addEventListener("gamepaddisconnected", () => {
   controllerConnected = false;
 });
-
 const packet = {
   decode(data: ArrayBuffer) {
     const decoder = new TextDecoder();
@@ -137,11 +108,8 @@ const packet = {
     return encoder.encode(data);
   },
 };
-
-// Add these at the top level with other state variables
 let lastDirection = "";
 let pendingRequest = false;
-
 const cachedViewport = {
   x: 0,
   y: 0,
@@ -149,61 +117,91 @@ const cachedViewport = {
   h: window.innerHeight,
   padding: 64,
 };
-
 const cachedPaddedBounds = {
   x: 0,
   y: 0,
   w: 0,
   h: 0,
 };
-
-// Function to update cached viewport dimensions
+let lastViewportChunks = new Set<string>();
+let viewportUpdateThrottle = 0;
+function getViewportChunks(): Set<string> {
+  if (!window.mapChunks) return new Set();
+  const { chunkPixelSize } = window.mapChunks;
+  const padding = chunkPixelSize * 0.5; 
+  const viewportLeft = cachedViewport.x - padding;
+  const viewportTop = cachedViewport.y - padding;
+  const viewportRight = cachedViewport.x + cachedViewport.w + padding;
+  const viewportBottom = cachedViewport.y + cachedViewport.h + padding;
+  const startChunkX = Math.max(0, Math.floor(viewportLeft / chunkPixelSize));
+  const startChunkY = Math.max(0, Math.floor(viewportTop / chunkPixelSize));
+  const endChunkX = Math.min(window.mapChunks.chunksX - 1, Math.floor(viewportRight / chunkPixelSize));
+  const endChunkY = Math.min(window.mapChunks.chunksY - 1, Math.floor(viewportBottom / chunkPixelSize));
+  const visibleChunks = new Set<string>();
+  for (let chunkY = startChunkY; chunkY <= endChunkY; chunkY++) {
+    for (let chunkX = startChunkX; chunkX <= endChunkX; chunkX++) {
+      visibleChunks.add(`${chunkX}-${chunkY}`);
+    }
+  }
+  return visibleChunks;
+}
+function updateChunkVisibility() {
+  if (!window.mapChunks) return;
+  const currentViewportChunks = getViewportChunks();
+  const chunksChanged = 
+    currentViewportChunks.size !== lastViewportChunks.size ||
+    [...currentViewportChunks].some(chunk => !lastViewportChunks.has(chunk));
+  if (!chunksChanged) return;
+  for (const layerName in window.mapChunks.layers) {
+    const layer = window.mapChunks.layers[layerName];
+    for (const chunkKey in layer.chunkVisibility) {
+      layer.chunkVisibility[chunkKey] = false;
+    }
+  }
+  for (const chunkKey of currentViewportChunks) {
+    for (const layerName in window.mapChunks.layers) {
+      const layer = window.mapChunks.layers[layerName];
+      if (layer.chunks[chunkKey]?.hasContent) {
+        layer.chunkVisibility[chunkKey] = true;
+      }
+    }
+  }
+  window.mapChunks.redrawMainCanvas();
+  lastViewportChunks = currentViewportChunks;
+}
 function updateViewportCache() {
   cachedViewport.w = window.innerWidth;
   cachedViewport.h = window.innerHeight;
-  
-  // Pre-calculate padded bounds
   cachedPaddedBounds.w = cachedViewport.w + cachedViewport.padding * 2;
   cachedPaddedBounds.h = cachedViewport.h + cachedViewport.padding * 2;
 }
-
 updateViewportCache();
-
 animationLoop();
 function animationLoop() {
   if (!ctx) return;
-
   const fpsTarget = parseFloat(fpsSlider.value);
   const frameDuration = 1000 / fpsTarget;
   const now = performance.now();
   const deltaTime = (now - lastFrameTime) / 1000;
-
   if (now - lastFrameTime < frameDuration) {
     requestAnimationFrame(animationLoop);
     return;
   }
   lastFrameTime = now;
-
   const currentPlayer = players.find(p => p.id === cachedPlayerId);
   if (!currentPlayer) {
     requestAnimationFrame(animationLoop);
     return;
   }
-
-  // Update camera for current player
   updateCamera(currentPlayer);
-
-  // Movement Input Handling
   if (isMoving && isKeyPressed) {
     if (document.activeElement === chatInput || document.activeElement === friendsListSearch) {
       isMoving = false;
       lastDirection = "";
       return;
     }
-
     const keys = pressedKeys;
     let dir = "";
-
     if (keys.has("KeyW") && keys.has("KeyA")) dir = "UPLEFT";
     else if (keys.has("KeyW") && keys.has("KeyD")) dir = "UPRIGHT";
     else if (keys.has("KeyS") && keys.has("KeyA")) dir = "DOWNLEFT";
@@ -212,7 +210,6 @@ function animationLoop() {
     else if (keys.has("KeyS")) dir = "DOWN";
     else if (keys.has("KeyA")) dir = "LEFT";
     else if (keys.has("KeyD")) dir = "RIGHT";
-
     if (dir && dir !== lastDirection && !pendingRequest) {
       pendingRequest = true;
       sendRequest({ type: "MOVEXY", data: dir });
@@ -224,39 +221,32 @@ function animationLoop() {
     isMoving = false;
     lastDirection = "";
   }
-
-  // Update only scroll positions (these change frequently)
   cachedViewport.x = window.scrollX;
   cachedViewport.y = window.scrollY;
-  
-  // Update padded bounds with current scroll position
   cachedPaddedBounds.x = cachedViewport.x - cachedViewport.padding;
   cachedPaddedBounds.y = cachedViewport.y - cachedViewport.padding;
-
+  viewportUpdateThrottle++;
+  if (viewportUpdateThrottle >= 5) {
+    updateChunkVisibility();
+    viewportUpdateThrottle = 0;
+  }
   ctx.clearRect(cachedViewport.x, cachedViewport.y, cachedViewport.w, cachedViewport.h);
-
   const isInView = (x: number, y: number) =>
     x >= cachedPaddedBounds.x &&
     y >= cachedPaddedBounds.y &&
     x <= cachedPaddedBounds.x + cachedPaddedBounds.w &&
     y <= cachedPaddedBounds.y + cachedPaddedBounds.h;
-
   const visiblePlayers = players.filter(p =>
     isInView(p.position.x, p.position.y) &&
     (p.id === cachedPlayerId || !p.isStealth || (p.isStealth && currentPlayer.isAdmin))
   );
-
-  // DOM health and stamina bar updates
   if (currentPlayer) {
     const { health, max_health, stamina, max_stamina } = currentPlayer.stats;
     const healthPercent = (health / max_health) * 100;
     const staminaPercent = (stamina / max_stamina) * 100;
-
     updateHealthBar(healthBar, healthPercent);
     updateStaminaBar(staminaBar, staminaPercent);
   }
-
-  // Update targeted player's bars
   const targetPlayer = players.find(p => p.targeted);
   if (targetPlayer) {
     const { health, max_health, stamina, max_stamina } = targetPlayer.stats;
@@ -265,15 +255,11 @@ function animationLoop() {
     updateHealthBar(targetHealthBar, healthPercent);
     updateStaminaBar(targetStaminaBar, staminaPercent);
   }
-
   const visibleNpcs = npcs.filter(npc =>
     isInView(npc.position.x, npc.position.y)
   );
-
   const playerZ = 3;
-
   if (window.mapLayerCanvases) {
-    // Background layers
     for (const layer of window.mapLayerCanvases) {
       if (layer.zIndex < playerZ) {
         ctx.drawImage(
@@ -283,12 +269,9 @@ function animationLoop() {
         );
       }
     }
-
     for (const p of visiblePlayers) p.show(ctx);
-
     for (const npc of visibleNpcs) {
       npc.show(ctx);
-
       if (npc.particles) {
         for (const particle of npc.particles) {
           if (particle.visible) {
@@ -296,11 +279,8 @@ function animationLoop() {
           }
         }
       }
-
       npc.dialogue(ctx);
     }
-
-    // Foreground layers
     for (const layer of window.mapLayerCanvases) {
       if (layer.zIndex >= playerZ) {
         ctx.drawImage(
@@ -310,36 +290,29 @@ function animationLoop() {
         );
       }
     }
-
-    // Overlay chat
     for (const p of visiblePlayers) p.showChat(ctx);
   }
-
   if (times.length > 60) times.shift();
   times.push(now);
-
   requestAnimationFrame(animationLoop);
 }
-
+window.addEventListener('resize', () => {
+  updateViewportCache();
+  lastViewportChunks.clear();
+  updateChunkVisibility();
+});
 const cameraSmoothing = 0.05;
 function updateCamera(currentPlayer: any) {
   if (!loaded) return;
-  
   if (currentPlayer) {
     const now = performance.now();
     const deltaTime = Math.min((now - lastUpdate) / 16.67, 2);
     lastUpdate = now;
-    
-    // Calculate target camera position without rounding initially
     const targetX = currentPlayer.position.x - window.innerWidth / 2 + 8;
     const targetY = currentPlayer.position.y - window.innerHeight / 2 + 48;
-    
-    // Apply smoothing to unrounded values
     const smoothing = 1 - Math.pow(1 - cameraSmoothing, deltaTime);
     cameraX = lerp(cameraX, targetX, smoothing);
     cameraY = lerp(cameraY, targetY, smoothing);
-    
-    // Round only for the final scroll position
     window.scrollTo(Math.round(cameraX), Math.round(cameraY));
   }
 }
@@ -607,35 +580,22 @@ socket.onmessage = async (event) => {
       createNPC(data);
       break;
     }
-    case "LOAD_MAP":
+case "LOAD_MAP":
       {
-        // Remove the full map image if it exists to update the map image with a new one
-        // const image = fullmap.querySelector("img") as HTMLImageElement;
-        // if (image) {
-        //   fullmap.removeChild(image);
-        // }
-        // Uncompress zlib compressed data
         // @ts-expect-error - pako is not defined because it is loaded in the index.html
         const inflated = pako.inflate(new Uint8Array(new Uint8Array(data[0].data)), { to: "string" });
         const mapData = inflated ? JSON.parse(inflated) : null;
-
         const loadTilesets = async (tilesets: any[]) => {
             if (!tilesets?.length) throw new Error("No tilesets found");
-
-            // Fetch all tileset data and create images
             const tilesetPromises = tilesets.map(async (tileset) => {
                 const name = tileset.image.split("/").pop();
                 const tilesetResponse = await fetch(`/tileset?name=${name}`);
-
                 if (!tilesetResponse.ok) {
                     throw new Error(`Failed to fetch tileset: ${name}`);
                 }
-
                 const tilesetData = await tilesetResponse.json();
-
-                // @ts-expect-error - pako is loaded in index.html
+                // @ts-expect-error - pako is not defined because it is loaded in the index.html
                 const inflatedData = pako.inflate(new Uint8Array(tilesetData.tileset.data.data), { to: "string" });
-                
                 return new Promise<HTMLImageElement>((resolve, reject) => {
                     const image = new Image();
                     image.onload = () => resolve(image);
@@ -643,7 +603,6 @@ socket.onmessage = async (event) => {
                     image.src = `data:image/png;base64,${inflatedData}`;
                 });
             });
-
             return Promise.all(tilesetPromises);
         };
         try {
@@ -654,119 +613,248 @@ socket.onmessage = async (event) => {
             console.error("Map loading failed:", error);
             throw error;
         }
-
         async function drawMap(images: HTMLImageElement[]): Promise<void> {
           return new Promise((resolve) => {
             const mapWidth = mapData.width * mapData.tilewidth;
             const mapHeight = mapData.height * mapData.tileheight;
-
-            // Create off-screen canvases for each layer (not added to DOM)
-            const layerCanvases = mapData.layers.map((_layer: any, index: number) => {
-              const layerCanvas = document.createElement('canvas');
-              layerCanvas.width = mapWidth;
-              layerCanvas.height = mapHeight;
-
-              return {
-                canvas: layerCanvas,
-                ctx: layerCanvas.getContext('2d', { willReadFrequently: false })!,
-                zIndex: _layer.zIndex || index
-              };
-            });
-
-            // Set main canvas dimensions
+            const CHUNK_SIZE = 25; 
+            const chunkPixelSize = CHUNK_SIZE * mapData.tilewidth;
             canvas.width = mapWidth;
             canvas.height = mapHeight;
             canvas.style.width = mapWidth + "px";
             canvas.style.height = mapHeight + "px";
             canvas.style.display = "block";
-
-            // Sort layers by zIndex for proper rendering order
+            const mainCtx = canvas.getContext('2d', { willReadFrequently: false });
+            if (!mainCtx) throw new Error("Could not get canvas context");
+            mainCtx.imageSmoothingEnabled = false;
             const sortedLayers = [...mapData.layers].sort((a, b) => (a.zIndex || 0) - (b.zIndex || 0));
-
             const visibleTileLayers = sortedLayers.filter(layer => layer.visible && layer.type === "tilelayer");
-            const step = 100 / visibleTileLayers.length;
-
-            let currentLayer = 0;
-            let progress = 0;
-
-            async function processLayer(layer: any, layerCanvas: any): Promise<void> {
-              const ctx = layerCanvas.ctx;
-              ctx.imageSmoothingEnabled = false;
-
-              const batchSize = 10;
-              progress += step;
-              progressBar.style.width = `${Math.min(progress, 100)}%`;
-
-              async function processRowBatch(startY: number): Promise<void> {
-                for (let y = startY; y < startY + batchSize && y < mapData.height; y++) {
-                  for (let x = 0; x < mapData.width; x++) {
+            const chunksX = Math.ceil(mapData.width / CHUNK_SIZE);
+            const chunksY = Math.ceil(mapData.height / CHUNK_SIZE);
+            const totalChunks = chunksX * chunksY * visibleTileLayers.length;
+            let processedChunks = 0;
+            const chunkCanvases: {[key: string]: {[key: string]: HTMLCanvasElement | null}} = {};
+            window.mapLayerCanvases = [];
+            window.mapChunks = {
+              chunksX,
+              chunksY,
+              chunkSize: CHUNK_SIZE,
+              chunkPixelSize,
+              layers: {},
+              chunks: chunkCanvases,
+              redrawMainCanvas: () => {
+                mainCtx.clearRect(0, 0, mapWidth, mapHeight);
+                const layerNames = Object.keys(window.mapChunks.layers).sort((a, b) => {
+                  return (window.mapChunks.layers[a].zIndex || 0) - (window.mapChunks.layers[b].zIndex || 0);
+                });
+                for (const layerName of layerNames) {
+                  const layer = window.mapChunks.layers[layerName];
+                  if (!layer.visible) continue;
+                  for (let chunkY = 0; chunkY < chunksY; chunkY++) {
+                    for (let chunkX = 0; chunkX < chunksX; chunkX++) {
+                      const chunkKey = `${chunkX}-${chunkY}`;
+                      const chunkCanvas = chunkCanvases[layerName]?.[chunkKey];
+                      if (chunkCanvas && layer.chunkVisibility?.[chunkKey] !== false) {
+                        if (mainCtx) {
+                          if (mainCtx) {
+                            mainCtx.drawImage(
+                              chunkCanvas,
+                              chunkX * chunkPixelSize,
+                              chunkY * chunkPixelSize
+                            );
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              hideChunk: (layerName: string, chunkX: number, chunkY: number) => {
+                const layer = window.mapChunks.layers[layerName];
+                if (layer) {
+                  const chunkKey = `${chunkX}-${chunkY}`;
+                  layer.chunkVisibility[chunkKey] = false;
+                  window.mapChunks.redrawMainCanvas();
+                }
+              },
+              showChunk: (layerName: string, chunkX: number, chunkY: number) => {
+                const layer = window.mapChunks.layers[layerName];
+                if (layer) {
+                  const chunkKey = `${chunkX}-${chunkY}`;
+                  layer.chunkVisibility[chunkKey] = true;
+                  window.mapChunks.redrawMainCanvas();
+                }
+              },
+              hideChunksByRegion: (x1: number, y1: number, x2: number, y2: number) => {
+                const startChunkX = Math.floor(x1 / CHUNK_SIZE);
+                const startChunkY = Math.floor(y1 / CHUNK_SIZE);
+                const endChunkX = Math.floor(x2 / CHUNK_SIZE);
+                const endChunkY = Math.floor(y2 / CHUNK_SIZE);
+                for (const layerName in window.mapChunks.layers) {
+                  const layer = window.mapChunks.layers[layerName];
+                  for (let cy = startChunkY; cy <= endChunkY; cy++) {
+                    for (let cx = startChunkX; cx <= endChunkX; cx++) {
+                      const chunkKey = `${cx}-${cy}`;
+                      layer.chunkVisibility[chunkKey] = false;
+                    }
+                  }
+                }
+                window.mapChunks.redrawMainCanvas();
+              },
+              showChunksByRegion: (x1: number, y1: number, x2: number, y2: number) => {
+                const startChunkX = Math.floor(x1 / CHUNK_SIZE);
+                const startChunkY = Math.floor(y1 / CHUNK_SIZE);
+                const endChunkX = Math.floor(x2 / CHUNK_SIZE);
+                const endChunkY = Math.floor(y2 / CHUNK_SIZE);
+                for (const layerName in window.mapChunks.layers) {
+                  const layer = window.mapChunks.layers[layerName];
+                  for (let cy = startChunkY; cy <= endChunkY; cy++) {
+                    for (let cx = startChunkX; cx <= endChunkX; cx++) {
+                      const chunkKey = `${cx}-${cy}`;
+                      layer.chunkVisibility[chunkKey] = true;
+                    }
+                  }
+                }
+                window.mapChunks.redrawMainCanvas();
+              },
+              hideLayer: (layerName: string) => {
+                const layer = window.mapChunks.layers[layerName];
+                if (layer) {
+                  layer.visible = false;
+                  window.mapChunks.redrawMainCanvas();
+                }
+              },
+              showLayer: (layerName: string) => {
+                const layer = window.mapChunks.layers[layerName];
+                if (layer) {
+                  layer.visible = true;
+                  window.mapChunks.redrawMainCanvas();
+                }
+              }
+            };
+            async function processLayer(layer: any, layerIndex: number): Promise<void> {
+              const layerName = layer.name.replace(/[^a-zA-Z0-9-_]/g, '-');
+              chunkCanvases[layerName] = {};
+              window.mapChunks.layers[layerName] = {
+                originalName: layer.name,
+                zIndex: layer.zIndex || layerIndex,
+                visible: true,
+                chunkVisibility: {},
+                chunks: {}
+              };
+              const layerCanvas = document.createElement('canvas');
+              layerCanvas.width = mapWidth;
+              layerCanvas.height = mapHeight;
+              if (!window.mapLayerCanvases) {
+                window.mapLayerCanvases = [];
+              }
+              const layerCtx = layerCanvas.getContext('2d', { willReadFrequently: false });
+              if (!layerCtx) throw new Error("Could not get canvas context for layer canvas");
+              window.mapLayerCanvases.push({
+                canvas: layerCanvas,
+                ctx: layerCtx,
+                zIndex: layer.zIndex || layerIndex
+              });
+              async function processChunk(chunkX: number, chunkY: number): Promise<void> {
+                const startX = chunkX * CHUNK_SIZE;
+                const startY = chunkY * CHUNK_SIZE;
+                const endX = Math.min(startX + CHUNK_SIZE, mapData.width);
+                const endY = Math.min(startY + CHUNK_SIZE, mapData.height);
+                const actualChunkWidth = (endX - startX) * mapData.tilewidth;
+                const actualChunkHeight = (endY - startY) * mapData.tileheight;
+                const chunkCanvas = document.createElement('canvas');
+                chunkCanvas.width = actualChunkWidth;
+                chunkCanvas.height = actualChunkHeight;
+                const chunkCtx = chunkCanvas.getContext('2d', { willReadFrequently: false });
+                if (!chunkCtx) return;
+                chunkCtx.imageSmoothingEnabled = false;
+                let hasContent = false;
+                for (let y = startY; y < endY; y++) {
+                  for (let x = startX; x < endX; x++) {
                     const tileIndex = layer.data[y * mapData.width + x];
                     if (tileIndex === 0) continue;
-
                     const tileset = mapData.tilesets.find(
                       (t: any) => t.firstgid <= tileIndex && tileIndex < t.firstgid + t.tilecount
                     );
                     if (!tileset) continue;
-
                     const image = images[mapData.tilesets.indexOf(tileset)] as HTMLImageElement;
                     if (!image) continue;
-
                     const localTileIndex = tileIndex - tileset.firstgid;
                     const tilesPerRow = Math.floor(tileset.imagewidth / tileset.tilewidth);
                     const tileX = (localTileIndex % tilesPerRow) * tileset.tilewidth;
                     const tileY = Math.floor(localTileIndex / tilesPerRow) * tileset.tileheight;
-
-                    ctx.drawImage(
+                    chunkCtx.drawImage(
                       image,
                       tileX,
                       tileY,
                       tileset.tilewidth,
                       tileset.tileheight,
-                      x * mapData.tilewidth,
-                      y * mapData.tileheight,
+                      (x - startX) * mapData.tilewidth,
+                      (y - startY) * mapData.tileheight,
                       mapData.tilewidth,
                       mapData.tileheight
                     );
+                    if (!window.mapLayerCanvases) {
+                      window.mapLayerCanvases = [];
+                    }
+                    const layerCanvasData = window.mapLayerCanvases[window.mapLayerCanvases.length - 1];
+                    if (layerCanvasData && layerCanvasData.ctx) {
+                      layerCanvasData.ctx.drawImage(
+                        image,
+                        tileX,
+                        tileY,
+                        tileset.tilewidth,
+                        tileset.tileheight,
+                        x * mapData.tilewidth,
+                        y * mapData.tileheight,
+                        mapData.tilewidth,
+                        mapData.tileheight
+                      );
+                    }
+                    hasContent = true;
                   }
                 }
-
-                if (startY + batchSize < mapData.height) {
-                  await new Promise(resolve => setTimeout(resolve, 0));
-                  await processRowBatch(startY + batchSize);
+                const chunkKey = `${chunkX}-${chunkY}`;
+                if (hasContent) {
+                  chunkCanvases[layerName][chunkKey] = chunkCanvas;
+                } else {
+                  chunkCanvases[layerName][chunkKey] = null;
+                }
+                window.mapChunks.layers[layerName].chunkVisibility[chunkKey] = hasContent;
+                window.mapChunks.layers[layerName].chunks[chunkKey] = {
+                  x: chunkX,
+                  y: chunkY,
+                  hasContent
+                };
+                processedChunks++;
+                const progress = (processedChunks / totalChunks) * 100;
+                progressBar.style.width = `${Math.min(progress, 100)}%`;
+              }
+              for (let chunkY = 0; chunkY < chunksY; chunkY++) {
+                for (let chunkX = 0; chunkX < chunksX; chunkX++) {
+                  await processChunk(chunkX, chunkY);
+                  if ((chunkX + chunkY * chunksX) % 5 === 0) {
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                  }
                 }
               }
-
-              await processRowBatch(0);
             }
-
+            let currentLayerIndex = 0;
             async function renderLayers(): Promise<void> {
-              while (currentLayer < sortedLayers.length) {
-                const layer = sortedLayers[currentLayer];
-
+              for (const layer of sortedLayers) {
                 if (!layer.visible || layer.type !== "tilelayer" || layer.name.toLowerCase() === "collisions") {
-                  currentLayer++;
+                  currentLayerIndex++;
                   continue;
                 }
-
-                const layerCanvas = layerCanvases.find((lc: any) => lc.zIndex === (layer.zIndex || currentLayer));
-                if (layerCanvas) {
-                  await processLayer(layer, layerCanvas);
-                }
-
-                currentLayer++;
+                await processLayer(layer, currentLayerIndex);
+                currentLayerIndex++;
                 await new Promise(resolve => requestAnimationFrame(resolve));
               }
-
-              // Ensure the progress bar completes fully
+              (window.mapLayerCanvases ?? []).sort((a: any, b: any) => a.zIndex - b.zIndex);
               progressBar.style.width = `100%`;
-
-              window.mapLayerCanvases = layerCanvases.sort((a: any, b: any) => a.zIndex - b.zIndex);
-
               resolve();
-              
               setTimeout(() => {
                 if (loadingScreen) {
-                  // Fade out the loading screen after the map is loaded
                   loadingScreen.style.transition = "1s";
                   loadingScreen.style.opacity = "0";
                   setTimeout(() => {
@@ -777,7 +865,6 @@ socket.onmessage = async (event) => {
                 }
               }, 1000);
             }
-
             loaded = true;
             renderLayers();
           });

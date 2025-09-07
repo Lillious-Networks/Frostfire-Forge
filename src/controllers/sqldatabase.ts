@@ -69,29 +69,38 @@ function sqlWrapper(query: string, params: any[]): string {
   let result = parts[0];
   for (let i = 0; i < params.length; i++) {
     const param = params[i];
-    let escapedParam: string;
-    
-    if (param === null || param === undefined) {
-      escapedParam = 'NULL';
-    } else if (typeof param === 'string') {
-      // Escape single quotes and wrap in quotes
-      escapedParam = "'" + param.replace(/'/g, "''") + "'";
-    } else if (typeof param === 'number') {
-      escapedParam = param.toString();
-    } else if (typeof param === 'boolean') {
-      escapedParam = param ? '1' : '0';
-    } else if (param instanceof Date) {
-      escapedParam = "'" + param.toISOString().slice(0, 19).replace('T', ' ') + "'";
+
+    // Handle array (for IN clauses)
+    if (Array.isArray(param)) {
+      if (param.length === 0) {
+        throw new Error("Cannot use empty array as SQL parameter");
+      }
+      const escapedArray = param.map(p => escapeValue(p)).join(", ");
+      result += escapedArray + parts[i + 1];
     } else {
-      // For other types, convert to string and treat as string
-      escapedParam = "'" + String(param).replace(/'/g, "''") + "'";
+      result += escapeValue(param) + parts[i + 1];
     }
-    
-    result += escapedParam + parts[i + 1];
   }
 
   return result;
 }
+
+function escapeValue(param: any): string {
+  if (param === null || param === undefined) {
+    return "NULL";
+  } else if (typeof param === "string") {
+    return "'" + param.replace(/'/g, "''") + "'";
+  } else if (typeof param === "number") {
+    return param.toString();
+  } else if (typeof param === "boolean") {
+    return param ? "1" : "0";
+  } else if (param instanceof Date) {
+    return "'" + param.toISOString().slice(0, 19).replace("T", " ") + "'";
+  } else {
+    return "'" + String(param).replace(/'/g, "''") + "'";
+  }
+}
+
 
 export default async function query<T>(sql: string, values?: any[]): Promise<T[]> {
   try {
