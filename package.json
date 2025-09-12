@@ -10,7 +10,7 @@
     "uglify-js": "^3.19.3"
   },
   "devDependencies": {
-    "@eslint/js": "^9.34.0",
+    "@eslint/js": "^9.35.0",
     "@types/bun": "^1.2.21",
     "@types/eslint__js": "^9.14.0",
     "@types/node": "^22.18.1",
@@ -18,10 +18,10 @@
     "@types/uglify-js": "^3.17.5",
     "eslint": "^9.35.0",
     "husky": "^9.1.7",
-    "typescript-eslint": "^8.42.0"
+    "typescript-eslint": "^8.43.0"
   },
   "scripts": {
-    "production": "bun transpile-production && bun --bun --env-file=.env.production ./src/webserver/server.ts",
+    "production": "bun transpile-production && bun-profile.exe --bun --env-file=.env.production ./src/webserver/server.ts",
     "transpile-development": "bun --env-file=.env.development ./src/utility/transpiler.ts",
     "transpile-production": "bun --env-file=.env.production ./src/utility/transpiler.ts",
     "development": "bun transpile-development && bun --inspect --env-file=.env.development ./src/webserver/server.ts",

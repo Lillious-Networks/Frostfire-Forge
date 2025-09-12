@@ -57,6 +57,7 @@ const friends = {
     }
   },
   async remove(username: string, friend_username: string) {
+    console.log("Removing friend:", username, friend_username);
     if (!username || !friend_username) return [];
 
     try {
@@ -86,6 +87,8 @@ const friends = {
         "UPDATE friendslist SET friends = ? WHERE username = ?",
         [friendsString, username]
       )) as any;
+
+      console.log("Update result:", result);
 
       if (result.affectedRows > 0) {
         return currentFriends; // Return updated friends list
