@@ -24,7 +24,16 @@ const packetsSentReceived = document.getElementById("packets-sent-received") as 
 const optionsMenu = document.getElementById("options-menu-container") as HTMLDivElement;
 const friendsList = document.getElementById("friends-list-content") as HTMLDivElement;
 const friendsListSearch = document.getElementById("friends-list-search") as HTMLInputElement;
-
+const onlinecount = document.getElementById("onlinecount") as HTMLDivElement;
+const progressBar = document.getElementById("progress-bar") as HTMLDivElement;
+const progressBarContainer = document.getElementById("progress-bar-container") as HTMLDivElement;
+const inventoryGrid = document.getElementById("grid") as HTMLDivElement;
+const chatMessages = document.getElementById("chat-messages") as HTMLDivElement;
+const loadingScreen = document.getElementById("loading-screen");
+const healthLabel = document.getElementById("stats-screen-health-label") as HTMLDivElement;
+const manaLabel = document.getElementById("stats-screen-mana-label") as HTMLDivElement;
+const notificationContainer = document.getElementById("game-notification-container");
+const notificationMessage = document.getElementById("game-notification-message");
 
 function toggleUI(element: HTMLElement, toggleFlag: boolean, hidePosition: number) {
   element.style.transition = "1s";
@@ -150,5 +159,6 @@ export {
     toggleUI, toggleDebugContainer, handleStatsUI, createPartyUI, updateHealthBar, updateStaminaBar, positionText,
     friendsListUI, inventoryUI, spellBookUI, pauseMenu, menuElements, chatInput, canvas, ctx, fpsSlider, healthBar,
     staminaBar, targetHealthBar, targetStaminaBar, xpBar, musicSlider, effectsSlider, mutedCheckbox, statUI, overlay,
-    packetsSentReceived, optionsMenu, friendsList, friendsListSearch
+    packetsSentReceived, optionsMenu, friendsList, friendsListSearch, onlinecount, progressBar, progressBarContainer,
+    inventoryGrid, chatMessages, loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage
 };

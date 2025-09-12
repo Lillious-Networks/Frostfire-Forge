@@ -1,4 +1,5 @@
-const socket = new WebSocket(`wss://forge.lillious.com:3000/`);
+import { config } from '../web/global.js';
+const socket = new WebSocket(config.WEBSOCKET_URL || "ws://localhost:3000");
 import './events.ts';
 import pako from '../libs/pako.js';
 import packet from './packetencoder.ts';
@@ -8,7 +9,11 @@ import { createPlayer } from './player.ts';
 import { updateFriendsList } from './friends.ts';
 import { createInvitationPopup } from './invites.ts';
 import { updateFriendOnlineStatus } from "./friends.js";
-import { createPartyUI, canvas, positionText, fpsSlider, musicSlider, effectsSlider, mutedCheckbox, statUI, packetsSentReceived } from './ui.ts';
+import { createPartyUI, canvas, positionText, fpsSlider,
+  musicSlider, effectsSlider, mutedCheckbox, statUI, packetsSentReceived,
+  onlinecount, progressBar, progressBarContainer, inventoryGrid, chatMessages,
+  loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage,
+} from './ui.ts';
 import { playAudio, playMusic } from './audio.ts';
 import { updateXp } from './xp.ts';
 import { createNPC } from './npc.ts';
@@ -16,16 +21,7 @@ import parseAPNG from '../libs/apng_parser.js';
 import { getCookie } from './cookies.ts';
 socket.binaryType = "arraybuffer";
 let sentRequests: number = 0, receivedResponses: number = 0;
-const onlinecount = document.getElementById("onlinecount") as HTMLDivElement;
-const progressBar = document.getElementById("progress-bar") as HTMLDivElement;
-const progressBarContainer = document.getElementById("progress-bar-container") as HTMLDivElement;
-const inventoryGrid = document.getElementById("grid") as HTMLDivElement;
-const chatMessages = document.getElementById("chat-messages") as HTMLDivElement;
-const loadingScreen = document.getElementById("loading-screen");
-const healthLabel = document.getElementById("stats-screen-health-label") as HTMLDivElement;
-const manaLabel = document.getElementById("stats-screen-mana-label") as HTMLDivElement;
-const notificationContainer = document.getElementById("game-notification-container");
-const notificationMessage = document.getElementById("game-notification-message");
+
 let clearNotificationTimeout: any = null;
 
 function sendRequest(data: any) {
@@ -521,9 +517,11 @@ case "LOAD_MAP":
                   loadingScreen.style.transition = "1s";
                   loadingScreen.style.opacity = "0";
                   setTimeout(() => {
-                    loadingScreen.style.display = "none";
-                    progressBar.style.width = "0%";
-                    progressBarContainer.style.display = "block";
+                    if (loadingScreen) {
+                      loadingScreen.style.display = "none";
+                      progressBar.style.width = "0%";
+                      progressBarContainer.style.display = "block";
+                    }
                   }, 1000);
                 }
               }, 1000);
@@ -876,6 +874,7 @@ function showNotification(message: string, autoClose: boolean = true, reconnect:
       clearTimeout(clearNotificationTimeout);
     }
     clearNotificationTimeout = setTimeout(() => {
+      if (!notificationContainer || !notificationMessage) return;
       notificationContainer.style.display = "none";
       // If reconnect is true, redirect after hiding notification
       if (reconnect) {
