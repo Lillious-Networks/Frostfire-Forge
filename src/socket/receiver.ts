@@ -94,6 +94,18 @@ export default async function packetReceiver(
       }
       // TODO:Move this to the auth packet
       case "AUTH": {
+              // Check if session already exists
+              const session = await player.getSessionId(data.toString()) as any[];
+              if (session[0]?.session_id) {
+                console.log("Session already exists, terminating previous session");
+                // Find player in cache and close the connection and remove from cache
+                const existingPlayer = cache.get(session[0]?.session_id);
+                if (existingPlayer) {
+                  existingPlayer.ws.close(1008, "Already logged in");
+                  cache.remove(existingPlayer.id);
+                }
+              }
+              // Authenticate the player
               const auth = await player.setSessionId(data.toString(), ws.data.id);
               if (!auth) {
                 sendPacket(ws, packetManager.loginFailed());

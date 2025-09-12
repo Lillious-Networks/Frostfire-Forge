@@ -32,24 +32,21 @@ function sendRequest(data: any) {
 let cachedPlayerId: string | null = null;
 
 socket.onopen = () => {
-  console.log("WebSocket connection established");
   sendRequest({
     type: "PING",
     data: null,
   });
 };
 
-socket.onclose = (e) => {
+socket.onclose = () => {
   // Remove the loading bar if it exists
   progressBarContainer.style.display = 'none';
   showNotification("You have been disconnected from the server", false, true);
-  console.error("WebSocket closed:", e);
 };
 
-socket.onerror = (e) => {
+socket.onerror = () => {
   progressBarContainer.style.display = 'none';
   showNotification("An error occurred while connecting to the server", false, true);
-  console.error("WebSocket error:", e);
 };
 
 socket.onmessage = async (event) => {
@@ -239,7 +236,7 @@ socket.onmessage = async (event) => {
       createNPC(data);
       break;
     }
-case "LOAD_MAP":
+    case "LOAD_MAP":
       {
         // @ts-expect-error - pako is not defined because it is loaded in the index.html
         const inflated = pako.inflate(new Uint8Array(new Uint8Array(data[0].data)), { to: "string" });
@@ -540,7 +537,7 @@ case "LOAD_MAP":
         cachedPlayerId = connectionId;
         const sessionToken = getCookie("token");
         if (!sessionToken) {
-          window.location.href = "/";
+          window.location.href = "/game";
           return;
         }
 

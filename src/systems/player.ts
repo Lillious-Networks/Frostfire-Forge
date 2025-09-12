@@ -108,24 +108,27 @@ const player = {
         const response = await query("UPDATE accounts SET map = ?, position = ?, direction = ? WHERE session_id = ?", [map, `${position.x},${position.y}`, position.direction, session_id]);
         return response;
     },
-    setSessionId: async (token: string, sessionId: string) => {
-        if (!token || !sessionId) return;
-        // Check if the user already has a session id       
-        const sessionExists = await player.getSessionId(token) as any[];
-        if (sessionExists[0]?.session_id) {
-            if (sessionExists[0]?.session_id != sessionId) return;
-        }
+    setSessionId: async (token: string, sessionId: string): Promise<boolean | string> => {
+        if (!token || !sessionId) return false;
         const getUsername = await player.getUsernameByToken(token) as any[];
-        const username = await getUsername[0]?.username as string;
+        const username = getUsername[0]?.username as string;
+        if (!username) return false;
+
         const isBanned = await player.isBanned(username) as any[] | undefined;
-        if (!isBanned) return;
-        const response = await query("UPDATE accounts SET session_id = ?, online = ? WHERE token = ?", [sessionId, 1, token]);
+        if (!isBanned) return false;
+
         if (isBanned[0]?.banned === 1) {
             log.debug(`User ${username} is banned`);
             await player.logout(sessionId);
-            return;
+            return false;
         }
-        return response;
+
+        await query(
+            "UPDATE accounts SET session_id = ?, online = ? WHERE token = ?",
+            [sessionId, 1, token]
+        );
+
+        return true;
     },
     getSessionId: async (token: string) => {
         if (!token) return;
