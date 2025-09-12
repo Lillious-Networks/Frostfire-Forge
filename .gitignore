@@ -32,8 +32,7 @@ assets/sfx/*
 assets/tilesets/*
 !assets/tilesets/tiles.png
 
-src/webserver/www/game/js/*.js
-src/webserver/www/public/js/*.js
+src/webserver/www/public/js/web/*.js
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
