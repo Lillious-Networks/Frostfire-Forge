@@ -1,4 +1,4 @@
-const socket = new WebSocket(`ws://forge.lillious.com:3000/`);
+const socket = new WebSocket(`wss://forge.lillious.com:3000/`);
 import './events.ts';
 import pako from '../libs/pako.js';
 import packet from './packetencoder.ts';
