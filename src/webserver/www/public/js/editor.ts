@@ -1,4 +1,4 @@
-import { APNGEncoder } from "../../libs/apng_encoder";
+import { APNGEncoder } from "../libs/apng_encoder";
 
 document.addEventListener('DOMContentLoaded', () => {
     const dropzone = document.getElementById('editor-dropzone');
