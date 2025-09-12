@@ -1,6 +1,6 @@
 const socket = new WebSocket(`ws://beta.forge.lillious.com:3000/`);
 import './events.ts';
-import pako from '../../libs/pako.js';
+import pako from '../libs/pako.js';
 import packet from './packetencoder.ts';
 import Cache from "./cache";
 const cache = Cache.getInstance();
@@ -12,7 +12,7 @@ import { createPartyUI, canvas, positionText, fpsSlider, musicSlider, effectsSli
 import { playAudio, playMusic } from './audio.ts';
 import { updateXp } from './xp.ts';
 import { createNPC } from './npc.ts';
-import parseAPNG from '../../libs/apng_parser.js';
+import parseAPNG from '../libs/apng_parser.js';
 import { getCookie } from './cookies.ts';
 socket.binaryType = "arraybuffer";
 let sentRequests: number = 0, receivedResponses: number = 0;

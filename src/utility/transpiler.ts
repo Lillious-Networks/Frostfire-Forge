@@ -52,7 +52,7 @@ function transpileDirectory(sourceDir: string) {
 
 // Define directories to transpile
 const directories = [
-    path.join(import.meta.dir, "..", "webserver", "www", "public", "js"),
+    path.join(import.meta.dir, "..", "webserver", "www", "public", "js", "web"),
 ];
 
 // Transpile each directory

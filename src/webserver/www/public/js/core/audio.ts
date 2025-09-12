@@ -2,7 +2,7 @@
 const audioCache = new Map<string, string>();
 import { getUserHasInteracted } from "./input.js";
 import { musicSlider, effectsSlider, mutedCheckbox } from "./ui.js";
-import pako from '../../libs/pako.js';
+import pako from '../libs/pako.js';
 
 export function playMusic(name: string, data: Uint8Array, timestamp: number): void {
   if (!getUserHasInteracted()) {
