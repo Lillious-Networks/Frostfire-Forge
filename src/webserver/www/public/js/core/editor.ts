@@ -1,4 +1,4 @@
-import { APNGEncoder } from "../libs/apng_encoder";
+import { APNGEncoder } from "../../libs/apng_encoder";
 
 document.addEventListener('DOMContentLoaded', () => {
     const dropzone = document.getElementById('editor-dropzone');
@@ -359,7 +359,7 @@ document.addEventListener('DOMContentLoaded', () => {
         })
         .then(pngData => {
             console.log("Animation generated, creating blob");
-            const blob = new Blob([pngData], { type: 'image/png' });
+            const blob = new Blob([pngData as any], { type: 'image/png' });
             
             // Show preview
             createPreviewSection();
