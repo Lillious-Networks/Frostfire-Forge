@@ -38,15 +38,15 @@ socket.onopen = () => {
   });
 };
 
-socket.onclose = () => {
+socket.onclose = (ev: CloseEvent) => {
   // Remove the loading bar if it exists
   progressBarContainer.style.display = 'none';
-  showNotification("You have been disconnected from the server", false, true);
+  showNotification(`You have been disconnected from the server: ${ev.code}`, false, true);
 };
 
-socket.onerror = () => {
+socket.onerror = (ev: Event) => {
   progressBarContainer.style.display = 'none';
-  showNotification("An error occurred while connecting to the server", false, true);
+  showNotification(`An error occurred while connecting to the server: ${ev.type}`, false, true);
 };
 
 socket.onmessage = async (event) => {

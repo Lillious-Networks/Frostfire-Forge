@@ -17,28 +17,30 @@ import { generateKeyPair } from "../modules/cipher";
 // Load settings
 import * as settings from "../../config/settings.json";
 
-const _cert = path.join(import.meta.dir, "../certs/cert.crt");
-const _key = path.join(import.meta.dir, "../certs/cert.key");
+const _cert = path.join(import.meta.dir, "../certs/cert.pem");
+const _key = path.join(import.meta.dir, "../certs/key.pem");
+const _bundle = path.join(import.meta.dir, "../certs/cert.ca-bundle");
 const _https = process.env.WEBSRV_USESSL === "true";
 let options;
 
 if (_https) {
-  if (!fs.existsSync(_cert) || !fs.existsSync(_key)) {
+  if (!fs.existsSync(_cert) || !fs.existsSync(_key) || !fs.existsSync(_bundle)) {
     log.error(`Attempted to locate certificate and key but failed`);
     log.error(`Certificate: ${_cert}`);
     log.error(`Key: ${_key}`);
+    log.error(`Bundle: ${_bundle}`);
     throw new Error("SSL certificate or key is missing");
   }
   try {
     options = {
       key: Bun.file(_key),
       cert: Bun.file(_cert),
+      ca: Bun.file(_bundle),
     };
   } catch (e) {
     log.error(e as string);
   }
 }
-
 const RateLimitOptions: RateLimitOptions = {
   // Maximum amount of requests
   maxRequests: settings?.websocketRatelimit?.maxRequests || 2000,
@@ -70,9 +72,15 @@ const Server = Bun.serve<Packet, any>({
     const useragent = req.headers.get("user-agent");
     // Base64 encode the public key
     const chatDecryptionKey = keyPair.publicKey;
-    if (!useragent)
+    if (!useragent) {
+      log.error(`User-Agent header is missing for client with id: ${id}`);
       return new Response("User-Agent header is missing", { status: 400 });
+    }
+      
     const success = Server.upgrade(req, { data: { id, useragent, chatDecryptionKey } });
+    if (!success) {
+      log.error(`WebSocket upgrade failed for client with id: ${id}`);
+    }
     return success
       ? undefined
       : new Response("WebSocket upgrade error", { status: 400 });
@@ -82,11 +90,16 @@ const Server = Bun.serve<Packet, any>({
     perMessageDeflate: true, // Enable per-message deflate compression
     maxPayloadLength: 1024 * 1024 * settings?.websocket?.maxPayloadMB || 1024 * 1024, // 1MB
     // Seconds to wait for the connection to close
-    idleTimeout: settings?.websocket?.idleTimeout || 1,
+    idleTimeout: settings?.websocket?.idleTimeout || 5,
     async open(ws: any) {
       ws.binaryType = "arraybuffer";
       // Add the client to the set of connected clients
-      if (!ws.data?.id || !ws.data?.useragent || !ws.data?.chatDecryptionKey) return;
+      if (!ws.data?.id || !ws.data?.useragent || !ws.data?.chatDecryptionKey) {
+        log.error(`WebSocket connection missing identity information. Closing connection.`);
+        ws.close(1000, "Missing identity information");
+        return;
+      }
+
       connections.add({ id: ws.data.id, useragent: ws.data.useragent, chatDecryptionKey: ws.data.chatDecryptionKey });
       packetQueue.set(ws.data.id, []);
       // Emit the onConnection event
@@ -331,7 +344,6 @@ listener.on("onConnection", (data) => {
 // On disconnect
 listener.on("onDisconnect", async (data) => {
   if (!data) return;
-
   try {
     const playerData = cache.get(data.id);
     if (!playerData) return;

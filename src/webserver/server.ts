@@ -225,8 +225,11 @@ async function createGuestAccount(req: Request, server: any) {
 
     const token = await player.login(guest_username.toLowerCase(), guest_password);
     if (!token) {
+      log.debug(`Failed to login guest user after registration: ${guest_username} (${ip})`);
       return new Response(JSON.stringify({ message: "Failed to create guest account" }), { status: 500 });
     }
+
+    log.debug(`Guest account created: ${guest_username} (${ip})`);
 
     return new Response(JSON.stringify({ message: "Logged in successfully"}), { status: 301, headers: { "Set-Cookie": `token=${token}; Path=/;` } });
 
