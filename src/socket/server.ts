@@ -33,6 +33,7 @@ if (_https) {
     options = {
       key: Bun.file(_key),
       cert: Bun.file(_cert),
+      ALPNProtocols: "http/1.1,h2",
     };
   } catch (e) {
     log.error(e as string);
@@ -73,7 +74,7 @@ const Server = Bun.serve<Packet, any>({
       log.error(`User-Agent header is missing for client with id: ${id}`);
       return new Response("User-Agent header is missing", { status: 400 });
     }
-      
+
     const success = Server.upgrade(req, { data: { id, useragent, chatDecryptionKey } });
     if (!success) {
       log.error(`WebSocket upgrade failed for client with id: ${id}`);
@@ -89,6 +90,7 @@ const Server = Bun.serve<Packet, any>({
     // Seconds to wait for the connection to close
     idleTimeout: settings?.websocket?.idleTimeout || 5,
     async open(ws: any) {
+      console.log(`New Connection: ${ws.data.id} - ${ws.data.useragent}`);
       ws.binaryType = "arraybuffer";
       // Add the client to the set of connected clients
       if (!ws.data?.id || !ws.data?.useragent || !ws.data?.chatDecryptionKey) {
@@ -140,12 +142,18 @@ const Server = Bun.serve<Packet, any>({
         type: "CONNECTION_COUNT",
         data: connections.size,
       } as unknown as Packet;
-      Server.publish(
-        "CONNECTION_COUNT" as Subscription["event"],
-        packet.encode(JSON.stringify(_packet))
-      );
+
+      // Set timeout to 1000 if user agent is an iOS or Mac device due to a bug with Safari not allowing immediate messages
+      const timeout = ws.data.useragent.includes("iPhone") || ws.data.useragent.includes("iPad") || ws.data.useragent.includes("Macintosh") ? 1000 : 0;
+      setTimeout(() => {
+        Server.publish(
+          "CONNECTION_COUNT" as Subscription["event"],
+          packet.encode(JSON.stringify(_packet))
+        );
+      }, timeout);
     },
-    async close(ws: any) {
+    async close(ws: any, code: number, reason: string) {
+      console.log(`Disconnected: ${ws.data.id} - ${ws.data.useragent} - ${code} - ${reason}`);
       // Remove the client from the set of connected clients
       if (!ws.data.id) return;
       // Find the client object in the set
