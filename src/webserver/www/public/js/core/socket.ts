@@ -90,7 +90,7 @@ socket.onmessage = async (event) => {
         if (!data?.name || !data?.data) return;
 
         let apng: any;
-        let cachedData = cache.animations.get(data.name);
+        const cachedData = cache.animations.get(data.name);
 
         if (cachedData instanceof Uint8Array) {
           console.log(`[ANIMATION] Cache hit in memory: ${data.name}`);
