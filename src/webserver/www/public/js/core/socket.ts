@@ -86,44 +86,61 @@ socket.onmessage = async (event) => {
       break;
     }
     case "ANIMATION": {
-      let apng: any;
       try {
-          if (cache.animations.has(data?.name)) {
-              const inflatedData = cache.animations.get(data?.name)!;
-              if (!inflatedData) return;
-              apng = parseAPNG(inflatedData);
-          } else {
-              // @ts-expect-error - pako is not defined because it is loaded in the index.html
-              const inflatedData = pako.inflate(new Uint8Array(data?.data?.data));
-              if (!inflatedData) return;
-              apng = parseAPNG(inflatedData.buffer);
-              cache.animations.set(data.name, inflatedData.buffer);
-          }
+        if (!data?.name || !data?.data) return;
 
-          if (!(apng instanceof Error) && cache.players) {
-              const findPlayer = async () => {
-                  const player = cache.players.find(p => p.id === data.id);
-                  if (player) {
-                      player.animation = {
-                          frames: apng?.frames,
-                          currentFrame: 0,
-                          lastFrameTime: performance.now()
-                      };
-                      // Initialize the frames' images
-                      if (apng.frames && apng.frames.length > 0) {
-                        apng.frames.forEach((frame: any) => frame.createImage());
-                      }
-                  } else {
-                      // Retry after a short delay
-                      await new Promise(resolve => setTimeout(resolve, 100));
-                      await findPlayer();
-                  }
-              };
-              
-              findPlayer().catch(err => console.error('Error in findPlayer:', err));
+        let apng: any;
+        let cachedData = cache.animations.get(data.name);
+
+        if (cachedData instanceof Uint8Array) {
+          console.log(`[ANIMATION] Cache hit in memory: ${data.name}`);
+          apng = parseAPNG(cachedData);
+        } else {
+          // Check IndexedDB
+          const dbData = await getAnimationFromDB(data.name);
+          if (dbData) {
+            console.log(`[ANIMATION] Cache hit in IndexedDB: ${data.name}`);
+            cache.animations.set(data.name, dbData);
+            apng = parseAPNG(dbData);
+          } else {
+            console.log(`[ANIMATION] Cache miss: ${data.name}. Inflating...`);
+            // @ts-expect-error - pako is loaded globally
+            const inflated = pako.inflate(new Uint8Array(data.data.data));
+            if (!inflated) {
+              console.warn(`[ANIMATION] Inflation failed for: ${data.name}`);
+              return;
+            }
+
+            console.log(`[ANIMATION] Caching inflated data: ${data.name}`);
+            cache.animations.set(data.name, inflated);
+            await saveAnimationToDB(data.name, inflated);
+            apng = parseAPNG(inflated);
           }
+        }
+
+        if (!(apng instanceof Error) && cache.players) {
+          const findPlayer = async () => {
+            const player = cache.players.find(p => p.id === data.id);
+            if (player) {
+              player.animation = {
+                frames: apng.frames,
+                currentFrame: 0,
+                lastFrameTime: performance.now(),
+              };
+
+              if (apng.frames && apng.frames.length > 0) {
+                apng.frames.forEach((frame: any) => frame.createImage());
+              }
+            } else {
+              await new Promise(resolve => setTimeout(resolve, 100));
+              await findPlayer();
+            }
+          };
+
+          findPlayer().catch(err => console.error('Error in findPlayer:', err));
+        }
       } catch (error) {
-          console.error('Failed to process animation data:', error);
+        console.error('Failed to process animation data:', error);
       }
       break;
     }
@@ -1143,5 +1160,44 @@ setInterval(() => {
   sentRequests = 0;
   receivedResponses = 0;
 }, 1000);
+
+// Utility IndexedDB wrapper
+async function openAnimationDB() {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open("AnimationCache", 1);
+
+    request.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains("animations")) {
+        db.createObjectStore("animations");
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function getAnimationFromDB(name: string): Promise<Uint8Array | undefined> {
+  const db = await openAnimationDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("animations", "readonly");
+    const store = tx.objectStore("animations");
+    const req = store.get(name);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveAnimationToDB(name: string, data: Uint8Array) {
+  const db = await openAnimationDB();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction("animations", "readwrite");
+    const store = tx.objectStore("animations");
+    const req = store.put(data, name);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
 
 export { sendRequest, cachedPlayerId, getIsLoaded };
