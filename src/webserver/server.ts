@@ -39,8 +39,7 @@ import assetCache from "../services/assetCache";
 
 const _cert = path.join(import.meta.dir, "../certs/cert.pem");
 const _key = path.join(import.meta.dir, "../certs/key.pem");
-const _bundle = path.join(import.meta.dir, "../certs/cert.ca-bundle");
-const _https = process.env.WEBSRV_USESSL === "true" && fs.existsSync(_cert) && fs.existsSync(_key) && fs.existsSync(_bundle);
+const _https = process.env.WEBSRV_USESSL === "true" && fs.existsSync(_cert) && fs.existsSync(_key);
 
 const routes = {
   "/docs": docs_html,
@@ -148,7 +147,6 @@ Bun.serve({
   ...(_https ? {
       cert: fs.readFileSync(_cert),
       key: fs.readFileSync(_key),
-      ca: fs.readFileSync(_bundle),
     }
   : {}),
 });

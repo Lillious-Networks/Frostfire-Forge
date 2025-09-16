@@ -19,23 +19,20 @@ import * as settings from "../../config/settings.json";
 
 const _cert = path.join(import.meta.dir, "../certs/cert.pem");
 const _key = path.join(import.meta.dir, "../certs/key.pem");
-const _bundle = path.join(import.meta.dir, "../certs/cert.ca-bundle");
 const _https = process.env.WEBSRV_USESSL === "true";
 let options;
 
 if (_https) {
-  if (!fs.existsSync(_cert) || !fs.existsSync(_key) || !fs.existsSync(_bundle)) {
+  if (!fs.existsSync(_cert) || !fs.existsSync(_key)) {
     log.error(`Attempted to locate certificate and key but failed`);
     log.error(`Certificate: ${_cert}`);
     log.error(`Key: ${_key}`);
-    log.error(`Bundle: ${_bundle}`);
     throw new Error("SSL certificate or key is missing");
   }
   try {
     options = {
       key: Bun.file(_key),
-      cert: Bun.file(_cert),
-      ca: Bun.file(_bundle),
+      cert: Bun.file(_cert)
     };
   } catch (e) {
     log.error(e as string);
