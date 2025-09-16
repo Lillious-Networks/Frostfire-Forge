@@ -161,7 +161,19 @@ input[type=range]:disabled {
     display: none;
 }
 
-#result p {
+#logs {
+    font-size: 0.8em;
+    font-weight: bold;
+    line-height: 2;
+    border-radius: 2px;
+    text-align: center;
+    padding: 5px;
+    padding-left: 50px;
+    padding-right: 50px;
+    display: none;
+}
+
+#result p, #logs p {
     border-bottom: 1px solid rgb(41, 54, 71);
     padding-bottom: 10px;
 }

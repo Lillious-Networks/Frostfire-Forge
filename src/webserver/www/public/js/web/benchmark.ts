@@ -10,6 +10,26 @@ const interval = document.getElementById('interval') as HTMLInputElement;
 const intervalLabel = document.getElementById('interval-label') as HTMLLabelElement;
 const stop = document.getElementById('stop') as HTMLButtonElement;
 let stopped = false;
+let errored = false;
+
+// Write logs to the logs element
+const logs = document.getElementById('logs') as HTMLParagraphElement;
+function logMessage(message: string) {
+    logs.style.display = 'block';
+    const timestamp = new Date().toLocaleTimeString();
+    logs.innerHTML += `<p>[${timestamp}] ${message}</p>`;
+    logs.scrollTop = logs.scrollHeight; // Auto-scroll to the bottom
+}
+
+console.error = (message?: any, ...optionalParams: any[]) => {
+    logMessage(typeof message === 'string' ? message : JSON.stringify(message));
+    if (optionalParams.length > 0) {
+        optionalParams.forEach(param => {
+            logMessage(typeof param === 'string' ? param : JSON.stringify(param));
+        });
+    }
+}
+
 function createPacket(size: number) {
     // size is in mb
     const data = new Uint8Array(size * 1024 * 1024);
@@ -178,11 +198,13 @@ start.addEventListener('click', async () => {
         websocket.onerror = (error) => {
             if (stopped) return;
             console.error("WebSocket error:", error);
+            errored = true;
             result.innerText = `An error occurred while connecting to the WebSocket.`;
             connections.delete(id);
         };
 
         websocket.onclose = () => {
+            if (errored) return;
             connections.delete(id);
             if (connections.size === 0) {
                 const endTime = Date.now();

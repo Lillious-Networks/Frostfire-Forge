@@ -20,7 +20,7 @@ import * as settings from "../../config/settings.json";
 const _cert = path.join(import.meta.dir, "../certs/cert.pem");
 const _key = path.join(import.meta.dir, "../certs/key.pem");
 const _https = process.env.WEBSRV_USESSL === "true";
-let options;
+let options: Bun.TLSOptions | undefined = undefined;
 
 if (_https) {
   if (!fs.existsSync(_cert) || !fs.existsSync(_key)) {
@@ -32,7 +32,7 @@ if (_https) {
   try {
     options = {
       key: Bun.file(_key),
-      cert: Bun.file(_cert)
+      cert: Bun.file(_cert),
     };
   } catch (e) {
     log.error(e as string);

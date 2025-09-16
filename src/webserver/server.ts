@@ -12,6 +12,7 @@ import fs from "fs";
 import docs_html from "./www/public/docs.html";
 import editor_html from "./www/public/editor.html";
 import benchmark_html from "./www/public/benchmark.html";
+import connectiontest_html from "./www/public/connection-test.html";
 import login_html from "./www/public/index.html";
 import register_html from "./www/public/register.html";
 import game_html from "./www/public/game.html";
@@ -44,6 +45,7 @@ const _https = process.env.WEBSRV_USESSL === "true" && fs.existsSync(_cert) && f
 const routes = {
   "/docs": docs_html,
   "/benchmark": benchmark_html,
+  "/connection-test": connectiontest_html,
   "/": login_html,
   "/registration": register_html,
   "/game": game_html,
@@ -94,6 +96,7 @@ Bun.serve({
   routes: {
     "/docs": routes["/docs"],
     "/benchmark": routes["/benchmark"],
+    "/connection-test": routes["/connection-test"],
     "/": routes["/"],
     "/registration": routes["/registration"],
     "/register": routes["/register"],
