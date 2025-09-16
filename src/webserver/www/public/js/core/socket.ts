@@ -238,297 +238,520 @@ socket.onmessage = async (event) => {
     }
     case "LOAD_MAP":
       {
-        // @ts-expect-error - pako is not defined because it is loaded in the index.html
-        const inflated = pako.inflate(new Uint8Array(new Uint8Array(data[0].data)), { to: "string" });
-        const mapData = inflated ? JSON.parse(inflated) : null;
-        const loadTilesets = async (tilesets: any[]) => {
-            if (!tilesets?.length) throw new Error("No tilesets found");
-            const tilesetPromises = tilesets.map(async (tileset) => {
-                const name = tileset.image.split("/").pop();
-                const tilesetResponse = await fetch(`/tileset?name=${name}`);
-                if (!tilesetResponse.ok) {
-                    throw new Error(`Failed to fetch tileset: ${name}`);
+      // @ts-expect-error - pako is not defined because it is loaded in the index.html
+      const inflated = pako.inflate(new Uint8Array(new Uint8Array(data[0].data)), { to: "string" });
+      const mapData = inflated ? JSON.parse(inflated) : null;
+      
+      // Alternative Safari-compatible image loading without CORS issues
+      const loadTilesets = async (tilesets: any[]) => {
+        if (!tilesets?.length) throw new Error("No tilesets found");
+        
+        const tilesetPromises = tilesets.map(async (tileset) => {
+          const name = tileset.image.split("/").pop();
+          
+          const tilesetResponse = await fetch(`/tileset?name=${name}`);
+          if (!tilesetResponse.ok) {
+            throw new Error(`Failed to fetch tileset: ${name}`);
+          }
+          const tilesetData = await tilesetResponse.json();
+          // @ts-expect-error - pako is not defined because it is loaded in the index.html
+          const inflatedData = pako.inflate(new Uint8Array(tilesetData.tileset.data.data), { to: "string" });
+          
+          return new Promise<HTMLImageElement>((resolve, reject) => {
+            const image = new Image();
+            
+            // Try WITHOUT crossOrigin first for Safari
+            let usesCrossOrigin = false;
+            
+            const attemptLoad = (withCors: boolean) => {
+              
+              if (withCors && !usesCrossOrigin) {
+                image.crossOrigin = 'anonymous';
+                usesCrossOrigin = true;
+              }
+              
+              const cleanup = () => {
+                image.onload = null;
+                image.onerror = null;
+              };
+              
+              image.onload = () => {
+                cleanup();
+                
+                if (image.complete && image.naturalWidth > 0) {
+                  resolve(image);
+                } else {
+                  reject(new Error(`Image loaded but invalid: ${name}`));
                 }
-                const tilesetData = await tilesetResponse.json();
-                // @ts-expect-error - pako is not defined because it is loaded in the index.html
-                const inflatedData = pako.inflate(new Uint8Array(tilesetData.tileset.data.data), { to: "string" });
-                return new Promise<HTMLImageElement>((resolve, reject) => {
-                    const image = new Image();
-                    image.onload = () => resolve(image);
-                    image.onerror = () => reject(new Error(`Failed to load tileset image: ${name}`));
-                    image.src = `data:image/png;base64,${inflatedData}`;
-                });
-            });
-            return Promise.all(tilesetPromises);
-        };
-        try {
-            const images = await loadTilesets(mapData.tilesets);
-            if (!images.length) throw new Error("No tileset images loaded");
-            await drawMap(images);
-        } catch (error) {
-            console.error("Map loading failed:", error);
-            throw error;
+              };
+              
+              image.onerror = () => {
+                cleanup();
+                
+                // Try with CORS if first attempt failed
+                if (!withCors) {
+                  attemptLoad(true);
+                } else {
+                  reject(new Error(`Failed to load tileset image: ${name}`));
+                }
+              };
+              
+              image.src = `data:image/png;base64,${inflatedData}`;
+            };
+            
+            // Start without CORS for Safari compatibility
+            attemptLoad(false);
+            
+            // Timeout fallback
+            setTimeout(() => {
+              if (!image.complete) {
+                reject(new Error(`Timeout loading tileset image: ${name}`));
+              }
+            }, 15000);
+          });
+        });
+        
+        const loadedImages = await Promise.all(tilesetPromises);
+        return loadedImages;
+      };
+
+      // More aggressive Safari canvas context creation
+      const createSafeCanvasContext = (
+        canvas: HTMLCanvasElement, 
+        options?: CanvasRenderingContext2DSettings
+      ): CanvasRenderingContext2D | null => {
+        
+        // Ensure canvas is properly sized first
+        if (!canvas.width || !canvas.height) {
+          canvas.width = canvas.width || 100;
+          canvas.height = canvas.height || 100;
         }
+        
+        // Force multiple layout calculations for Safari
+        canvas.offsetWidth;
+        canvas.offsetHeight;
+        canvas.clientWidth;
+        canvas.clientHeight;
+        
+        let ctx: CanvasRenderingContext2D | null = null;
+        
+        // More aggressive attempts for Safari
+        const attempts = [
+          // Safari-specific: try with no options first
+          () => {
+            return canvas.getContext('2d');
+          },
+          // Try with alpha only
+          () => {
+            return canvas.getContext('2d', { alpha: true });
+          },
+          // Try with willReadFrequently false
+          () => {
+            return canvas.getContext('2d', { willReadFrequently: false });
+          },
+          // Try with original options
+          () => {
+            return canvas.getContext('2d', options);
+          },
+          // Force reset and try again
+          () => {
+            const oldWidth = canvas.width;
+            const oldHeight = canvas.height;
+            canvas.width = oldWidth;
+            canvas.height = oldHeight;
+            canvas.offsetHeight; // Force layout again
+            return canvas.getContext('2d');
+          }
+        ];
+        
+        for (let i = 0; i < attempts.length; i++) {
+          try {
+            ctx = attempts[i]();
+            if (ctx) {
+              break;
+            }
+          } catch (e) {
+            console.error("Error creating canvas context:", e);
+            continue;
+          }
+        }
+        
+        return ctx;
+      };
+
+      try {
+        const images = await loadTilesets(mapData.tilesets);
+        if (!images.length) throw new Error("No tileset images loaded");
+        await drawMap(images);
+      } catch (error) {
+        console.error("Map loading failed:", error);
+        throw error;
+      }
+
         async function drawMap(images: HTMLImageElement[]): Promise<void> {
-          return new Promise((resolve) => {
-            const mapWidth = mapData.width * mapData.tilewidth;
-            const mapHeight = mapData.height * mapData.tileheight;
-            const CHUNK_SIZE = 25; 
-            const chunkPixelSize = CHUNK_SIZE * mapData.tilewidth;
-            canvas.width = mapWidth;
-            canvas.height = mapHeight;
-            canvas.style.width = mapWidth + "px";
-            canvas.style.height = mapHeight + "px";
-            canvas.style.display = "block";
-            const mainCtx = canvas.getContext('2d', { willReadFrequently: false });
-            if (!mainCtx) throw new Error("Could not get canvas context");
-            mainCtx.imageSmoothingEnabled = false;
-            const sortedLayers = [...mapData.layers].sort((a, b) => (a.zIndex || 0) - (b.zIndex || 0));
-            const visibleTileLayers = sortedLayers.filter(layer => layer.visible && layer.type === "tilelayer");
-            const chunksX = Math.ceil(mapData.width / CHUNK_SIZE);
-            const chunksY = Math.ceil(mapData.height / CHUNK_SIZE);
-            const totalChunks = chunksX * chunksY * visibleTileLayers.length;
-            let processedChunks = 0;
-            const chunkCanvases: {[key: string]: {[key: string]: HTMLCanvasElement | null}} = {};
-            window.mapLayerCanvases = [];
-            window.mapChunks = {
-              chunksX,
-              chunksY,
-              chunkSize: CHUNK_SIZE,
-              chunkPixelSize,
-              layers: {},
-              chunks: chunkCanvases,
-              redrawMainCanvas: () => {
-                mainCtx.clearRect(0, 0, mapWidth, mapHeight);
-                const layerNames = Object.keys(window.mapChunks.layers).sort((a, b) => {
-                  return (window.mapChunks.layers[a].zIndex || 0) - (window.mapChunks.layers[b].zIndex || 0);
-                });
-                for (const layerName of layerNames) {
-                  const layer = window.mapChunks.layers[layerName];
-                  if (!layer.visible) continue;
-                  for (let chunkY = 0; chunkY < chunksY; chunkY++) {
-                    for (let chunkX = 0; chunkX < chunksX; chunkX++) {
-                      const chunkKey = `${chunkX}-${chunkY}`;
-                      const chunkCanvas = chunkCanvases[layerName]?.[chunkKey];
-                      if (chunkCanvas && layer.chunkVisibility?.[chunkKey] !== false) {
-                        if (mainCtx) {
-                          if (mainCtx) {
-                            mainCtx.drawImage(
-                              chunkCanvas,
-                              chunkX * chunkPixelSize,
-                              chunkY * chunkPixelSize
-                            );
+          return new Promise((resolve, reject) => {
+            try {              
+              const mapWidth = mapData.width * mapData.tilewidth;
+              const mapHeight = mapData.height * mapData.tileheight;
+              const CHUNK_SIZE = 25; 
+              const chunkPixelSize = CHUNK_SIZE * mapData.tilewidth;
+
+              // Setup main canvas with extra Safari care
+              canvas.width = mapWidth;
+              canvas.height = mapHeight;
+              canvas.style.width = mapWidth + "px";
+              canvas.style.height = mapHeight + "px";
+              canvas.style.display = "block";
+              canvas.style.backgroundColor = "#ffffff"; // Explicit white background
+              
+              // Force Safari to acknowledge the canvas
+              canvas.offsetWidth;
+              canvas.offsetHeight;
+              
+              const mainCtx = createSafeCanvasContext(canvas, { 
+                willReadFrequently: false,
+                alpha: false 
+              });
+              
+              if (!mainCtx) {
+                reject(new Error("Could not get main canvas context"));
+                return;
+              }
+                            
+              mainCtx.imageSmoothingEnabled = false;
+              
+              // Test the context by drawing something
+              mainCtx.fillStyle = '#ff0000'; // Red test
+              mainCtx.fillRect(0, 0, 50, 50);
+              mainCtx.fillStyle = '#00ff00'; // Green test  
+              mainCtx.fillRect(50, 0, 50, 50);
+              mainCtx.fillStyle = '#0000ff'; // Blue test
+              mainCtx.fillRect(100, 0, 50, 50);
+                            
+              // Clear and set white background
+              mainCtx.fillStyle = '#ffffff';
+              mainCtx.fillRect(0, 0, mapWidth, mapHeight);
+
+              const sortedLayers = [...mapData.layers].sort((a, b) => (a.zIndex || 0) - (b.zIndex || 0));
+              const visibleTileLayers = sortedLayers.filter(layer => layer.visible && layer.type === "tilelayer");
+              const chunksX = Math.ceil(mapData.width / CHUNK_SIZE);
+              const chunksY = Math.ceil(mapData.height / CHUNK_SIZE);
+              const totalChunks = chunksX * chunksY * visibleTileLayers.length;
+              let processedChunks = 0;
+
+              const chunkCanvases: {[key: string]: {[key: string]: HTMLCanvasElement | null}} = {};
+              window.mapLayerCanvases = [];
+              
+              window.mapChunks = {
+                chunksX,
+                chunksY,
+                chunkSize: CHUNK_SIZE,
+                chunkPixelSize,
+                layers: {},
+                chunks: chunkCanvases,
+                redrawMainCanvas: () => {
+                  if (!mainCtx) return;
+                  
+                  try {
+                    // Clear canvas with white background
+                    mainCtx.fillStyle = '#ffffff';
+                    mainCtx.fillRect(0, 0, mapWidth, mapHeight);
+                    
+                    const layerNames = Object.keys(window.mapChunks.layers).sort((a, b) => {
+                      return (window.mapChunks.layers[a].zIndex || 0) - (window.mapChunks.layers[b].zIndex || 0);
+                    });
+                                        
+                    for (const layerName of layerNames) {
+                      const layer = window.mapChunks.layers[layerName];
+                      if (!layer.visible) continue;
+                      
+                      for (let chunkY = 0; chunkY < chunksY; chunkY++) {
+                        for (let chunkX = 0; chunkX < chunksX; chunkX++) {
+                          const chunkKey = `${chunkX}-${chunkY}`;
+                          const chunkCanvas = chunkCanvases[layerName]?.[chunkKey];
+                          
+                          if (chunkCanvas && layer.chunkVisibility?.[chunkKey] !== false) {
+                            try {
+                              mainCtx.drawImage(
+                                chunkCanvas,
+                                chunkX * chunkPixelSize,
+                                chunkY * chunkPixelSize
+                              );
+                            } catch (drawError) {
+                              console.error(`Error drawing chunk ${chunkKey} of layer ${layerName}:`, drawError);
+                            }
                           }
                         }
                       }
                     }
+                  } catch (error) {
+                      console.error('Error in redrawMainCanvas:', error);
                   }
-                }
-              },
-              hideChunk: (layerName: string, chunkX: number, chunkY: number) => {
-                const layer = window.mapChunks.layers[layerName];
-                if (layer) {
-                  const chunkKey = `${chunkX}-${chunkY}`;
-                  layer.chunkVisibility[chunkKey] = false;
-                  window.mapChunks.redrawMainCanvas();
-                }
-              },
-              showChunk: (layerName: string, chunkX: number, chunkY: number) => {
-                const layer = window.mapChunks.layers[layerName];
-                if (layer) {
-                  const chunkKey = `${chunkX}-${chunkY}`;
-                  layer.chunkVisibility[chunkKey] = true;
-                  window.mapChunks.redrawMainCanvas();
-                }
-              },
-              hideChunksByRegion: (x1: number, y1: number, x2: number, y2: number) => {
-                const startChunkX = Math.floor(x1 / CHUNK_SIZE);
-                const startChunkY = Math.floor(y1 / CHUNK_SIZE);
-                const endChunkX = Math.floor(x2 / CHUNK_SIZE);
-                const endChunkY = Math.floor(y2 / CHUNK_SIZE);
-                for (const layerName in window.mapChunks.layers) {
+                },
+                hideChunk: (layerName: string, chunkX: number, chunkY: number) => {
                   const layer = window.mapChunks.layers[layerName];
-                  for (let cy = startChunkY; cy <= endChunkY; cy++) {
-                    for (let cx = startChunkX; cx <= endChunkX; cx++) {
-                      const chunkKey = `${cx}-${cy}`;
-                      layer.chunkVisibility[chunkKey] = false;
+                  if (layer) {
+                    const chunkKey = `${chunkX}-${chunkY}`;
+                    layer.chunkVisibility[chunkKey] = false;
+                    window.mapChunks.redrawMainCanvas();
+                  }
+                },
+                showChunk: (layerName: string, chunkX: number, chunkY: number) => {
+                  const layer = window.mapChunks.layers[layerName];
+                  if (layer) {
+                    const chunkKey = `${chunkX}-${chunkY}`;
+                    layer.chunkVisibility[chunkKey] = true;
+                    window.mapChunks.redrawMainCanvas();
+                  }
+                },
+                hideChunksByRegion: (x1: number, y1: number, x2: number, y2: number) => {
+                  const startChunkX = Math.floor(x1 / CHUNK_SIZE);
+                  const startChunkY = Math.floor(y1 / CHUNK_SIZE);
+                  const endChunkX = Math.floor(x2 / CHUNK_SIZE);
+                  const endChunkY = Math.floor(y2 / CHUNK_SIZE);
+                  for (const layerName in window.mapChunks.layers) {
+                    const layer = window.mapChunks.layers[layerName];
+                    for (let cy = startChunkY; cy <= endChunkY; cy++) {
+                      for (let cx = startChunkX; cx <= endChunkX; cx++) {
+                        const chunkKey = `${cx}-${cy}`;
+                        layer.chunkVisibility[chunkKey] = false;
+                      }
                     }
                   }
-                }
-                window.mapChunks.redrawMainCanvas();
-              },
-              showChunksByRegion: (x1: number, y1: number, x2: number, y2: number) => {
-                const startChunkX = Math.floor(x1 / CHUNK_SIZE);
-                const startChunkY = Math.floor(y1 / CHUNK_SIZE);
-                const endChunkX = Math.floor(x2 / CHUNK_SIZE);
-                const endChunkY = Math.floor(y2 / CHUNK_SIZE);
-                for (const layerName in window.mapChunks.layers) {
-                  const layer = window.mapChunks.layers[layerName];
-                  for (let cy = startChunkY; cy <= endChunkY; cy++) {
-                    for (let cx = startChunkX; cx <= endChunkX; cx++) {
-                      const chunkKey = `${cx}-${cy}`;
-                      layer.chunkVisibility[chunkKey] = true;
+                  window.mapChunks.redrawMainCanvas();
+                },
+                showChunksByRegion: (x1: number, y1: number, x2: number, y2: number) => {
+                  const startChunkX = Math.floor(x1 / CHUNK_SIZE);
+                  const startChunkY = Math.floor(y1 / CHUNK_SIZE);
+                  const endChunkX = Math.floor(x2 / CHUNK_SIZE);
+                  const endChunkY = Math.floor(y2 / CHUNK_SIZE);
+                  for (const layerName in window.mapChunks.layers) {
+                    const layer = window.mapChunks.layers[layerName];
+                    for (let cy = startChunkY; cy <= endChunkY; cy++) {
+                      for (let cx = startChunkX; cx <= endChunkX; cx++) {
+                        const chunkKey = `${cx}-${cy}`;
+                        layer.chunkVisibility[chunkKey] = true;
+                      }
                     }
                   }
-                }
-                window.mapChunks.redrawMainCanvas();
-              },
-              hideLayer: (layerName: string) => {
-                const layer = window.mapChunks.layers[layerName];
-                if (layer) {
-                  layer.visible = false;
                   window.mapChunks.redrawMainCanvas();
+                },
+                hideLayer: (layerName: string) => {
+                  const layer = window.mapChunks.layers[layerName];
+                  if (layer) {
+                    layer.visible = false;
+                    window.mapChunks.redrawMainCanvas();
+                  }
+                },
+                showLayer: (layerName: string) => {
+                  const layer = window.mapChunks.layers[layerName];
+                  if (layer) {
+                    layer.visible = true;
+                    window.mapChunks.redrawMainCanvas();
+                  }
                 }
-              },
-              showLayer: (layerName: string) => {
-                const layer = window.mapChunks.layers[layerName];
-                if (layer) {
-                  layer.visible = true;
-                  window.mapChunks.redrawMainCanvas();
-                }
-              }
-            };
-            async function processLayer(layer: any, layerIndex: number): Promise<void> {
-              const layerName = layer.name.replace(/[^a-zA-Z0-9-_]/g, '-');
-              chunkCanvases[layerName] = {};
-              window.mapChunks.layers[layerName] = {
-                originalName: layer.name,
-                zIndex: layer.zIndex || layerIndex,
-                visible: true,
-                chunkVisibility: {},
-                chunks: {}
               };
-              const layerCanvas = document.createElement('canvas');
-              layerCanvas.width = mapWidth;
-              layerCanvas.height = mapHeight;
-              if (!window.mapLayerCanvases) {
-                window.mapLayerCanvases = [];
-              }
-              const layerCtx = layerCanvas.getContext('2d', { willReadFrequently: false });
-              if (!layerCtx) throw new Error("Could not get canvas context for layer canvas");
-              window.mapLayerCanvases.push({
-                canvas: layerCanvas,
-                ctx: layerCtx,
-                zIndex: layer.zIndex || layerIndex
-              });
-              async function processChunk(chunkX: number, chunkY: number): Promise<void> {
-                const startX = chunkX * CHUNK_SIZE;
-                const startY = chunkY * CHUNK_SIZE;
-                const endX = Math.min(startX + CHUNK_SIZE, mapData.width);
-                const endY = Math.min(startY + CHUNK_SIZE, mapData.height);
-                const actualChunkWidth = (endX - startX) * mapData.tilewidth;
-                const actualChunkHeight = (endY - startY) * mapData.tileheight;
-                const chunkCanvas = document.createElement('canvas');
-                chunkCanvas.width = actualChunkWidth;
-                chunkCanvas.height = actualChunkHeight;
-                const chunkCtx = chunkCanvas.getContext('2d', { willReadFrequently: false });
-                if (!chunkCtx) return;
-                chunkCtx.imageSmoothingEnabled = false;
-                let hasContent = false;
-                for (let y = startY; y < endY; y++) {
-                  for (let x = startX; x < endX; x++) {
-                    const tileIndex = layer.data[y * mapData.width + x];
-                    if (tileIndex === 0) continue;
-                    const tileset = mapData.tilesets.find(
-                      (t: any) => t.firstgid <= tileIndex && tileIndex < t.firstgid + t.tilecount
-                    );
-                    if (!tileset) continue;
-                    const image = images[mapData.tilesets.indexOf(tileset)] as HTMLImageElement;
-                    if (!image) continue;
-                    const localTileIndex = tileIndex - tileset.firstgid;
-                    const tilesPerRow = Math.floor(tileset.imagewidth / tileset.tilewidth);
-                    const tileX = (localTileIndex % tilesPerRow) * tileset.tilewidth;
-                    const tileY = Math.floor(localTileIndex / tilesPerRow) * tileset.tileheight;
-                    chunkCtx.drawImage(
-                      image,
-                      tileX,
-                      tileY,
-                      tileset.tilewidth,
-                      tileset.tileheight,
-                      (x - startX) * mapData.tilewidth,
-                      (y - startY) * mapData.tileheight,
-                      mapData.tilewidth,
-                      mapData.tileheight
-                    );
-                    if (!window.mapLayerCanvases) {
-                      window.mapLayerCanvases = [];
-                    }
-                    const layerCanvasData = window.mapLayerCanvases[window.mapLayerCanvases.length - 1];
-                    if (layerCanvasData && layerCanvasData.ctx) {
-                      layerCanvasData.ctx.drawImage(
-                        image,
-                        tileX,
-                        tileY,
-                        tileset.tilewidth,
-                        tileset.tileheight,
-                        x * mapData.tilewidth,
-                        y * mapData.tileheight,
-                        mapData.tilewidth,
-                        mapData.tileheight
-                      );
-                    }
-                    hasContent = true;
-                  }
-                }
-                const chunkKey = `${chunkX}-${chunkY}`;
-                if (hasContent) {
-                  chunkCanvases[layerName][chunkKey] = chunkCanvas;
-                } else {
-                  chunkCanvases[layerName][chunkKey] = null;
-                }
-                window.mapChunks.layers[layerName].chunkVisibility[chunkKey] = hasContent;
-                window.mapChunks.layers[layerName].chunks[chunkKey] = {
-                  x: chunkX,
-                  y: chunkY,
-                  hasContent
+
+              // Safari-safe processLayer with more debugging
+              async function processLayer(layer: any, layerIndex: number): Promise<void> {
+               
+                const layerName = layer.name.replace(/[^a-zA-Z0-9-_]/g, '-');
+                chunkCanvases[layerName] = {};
+                window.mapChunks.layers[layerName] = {
+                  originalName: layer.name,
+                  zIndex: layer.zIndex || layerIndex,
+                  visible: true,
+                  chunkVisibility: {},
+                  chunks: {}
                 };
-                processedChunks++;
-                const progress = (processedChunks / totalChunks) * 100;
-                progressBar.style.width = `${Math.min(progress, 100)}%`;
-              }
-              for (let chunkY = 0; chunkY < chunksY; chunkY++) {
-                for (let chunkX = 0; chunkX < chunksX; chunkX++) {
-                  await processChunk(chunkX, chunkY);
-                  if ((chunkX + chunkY * chunksX) % 5 === 0) {
-                    await new Promise(resolve => setTimeout(resolve, 0));
+
+                const layerCanvas = document.createElement('canvas');
+                layerCanvas.width = mapWidth;
+                layerCanvas.height = mapHeight;
+                
+                const layerCtx = createSafeCanvasContext(layerCanvas, { 
+                  willReadFrequently: false,
+                  alpha: true 
+                });
+                
+                if (!layerCtx) {
+                  return;
+                }
+                
+                layerCtx.imageSmoothingEnabled = false;
+                layerCtx.clearRect(0, 0, mapWidth, mapHeight);
+                                
+                if (!window.mapLayerCanvases) {
+                  window.mapLayerCanvases = [];
+                }
+                
+                window.mapLayerCanvases.push({
+                  canvas: layerCanvas,
+                  ctx: layerCtx,
+                  zIndex: layer.zIndex || layerIndex
+                });
+
+                async function processChunk(chunkX: number, chunkY: number): Promise<void> {
+                  const startX = chunkX * CHUNK_SIZE;
+                  const startY = chunkY * CHUNK_SIZE;
+                  const endX = Math.min(startX + CHUNK_SIZE, mapData.width);
+                  const endY = Math.min(startY + CHUNK_SIZE, mapData.height);
+                  const actualChunkWidth = (endX - startX) * mapData.tilewidth;
+                  const actualChunkHeight = (endY - startY) * mapData.tileheight;
+
+                  const chunkCanvas = document.createElement('canvas');
+                  chunkCanvas.width = actualChunkWidth;
+                  chunkCanvas.height = actualChunkHeight;
+                  
+                  const chunkCtx = createSafeCanvasContext(chunkCanvas, { willReadFrequently: false });
+                  
+                  if (!chunkCtx) {
+                    return;
+                  }
+                  
+                  chunkCtx.imageSmoothingEnabled = false;
+                  let hasContent = false;
+
+                  for (let y = startY; y < endY; y++) {
+                    for (let x = startX; x < endX; x++) {
+                      const tileIndex = layer.data[y * mapData.width + x];
+                      if (tileIndex === 0) continue;
+
+                      const tileset = mapData.tilesets.find(
+                        (t: any) => t.firstgid <= tileIndex && tileIndex < t.firstgid + t.tilecount
+                      );
+                      if (!tileset) continue;
+
+                      const image = images[mapData.tilesets.indexOf(tileset)] as HTMLImageElement;
+                      if (!image || !image.complete || image.naturalWidth === 0) {
+                        continue;
+                      }
+
+                      const localTileIndex = tileIndex - tileset.firstgid;
+                      const tilesPerRow = Math.floor(tileset.imagewidth / tileset.tilewidth);
+                      const tileX = (localTileIndex % tilesPerRow) * tileset.tilewidth;
+                      const tileY = Math.floor(localTileIndex / tilesPerRow) * tileset.tileheight;
+
+                      try {
+                        chunkCtx.drawImage(
+                          image,
+                          tileX, tileY, tileset.tilewidth, tileset.tileheight,
+                          (x - startX) * mapData.tilewidth,
+                          (y - startY) * mapData.tileheight,
+                          mapData.tilewidth, mapData.tileheight
+                        );
+
+                        if (!window.mapLayerCanvases) {
+                          window.mapLayerCanvases = [];
+                        }
+                        const layerCanvasData = window.mapLayerCanvases[window.mapLayerCanvases.length - 1];
+                        if (layerCanvasData && layerCanvasData.ctx) {
+                          layerCanvasData.ctx.drawImage(
+                            image,
+                            tileX, tileY, tileset.tilewidth, tileset.tileheight,
+                            x * mapData.tilewidth,
+                            y * mapData.tileheight,
+                            mapData.tilewidth, mapData.tileheight
+                          );
+                        }
+                        hasContent = true;
+                      } catch (drawError) {
+
+                        if (drawError instanceof DOMException && drawError.name === 'NotAllowedError') {
+                          console.error('Canvas tainted - CORS issue detected');
+                        }
+                      }
+                    }
+                  }
+
+                  const chunkKey = `${chunkX}-${chunkY}`;
+                  if (hasContent) {
+                    chunkCanvases[layerName][chunkKey] = chunkCanvas;
+                  } else {
+                    chunkCanvases[layerName][chunkKey] = null;
+                  }
+
+                  window.mapChunks.layers[layerName].chunkVisibility[chunkKey] = hasContent;
+                  window.mapChunks.layers[layerName].chunks[chunkKey] = {
+                    x: chunkX,
+                    y: chunkY,
+                    hasContent
+                  };
+
+                  processedChunks++;
+                  const progress = (processedChunks / totalChunks) * 100;
+                  progressBar.style.width = `${Math.min(progress, 100)}%`;
+                }
+
+                for (let chunkY = 0; chunkY < chunksY; chunkY++) {
+                  for (let chunkX = 0; chunkX < chunksX; chunkX++) {
+                    await processChunk(chunkX, chunkY);
+                    if ((chunkX + chunkY * chunksX) % 5 === 0) {
+                      await new Promise(resolve => setTimeout(resolve, 0));
+                    }
                   }
                 }
               }
-            }
-            let currentLayerIndex = 0;
-            async function renderLayers(): Promise<void> {
-              for (const layer of sortedLayers) {
-                if (!layer.visible || layer.type !== "tilelayer" || layer.name.toLowerCase() === "collisions") {
-                  currentLayerIndex++;
-                  continue;
-                }
-                await processLayer(layer, currentLayerIndex);
-                currentLayerIndex++;
-                await new Promise(resolve => requestAnimationFrame(resolve));
-              }
-              (window.mapLayerCanvases ?? []).sort((a: any, b: any) => a.zIndex - b.zIndex);
-              progressBar.style.width = `100%`;
-              resolve();
-              setTimeout(() => {
-                if (loadingScreen) {
-                  loadingScreen.style.transition = "1s";
-                  loadingScreen.style.opacity = "0";
+
+              let currentLayerIndex = 0;
+              async function renderLayers(): Promise<void> {
+                try {                  
+                  for (const layer of sortedLayers) {
+                    if (!layer.visible || layer.type !== "tilelayer" || layer.name.toLowerCase() === "collisions") {
+                      currentLayerIndex++;
+                      continue;
+                    }
+                    await processLayer(layer, currentLayerIndex);
+                    currentLayerIndex++;
+                    await new Promise(resolve => requestAnimationFrame(resolve));
+                  }
+                  
+                  (window.mapLayerCanvases ?? []).sort((a: any, b: any) => a.zIndex - b.zIndex);
+                  
+                  
+                  // Force multiple renders to ensure Safari displays content
+                  window.mapChunks.redrawMainCanvas();
+                  
+                  // Additional Safari-specific render attempts
+                  setTimeout(() => {
+                    window.mapChunks.redrawMainCanvas();
+                  }, 100);
+                  
+                  setTimeout(() => {
+                    window.mapChunks.redrawMainCanvas();
+                  }, 500);
+                  
+                  progressBar.style.width = `100%`;
+                  resolve();
+                  
                   setTimeout(() => {
                     if (loadingScreen) {
-                      loadingScreen.style.display = "none";
-                      progressBar.style.width = "0%";
-                      progressBarContainer.style.display = "block";
+                      loadingScreen.style.transition = "1s";
+                      loadingScreen.style.opacity = "0";
+                      setTimeout(() => {
+                        if (loadingScreen) {
+                          loadingScreen.style.display = "none";
+                          progressBar.style.width = "0%";
+                          progressBarContainer.style.display = "block";
+                        }
+                      }, 1000);
                     }
                   }, 1000);
+                } catch (error) {
+                  reject(error);
                 }
-              }, 1000);
+              }
+
+              loaded = true;
+              renderLayers();
+              
+            } catch (error) {
+              reject(error);
             }
-            loaded = true;
-            renderLayers();
           });
         }
       }
-      break;
+    break;
     case "LOGIN_SUCCESS":
       {
         const connectionId = JSON.parse(packet.decode(event.data))["data"];

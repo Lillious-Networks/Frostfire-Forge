@@ -22,6 +22,89 @@ declare global {
   }
 }
 
+// iOS Safari-safe initialization of mapLayerCanvases
+window.mapLayerCanvases = window.mapLayerCanvases || [];
+
+function createLayerCanvas(zIndex: number) {
+  const layerCanvas = document.createElement('canvas');
+
+  // Set dimensions BEFORE any other operations (critical for Safari)
+  const scale = window.devicePixelRatio || 1;
+  layerCanvas.width = window.innerWidth * scale;
+  layerCanvas.height = window.innerHeight * scale;
+  
+  // Set CSS dimensions
+  layerCanvas.style.width = `${window.innerWidth}px`;
+  layerCanvas.style.height = `${window.innerHeight}px`;
+  layerCanvas.style.position = 'absolute';
+  layerCanvas.style.top = '0';
+  layerCanvas.style.left = '0';
+  layerCanvas.style.zIndex = zIndex.toString();
+  
+  // Force a layout/reflow before getting context (Safari fix)
+
+  layerCanvas.offsetHeight; // This forces Safari to process the canvas setup
+
+
+  // Now get the context - this should work reliably
+  const layerCtx = layerCanvas.getContext('2d', { 
+    alpha: true,
+    desynchronized: false 
+  });
+  
+  if (!layerCtx) {
+    console.error(`Failed to get 2D context for layer canvas (zIndex: ${zIndex})`);
+    // Create a dummy context to prevent crashes
+    const dummyCanvas = document.createElement('canvas');
+    dummyCanvas.width = 1;
+    dummyCanvas.height = 1;
+    const dummyCtx = dummyCanvas.getContext('2d')!;
+    return { canvas: layerCanvas, ctx: dummyCtx, zIndex };
+  }
+
+  // Append to DOM AFTER successful context creation
+  document.body.appendChild(layerCanvas); 
+
+  // Scale for high-DPI displays
+  layerCtx.scale(scale, scale);
+
+  return { canvas: layerCanvas, ctx: layerCtx, zIndex };
+}
+
+// Initialize layers if not already present
+if (window.mapLayerCanvases.length === 0) {
+  window.mapLayerCanvases.push(createLayerCanvas(1)); // background
+  window.mapLayerCanvases.push(createLayerCanvas(3)); // below player
+  window.mapLayerCanvases.push(createLayerCanvas(5)); // above player
+}
+
+// Resize handler for iOS / high-DPI devices
+function resizeLayerCanvases() {
+  const scale = window.devicePixelRatio || 1;
+  for (const layer of window.mapLayerCanvases!) {
+    // Remove from DOM temporarily (helps with Safari context issues)
+    const parent = layer.canvas.parentNode;
+    if (parent) parent.removeChild(layer.canvas);
+    
+    // Update dimensions
+    layer.canvas.width = window.innerWidth * scale;
+    layer.canvas.height = window.innerHeight * scale;
+    layer.canvas.style.width = `${window.innerWidth}px`;
+    layer.canvas.style.height = `${window.innerHeight}px`;
+
+    layer.canvas.offsetHeight; // Force reflow
+
+    // Re-add to DOM
+    if (parent) parent.appendChild(layer.canvas);
+    
+    // Reset transform and scaling
+    if (layer.ctx && typeof layer.ctx.setTransform === 'function') {
+      layer.ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    }
+  }
+}
+window.addEventListener('resize', resizeLayerCanvases);
+
 const cachedViewport = {
   x: 0,
   y: 0,
