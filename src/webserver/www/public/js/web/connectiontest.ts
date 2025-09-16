@@ -71,7 +71,7 @@ function connectWebSocket() {
             console.log(`Received Data: ${JSON.stringify(data)}`);
         };
         websocket.onerror = (event) => {
-            console.error('WebSocket error:', event);
+            console.error('WebSocket error:', JSON.stringify(event));
         };
 
         websocket.onclose = (event) => {
