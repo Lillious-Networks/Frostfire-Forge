@@ -7,10 +7,10 @@ self.onmessage = async function (e) {
       return;
     }
 
-    // @ts-expect-error - pako is loaded in index.html
+    // @ts-expect-error - pako loaded in index.html
     const inflatedData = pako.inflate(new Uint8Array(animationData.data.data));
 
-    // @ts-expect-error - parseAPNG is loaded in index.html
+    // @ts-expect-error - parseAPNG loaded in index.html
     const apng = parseAPNG(inflatedData.buffer);
 
     if (apng instanceof Error) {
@@ -24,7 +24,10 @@ self.onmessage = async function (e) {
       delay: frame.delay,
     }));
 
-    self.postMessage({ framesInfo });
+    // Extract raw frame data for main thread to create blobs
+    const frameBuffers = apng.frames.map((frame: any) => frame.data.buffer);
+
+    self.postMessage({ framesInfo, frameBuffers });
   } catch (error: any) {
     self.postMessage({ error: error.message });
   }
