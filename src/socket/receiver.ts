@@ -20,6 +20,7 @@ import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 // Load settings
 import * as settings from "../../config/settings.json";
 import { randomBytes } from "../modules/hash";
+import worlds from "../systems/worlds.ts";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 
 let restartScheduled: boolean;
@@ -186,6 +187,20 @@ export default async function packetReceiver(
                 maps.find((m: MapData) => m.name === `${defaultMap}.json`);
               if (!map) return;
               spawnLocation.map = map.name;
+
+              const _worlds = assetCache.get("worlds") as WorldData[];
+              const thisWorld = _worlds.find(w => w.name === spawnLocation.map.replace(".json", ""));
+              const playerCount = (thisWorld?.players || 0) + 1;
+              const maxPlayers = thisWorld?.max_players || 100;
+              if (thisWorld && maxPlayers && playerCount > maxPlayers) {
+                ws.close(1008, "World is full");
+                return;
+              }
+              // Send weather data
+              const weather = worlds.getCurrentWeather(spawnLocation.map.replace(".json", "")) || null;
+              if (weather) {
+                sendPacket(ws, packetManager.weather({ weather }) );
+              }
               await player.setLocation(ws.data.id, spawnLocation.map.replace(".json", ""), {
                 x: spawnLocation.x,
                 y: spawnLocation.y,
@@ -380,6 +395,14 @@ export default async function packetReceiver(
                   sendPacket(ws, packetManager.music(musicData));
                 }
               });
+
+              // Increase player count in the world
+
+              if (thisWorld) {
+                thisWorld.players = (thisWorld.players || 0) + 1;
+                assetCache.set("worlds", _worlds);
+              }
+              console.log(`World: ${spawnLocation.map.replace(".json", "")} now has ${thisWorld?.players || 0} players.`);
               break;
       }
       // TODO:Move this to the logout packet

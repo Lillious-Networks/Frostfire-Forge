@@ -4,6 +4,8 @@ import './events.ts';
 import pako from '../libs/pako.js';
 import packet from './packetencoder.ts';
 import Cache from "./cache";
+import { updateTime } from './ambience.ts';
+import { setWeatherType } from './renderer.ts';
 const cache = Cache.getInstance();
 import { createPlayer } from './player.ts';
 import { updateFriendsList } from './friends.ts';
@@ -12,7 +14,7 @@ import { updateFriendOnlineStatus } from "./friends.js";
 import { createPartyUI, canvas, positionText, fpsSlider,
   musicSlider, effectsSlider, mutedCheckbox, statUI, packetsSentReceived,
   onlinecount, progressBar, progressBarContainer, inventoryGrid, chatMessages,
-  loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage,
+  loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage
 } from './ui.ts';
 import { playAudio, playMusic } from './audio.ts';
 import { updateXp } from './xp.ts';
@@ -55,6 +57,16 @@ socket.onmessage = async (event) => {
   const data = JSON.parse(packet.decode(event.data))["data"];
   const type = JSON.parse(packet.decode(event.data))["type"];
   switch (type) {
+    case "SERVER_TIME": {
+      if (!data) return;
+      updateTime(data);
+      break;
+    }
+    case "WEATHER": {
+      if (!data || !data.weather) return;
+      setWeatherType(data.weather);
+      break;
+    }
     case "CONSOLE_MESSAGE": {
       if (!data || !data.message) return;
       window.Notify(data.type, data.message);

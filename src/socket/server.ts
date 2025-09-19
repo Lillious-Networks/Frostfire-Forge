@@ -16,6 +16,7 @@ import { generateKeyPair } from "../modules/cipher";
 
 // Load settings
 import * as settings from "../../config/settings.json";
+import assetCache from "../services/assetCache.ts";
 
 const _cert = path.join(import.meta.dir, "../certs/cert.pem");
 const _key = path.join(import.meta.dir, "../certs/key.pem");
@@ -138,17 +139,18 @@ const Server = Bun.serve<Packet, any>({
       ws.subscribe("CONNECTION_COUNT" as Subscription["event"]);
       ws.subscribe("BROADCAST" as Subscription["event"]);
       ws.subscribe("DISCONNECT_PLAYER" as Subscription["event"]);
-      const _packet = {
-        type: "CONNECTION_COUNT",
-        data: connections.size,
-      } as unknown as Packet;
 
       // Set timeout to 1000 if user agent is an iOS or Mac device due to a bug with Safari not allowing immediate messages
       const timeout = ws.data.useragent.includes("iPhone") || ws.data.useragent.includes("iPad") || ws.data.useragent.includes("Macintosh") ? 1000 : 0;
+      
       setTimeout(() => {
+        // Publish the connection count to all clients
         Server.publish(
           "CONNECTION_COUNT" as Subscription["event"],
-          packet.encode(JSON.stringify(_packet))
+          packet.encode(JSON.stringify({
+            type: "CONNECTION_COUNT",
+            data: connections.size,
+          }))
         );
       }, timeout);
     },
@@ -293,6 +295,7 @@ listener.on("onServerTick", async () => {
 
   Object.values(players).forEach(async (playerData: any) => {
     const now = performance.now();
+    playerData.ws.send(packetManager.serverTime()[0]);
 
     // Reset PvP flag if no recent attack
     const timeSinceLastAttack = playerData.last_attack ? now - playerData.last_attack : Infinity;
@@ -352,6 +355,14 @@ listener.on("onDisconnect", async (data) => {
   try {
     const playerData = cache.get(data.id);
     if (!playerData) return;
+    const _worlds = assetCache.get("worlds") as WorldData[];
+    const thisWorld = _worlds.find(w => w.name === playerData.location.map.replace(".json", ""));
+    if (thisWorld && thisWorld.players && thisWorld.players > 0) {
+      thisWorld.players -= 1;
+      assetCache.set("worlds", _worlds);
+    }
+
+    console.log(`World: ${playerData.location.map.replace(".json", "")} now has ${thisWorld?.players || 0} players.`);
 
     if (!playerData.isGuest) {
         // Save player stats and location

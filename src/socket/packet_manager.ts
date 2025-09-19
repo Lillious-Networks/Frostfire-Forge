@@ -323,4 +323,14 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "CONSOLE_MESSAGE", data })),
     ] as any[];
   },
+  serverTime: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "SERVER_TIME", data: Date.now() })),
+    ] as any[];
+  },
+  weather: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "WEATHER", data })),
+    ] as any[];
+  }
 };

@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="./css/game.css" />
   </head>
   <body oncontextmenu="return false;">
+    <div id="ambience-overlay" class="ui"></div>
     <div id="loading-screen" class="ui">
       <button type="button" id="start-game-button" class="ui">Start Game</button>
       <div id="progress-bar-container" class="ui">
@@ -48,6 +49,7 @@
           </div>
         </div>
       </div>
+      <div id="server-time-container" class="ui"><p id="server-time-value">7:40:46 PM</p></div>
       <div id="debug-container" class="ui">
         <div id="onlinecount" class="ui"></div>
         <div id="packets-sent-received" class="ui">Sent: 0, Received: 0</div>
@@ -145,5 +147,6 @@
       <div id="party-container" class="ui"></div>
     </div>
     <canvas id="game"></canvas>
+    <canvas id="weather"></canvas>
   </body>
 </html>

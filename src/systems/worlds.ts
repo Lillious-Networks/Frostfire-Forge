@@ -3,18 +3,23 @@ import assetCache from "../services/assetCache";
 
 const worlds = {
   async list() {
-    return (await query("SELECT * FROM worlds")) as WorldData[];
+    const results = await query("SELECT * FROM worlds") as WorldData[];
+    const worlds = results.map(world => {
+      const players = 0;
+      return { ...world, players };
+    });
+    return worlds;
   },
-  async get(world: string) {
+  get(world: string) {
     const worlds = assetCache.get("worlds") as WorldData[];
     return worlds.find((w) => w.name === world);
   },
-  async getCurrentWeather(world: string) {
-    const worldData = await this.get(world);
+  getCurrentWeather(world: string) {
+    const worldData = this.get(world);
     return worldData?.weather || "clear";
   },
-  async getMaxPlayers(world: string) {
-    const worldData = await this.get(world);
+  getMaxPlayers(world: string) {
+    const worldData = this.get(world);
     return worldData?.max_players || 100;
   },
   async add(world: WorldData) {

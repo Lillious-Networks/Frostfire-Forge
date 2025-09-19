@@ -34,6 +34,10 @@ const healthLabel = document.getElementById("stats-screen-health-label") as HTML
 const manaLabel = document.getElementById("stats-screen-mana-label") as HTMLDivElement;
 const notificationContainer = document.getElementById("game-notification-container");
 const notificationMessage = document.getElementById("game-notification-message");
+const serverTime = document.getElementById("server-time-value") as HTMLDivElement;
+const ambience = document.getElementById("ambience-overlay") as HTMLDivElement;
+const weatherCanvas = document.getElementById("weather") as HTMLCanvasElement;
+const weatherCtx = weatherCanvas.getContext("2d");
 
 function toggleUI(element: HTMLElement, toggleFlag: boolean, hidePosition: number) {
   element.style.transition = "1s";
@@ -160,5 +164,6 @@ export {
     friendsListUI, inventoryUI, spellBookUI, pauseMenu, menuElements, chatInput, canvas, ctx, fpsSlider, healthBar,
     staminaBar, targetHealthBar, targetStaminaBar, xpBar, musicSlider, effectsSlider, mutedCheckbox, statUI, overlay,
     packetsSentReceived, optionsMenu, friendsList, friendsListSearch, onlinecount, progressBar, progressBarContainer,
-    inventoryGrid, chatMessages, loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage
+    inventoryGrid, chatMessages, loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage,
+    serverTime, ambience, weatherCanvas, weatherCtx
 };

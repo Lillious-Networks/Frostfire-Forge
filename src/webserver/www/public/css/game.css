@@ -1103,7 +1103,7 @@ input[type=range]:disabled {
 
 #context-menu {
   position: fixed;
-  z-index: 1000;
+  z-index: 1004;
   background: rgba(255, 255, 255, 0.9);
   border: 1px solid #ccc;
   box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
@@ -1258,4 +1258,50 @@ input[type=range]:disabled {
 
 .notification-warning {
   border-right: 5px solid var(--orange);
+}
+
+#server-time-container {
+  display: block;
+  position: fixed;
+  z-index: 101;
+  backdrop-filter: blur(1px);
+  background: #ffffff20;
+  border-radius: 10px;
+  min-width: 100px;
+  min-height: 30px;
+  top: 25px;
+  right: 25px;
+  box-shadow: 0 0 10px #00000080;
+}
+
+#server-time-container #server-time-value {
+  color: #fff;
+  -webkit-text-stroke-width: 0.2px;
+  -webkit-text-stroke-color: #ffffff;
+  text-shadow: 0 0 5px #000000;
+  font-weight: lighter;
+  user-select: none;
+  font-size: 0.8em;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-family: 'Comic Relief';
+}
+
+#ambience-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  pointer-events: none;
+}
+
+#weather {
+  position: absolute;
+  pointer-events: none;
+  z-index: 10;
 }

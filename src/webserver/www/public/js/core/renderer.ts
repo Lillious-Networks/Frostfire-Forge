@@ -1,8 +1,10 @@
 import { getIsLoaded, cachedPlayerId, sendRequest } from "./socket.js";
 import { getIsKeyPressed, pressedKeys, setIsMoving, getIsMoving } from "./input.js";
 import Cache from "./cache";
+let weatherType = null as string | null;
 const cache = Cache.getInstance();
 import { updateHealthBar, updateStaminaBar } from "./ui.js";
+import { updateWeatherCanvas, weather } from './weather.ts';
 import { chatInput } from "./chat.js";
 import { friendsListSearch } from "./friends.js";
 let lastUpdate = performance.now();
@@ -106,6 +108,10 @@ function updateCamera(currentPlayer: any) {
     const smoothing = 1 - Math.pow(1 - cameraSmoothing, deltaTime);
     cameraX = lerp(cameraX, targetX, smoothing);
     cameraY = lerp(cameraY, targetY, smoothing);
+    if (weatherType) {
+      updateWeatherCanvas(cameraX, cameraY);
+      weather(weatherType);
+    }
     window.scrollTo(Math.round(cameraX), Math.round(cameraY));
   }
 }
@@ -228,6 +234,7 @@ function animationLoop() {
   if (times.length > 60) times.shift();
   times.push(now);
   requestAnimationFrame(animationLoop);
+  `requestAnimationFrame(weather);`
 }
 
 updateViewportCache();
@@ -257,4 +264,12 @@ function getCameraY() {
   return cameraY;
 }
 
-export { lastDirection, setDirection, setPendingRequest, canvas, setCameraX, setCameraY, getCameraX, getCameraY, updateChunkVisibility, updateViewportCache, lastViewportChunks };
+function getWeatherType() {
+  return weatherType;
+}
+
+function setWeatherType(type: string | null) {
+  weatherType = type;
+}
+
+export { lastDirection, setDirection, setPendingRequest, canvas, setCameraX, setCameraY, getCameraX, getCameraY, updateChunkVisibility, updateViewportCache, lastViewportChunks, setWeatherType, getWeatherType };

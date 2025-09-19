@@ -253,6 +253,7 @@ declare interface WeatherData {
 declare interface WorldData {
   name: string;
   weather: string;
+  players?: number;
   max_players: number;
   default_map: string;
 }
