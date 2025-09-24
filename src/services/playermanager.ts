@@ -1,4 +1,4 @@
-class CacheService {
+class PlayerManager {
     private cache: { [key: string]: any };
 
     constructor() {
@@ -41,5 +41,5 @@ class CacheService {
     }
 }
 
-const cache: CacheService = new CacheService();
-export default cache;
+const playerCache: PlayerManager = new PlayerManager();
+export default playerCache;

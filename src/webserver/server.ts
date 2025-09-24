@@ -69,7 +69,7 @@ const routes = {
     return await updatePassword(req, server);
   },
   "/tileset" : async (req: Request) => {
-    const tilesets = assetCache.get("tilesets");
+    const tilesets = await assetCache.get("tilesets");
     if (req.method !== "GET") {
       return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
     }
@@ -493,4 +493,4 @@ function tryParseURL(url: string) : URL | null {
 
 const readyTimeMs = performance.now() - now;
 log.success(`Webserver started on port ${_https ? "443 (HTTPS)" : "80 (HTTP)"} - Ready in ${(readyTimeMs / 1000).toFixed(3)}s (${readyTimeMs.toFixed(0)}ms)`);
-await import("../socket/server");
+import '../socket/server';

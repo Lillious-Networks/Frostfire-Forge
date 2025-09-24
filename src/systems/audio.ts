@@ -1,11 +1,12 @@
 import assetCache from "../services/assetCache";
 
 const audio = {
-    list: () => {
-        return assetCache.get("audio") as AudioData[];
+    list: async () => {
+        return await assetCache.get("audio") as AudioData[];
     },
-    get: (name: string) => {
-        return audio.list().find((a: any) => a.name === name);
+    get: async (name: string) => {
+        const audioList = await audio.list();
+        return audioList.find((a: any) => a.name === name);
     }
 }
 

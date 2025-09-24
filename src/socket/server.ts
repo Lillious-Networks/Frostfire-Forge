@@ -8,7 +8,7 @@ import { event } from "../systems/events";
 import eventEmitter from "node:events";
 import log from "../modules/logger";
 import player from "../systems/player";
-import cache from "../services/cache.ts";
+import playerCache from "../services/playermanager.ts";
 import packet from "../modules/packet";
 import path from "node:path";
 import fs from "node:fs";
@@ -84,6 +84,7 @@ const Server = Bun.serve<Packet, any>({
       ? undefined
       : new Response("WebSocket upgrade error", { status: 400 });
   },
+  reusePort: true,
   tls: options,
   websocket: {
     perMessageDeflate: true, // Enable per-message deflate compression
@@ -242,10 +243,10 @@ const Server = Bun.serve<Packet, any>({
         const isPriority = priorityPackets.includes(packetType);
         // Check if the packet is a priority packet and process it immediately
         if (isPriority) {
-          packetReceiver(Server, ws, message.toString());
+          packetReceiver(null, ws, message.toString());
           return;
         }
-        handleBackpressure(ws as any, () => packetReceiver(Server, ws, message.toString()));
+        handleBackpressure(ws as any, () => packetReceiver(null, ws, message.toString()));
       } catch (e) {
         log.error(e as string);
       }
@@ -255,8 +256,7 @@ const Server = Bun.serve<Packet, any>({
 
 // Awake event
 listener.on("onAwake", async () => {
-  // Clean up the player session ids, set them to offline, and clear all tokens
-  await player.clear();
+  await player.clear(); // Clear player sessions on startup
 });
 
 // Start event
@@ -291,7 +291,7 @@ listener.on("onFixedUpdate", async () => {
 
 // Server tick (every 1 second)
 listener.on("onServerTick", async () => {
-  const players = cache.list() as any;
+  const players = playerCache.list() as any;
 
   Object.values(players).forEach(async (playerData: any) => {
     const now = performance.now();
@@ -353,9 +353,9 @@ listener.on("onConnection", (data) => {
 listener.on("onDisconnect", async (data) => {
   if (!data) return;
   try {
-    const playerData = cache.get(data.id);
+    const playerData = playerCache.get(data.id);
     if (!playerData) return;
-    const _worlds = assetCache.get("worlds") as WorldData[];
+    const _worlds = await assetCache.get("worlds") as WorldData[];
     const thisWorld = _worlds.find(w => w.name === playerData.location.map.replace(".json", ""));
     if (thisWorld && thisWorld.players && thisWorld.players > 0) {
       thisWorld.players -= 1;
@@ -376,7 +376,7 @@ listener.on("onDisconnect", async (data) => {
     }
 
     await player.clearSessionId(playerData.id);
-    cache.remove(playerData.id);
+    playerCache.remove(playerData.id);
     log.debug(`Disconnected: ${playerData.username}`);
   } catch (e) {
     log.error(e as string);
@@ -385,22 +385,22 @@ listener.on("onDisconnect", async (data) => {
 
 // Save loop
 listener.on("onSave", async () => {
-  const playerCache = cache.list();
+  const cache = playerCache.list();
   for (const p in playerCache) {
-    if (!playerCache[p]) continue;
-    if (playerCache[p]?.isGuest) continue; // Skip guests
+    if (!cache[p]) continue;
+    if (cache[p]?.isGuest) continue; // Skip guests
     // Save player stats and location
     try {
-      if (playerCache[p]?.stats) {
-          await player.setStats(playerCache[p].username, playerCache[p].stats);
+      if (cache[p]?.stats) {
+          await player.setStats(cache[p].username, cache[p].stats);
       } else {
           log.warn(`No stats found for player ID ${p} during save.`);
       }
-      if (playerCache[p]?.location) {
+      if (cache[p]?.location) {
           await player.setLocation(
               p,
-              playerCache[p].location.map,
-              playerCache[p].location.position,
+              cache[p].location.map,
+              cache[p].location.position,
           );
       } else {
           log.warn(`No location found for player ID ${p} during save.`);

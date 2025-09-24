@@ -105,17 +105,14 @@ socket.onmessage = async (event) => {
         const cachedData = cache.animations.get(data.name);
 
         if (cachedData instanceof Uint8Array) {
-          console.log(`[ANIMATION] Cache hit in memory: ${data.name}`);
           apng = parseAPNG(cachedData);
         } else {
           // Check IndexedDB
           const dbData = await getAnimationFromDB(data.name);
           if (dbData) {
-            console.log(`[ANIMATION] Cache hit in IndexedDB: ${data.name}`);
             cache.animations.set(data.name, dbData);
             apng = parseAPNG(dbData);
           } else {
-            console.log(`[ANIMATION] Cache miss: ${data.name}. Inflating...`);
             // @ts-expect-error - pako is loaded globally
             const inflated = pako.inflate(new Uint8Array(data.data.data));
             if (!inflated) {
@@ -123,7 +120,6 @@ socket.onmessage = async (event) => {
               return;
             }
 
-            console.log(`[ANIMATION] Caching inflated data: ${data.name}`);
             cache.animations.set(data.name, inflated);
             await saveAnimationToDB(data.name, inflated);
             apng = parseAPNG(inflated);
@@ -272,77 +268,88 @@ socket.onmessage = async (event) => {
       const mapData = inflated ? JSON.parse(inflated) : null;
       
       // Alternative Safari-compatible image loading without CORS issues
-      const loadTilesets = async (tilesets: any[]) => {
-        if (!tilesets?.length) throw new Error("No tilesets found");
-        
-        const tilesetPromises = tilesets.map(async (tileset) => {
-          const name = tileset.image.split("/").pop();
-          
-          const tilesetResponse = await fetch(`/tileset?name=${name}`);
-          if (!tilesetResponse.ok) {
-            throw new Error(`Failed to fetch tileset: ${name}`);
-          }
-          const tilesetData = await tilesetResponse.json();
-          // @ts-expect-error - pako is not defined because it is loaded in the index.html
-          const inflatedData = pako.inflate(new Uint8Array(tilesetData.tileset.data.data), { to: "string" });
-          
-          return new Promise<HTMLImageElement>((resolve, reject) => {
-            const image = new Image();
-            
-            // Try WITHOUT crossOrigin first for Safari
-            let usesCrossOrigin = false;
-            
-            const attemptLoad = (withCors: boolean) => {
-              
-              if (withCors && !usesCrossOrigin) {
-                image.crossOrigin = 'anonymous';
-                usesCrossOrigin = true;
-              }
-              
-              const cleanup = () => {
-                image.onload = null;
-                image.onerror = null;
-              };
-              
-              image.onload = () => {
-                cleanup();
-                
-                if (image.complete && image.naturalWidth > 0) {
-                  resolve(image);
-                } else {
-                  reject(new Error(`Image loaded but invalid: ${name}`));
-                }
-              };
-              
-              image.onerror = () => {
-                cleanup();
-                
-                // Try with CORS if first attempt failed
-                if (!withCors) {
-                  attemptLoad(true);
-                } else {
-                  reject(new Error(`Failed to load tileset image: ${name}`));
-                }
-              };
-              
-              image.src = `data:image/png;base64,${inflatedData}`;
-            };
-            
-            // Start without CORS for Safari compatibility
-            attemptLoad(false);
-            
-            // Timeout fallback
-            setTimeout(() => {
-              if (!image.complete) {
-                reject(new Error(`Timeout loading tileset image: ${name}`));
-              }
-            }, 15000);
-          });
-        });
-        
-        const loadedImages = await Promise.all(tilesetPromises);
-        return loadedImages;
+const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
+  if (!tilesets?.length) throw new Error("No tilesets found");
+
+  // Helper: Base64 → Uint8Array
+  const base64ToUint8Array = (base64: string) => {
+    const raw = atob(base64);
+    const uint8Array = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) uint8Array[i] = raw.charCodeAt(i);
+    return uint8Array;
+  };
+
+  // Helper: Uint8Array → Base64 (for PNG)
+  const uint8ArrayToBase64 = (bytes: Uint8Array) => {
+    let binary = "";
+    const chunkSize = 0x8000; // avoid stack overflow
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, i + chunkSize);
+      binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+  };
+
+  const tilesetPromises = tilesets.map(async (tileset) => {
+    const name = tileset.image.split("/").pop();
+
+    const response = await fetch(`/tileset?name=${name}`);
+    if (!response.ok) throw new Error(`Failed to fetch tileset: ${name}`);
+
+    const tilesetData = await response.json();
+    const compressedBase64 = tilesetData.tileset.data;
+
+    // Decode Base64 → Uint8Array → inflate gzip
+    const compressedBytes = base64ToUint8Array(compressedBase64);
+    // @ts-expect-error - pako is not defined because it is loaded in the index.html
+    const inflatedBytes = pako.inflate(compressedBytes);
+
+    // Convert inflated bytes → Base64 for Image.src
+    const imageBase64 = uint8ArrayToBase64(inflatedBytes);
+
+    return new Promise<HTMLImageElement>((resolve, reject) => {
+      const image = new Image();
+
+      // Try without crossOrigin first for Safari
+      let usesCrossOrigin = false;
+      const attemptLoad = (withCors: boolean) => {
+        if (withCors && !usesCrossOrigin) {
+          image.crossOrigin = "anonymous";
+          usesCrossOrigin = true;
+        }
+
+        const cleanup = () => {
+          image.onload = null;
+          image.onerror = null;
+        };
+
+        image.onload = () => {
+          cleanup();
+          if (image.complete && image.naturalWidth > 0) resolve(image);
+          else reject(new Error(`Image loaded but invalid: ${name}`));
+        };
+
+        image.onerror = () => {
+          cleanup();
+          if (!withCors) attemptLoad(true);
+          else reject(new Error(`Failed to load tileset image: ${name}`));
+        };
+
+        image.src = `data:image/png;base64,${imageBase64}`;
       };
+
+      attemptLoad(false);
+
+      // Timeout fallback
+      setTimeout(() => {
+        if (!image.complete) reject(new Error(`Timeout loading tileset image: ${name}`));
+      }, 15000);
+    });
+  });
+
+  return Promise.all(tilesetPromises);
+};
+
 
       // More aggressive Safari canvas context creation
       const createSafeCanvasContext = (

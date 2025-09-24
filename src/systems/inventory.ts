@@ -1,6 +1,6 @@
 import query from "../controllers/sqldatabase";
 import assetCache from "../services/assetCache";
-const items = assetCache.get("items") as Item[] || [];
+const items = await assetCache.get("items") as Item[] || [];
 import log from "../modules/logger";
 
 const inventory = {

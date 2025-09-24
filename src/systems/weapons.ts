@@ -15,7 +15,7 @@ const weapons = {
   },
   async find(weapon: WeaponData) {
     if (!weapon?.name) return;
-    const weapons = assetCache.get("weapons") as WeaponData[];
+    const weapons = await assetCache.get("weapons") as WeaponData[];
     return weapons.find((w) => w.name === weapon.name);
   },
   async update(weapon: WeaponData) {
@@ -25,7 +25,7 @@ const weapons = {
       [weapon.damage, weapon.mana, weapon.type, weapon.description, weapon.quality, weapon.name]
     );
     if (result) {
-      const weapons = assetCache.get("weapons") as WeaponData[];
+      const weapons = await assetCache.get("weapons") as WeaponData[];
       const index = weapons.findIndex((w) => w.name === weapon.name);
       weapons[index] = weapon;
       assetCache.set("weapons", weapons);

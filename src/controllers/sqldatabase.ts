@@ -17,12 +17,12 @@ async function createSQLController(): Promise<any> {
             database: process.env.DATABASE_NAME,
             port: parseInt(process.env.DATABASE_PORT || "3306"),
             tls: getSqlCert(),
-            max: 20,
-            idleTimeout: 30,
+            max: 50,
+            idleTimeout: 10,
             maxLifetime: 0,
-            connectionTimeout: 30
+            connectionTimeout: 10
         });
-        
+
         return db;
     }
     // The written SQL statements are not compatible with postgres, so this is untested and probably broken.

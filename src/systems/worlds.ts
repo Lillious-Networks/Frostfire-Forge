@@ -10,16 +10,16 @@ const worlds = {
     });
     return worlds;
   },
-  get(world: string) {
-    const worlds = assetCache.get("worlds") as WorldData[];
+  async get(world: string) {
+    const worlds = await assetCache.get("worlds") as WorldData[];
     return worlds.find((w) => w.name === world);
   },
-  getCurrentWeather(world: string) {
-    const worldData = this.get(world);
+  async getCurrentWeather(world: string) {
+    const worldData = await this.get(world);
     return worldData?.weather || "clear";
   },
-  getMaxPlayers(world: string) {
-    const worldData = this.get(world);
+  async getMaxPlayers(world: string) {
+    const worldData = await this.get(world);
     return worldData?.max_players || 100;
   },
   async add(world: WorldData) {

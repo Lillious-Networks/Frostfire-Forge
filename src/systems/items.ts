@@ -30,7 +30,7 @@ const items = {
       [item.quality, item.description, item.name, item.icon || null]
     );
     if (result) {
-      const items = assetCache.get("items") as Item[];
+      const items = await assetCache.get("items") as Item[];
       const index = items.findIndex((i) => i.name === item.name);
       items[index] = item;
       assetCache.set("items", items);

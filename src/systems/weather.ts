@@ -16,7 +16,7 @@ const weather = {
   },
   async find(weather: WeatherData) {
     if (!weather?.name) return;
-    const weathers = assetCache.get("weather") as WeatherData[];
+    const weathers = await assetCache.get("weather") as WeatherData[];
     return weathers.find((w) => w.name === weather.name);
   },
   async update(weather: WeatherData) {

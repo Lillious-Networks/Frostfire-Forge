@@ -110,8 +110,8 @@ loadIcons();
 
 // Load world data
 const worldNow = performance.now();
-assetCache.add("worlds", await worlds.list());
-const world = assetCache.get("worlds") as WorldData[];
+await assetCache.add("worlds", await worlds.list());
+const world = await assetCache.get("worlds") as WorldData[];
 log.success(`Loaded ${world.length} world(s) from the database in ${(performance.now() - worldNow).toFixed(2)}ms`);
 
 // Check if the world name in the config is in the asset cache
@@ -124,46 +124,47 @@ if (!world.find((w) => w.name === worldName)) {
 
 // Load item data
 const itemnow = performance.now();
-assetCache.add("items", await item.list());
+await assetCache.add("items", await item.list());
 // For each item, find the icon data and add the compressed data to the item object
-assetCache.get("items").forEach((item: any) => {
+const itemList = await assetCache.get("items");
+itemList.forEach(async (item: any) => {
   if (item.icon) {
-    const iconData = assetCache.get(item.icon);
+    const iconData = await assetCache.get(item.icon);
     item.icon = iconData || null; // Replace the icon with the compressed data if it exists
   }
 });
-const items = assetCache.get("items") as Item[];
+const items = await assetCache.get("items") as Item[];
 
 log.success(`Loaded ${items.length} item(s) from the database in ${(performance.now() - itemnow).toFixed(2)}ms`);
 
 // Load spell data
 const spellnow = performance.now();
-assetCache.add("spells", await spell.list());
-const spells = assetCache.get("spells") as SpellData[];
+await assetCache.add("spells", await spell.list());
+const spells = await assetCache.get("spells") as SpellData[];
 log.success(`Loaded ${spells.length} spell(s) from the database in ${(performance.now() - spellnow).toFixed(2)}ms`);
 
 // Load weapon data
 const weaponnow = performance.now();
-assetCache.add("weapons", await weapon.list());
-const weapons = assetCache.get("weapons") as WeaponData[];
+await assetCache.add("weapons", await weapon.list());
+const weapons = await assetCache.get("weapons") as WeaponData[];
 log.success(`Loaded ${weapons.length} weapon(s) from the database in ${(performance.now() - weaponnow).toFixed(2)}ms`);
 
 // Load npc data
 const npcnow = performance.now();
-assetCache.add("npcs", await npc.list());
-const npcs = assetCache.get("npcs") as Npc[];
+await assetCache.add("npcs", await npc.list());
+const npcs = await assetCache.get("npcs") as Npc[];
 log.success(`Loaded ${npcs.length} npc(s) from the database in ${(performance.now() - npcnow).toFixed(2)}ms`);
 
 // Load particle data
 const particleNow = performance.now();
-assetCache.add("particles", await particle.list());
-const particles = assetCache.get("particles") as Particle[];
+await assetCache.add("particles", await particle.list());
+const particles = await assetCache.get("particles") as Particle[];
 log.success(`Loaded ${particles.length} particle(s) from the database in ${(performance.now() - particleNow).toFixed(2)}ms`);
 
 // Load quest data
 const questNow = performance.now();
-assetCache.add("quests", await quest.list());
-const quests = assetCache.get("quests") as Quest[];
+await assetCache.add("quests", await quest.list());
+const quests = await assetCache.get("quests") as Quest[];
 log.success(`Loaded ${quests.length} quest(s) from the database in ${(performance.now() - questNow).toFixed(2)}ms`);
 
 // Load maps
@@ -407,8 +408,8 @@ export async function reloadMap(mapName: string): Promise<MapData> {
 
     extractAndCompressLayers(newMap);
 
-    const maps = assetCache.get("maps") as MapData[];
-    const mapProps = assetCache.get("mapProperties") as MapProperties[];
+    const maps = await assetCache.get("maps") as MapData[];
+    const mapProps = await assetCache.get("mapProperties") as MapProperties[];
 
     const index = maps.findIndex(m => m.name === file);
     const newProps: MapProperties = {
@@ -442,7 +443,7 @@ export async function reloadMap(mapName: string): Promise<MapData> {
 loadAllMaps();
 
 // Load tilesets
-function loadTilesets() {
+async function loadTilesets() {
   const now = performance.now();
   const tilesets = [] as TilesetData[];
   const tilesetDir = path.join(import.meta.dir, assetData.tilesets.path);
@@ -453,7 +454,9 @@ function loadTilesets() {
 
   const tilesetFiles = fs.readdirSync(tilesetDir);
   tilesetFiles.forEach((file) => {
-    const tilesetData = fs.readFileSync(path.join(tilesetDir, file), "base64");
+    // Read raw file as Buffer
+    const tilesetData = fs.readFileSync(path.join(tilesetDir, file));
+    // Compress using gzip
     const compressedData = zlib.gzipSync(tilesetData);
 
     const originalSize = tilesetData.length;
@@ -471,10 +474,19 @@ function loadTilesets() {
     tilesets.push({ name: file, data: compressedData });
   });
 
-  assetCache.add("tilesets", tilesets);
+  // Store as Base64 strings to work with JSON.stringify in Redis
+  await assetCache.add(
+    "tilesets",
+    tilesets.map(t => ({
+      name: t.name,
+      data: t.data.toString("base64") // encode buffer as base64
+    }))
+  );
+
   log.success(`Loaded ${tilesets.length} tileset(s) in ${(performance.now() - now).toFixed(2)}ms`);
 }
-loadTilesets();
+
+await loadTilesets();
 
 function tryParse(data: string): any {
   try {

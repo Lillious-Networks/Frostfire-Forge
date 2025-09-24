@@ -9,26 +9,26 @@ const world = worldList.find((w) => w.name === settings.world);
 
 // Load weather data
 const weatherNow = performance.now();
-assetCache.add("weather", await weather.list());
-const weathers = assetCache.get("weather") as WeatherData[];
+await assetCache.add("weather", await weather.list());
+const weathers = await assetCache.get("weather") as WeatherData[];
 log.success(`Loaded ${weathers.length} weather(s) from the database in ${(performance.now() - weatherNow).toFixed(2)}ms`);
 
 const particles = {
   async add(particle: Particle) {
     const response = await query("INSERT INTO particles (size, color, velocity, lifetime, scale, opacity, visible, gravity, name, localposition, interval, amount, staggertime, spread, affected_by_weather) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [particle.size, particle.color, particle.velocity, particle.lifetime, particle.scale, particle.opacity, particle.visible, particle.gravity, particle.name, particle.localposition, particle.interval, particle.amount, particle.staggertime, particle.spread, particle.affected_by_weather]);
-    assetCache.set("particles", response);
+    await assetCache.set("particles", response);
     return response;
   },
 
   async remove(particle: Particle) {
     const response = await query("DELETE FROM particles WHERE name = ?", [particle.name]);
-    assetCache.set("particles", response);
+    await assetCache.set("particles", response);
     return response;
   },
   
   async update(particle: Particle) {
     const response = await query("UPDATE particles SET size = ?, color = ?, velocity = ?, lifetime = ?, scale = ?, opacity = ?, visible = ?, gravity = ?, name = ?, localposition = ?, interval = ?, amount = ?, staggertime = ?, spread = ?, affected_by_weather = ? WHERE name = ?", [particle.size, particle.color, particle.velocity, particle.lifetime, particle.scale, particle.opacity, particle.visible, particle.gravity, particle.name, particle.localposition, particle.interval, particle.amount, particle.staggertime, particle.spread, particle.affected_by_weather, particle.name]);
-    assetCache.set("particles", response);
+    await assetCache.set("particles", response);
     return response;
   },
 
@@ -71,7 +71,7 @@ const particles = {
       };
       particles.push(p);
     }
-    assetCache.set("particles", particles);
+    await assetCache.set("particles", particles);
     return particles;
   },
   
@@ -97,7 +97,7 @@ const particles = {
       initialVelocity: null,
       weather: response[0]?.affected_by_weather ? weather : 'none',
     };
-    assetCache.set("particles", p);
+    await assetCache.set("particles", p);
     return p;
   },
 }
