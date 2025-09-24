@@ -673,7 +673,7 @@ input::placeholder {
   min-width: 200px;
   max-width: 500px;
   padding: 10px;
-  top: 25px;
+  top: 100px;
   right: 25px;
   box-shadow: 0 0 10px #00000080;
 }

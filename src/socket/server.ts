@@ -84,10 +84,9 @@ const Server = Bun.serve<Packet, any>({
       ? undefined
       : new Response("WebSocket upgrade error", { status: 400 });
   },
-  reusePort: true,
   tls: options,
   websocket: {
-    perMessageDeflate: true, // Enable per-message deflate compression
+    perMessageDeflate: false, // Enable per-message deflate compression
     maxPayloadLength: 1024 * 1024 * settings?.websocket?.maxPayloadMB || 1024 * 1024, // 1MB
     // Seconds to wait for the connection to close
     idleTimeout: settings?.websocket?.idleTimeout || 5,

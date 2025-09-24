@@ -11,6 +11,7 @@ const intervalLabel = document.getElementById('interval-label') as HTMLLabelElem
 const stop = document.getElementById('stop') as HTMLButtonElement;
 let stopped = false;
 let errored = false;
+let total = 0;
 
 // Write logs to the logs element
 const logs = document.getElementById('logs') as HTMLParagraphElement;
@@ -119,7 +120,7 @@ start.addEventListener('click', async () => {
     result.style.display = 'block';
     result.innerHTML = '';
     stopped = false;
-    let total = 0;
+    total = 0;
 
     const clientsValue = parseInt(clients.value);
     const iterationsValue = parseInt(iterations.value);
@@ -185,7 +186,8 @@ start.addEventListener('click', async () => {
                     type: "BENCHMARK",
                     data: {
                         data: dataArray,
-                        id: i
+                        id: i,
+                        sent_timestamp: Date.now()
                     }
                     })
                 )
@@ -203,6 +205,7 @@ start.addEventListener('click', async () => {
             connections.delete(id);
         };
 
+        const averageResponseTimes: number[] = [];
         websocket.onclose = () => {
             if (errored) return;
             connections.delete(id);
@@ -212,6 +215,11 @@ start.addEventListener('click', async () => {
                 const averageTimePerMessage = totalTime / total;
                 const dataPerMessage = formatDataSize(calculateDataArrayBytes(Number(data.value), bytesPerElement));
                 const totalDataBytes = formatDataSize(calculateDataArrayBytes(Number(data.value), bytesPerElement) * iterationsValue);
+                const averageResponseTime =
+                    averageResponseTimes.length > 0
+                        ? averageResponseTimes.reduce((a, b) => a + b, 0) / averageResponseTimes.length
+                        : 0;
+
                 if (stopped) {
                     result.textContent = 'Benchmark aborted';
                     setTimeout(() => {
@@ -229,6 +237,7 @@ start.addEventListener('click', async () => {
                     <p>Data per message: ${dataPerMessage}</p>
                     <p>Total time elapsed: ${totalTime} s</p>
                     <p>Average time per message: ${Math.round(averageTimePerMessage * 1000)} ms</p>
+                    <p>Average response time: ${Math.round(averageResponseTime)} ms</p>
                 `;
                 reset();
                 }
@@ -239,6 +248,11 @@ start.addEventListener('click', async () => {
             if (!(event.data instanceof ArrayBuffer)) return;
             const type = JSON.parse(packet.decode(event.data))["type"];
             if (type !== 'BENCHMARK') return;
+            const data = JSON.parse(packet.decode(event.data))["data"];
+            const sent_timestamp = data["sent_timestamp"];
+            const returned_timestamp = data["returned_timestamp"];
+            const responseTime = returned_timestamp - sent_timestamp;
+            averageResponseTimes.push(responseTime);           
             total++;
             counter++;
             result.innerText = `Received ${total} messages`;

@@ -87,6 +87,7 @@ export default async function packetReceiver(
     // Handle the packet
     switch (type) {
       case "BENCHMARK": {
+        (data as any)["returned_timestamp"] = Date.now();
         sendPacket(ws, packetManager.benchmark(data));
         break;
       }
