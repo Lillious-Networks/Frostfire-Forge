@@ -46,8 +46,8 @@ const spritePromises = await Promise.all(
 const sprites = spritePromises.filter(Boolean).flat();
 assetCache.add("sprites", sprites);
 
-const npcs = assetCache.get("npcs");
-const particles = assetCache.get("particles");
+const npcs = await assetCache.get("npcs");
+const particles = await assetCache.get("particles");
 
 export default async function packetReceiver(
   server: any,
@@ -210,7 +210,7 @@ export default async function packetReceiver(
         if (!map) return;
         spawnLocation.map = map.name;
 
-        const _worlds = (await assetCache.get("worlds")) as WorldData[];
+        const _worlds = await assetCache.get("worlds") as WorldData[];
         const thisWorld = _worlds.find(
           (w) => w.name === spawnLocation.map.replace(".json", "")
         );
@@ -466,7 +466,7 @@ export default async function packetReceiver(
 
         if (thisWorld) {
           thisWorld.players = (thisWorld.players || 0) + 1;
-          assetCache.set("worlds", _worlds);
+          await assetCache.set("worlds", _worlds);
         }
         console.log(
           `World: ${spawnLocation.map.replace(".json", "")} now has ${
@@ -1013,9 +1013,10 @@ export default async function packetReceiver(
           currentPlayer.stats.stamina = 0;
         }
 
+        const audio = await assetCache.get("audio") as SoundData[];
         const audioData = {
           name: "attack_sword",
-          data: (await assetCache.get("audio")).find(
+          data: audio.find(
             (a: SoundData) => a.name === "attack_sword"
           ),
           pitch: pitch,

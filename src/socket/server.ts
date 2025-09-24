@@ -352,36 +352,65 @@ listener.on("onConnection", (data) => {
 // On disconnect
 listener.on("onDisconnect", async (data) => {
   if (!data) return;
+
   try {
     const playerData = playerCache.get(data.id);
     if (!playerData) return;
-    const _worlds = await assetCache.get("worlds") as WorldData[];
-    const thisWorld = _worlds.find(w => w.name === playerData.location.map.replace(".json", ""));
-    if (thisWorld && thisWorld.players && thisWorld.players > 0) {
-      thisWorld.players -= 1;
-      assetCache.set("worlds", _worlds);
+
+    // Ensure worlds are stored/retrieved as JSON array
+    let _worlds: WorldData[] = [];
+    try {
+      const cachedWorlds = await assetCache.get("worlds");
+      if (cachedWorlds) {
+        _worlds = Array.isArray(cachedWorlds)
+          ? cachedWorlds
+          : JSON.parse(cachedWorlds); // handle string case
+      }
+    } catch (err) {
+      log.error(`[WorldsFetchError] Failed to fetch worlds: ${err}`);
+      _worlds = [];
     }
 
-    console.log(`World: ${playerData.location.map.replace(".json", "")} now has ${thisWorld?.players || 0} players.`);
+    const thisWorld = _worlds.find(
+      (w) => w.name === playerData.location.map.replace(".json", "")
+    );
+
+    if (thisWorld && typeof thisWorld.players === "number" && thisWorld.players > 0) {
+      thisWorld.players -= 1;
+
+      // Always set back as JSON string to avoid type mismatch
+      await assetCache.set("worlds", JSON.stringify(_worlds));
+    }
+
+    console.log(
+      `World: ${playerData.location.map.replace(".json", "")} now has ${
+        thisWorld?.players || 0
+      } players.`
+    );
 
     if (!playerData.isGuest) {
-        // Save player stats and location
-        if (playerData?.stats) {
-            await player.setStats(playerData.username, playerData.stats);
-        }
+      if (playerData?.stats) {
+        await player.setStats(playerData.username, playerData.stats);
+      }
 
-        if (playerData?.id && playerData?.location) {
-            await player.setLocation(playerData.id, playerData.location.map, playerData.location.position);
-        }
+      if (playerData?.id && playerData?.location) {
+        await player.setLocation(
+          playerData.id,
+          playerData.location.map,
+          playerData.location.position
+        );
+      }
     }
 
     await player.clearSessionId(playerData.id);
     playerCache.remove(playerData.id);
+
     log.debug(`Disconnected: ${playerData.username}`);
   } catch (e) {
     log.error(e as string);
   }
 });
+
 
 // Save loop
 listener.on("onSave", async () => {

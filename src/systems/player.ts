@@ -555,19 +555,19 @@ const player = {
     const playerHeight = playerProperties.height || 32;
 
     const mapKey = map.replace(".json", "");
-    const pvpData = await assetCache.get(mapKey);
-    const mapProperties = (await assetCache.get(
-      "mapProperties"
-    )) as MapProperties[];
-    const mapData = mapProperties.find(
-      (m) => m.name.replace(".json", "") === mapKey
-    );
-    if (!mapData || !pvpData || !pvpData.nopvp) return false;
 
-    const data = pvpData.nopvp;
-    if (!Array.isArray(data) || data.length < 3) return false;
+    // Fetch PvP tile data from Redis hash
+    const pvpData = await assetCache.getNested(mapKey, "nopvp");
+    if (!pvpData || !Array.isArray(pvpData) || pvpData.length < 3) return false;
 
-    const tileData = data.slice(2);
+    // Fetch map properties (can be stored as a hash or a string)
+    const mapPropertiesRaw = await assetCache.get("mapProperties") as MapProperties[];
+    if (!mapPropertiesRaw) return false;
+
+    const mapData = mapPropertiesRaw.find(m => m.name.replace(".json", "") === mapKey);
+    if (!mapData) return false;
+
+    const tileData = pvpData.slice(2);
     const tileWidth = mapData.tileWidth;
     const tileHeight = mapData.tileHeight;
     const gridOffsetWidth = Math.floor(mapData.width / 2);
@@ -586,8 +586,8 @@ const player = {
       for (let x = left; x <= right; x++) {
         const indexX = x + gridOffsetWidth;
         const indexY = y + gridOffsetHeight;
-
         const targetIndex = indexY * mapData.width + indexX;
+
         let currentIndex = 0;
         let tileValue = 0;
 
@@ -599,115 +599,113 @@ const player = {
             tileValue = value;
             break;
           }
-
           currentIndex += count;
         }
 
         if (tileValue !== 0) {
-          return false; // Found a no-PvP tile → cannot attack here
+          return false; // No-PvP tile → cannot attack here
         }
       }
     }
 
     return true; // All tiles under player are PvP-enabled
   },
-checkIfWouldCollide: async function (
-  map: string,
-  position: PositionData,
-  playerProperties: PlayerProperties
-) {
-  const playerWidth = playerProperties.width || 32;
-  const playerHeight = playerProperties.height || 32;
-  const mapKey = map.replace(".json", "");
+  checkIfWouldCollide: async function (
+    map: string,
+    position: PositionData,
+    playerProperties: PlayerProperties
+  ) {
+    const playerWidth = playerProperties.width || 32;
+    const playerHeight = playerProperties.height || 32;
+    const mapKey = map.replace(".json", "");
 
-  // Load map from cache or Redis
-  let mapDataCached = mapCache.get(mapKey);
-  if (!mapDataCached) {
-    const mapProperties = (await assetCache.get("mapProperties")) as MapProperties[];
-    const mapData = mapProperties.find((m) => m.name.replace(".json", "") === mapKey);
-    if (!mapData) return { value: true, reason: "no_map_data" };
+    // Load map from cache or Redis
+    let mapDataCached = mapCache.get(mapKey);
+    if (!mapDataCached) {
+      const mapProperties = (await assetCache.get("mapProperties")) as MapProperties[];
+      const mapData = mapProperties.find((m) => m.name.replace(".json", "") === mapKey);
+      if (!mapData) return { value: true, reason: "no_map_data" };
 
-    let collisionData: any;
-    try {
-      const fetched = await assetCache.getNested(mapKey, "collision");
-      collisionData = fetched !== undefined ? fetched : (await assetCache.get(mapKey))?.collision;
-      if (!collisionData || !Array.isArray(collisionData)) return { value: true, reason: "no_collision_data" };
-    } catch (err: any) {
-      console.error(`[RedisDebug] Failed to fetch collision for ${mapKey}:`, err);
-      return { value: true, reason: "redis_error" };
-    }
+      let collisionData: any;
+      try {
+        const fetched = await assetCache.getNested(mapKey, "collision");
+        collisionData = fetched !== undefined ? fetched : (await assetCache.get(mapKey))?.collision;
+        if (!collisionData || !Array.isArray(collisionData)) return { value: true, reason: "no_collision_data" };
+      } catch (err: any) {
+        console.error(`[RedisDebug] Failed to fetch collision for ${mapKey}:`, err);
+        return { value: true, reason: "redis_error" };
+      }
 
-    // Decode RLE once
-    const data = collisionData.slice(2);
-    const grid = new Uint8Array(mapData.width * mapData.height);
-    let currentIndex = 0;
-    for (let i = 0; i < data.length; i += 2) {
-      const value = data[i];
-      const count = data[i + 1];
-      for (let j = 0; j < count; j++) grid[currentIndex++] = value;
-    }
+      // Decode RLE once
+      const data = collisionData.slice(2);
+      const grid = new Uint8Array(mapData.width * mapData.height);
+      let currentIndex = 0;
+      for (let i = 0; i < data.length; i += 2) {
+        const value = data[i];
+        const count = data[i + 1];
+        for (let j = 0; j < count; j++) grid[currentIndex++] = value;
+      }
 
-    mapDataCached = {
-      warps: Array.isArray(mapData.warps)
-        ? Object.fromEntries(
-            (mapData.warps as WarpObject[]).map((warp, idx) => [warp.name ?? String(idx), warp])
-          )
-        : (mapData.warps || {}),
-      grid,
-      width: mapData.width,
-      height: mapData.height,
-      tileWidth: mapData.tileWidth,
-      tileHeight: mapData.tileHeight,
-    };
-
-    mapCache.set(mapKey, mapDataCached);
-  }
-
-  const { warps, grid, width, height, tileWidth, tileHeight } = mapDataCached;
-
-  // Add offsets to align player coordinates with the collision grid
-  const gridOffsetWidth = Math.floor(width / 2);
-  const gridOffsetHeight = Math.floor(height / 2);
-
-  // Warp collision
-  for (const key in warps) {
-    const warp = warps[key];
-    if (
-      position.x + playerWidth > warp.position.x &&
-      position.x < warp.position.x + warp.size.width &&
-      position.y + playerHeight > warp.position.y &&
-      position.y < warp.position.y + warp.size.height
-    ) {
-      return {
-        value: true,
-        reason: "warp_collision",
-        warp: { map: warp.map, position: { x: warp.x, y: warp.y } },
+      mapDataCached = {
+        warps: Array.isArray(mapData.warps)
+          ? Object.fromEntries(
+              (mapData.warps as WarpObject[]).map((warp, idx) => [warp.name ?? String(idx), warp])
+            )
+          : (mapData.warps || {}),
+        grid,
+        width: mapData.width,
+        height: mapData.height,
+        tileWidth: mapData.tileWidth,
+        tileHeight: mapData.tileHeight,
       };
+
+      mapCache.set(mapKey, mapDataCached);
     }
-  }
 
-  // Tile collision
-  const margin = 0.1;
-  const left = Math.floor(((position.x + margin) / tileWidth) + 0.6);
-  const right = Math.floor(((position.x + playerWidth - margin) / tileWidth) + 0.6);
-  const top = Math.floor(((position.y + margin) / tileHeight) + 1.5);
-  const bottom = Math.floor((position.y + playerHeight - margin) / tileHeight + 0.7);
+    const { warps, grid, width, height, tileWidth, tileHeight } = mapDataCached;
 
-  for (let y = top; y <= bottom; y++) {
-    for (let x = left; x <= right; x++) {
-      const tileX = x + gridOffsetWidth;
-      const tileY = y + gridOffsetHeight;
+    // Add offsets to align player coordinates with the collision grid
+    const gridOffsetWidth = Math.floor(width / 2);
+    const gridOffsetHeight = Math.floor(height / 2);
 
-      if (tileX < 0 || tileY < 0 || tileX >= width || tileY >= height) continue;
-
-      const tileValue = grid[tileY * width + tileX];
-      if (tileValue !== 0) return { value: true, reason: "tile_collision", tile: { x, y } };
+    // Warp collision
+    for (const key in warps) {
+      const warp = warps[key];
+      if (
+        position.x + playerWidth > warp.position.x &&
+        position.x < warp.position.x + warp.size.width &&
+        position.y + playerHeight > warp.position.y &&
+        position.y < warp.position.y + warp.size.height
+      ) {
+        return {
+          value: true,
+          reason: "warp_collision",
+          warp: { map: warp.map, position: { x: warp.x, y: warp.y } },
+        };
+      }
     }
-  }
 
-  return { value: false, reason: "no_collision" };
-},
+    // Tile collision
+    const margin = 0.1;
+    const left = Math.floor(((position.x + margin) / tileWidth) + 0.6);
+    const right = Math.floor(((position.x + playerWidth - margin) / tileWidth) + 0.6);
+    const top = Math.floor(((position.y + margin) / tileHeight) + 1.5);
+    const bottom = Math.floor((position.y + playerHeight - margin) / tileHeight + 0.7);
 
+    for (let y = top; y <= bottom; y++) {
+      for (let x = left; x <= right; x++) {
+        const tileX = x + gridOffsetWidth;
+        const tileY = y + gridOffsetHeight;
+
+        if (tileX < 0 || tileY < 0 || tileX >= width || tileY >= height) continue;
+
+        const tileValue = grid[tileY * width + tileX];
+        if (tileValue !== 0) return { value: true, reason: "tile_collision", tile: { x, y } };
+      }
+    }
+
+    return { value: false, reason: "no_collision" };
+  },
   kick: async (username: string, ws: WebSocket) => {
     const response = (await query(
       "SELECT session_id FROM accounts WHERE username = ?",

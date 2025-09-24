@@ -14,85 +14,105 @@ class AssetCacheService {
     return `${this.prefix}${key}`;
   }
 
-  private async logRedisType(key: string) {
+  /** Helper to send commands with debug info */
+  private async safeSend<T = any>(cmd: string, args: string[]): Promise<T> {
+    const key = args[0];
     try {
-      const type = await this.client.send("TYPE", [this.prefixed(key)]);
+      return await this.client.send(cmd, args);
+    } catch (e: any) {
+      let type: string | null = null;
+      try {
+        type = await this.client.send("TYPE", [key]);
+      } catch {
+        type = "unknown";
+      }
 
-      return type;
-    } catch (e) {
-      console.error(`[RedisDebug] Failed to get type for key ${this.prefixed(key)}:`, e);
-      return null;
+      console.error(
+        `[RedisDebug] ERROR on ${cmd} ${args.join(" ")} | key=${key} | type=${type}`
+      );
+      console.error(new Error("[RedisDebug] stack trace").stack);
+      throw e;
     }
   }
 
-  async add(key: string, value: RedisValue): Promise<void> {
-    await this.logRedisType(key);
-    await this.client.set(this.prefixed(key), JSON.stringify(value));
+  /** Ensure key is cleared if type mismatch occurs */
+  private async ensureHashKey(key: string): Promise<void> {
+    const type = await this.safeSend("TYPE", [this.prefixed(key)]);
+    if (type !== "none" && type !== "hash") {
+      await this.safeSend("DEL", [this.prefixed(key)]);
+    }
   }
 
-  async get(key: string): Promise<RedisValue> {
-    await this.logRedisType(key);
-    const raw = await this.client.get(this.prefixed(key));
-    return raw === null ? undefined : JSON.parse(raw);
+  async add(key: string, value: any) {
+    const data = typeof value === "string" ? value : JSON.stringify(value);
+    await this.client.set(this.prefixed(key), data);
+  }
+
+  async get(key: string) {
+    const data = await this.client.get(this.prefixed(key));
+    if (!data) return null;
+    try {
+      return JSON.parse(data);
+    } catch {
+      return data;
+    }
   }
 
   async remove(key: string): Promise<void> {
-    await this.logRedisType(key);
-    await this.client.del(this.prefixed(key));
+    await this.safeSend("DEL", [this.prefixed(key)]);
   }
 
   async clear(): Promise<void> {
     const pattern = this.prefix + "*";
-    const keys = (await this.client.send("KEYS", [pattern])) as string[] | null;
-    if (!keys || keys.length === 0) return;
+    const keys = (await this.safeSend<string[]>("KEYS", [pattern])) ?? [];
+    if (keys.length === 0) return;
 
     const chunkSize = 500;
     for (let i = 0; i < keys.length; i += chunkSize) {
       const chunk = keys.slice(i, i + chunkSize);
-      await this.client.send("DEL", chunk);
+      await this.safeSend("DEL", chunk);
     }
   }
 
   async list(): Promise<Record<string, RedisValue>> {
     const pattern = this.prefix + "*";
-    const keys = (await this.client.send("KEYS", [pattern])) as string[] | null;
+    const keys = (await this.safeSend<string[]>("KEYS", [pattern])) ?? [];
     const out: Record<string, RedisValue> = {};
-    if (!keys || keys.length === 0) return out;
+    if (keys.length === 0) return out;
 
-    const values = (await this.client.send("MGET", keys)) as (string | null)[];
-    for (let i = 0; i < keys.length; i++) {
-      const shortKey = keys[i].slice(this.prefix.length);
-      out[shortKey] = values[i] === null ? undefined : JSON.parse(values[i] as string);
+    const stringKeys: string[] = [];
+    for (const k of keys) {
+      const type = await this.safeSend("TYPE", [k]);
+      if (type === "string") stringKeys.push(k);
+    }
+
+    const values = (await this.safeSend<(string | null)[]>("MGET", stringKeys)) ?? [];
+    for (let i = 0; i < stringKeys.length; i++) {
+      const shortKey = stringKeys[i].slice(this.prefix.length);
+      out[shortKey] =
+        values[i] === null ? undefined : JSON.parse(values[i] as string);
     }
     return out;
   }
 
+  /** Nested hash helpers */
   async addNested(key: string, nestedKey: string, value: RedisValue): Promise<void> {
-    const type = await this.logRedisType(key);
-    if (type && type !== "none" && type !== "hash") {
-      console.warn(`[RedisDebug] WARNING: Key ${this.prefixed(key)} exists as ${type}, cannot HSET`);
-    }
-    await this.client.send("HSET", [this.prefixed(key), nestedKey, JSON.stringify(value)]);
+    await this.ensureHashKey(key);
+    await this.safeSend("HSET", [this.prefixed(key), nestedKey, JSON.stringify(value)]);
   }
 
   async getNested(key: string, nestedKey: string): Promise<RedisValue> {
-    const type = await this.logRedisType(key);
-    if (type && type !== "hash") {
-      console.warn(`[RedisDebug] WARNING: Key ${this.prefixed(key)} exists as ${type}, cannot HGET`);
-    }
-    const raw = (await this.client.send("HGET", [this.prefixed(key), nestedKey])) as string | null;
+    await this.ensureHashKey(key);
+    const raw = await this.safeSend<string | null>("HGET", [this.prefixed(key), nestedKey]);
     return raw === null ? undefined : JSON.parse(raw);
   }
 
   async removeNested(key: string, nestedKey: string): Promise<void> {
-    const type = await this.logRedisType(key);
-    if (type && type !== "hash") {
-      console.warn(`[RedisDebug] WARNING: Key ${this.prefixed(key)} exists as ${type}, cannot HDEL`);
-    }
-    await this.client.send("HDEL", [this.prefixed(key), nestedKey]);
+    await this.ensureHashKey(key);
+    await this.safeSend("HDEL", [this.prefixed(key), nestedKey]);
   }
 
-  async set(key: string, value: RedisValue): Promise<void> {
+  async set(key: string, value: any) {
     await this.add(key, value);
   }
 
