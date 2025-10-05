@@ -31,6 +31,14 @@ const player = {
 
     // Clear all guest accounts
     await query("DELETE FROM accounts WHERE guest_mode = 1");
+    // Clear stats of guest accounts
+    await query("DELETE FROM stats WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
+    // Clear client configs of guest accounts
+    await query("DELETE FROM clientconfig WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
+    // Clear quest logs of guest accounts
+    await query("DELETE FROM quest_log WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
+    // Clear currency of guest accounts
+    await query("DELETE FROM currency WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
   },
   register: async (
     username: string,

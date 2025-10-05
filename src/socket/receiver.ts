@@ -421,22 +421,16 @@ export default async function packetReceiver(
             };
             sendPacket(p.ws, packetManager.spawnPlayer(spawnForOther));
           }
-          if (position?.direction && ws.data.id === p.id) {
-            // self only
-            await sendAnimationTo(
-              ws,
-              getAnimationNameForDirection(position.direction, false),
-              ws.data.id
-            );
-            for (const other of playersOnMap) {
-              if (other.id !== ws.data.id && other.ws) {
-                await sendAnimationTo(
-                  other.ws,
-                  getAnimationNameForDirection(position.direction, false),
-                  ws.data.id
-                );
-              }
+          if (position?.direction) {
+            const animName = getAnimationNameForDirection(position.direction, false);
+            if (p.ws === ws) {
+              setImmediate(() => {
+                sendAnimation(ws, animName, ws.data.id);
+              });
             }
+            setImmediate(() => {
+              sendAnimationTo(p.ws, animName, ws.data.id);
+            });
           }
         }
         if (playerDataForLoad.length > 0) {

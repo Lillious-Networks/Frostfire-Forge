@@ -46,24 +46,24 @@ function lerp(start: number, end: number, amount: number) {
 
 function getViewportChunks(): Set<string> {
   if (!window.mapChunks) return new Set();
-  const { chunkPixelSize } = window.mapChunks;
-  const padding = chunkPixelSize * 0.5; 
-  const viewportLeft = cachedViewport.x - padding;
-  const viewportTop = cachedViewport.y - padding;
-  const viewportRight = cachedViewport.x + cachedViewport.w + padding;
-  const viewportBottom = cachedViewport.y + cachedViewport.h + padding;
-  const startChunkX = Math.max(0, Math.floor(viewportLeft / chunkPixelSize));
-  const startChunkY = Math.max(0, Math.floor(viewportTop / chunkPixelSize));
-  const endChunkX = Math.min(window.mapChunks.chunksX - 1, Math.floor(viewportRight / chunkPixelSize));
-  const endChunkY = Math.min(window.mapChunks.chunksY - 1, Math.floor(viewportBottom / chunkPixelSize));
-  const visibleChunks = new Set<string>();
-  for (let chunkY = startChunkY; chunkY <= endChunkY; chunkY++) {
-    for (let chunkX = startChunkX; chunkX <= endChunkX; chunkX++) {
-      visibleChunks.add(`${chunkX}-${chunkY}`);
+
+  const { chunkPixelSize, chunksX, chunksY } = window.mapChunks;
+  const paddingPx = chunkPixelSize * 0.5;
+
+  const left = Math.max(0, Math.floor((cachedViewport.x - paddingPx) / chunkPixelSize));
+  const top = Math.max(0, Math.floor((cachedViewport.y - paddingPx) / chunkPixelSize));
+  const right = Math.min(chunksX - 1, Math.floor((cachedViewport.x + cachedViewport.w + paddingPx) / chunkPixelSize));
+  const bottom = Math.min(chunksY - 1, Math.floor((cachedViewport.y + cachedViewport.h + paddingPx) / chunkPixelSize));
+
+  const visible = new Set<string>();
+  for (let cy = top; cy <= bottom; cy++) {
+    for (let cx = left; cx <= right; cx++) {
+      visible.add(`${cx}-${cy}`);
     }
   }
-  return visibleChunks;
+  return visible;
 }
+
 function updateChunkVisibility() {
   if (!window.mapChunks) return;
   const currentViewportChunks = getViewportChunks();

@@ -1,28 +1,45 @@
-import { config } from '../web/global.js';
+import { config } from "../web/global.js";
 const socket = new WebSocket(config.WEBSOCKET_URL || "ws://localhost:3000");
-import './events.ts';
-import pako from '../libs/pako.js';
-import packet from './packetencoder.ts';
+import "./events.ts";
+import pako from "../libs/pako.js";
+import packet from "./packetencoder.ts";
 import Cache from "./cache";
-import { updateTime } from './ambience.ts';
-import { setWeatherType } from './renderer.ts';
+import { updateTime } from "./ambience.ts";
+import { setWeatherType } from "./renderer.ts";
 const cache = Cache.getInstance();
-import { createPlayer } from './player.ts';
-import { updateFriendsList } from './friends.ts';
-import { createInvitationPopup } from './invites.ts';
+import { createPlayer } from "./player.ts";
+import { updateFriendsList } from "./friends.ts";
+import { createInvitationPopup } from "./invites.ts";
 import { updateFriendOnlineStatus } from "./friends.js";
-import { createPartyUI, canvas, positionText, fpsSlider,
-  musicSlider, effectsSlider, mutedCheckbox, statUI, packetsSentReceived,
-  onlinecount, progressBar, progressBarContainer, inventoryGrid, chatMessages,
-  loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage
-} from './ui.ts';
-import { playAudio, playMusic } from './audio.ts';
-import { updateXp } from './xp.ts';
-import { createNPC } from './npc.ts';
-import parseAPNG from '../libs/apng_parser.js';
-import { getCookie } from './cookies.ts';
+import {
+  createPartyUI,
+  canvas,
+  positionText,
+  fpsSlider,
+  musicSlider,
+  effectsSlider,
+  mutedCheckbox,
+  statUI,
+  packetsSentReceived,
+  onlinecount,
+  progressBar,
+  progressBarContainer,
+  inventoryGrid,
+  chatMessages,
+  loadingScreen,
+  healthLabel,
+  manaLabel,
+  notificationContainer,
+  notificationMessage,
+} from "./ui.ts";
+import { playAudio, playMusic } from "./audio.ts";
+import { updateXp } from "./xp.ts";
+import { createNPC } from "./npc.ts";
+import parseAPNG from "../libs/apng_parser.js";
+import { getCookie } from "./cookies.ts";
 socket.binaryType = "arraybuffer";
-let sentRequests: number = 0, receivedResponses: number = 0;
+let sentRequests: number = 0,
+  receivedResponses: number = 0;
 
 let clearNotificationTimeout: any = null;
 
@@ -42,13 +59,21 @@ socket.onopen = () => {
 
 socket.onclose = (ev: CloseEvent) => {
   // Remove the loading bar if it exists
-  progressBarContainer.style.display = 'none';
-  showNotification(`You have been disconnected from the server: ${ev.code}`, false, true);
+  progressBarContainer.style.display = "none";
+  showNotification(
+    `You have been disconnected from the server: ${ev.code}`,
+    false,
+    true
+  );
 };
 
 socket.onerror = (ev: Event) => {
-  progressBarContainer.style.display = 'none';
-  showNotification(`An error occurred while connecting to the server: ${ev.type}`, false, true);
+  progressBarContainer.style.display = "none";
+  showNotification(
+    `An error occurred while connecting to the server: ${ev.type}`,
+    false,
+    true
+  );
 };
 
 socket.onmessage = async (event) => {
@@ -58,7 +83,7 @@ socket.onmessage = async (event) => {
   const type = JSON.parse(packet.decode(event.data))["type"];
   switch (type) {
     case "SERVER_TIME": {
-      sendRequest({type: "TIME_SYNC"});
+      sendRequest({ type: "TIME_SYNC" });
       if (!data) return;
       updateTime(data);
       break;
@@ -79,11 +104,13 @@ socket.onmessage = async (event) => {
       break;
     }
     case "UPDATE_FRIENDS": {
-        const currentPlayer = cache.players.size ? Array.from(cache.players).find(p => p.id === cachedPlayerId) : null;
-        if (currentPlayer) {
-          currentPlayer.friends = data.friends || [];
-          updateFriendsList(data);
-        }
+      const currentPlayer = cache.players.size
+        ? Array.from(cache.players).find((p) => p.id === cachedPlayerId)
+        : null;
+      if (currentPlayer) {
+        currentPlayer.friends = data.friends || [];
+        updateFriendsList(data);
+      }
       break;
     }
     case "UPDATE_ONLINE_STATUS": {
@@ -91,7 +118,9 @@ socket.onmessage = async (event) => {
       break;
     }
     case "UPDATE_PARTY": {
-      const currentPlayer = cache.players.size ? Array.from(cache.players).find(p => p.id === cachedPlayerId) : null;
+      const currentPlayer = cache.players.size
+        ? Array.from(cache.players).find((p) => p.id === cachedPlayerId)
+        : null;
       if (currentPlayer) {
         currentPlayer.party = data.members || [];
         createPartyUI(currentPlayer.party);
@@ -129,7 +158,9 @@ socket.onmessage = async (event) => {
 
         if (!(apng instanceof Error) && cache.players) {
           const findPlayer = async () => {
-            const player = cache.players.size ? Array.from(cache.players).find(p => p.id === data.id) : null;
+            const player = cache.players.size
+              ? Array.from(cache.players).find((p) => p.id === data.id)
+              : null;
             if (player) {
               player.animation = {
                 frames: apng.frames,
@@ -141,15 +172,17 @@ socket.onmessage = async (event) => {
                 apng.frames.forEach((frame: any) => frame.createImage());
               }
             } else {
-              await new Promise(resolve => setTimeout(resolve, 100));
+              await new Promise((resolve) => setTimeout(resolve, 100));
               await findPlayer();
             }
           };
 
-          findPlayer().catch(err => console.error('Error in findPlayer:', err));
+          findPlayer().catch((err) =>
+            console.error("Error in findPlayer:", err)
+          );
         }
       } catch (error) {
-        console.error('Failed to process animation data:', error);
+        console.error("Failed to process animation data:", error);
       }
       break;
     }
@@ -178,7 +211,7 @@ socket.onmessage = async (event) => {
       // Clear existing players that are not the current player
       cache.players.forEach((player) => {
         if (player.id !== cachedPlayerId) {
-            cache.players.delete(player);
+          cache.players.delete(player);
         }
       });
 
@@ -200,7 +233,9 @@ socket.onmessage = async (event) => {
       const arrayToDisconnect = Array.isArray(data) ? data : [data];
       arrayToDisconnect.forEach((playerData) => {
         console.log(`Player ${playerData.id} disconnected (malformed packet)`);
-        const player = Array.from(cache.players).find(player => player.id === playerData.id);
+        const player = Array.from(cache.players).find(
+          (player) => player.id === playerData.id
+        );
         if (player) {
           cache.players.delete(player);
         }
@@ -214,18 +249,22 @@ socket.onmessage = async (event) => {
       updateFriendOnlineStatus(data.username, false);
 
       // Remove player from the array
-      const player = Array.from(cache.players).find(player => player.id === data.id);
+      const player = Array.from(cache.players).find(
+        (player) => player.id === data.id
+      );
       if (player) {
         cache.players.delete(player);
       }
-        // If they were targeted, hide target stats
-        // if (wasTargeted) {
-        //   displayElement(targetStats, false);
-        // }
+      // If they were targeted, hide target stats
+      // if (wasTargeted) {
+      //   displayElement(targetStats, false);
+      // }
       break;
     }
     case "MOVEXY": {
-      const player = Array.from(cache.players).find((player) => player.id === data.id);
+      const player = Array.from(cache.players).find(
+        (player) => player.id === data.id
+      );
       if (!player) return;
 
       // Handle movement abort
@@ -238,7 +277,7 @@ socket.onmessage = async (event) => {
       // Smoothly update player position
       const targetX = canvas.width / 2 + data._data.x;
       const targetY = canvas.height / 2 + data._data.y;
-      
+
       // Update position directly for non-client players
       if (data.id !== cachedPlayerId) {
         player.position.x = targetX;
@@ -247,7 +286,7 @@ socket.onmessage = async (event) => {
         // For the client player, update position directly to avoid input lag
         player.position.x = targetX;
         player.position.y = targetY;
-        
+
         // Update position text
         positionText.innerText = `Position: ${data._data.x}, ${data._data.y}`;
       }
@@ -262,173 +301,180 @@ socket.onmessage = async (event) => {
     }
     case "LOAD_MAP":
       {
-      // @ts-expect-error - pako is not defined because it is loaded in the index.html
-      const inflated = pako.inflate(new Uint8Array(new Uint8Array(data[0].data)), { to: "string" });
-      const mapData = inflated ? JSON.parse(inflated) : null;
-      
-      // Alternative Safari-compatible image loading without CORS issues
-const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
-  if (!tilesets?.length) throw new Error("No tilesets found");
+        // @ts-expect-error - pako is not defined because it is loaded in the index.html
+        const inflated = pako.inflate(
+          new Uint8Array(new Uint8Array(data[0].data)),
+          { to: "string" }
+        );
+        const mapData = inflated ? JSON.parse(inflated) : null;
 
-  // Helper: Base64 → Uint8Array
-  const base64ToUint8Array = (base64: string) => {
-    const raw = atob(base64);
-    const uint8Array = new Uint8Array(raw.length);
-    for (let i = 0; i < raw.length; i++) uint8Array[i] = raw.charCodeAt(i);
-    return uint8Array;
-  };
+        // Alternative Safari-compatible image loading without CORS issues
+        const loadTilesets = async (
+          tilesets: any[]
+        ): Promise<HTMLImageElement[]> => {
+          if (!tilesets?.length) throw new Error("No tilesets found");
 
-  // Helper: Uint8Array → Base64 (for PNG)
-  const uint8ArrayToBase64 = (bytes: Uint8Array) => {
-    let binary = "";
-    const chunkSize = 0x8000; // avoid stack overflow
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, i + chunkSize);
-      binary += String.fromCharCode(...chunk);
-    }
-    return btoa(binary);
-  };
+          // Helper: Base64 → Uint8Array
+          const base64ToUint8Array = (base64: string) => {
+            const raw = atob(base64);
+            const uint8Array = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++)
+              uint8Array[i] = raw.charCodeAt(i);
+            return uint8Array;
+          };
 
-  const tilesetPromises = tilesets.map(async (tileset) => {
-    const name = tileset.image.split("/").pop();
-
-    const response = await fetch(`/tileset?name=${name}`);
-    if (!response.ok) throw new Error(`Failed to fetch tileset: ${name}`);
-
-    const tilesetData = await response.json();
-    const compressedBase64 = tilesetData.tileset.data;
-
-    // Decode Base64 → Uint8Array → inflate gzip
-    const compressedBytes = base64ToUint8Array(compressedBase64);
-    // @ts-expect-error - pako is not defined because it is loaded in the index.html
-    const inflatedBytes = pako.inflate(compressedBytes);
-
-    // Convert inflated bytes → Base64 for Image.src
-    const imageBase64 = uint8ArrayToBase64(inflatedBytes);
-
-    return new Promise<HTMLImageElement>((resolve, reject) => {
-      const image = new Image();
-
-      // Try without crossOrigin first for Safari
-      let usesCrossOrigin = false;
-      const attemptLoad = (withCors: boolean) => {
-        if (withCors && !usesCrossOrigin) {
-          image.crossOrigin = "anonymous";
-          usesCrossOrigin = true;
-        }
-
-        const cleanup = () => {
-          image.onload = null;
-          image.onerror = null;
-        };
-
-        image.onload = () => {
-          cleanup();
-          if (image.complete && image.naturalWidth > 0) resolve(image);
-          else reject(new Error(`Image loaded but invalid: ${name}`));
-        };
-
-        image.onerror = () => {
-          cleanup();
-          if (!withCors) attemptLoad(true);
-          else reject(new Error(`Failed to load tileset image: ${name}`));
-        };
-
-        image.src = `data:image/png;base64,${imageBase64}`;
-      };
-
-      attemptLoad(false);
-
-      // Timeout fallback
-      setTimeout(() => {
-        if (!image.complete) reject(new Error(`Timeout loading tileset image: ${name}`));
-      }, 15000);
-    });
-  });
-
-  return Promise.all(tilesetPromises);
-};
-
-
-      // More aggressive Safari canvas context creation
-      const createSafeCanvasContext = (
-        canvas: HTMLCanvasElement, 
-        options?: CanvasRenderingContext2DSettings
-      ): CanvasRenderingContext2D | null => {
-        
-        // Ensure canvas is properly sized first
-        if (!canvas.width || !canvas.height) {
-          canvas.width = canvas.width || 100;
-          canvas.height = canvas.height || 100;
-        }
-        
-        // Force multiple layout calculations for Safari
-        canvas.offsetWidth;
-        canvas.offsetHeight;
-        canvas.clientWidth;
-        canvas.clientHeight;
-        
-        let ctx: CanvasRenderingContext2D | null = null;
-        
-        // More aggressive attempts for Safari
-        const attempts = [
-          // Safari-specific: try with no options first
-          () => {
-            return canvas.getContext('2d');
-          },
-          // Try with alpha only
-          () => {
-            return canvas.getContext('2d', { alpha: true });
-          },
-          // Try with willReadFrequently false
-          () => {
-            return canvas.getContext('2d', { willReadFrequently: false });
-          },
-          // Try with original options
-          () => {
-            return canvas.getContext('2d', options);
-          },
-          // Force reset and try again
-          () => {
-            const oldWidth = canvas.width;
-            const oldHeight = canvas.height;
-            canvas.width = oldWidth;
-            canvas.height = oldHeight;
-            canvas.offsetHeight; // Force layout again
-            return canvas.getContext('2d');
-          }
-        ];
-        
-        for (let i = 0; i < attempts.length; i++) {
-          try {
-            ctx = attempts[i]();
-            if (ctx) {
-              break;
+          // Helper: Uint8Array → Base64 (for PNG)
+          const uint8ArrayToBase64 = (bytes: Uint8Array) => {
+            let binary = "";
+            const chunkSize = 0x8000; // avoid stack overflow
+            for (let i = 0; i < bytes.length; i += chunkSize) {
+              const chunk = bytes.subarray(i, i + chunkSize);
+              binary += String.fromCharCode(...chunk);
             }
-          } catch (e) {
-            console.error("Error creating canvas context:", e);
-            continue;
-          }
-        }
-        
-        return ctx;
-      };
+            return btoa(binary);
+          };
 
-      try {
-        const images = await loadTilesets(mapData.tilesets);
-        if (!images.length) throw new Error("No tileset images loaded");
-        await drawMap(images);
-      } catch (error) {
-        console.error("Map loading failed:", error);
-        throw error;
-      }
+          const tilesetPromises = tilesets.map(async (tileset) => {
+            const name = tileset.image.split("/").pop();
+
+            const response = await fetch(`/tileset?name=${name}`);
+            if (!response.ok)
+              throw new Error(`Failed to fetch tileset: ${name}`);
+
+            const tilesetData = await response.json();
+            const compressedBase64 = tilesetData.tileset.data;
+
+            // Decode Base64 → Uint8Array → inflate gzip
+            const compressedBytes = base64ToUint8Array(compressedBase64);
+            // @ts-expect-error - pako is not defined because it is loaded in the index.html
+            const inflatedBytes = pako.inflate(compressedBytes);
+
+            // Convert inflated bytes → Base64 for Image.src
+            const imageBase64 = uint8ArrayToBase64(inflatedBytes);
+
+            return new Promise<HTMLImageElement>((resolve, reject) => {
+              const image = new Image();
+
+              // Try without crossOrigin first for Safari
+              let usesCrossOrigin = false;
+              const attemptLoad = (withCors: boolean) => {
+                if (withCors && !usesCrossOrigin) {
+                  image.crossOrigin = "anonymous";
+                  usesCrossOrigin = true;
+                }
+
+                const cleanup = () => {
+                  image.onload = null;
+                  image.onerror = null;
+                };
+
+                image.onload = () => {
+                  cleanup();
+                  if (image.complete && image.naturalWidth > 0) resolve(image);
+                  else reject(new Error(`Image loaded but invalid: ${name}`));
+                };
+
+                image.onerror = () => {
+                  cleanup();
+                  if (!withCors) attemptLoad(true);
+                  else
+                    reject(new Error(`Failed to load tileset image: ${name}`));
+                };
+
+                image.src = `data:image/png;base64,${imageBase64}`;
+              };
+
+              attemptLoad(false);
+
+              // Timeout fallback
+              setTimeout(() => {
+                if (!image.complete)
+                  reject(new Error(`Timeout loading tileset image: ${name}`));
+              }, 15000);
+            });
+          });
+
+          return Promise.all(tilesetPromises);
+        };
+
+        // More aggressive Safari canvas context creation
+        const createSafeCanvasContext = (
+          canvas: HTMLCanvasElement,
+          options?: CanvasRenderingContext2DSettings
+        ): CanvasRenderingContext2D | null => {
+          // Ensure canvas is properly sized first
+          if (!canvas.width || !canvas.height) {
+            canvas.width = canvas.width || 100;
+            canvas.height = canvas.height || 100;
+          }
+
+          // Force multiple layout calculations for Safari
+          canvas.offsetWidth;
+          canvas.offsetHeight;
+          canvas.clientWidth;
+          canvas.clientHeight;
+
+          let ctx: CanvasRenderingContext2D | null = null;
+
+          // More aggressive attempts for Safari
+          const attempts = [
+            // Safari-specific: try with no options first
+            () => {
+              return canvas.getContext("2d");
+            },
+            // Try with alpha only
+            () => {
+              return canvas.getContext("2d", { alpha: true });
+            },
+            // Try with willReadFrequently false
+            () => {
+              return canvas.getContext("2d", { willReadFrequently: false });
+            },
+            // Try with original options
+            () => {
+              return canvas.getContext("2d", options);
+            },
+            // Force reset and try again
+            () => {
+              const oldWidth = canvas.width;
+              const oldHeight = canvas.height;
+              canvas.width = oldWidth;
+              canvas.height = oldHeight;
+              canvas.offsetHeight; // Force layout again
+              return canvas.getContext("2d");
+            },
+          ];
+
+          for (let i = 0; i < attempts.length; i++) {
+            try {
+              ctx = attempts[i]();
+              if (ctx) {
+                break;
+              }
+            } catch (e) {
+              console.error("Error creating canvas context:", e);
+              continue;
+            }
+          }
+
+          return ctx;
+        };
+
+        try {
+          const images = await loadTilesets(mapData.tilesets);
+          if (!images.length) throw new Error("No tileset images loaded");
+          await drawMap(images);
+        } catch (error) {
+          console.error("Map loading failed:", error);
+          throw error;
+        }
 
         async function drawMap(images: HTMLImageElement[]): Promise<void> {
           return new Promise((resolve, reject) => {
-            try {              
+            try {
               const mapWidth = mapData.width * mapData.tilewidth;
               const mapHeight = mapData.height * mapData.tileheight;
-              const CHUNK_SIZE = 25; 
+              const CHUNK_SIZE = 25;
               const chunkPixelSize = CHUNK_SIZE * mapData.tilewidth;
 
               // Setup main canvas with extra Safari care
@@ -438,45 +484,51 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
               canvas.style.height = mapHeight + "px";
               canvas.style.display = "block";
               canvas.style.backgroundColor = "#ffffff"; // Explicit white background
-              
+
               // Force Safari to acknowledge the canvas
               canvas.offsetWidth;
               canvas.offsetHeight;
-              
-              const mainCtx = createSafeCanvasContext(canvas, { 
+
+              const mainCtx = createSafeCanvasContext(canvas, {
                 willReadFrequently: false,
-                alpha: false 
+                alpha: false,
               });
-              
+
               if (!mainCtx) {
                 reject(new Error("Could not get main canvas context"));
                 return;
               }
-                            
+
               mainCtx.imageSmoothingEnabled = false;
-              
+
               // Test the context by drawing something
-              mainCtx.fillStyle = '#ff0000'; // Red test
+              mainCtx.fillStyle = "#ff0000"; // Red test
               mainCtx.fillRect(0, 0, 50, 50);
-              mainCtx.fillStyle = '#00ff00'; // Green test  
+              mainCtx.fillStyle = "#00ff00"; // Green test
               mainCtx.fillRect(50, 0, 50, 50);
-              mainCtx.fillStyle = '#0000ff'; // Blue test
+              mainCtx.fillStyle = "#0000ff"; // Blue test
               mainCtx.fillRect(100, 0, 50, 50);
-                            
+
               // Clear and set white background
-              mainCtx.fillStyle = '#ffffff';
+              mainCtx.fillStyle = "#ffffff";
               mainCtx.fillRect(0, 0, mapWidth, mapHeight);
 
-              const sortedLayers = [...mapData.layers].sort((a, b) => (a.zIndex || 0) - (b.zIndex || 0));
-              const visibleTileLayers = sortedLayers.filter(layer => layer.visible && layer.type === "tilelayer");
+              const sortedLayers = [...mapData.layers].sort(
+                (a, b) => (a.zIndex || 0) - (b.zIndex || 0)
+              );
+              const visibleTileLayers = sortedLayers.filter(
+                (layer) => layer.visible && layer.type === "tilelayer"
+              );
               const chunksX = Math.ceil(mapData.width / CHUNK_SIZE);
               const chunksY = Math.ceil(mapData.height / CHUNK_SIZE);
               const totalChunks = chunksX * chunksY * visibleTileLayers.length;
               let processedChunks = 0;
 
-              const chunkCanvases: {[key: string]: {[key: string]: HTMLCanvasElement | null}} = {};
+              const chunkCanvases: {
+                [key: string]: { [key: string]: HTMLCanvasElement | null };
+              } = {};
               window.mapLayerCanvases = [];
-              
+
               window.mapChunks = {
                 chunksX,
                 chunksY,
@@ -486,26 +538,35 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
                 chunks: chunkCanvases,
                 redrawMainCanvas: () => {
                   if (!mainCtx) return;
-                  
+
                   try {
                     // Clear canvas with white background
-                    mainCtx.fillStyle = '#ffffff';
+                    mainCtx.fillStyle = "#ffffff";
                     mainCtx.fillRect(0, 0, mapWidth, mapHeight);
-                    
-                    const layerNames = Object.keys(window.mapChunks.layers).sort((a, b) => {
-                      return (window.mapChunks.layers[a].zIndex || 0) - (window.mapChunks.layers[b].zIndex || 0);
+
+                    const layerNames = Object.keys(
+                      window.mapChunks.layers
+                    ).sort((a, b) => {
+                      return (
+                        (window.mapChunks.layers[a].zIndex || 0) -
+                        (window.mapChunks.layers[b].zIndex || 0)
+                      );
                     });
-                                        
+
                     for (const layerName of layerNames) {
                       const layer = window.mapChunks.layers[layerName];
                       if (!layer.visible) continue;
-                      
+
                       for (let chunkY = 0; chunkY < chunksY; chunkY++) {
                         for (let chunkX = 0; chunkX < chunksX; chunkX++) {
                           const chunkKey = `${chunkX}-${chunkY}`;
-                          const chunkCanvas = chunkCanvases[layerName]?.[chunkKey];
-                          
-                          if (chunkCanvas && layer.chunkVisibility?.[chunkKey] !== false) {
+                          const chunkCanvas =
+                            chunkCanvases[layerName]?.[chunkKey];
+
+                          if (
+                            chunkCanvas &&
+                            layer.chunkVisibility?.[chunkKey] !== false
+                          ) {
                             try {
                               mainCtx.drawImage(
                                 chunkCanvas,
@@ -513,17 +574,24 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
                                 chunkY * chunkPixelSize
                               );
                             } catch (drawError) {
-                              console.error(`Error drawing chunk ${chunkKey} of layer ${layerName}:`, drawError);
+                              console.error(
+                                `Error drawing chunk ${chunkKey} of layer ${layerName}:`,
+                                drawError
+                              );
                             }
                           }
                         }
                       }
                     }
                   } catch (error) {
-                      console.error('Error in redrawMainCanvas:', error);
+                    console.error("Error in redrawMainCanvas:", error);
                   }
                 },
-                hideChunk: (layerName: string, chunkX: number, chunkY: number) => {
+                hideChunk: (
+                  layerName: string,
+                  chunkX: number,
+                  chunkY: number
+                ) => {
                   const layer = window.mapChunks.layers[layerName];
                   if (layer) {
                     const chunkKey = `${chunkX}-${chunkY}`;
@@ -531,7 +599,11 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
                     window.mapChunks.redrawMainCanvas();
                   }
                 },
-                showChunk: (layerName: string, chunkX: number, chunkY: number) => {
+                showChunk: (
+                  layerName: string,
+                  chunkX: number,
+                  chunkY: number
+                ) => {
                   const layer = window.mapChunks.layers[layerName];
                   if (layer) {
                     const chunkKey = `${chunkX}-${chunkY}`;
@@ -539,7 +611,12 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
                     window.mapChunks.redrawMainCanvas();
                   }
                 },
-                hideChunksByRegion: (x1: number, y1: number, x2: number, y2: number) => {
+                hideChunksByRegion: (
+                  x1: number,
+                  y1: number,
+                  x2: number,
+                  y2: number
+                ) => {
                   const startChunkX = Math.floor(x1 / CHUNK_SIZE);
                   const startChunkY = Math.floor(y1 / CHUNK_SIZE);
                   const endChunkX = Math.floor(x2 / CHUNK_SIZE);
@@ -555,7 +632,12 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
                   }
                   window.mapChunks.redrawMainCanvas();
                 },
-                showChunksByRegion: (x1: number, y1: number, x2: number, y2: number) => {
+                showChunksByRegion: (
+                  x1: number,
+                  y1: number,
+                  x2: number,
+                  y2: number
+                ) => {
                   const startChunkX = Math.floor(x1 / CHUNK_SIZE);
                   const startChunkY = Math.floor(y1 / CHUNK_SIZE);
                   const endChunkX = Math.floor(x2 / CHUNK_SIZE);
@@ -584,66 +666,74 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
                     layer.visible = true;
                     window.mapChunks.redrawMainCanvas();
                   }
-                }
+                },
               };
 
               // Safari-safe processLayer with more debugging
-              async function processLayer(layer: any, layerIndex: number): Promise<void> {
-               
-                const layerName = layer.name.replace(/[^a-zA-Z0-9-_]/g, '-');
+              async function processLayer(
+                layer: any,
+                layerIndex: number
+              ): Promise<void> {
+                const layerName = layer.name.replace(/[^a-zA-Z0-9-_]/g, "-");
                 chunkCanvases[layerName] = {};
                 window.mapChunks.layers[layerName] = {
                   originalName: layer.name,
                   zIndex: layer.zIndex || layerIndex,
                   visible: true,
                   chunkVisibility: {},
-                  chunks: {}
+                  chunks: {},
                 };
 
-                const layerCanvas = document.createElement('canvas');
+                const layerCanvas = document.createElement("canvas");
                 layerCanvas.width = mapWidth;
                 layerCanvas.height = mapHeight;
-                
-                const layerCtx = createSafeCanvasContext(layerCanvas, { 
+
+                const layerCtx = createSafeCanvasContext(layerCanvas, {
                   willReadFrequently: false,
-                  alpha: true 
+                  alpha: true,
                 });
-                
+
                 if (!layerCtx) {
                   return;
                 }
-                
+
                 layerCtx.imageSmoothingEnabled = false;
                 layerCtx.clearRect(0, 0, mapWidth, mapHeight);
-                                
+
                 if (!window.mapLayerCanvases) {
                   window.mapLayerCanvases = [];
                 }
-                
+
                 window.mapLayerCanvases.push({
                   canvas: layerCanvas,
                   ctx: layerCtx,
-                  zIndex: layer.zIndex || layerIndex
+                  zIndex: layer.zIndex || layerIndex,
                 });
 
-                async function processChunk(chunkX: number, chunkY: number): Promise<void> {
+                async function processChunk(
+                  chunkX: number,
+                  chunkY: number
+                ): Promise<void> {
                   const startX = chunkX * CHUNK_SIZE;
                   const startY = chunkY * CHUNK_SIZE;
                   const endX = Math.min(startX + CHUNK_SIZE, mapData.width);
                   const endY = Math.min(startY + CHUNK_SIZE, mapData.height);
                   const actualChunkWidth = (endX - startX) * mapData.tilewidth;
-                  const actualChunkHeight = (endY - startY) * mapData.tileheight;
+                  const actualChunkHeight =
+                    (endY - startY) * mapData.tileheight;
 
-                  const chunkCanvas = document.createElement('canvas');
+                  const chunkCanvas = document.createElement("canvas");
                   chunkCanvas.width = actualChunkWidth;
                   chunkCanvas.height = actualChunkHeight;
-                  
-                  const chunkCtx = createSafeCanvasContext(chunkCanvas, { willReadFrequently: false });
-                  
+
+                  const chunkCtx = createSafeCanvasContext(chunkCanvas, {
+                    willReadFrequently: false,
+                  });
+
                   if (!chunkCtx) {
                     return;
                   }
-                  
+
                   chunkCtx.imageSmoothingEnabled = false;
                   let hasContent = false;
 
@@ -653,47 +743,73 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
                       if (tileIndex === 0) continue;
 
                       const tileset = mapData.tilesets.find(
-                        (t: any) => t.firstgid <= tileIndex && tileIndex < t.firstgid + t.tilecount
+                        (t: any) =>
+                          t.firstgid <= tileIndex &&
+                          tileIndex < t.firstgid + t.tilecount
                       );
                       if (!tileset) continue;
 
-                      const image = images[mapData.tilesets.indexOf(tileset)] as HTMLImageElement;
-                      if (!image || !image.complete || image.naturalWidth === 0) {
+                      const image = images[
+                        mapData.tilesets.indexOf(tileset)
+                      ] as HTMLImageElement;
+                      if (
+                        !image ||
+                        !image.complete ||
+                        image.naturalWidth === 0
+                      ) {
                         continue;
                       }
 
                       const localTileIndex = tileIndex - tileset.firstgid;
-                      const tilesPerRow = Math.floor(tileset.imagewidth / tileset.tilewidth);
-                      const tileX = (localTileIndex % tilesPerRow) * tileset.tilewidth;
-                      const tileY = Math.floor(localTileIndex / tilesPerRow) * tileset.tileheight;
+                      const tilesPerRow = Math.floor(
+                        tileset.imagewidth / tileset.tilewidth
+                      );
+                      const tileX =
+                        (localTileIndex % tilesPerRow) * tileset.tilewidth;
+                      const tileY =
+                        Math.floor(localTileIndex / tilesPerRow) *
+                        tileset.tileheight;
 
                       try {
                         chunkCtx.drawImage(
                           image,
-                          tileX, tileY, tileset.tilewidth, tileset.tileheight,
+                          tileX,
+                          tileY,
+                          tileset.tilewidth,
+                          tileset.tileheight,
                           (x - startX) * mapData.tilewidth,
                           (y - startY) * mapData.tileheight,
-                          mapData.tilewidth, mapData.tileheight
+                          mapData.tilewidth,
+                          mapData.tileheight
                         );
 
                         if (!window.mapLayerCanvases) {
                           window.mapLayerCanvases = [];
                         }
-                        const layerCanvasData = window.mapLayerCanvases[window.mapLayerCanvases.length - 1];
+                        const layerCanvasData =
+                          window.mapLayerCanvases[
+                            window.mapLayerCanvases.length - 1
+                          ];
                         if (layerCanvasData && layerCanvasData.ctx) {
                           layerCanvasData.ctx.drawImage(
                             image,
-                            tileX, tileY, tileset.tilewidth, tileset.tileheight,
+                            tileX,
+                            tileY,
+                            tileset.tilewidth,
+                            tileset.tileheight,
                             x * mapData.tilewidth,
                             y * mapData.tileheight,
-                            mapData.tilewidth, mapData.tileheight
+                            mapData.tilewidth,
+                            mapData.tileheight
                           );
                         }
                         hasContent = true;
                       } catch (drawError) {
-
-                        if (drawError instanceof DOMException && drawError.name === 'NotAllowedError') {
-                          console.error('Canvas tainted - CORS issue detected');
+                        if (
+                          drawError instanceof DOMException &&
+                          drawError.name === "NotAllowedError"
+                        ) {
+                          console.error("Canvas tainted - CORS issue detected");
                         }
                       }
                     }
@@ -706,11 +822,12 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
                     chunkCanvases[layerName][chunkKey] = null;
                   }
 
-                  window.mapChunks.layers[layerName].chunkVisibility[chunkKey] = hasContent;
+                  window.mapChunks.layers[layerName].chunkVisibility[chunkKey] =
+                    hasContent;
                   window.mapChunks.layers[layerName].chunks[chunkKey] = {
                     x: chunkX,
                     y: chunkY,
-                    hasContent
+                    hasContent,
                   };
 
                   processedChunks++;
@@ -722,7 +839,7 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
                   for (let chunkX = 0; chunkX < chunksX; chunkX++) {
                     await processChunk(chunkX, chunkY);
                     if ((chunkX + chunkY * chunksX) % 5 === 0) {
-                      await new Promise(resolve => setTimeout(resolve, 0));
+                      await new Promise((resolve) => setTimeout(resolve, 0));
                     }
                   }
                 }
@@ -730,35 +847,42 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
 
               let currentLayerIndex = 0;
               async function renderLayers(): Promise<void> {
-                try {                  
+                try {
                   for (const layer of sortedLayers) {
-                    if (!layer.visible || layer.type !== "tilelayer" || layer.name.toLowerCase() === "collisions") {
+                    if (
+                      !layer.visible ||
+                      layer.type !== "tilelayer" ||
+                      layer.name.toLowerCase() === "collisions"
+                    ) {
                       currentLayerIndex++;
                       continue;
                     }
                     await processLayer(layer, currentLayerIndex);
                     currentLayerIndex++;
-                    await new Promise(resolve => requestAnimationFrame(resolve));
+                    await new Promise((resolve) =>
+                      requestAnimationFrame(resolve)
+                    );
                   }
-                  
-                  (window.mapLayerCanvases ?? []).sort((a: any, b: any) => a.zIndex - b.zIndex);
-                  
-                  
+
+                  (window.mapLayerCanvases ?? []).sort(
+                    (a: any, b: any) => a.zIndex - b.zIndex
+                  );
+
                   // Force multiple renders to ensure Safari displays content
                   window.mapChunks.redrawMainCanvas();
-                  
+
                   // Additional Safari-specific render attempts
                   setTimeout(() => {
                     window.mapChunks.redrawMainCanvas();
                   }, 100);
-                  
+
                   setTimeout(() => {
                     window.mapChunks.redrawMainCanvas();
                   }, 500);
-                  
+
                   progressBar.style.width = `100%`;
                   resolve();
-                  
+
                   setTimeout(() => {
                     if (loadingScreen) {
                       loadingScreen.style.transition = "1s";
@@ -779,18 +903,19 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
 
               loaded = true;
               renderLayers();
-              
             } catch (error) {
               reject(error);
             }
           });
         }
       }
-    break;
+      break;
     case "LOGIN_SUCCESS":
       {
         const connectionId = JSON.parse(packet.decode(event.data))["data"];
-        const chatDecryptionKey = JSON.parse(packet.decode(event.data))["chatDecryptionKey"];
+        const chatDecryptionKey = JSON.parse(packet.decode(event.data))[
+          "chatDecryptionKey"
+        ];
         sessionStorage.setItem("connectionId", connectionId); // Store client's socket ID
         cachedPlayerId = connectionId;
         const sessionToken = getCookie("token");
@@ -802,7 +927,8 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
         // Store public key
         sessionStorage.setItem("chatDecryptionKey", chatDecryptionKey);
 
-        const language = navigator.language.split("-")[0] || navigator.language || "en";
+        const language =
+          navigator.language.split("-")[0] || navigator.language || "en";
         sendRequest({
           type: "AUTH",
           data: sessionToken,
@@ -831,7 +957,10 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
 
             if (item.icon) {
               // @ts-expect-error - pako is loaded in index.html
-              const inflatedData = pako.inflate(new Uint8Array(item.icon.data), { to: "string" });
+              const inflatedData = pako.inflate(
+                new Uint8Array(item.icon.data),
+                { to: "string" }
+              );
               const iconImage = new Image();
               iconImage.src = `data:image/png;base64,${inflatedData}`;
               iconImage.onload = () => {
@@ -879,7 +1008,8 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
           // Escape HTML tags before setting chat message
           player.chat = data.message;
           // Username with first letter uppercase
-          const username = data?.username?.charAt(0)?.toUpperCase() + data?.username?.slice(1);
+          const username =
+            data?.username?.charAt(0)?.toUpperCase() + data?.username?.slice(1);
           const timestamp = new Date().toLocaleTimeString();
           // Update chat box
           if (data.message?.trim() !== "" && username) {
@@ -887,7 +1017,9 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
             message.classList.add("message");
             message.style.userSelect = "text";
             // Escape HTML in the message before inserting
-            const escapedMessage = data.message.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const escapedMessage = data.message
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;");
             message.innerHTML = `${timestamp} ${username}: ${escapedMessage}`;
             chatMessages.appendChild(message);
             // Scroll to the bottom of the chat messages
@@ -930,7 +1062,9 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
       break;
     }
     case "STATS": {
-      const player = Array.from(cache.players).find((player) => player.id === data.id);
+      const player = Array.from(cache.players).find(
+        (player) => player.id === data.id
+      );
       if (!player) return;
       updateXp(data.xp, data.level, data.max_xp);
       player.stats = data;
@@ -960,14 +1094,14 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
       const data = JSON.parse(packet.decode(event.data))["data"];
 
       if (!data || !data.id || !data.username) {
-        const target = Array.from(cache.players).find(p => p.targeted);
+        const target = Array.from(cache.players).find((p) => p.targeted);
         if (target) target.targeted = false;
         //displayElement(targetStats, false);
         break;
       }
 
       cache.players.forEach((player) => {
-        player.targeted = (player.id === data.id);
+        player.targeted = player.id === data.id;
       });
 
       // displayElement(targetStats, true);
@@ -1003,7 +1137,9 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
     }
     case "UPDATESTATS": {
       const { target, stats } = JSON.parse(packet.decode(event.data))["data"];
-      const t = Array.from(cache.players).find((player) => player.id === target);
+      const t = Array.from(cache.players).find(
+        (player) => player.id === target
+      );
       if (t) {
         t.stats = stats;
       }
@@ -1011,7 +1147,9 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
     }
     case "REVIVE": {
       const data = JSON.parse(packet.decode(event.data))["data"];
-      const target = Array.from(cache.players).find((player) => player.id === data.target);
+      const target = Array.from(cache.players).find(
+        (player) => player.id === data.target
+      );
       if (!target) return;
 
       target.stats = data.stats;
@@ -1023,7 +1161,7 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
       }
 
       //displayElement(targetStats, false);
-      cache.players.forEach((player) => player.targeted = false);
+      cache.players.forEach((player) => (player.targeted = false));
       break;
     }
     case "UPDATE_XP": {
@@ -1067,7 +1205,9 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
     case "WHISPER": {
       const data = JSON.parse(packet.decode(event.data))["data"];
       // Escape HTML tags before setting chat message
-      const escapedMessage = data.message.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const escapedMessage = data.message
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
       const timestamp = new Date().toLocaleTimeString();
       // Update chat box
       if (data.message?.trim() !== "" && data.username) {
@@ -1075,7 +1215,8 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
         message.classList.add("message");
         message.style.userSelect = "text";
         // Username with first letter uppercase
-        const username = data?.username?.charAt(0)?.toUpperCase() + data?.username?.slice(1);
+        const username =
+          data?.username?.charAt(0)?.toUpperCase() + data?.username?.slice(1);
         message.innerHTML = `${timestamp} <span class="whisper-username">${username}:</span> <span class="whisper-message">${escapedMessage}</span>`;
         chatMessages.appendChild(message);
         // Scroll to the bottom of the chat messages
@@ -1086,7 +1227,9 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
     case "PARTY_CHAT": {
       const data = JSON.parse(packet.decode(event.data))["data"];
       // Escape HTML tags before setting chat message
-      const escapedMessage = data.message.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const escapedMessage = data.message
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
       const timestamp = new Date().toLocaleTimeString();
       // Update chat box
       if (data.message?.trim() !== "" && data.username) {
@@ -1094,7 +1237,8 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
         message.classList.add("message");
         message.style.userSelect = "text";
         // Username with first letter uppercase
-        const username = data?.username?.charAt(0)?.toUpperCase() + data?.username?.slice(1);
+        const username =
+          data?.username?.charAt(0)?.toUpperCase() + data?.username?.slice(1);
         message.innerHTML = `${timestamp} <span class="party-username">${username}:</span> <span class="party-message">${escapedMessage}</span>`;
         chatMessages.appendChild(message);
         // Scroll to the bottom of the chat messages
@@ -1110,18 +1254,21 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
     default:
       break;
   }
-}
+};
 
-function showNotification(message: string, autoClose: boolean = true, reconnect: boolean = false) {
-
+function showNotification(
+  message: string,
+  autoClose: boolean = true,
+  reconnect: boolean = false
+) {
   if (!notificationContainer || !notificationMessage) return;
-  
+
   notificationMessage.innerText = message;
   notificationContainer.style.display = "flex";
-  
+
   const baseTimeout = 5000; // Base timeout of 5 seconds
   const timePerChar = 100; // Additional time per character in milliseconds
-  const timeout = baseTimeout + (message.length * timePerChar);
+  const timeout = baseTimeout + message.length * timePerChar;
 
   if (autoClose) {
     // Clear any existing timeout
@@ -1173,7 +1320,11 @@ async function isLoaded() {
 }
 
 setInterval(() => {
-  if (packetsSentReceived.innerText === `Sent: ${sentRequests}, Received: ${receivedResponses}`) return;
+  if (
+    packetsSentReceived.innerText ===
+    `Sent: ${sentRequests}, Received: ${receivedResponses}`
+  )
+    return;
   packetsSentReceived.innerText = `Sent: ${sentRequests}, Received: ${receivedResponses}`;
   sentRequests = 0;
   receivedResponses = 0;
@@ -1196,7 +1347,9 @@ async function openAnimationDB() {
   });
 }
 
-async function getAnimationFromDB(name: string): Promise<Uint8Array | undefined> {
+async function getAnimationFromDB(
+  name: string
+): Promise<Uint8Array | undefined> {
   const db = await openAnimationDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction("animations", "readonly");
