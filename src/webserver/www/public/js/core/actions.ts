@@ -42,7 +42,7 @@ const contextActions: Record<string, { allowed_self: boolean, label: string, han
     handler: (id) => {
       // Update the document to add /w and the player's username
       const chatInput = document.getElementById("chat-input") as HTMLInputElement;
-      const username = cache.players.find(player => player.id === id)?.username || null;
+      const username = Array.from(cache.players).find(player => player.id === id)?.username;
       if (!username) return;
       chatInput.value = `/w ${username} `;
       chatInput.focus();
@@ -129,7 +129,7 @@ function createPartyContextMenu(event: MouseEvent, username: string) {
 
   contextMenu.dataset.username = username.toLowerCase();
   const ul = document.createElement("ul");
-  const currentPlayer = cache.players.find(player => player.id === cachedPlayerId);
+  const currentPlayer = Array.from(cache.players).find(player => player.id === cachedPlayerId);
   const isSelf = currentPlayer?.username.toLowerCase() === username.toLowerCase();
   Object.entries(partyContextActions).forEach(([action, { label, handler, only_self, allowed_self }]) => {
     if (only_self && !isSelf) return; // Skip actions that are only for self
@@ -182,8 +182,8 @@ function createContextMenu(event: MouseEvent, id: string) {
 
   const ul = document.createElement("ul");
   const isSelf = id === cachedPlayerId;
-  const currentPlayer = cache.players.find(player => player.id === cachedPlayerId);
-  const targetedPlayer = cache.players.find(player => player.id === id);
+  const currentPlayer = Array.from(cache.players).find(player => player.id === cachedPlayerId);
+  const targetedPlayer = Array.from(cache.players).find(player => player.id === id);
   const isFriend = currentPlayer?.friends?.includes(targetedPlayer?.username?.toString()) || false;
   const isInParty = currentPlayer?.party?.includes(targetedPlayer?.username?.toString()) || false;
 

@@ -127,7 +127,7 @@ function animationLoop() {
     return;
   }
   lastFrameTime = now;
-  const currentPlayer = cache.players.find(p => p.id === cachedPlayerId);
+  const currentPlayer = Array.from(cache.players).find(player => player.id === cachedPlayerId);
   if (!currentPlayer) {
     requestAnimationFrame(animationLoop);
     return;
@@ -175,7 +175,7 @@ function animationLoop() {
     y >= cachedPaddedBounds.y &&
     x <= cachedPaddedBounds.x + cachedPaddedBounds.w &&
     y <= cachedPaddedBounds.y + cachedPaddedBounds.h;
-  const visiblePlayers = cache.players.filter(p =>
+  const visiblePlayers = Array.from(cache.players).filter(p =>
     isInView(p.position.x, p.position.y) &&
     (p.id === cachedPlayerId || !p.isStealth || (p.isStealth && currentPlayer.isAdmin))
   );
@@ -186,7 +186,7 @@ function animationLoop() {
     updateHealthBar(healthBar, healthPercent);
     updateStaminaBar(staminaBar, staminaPercent);
   }
-  const targetPlayer = cache.players.find(p => p.targeted);
+  const targetPlayer = Array.from(cache.players).find(p => p.targeted);
   if (targetPlayer) {
     const { health, max_health, stamina, max_stamina } = targetPlayer.stats;
     const healthPercent = (health / max_health) * 100;

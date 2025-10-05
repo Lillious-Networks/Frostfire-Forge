@@ -1,7 +1,18 @@
 import packet from "../modules/packet";
-import log from "../modules/logger";
 
 export const packetManager = {
+  disconnect: (id: string) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "DISCONNECT_MALIFORMED",
+          data: {
+            id: id
+          },
+        })
+      )
+    ] as any[];
+  },
   reconnect: () => {
     return [
       packet.encode(
@@ -48,22 +59,6 @@ export const packetManager = {
   loginFailed: () => {
     return [
       packet.encode(JSON.stringify({ type: "LOGIN_FAILED", data: null })),
-    ] as any[];
-  },
-  timeSync: (data: any, ws: WebSocket) => {
-    const latency = performance.now() - Number(data) - 5000;
-    const ServerTime = performance.now();
-    if (latency >= 3000) {
-      log.error(`${ws.data.username} has high latency: ${latency}ms - closing connection`);
-      ws.close(1001, "High latency");
-    }
-    return [
-      packet.encode(
-        JSON.stringify({
-          type: "TIME_SYNC",
-          data: ServerTime,
-        })
-      )
     ] as any[];
   },
   inventory: (data: InventoryItem[]) => {

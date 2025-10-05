@@ -129,7 +129,7 @@ window.addEventListener("keydown", async (e) => {
   if (blacklistedKeys.has(e.code)) {
     // Check for tab
     if (e.code === "Tab" && !getContextMenuKeyTriggered()) {
-      const target = cache.players.find(player => player.targeted);
+      const target = Array.from(cache.players).find(player => player.targeted);
       if (target) {
         target.targeted = false;
       }
@@ -184,7 +184,7 @@ window.addEventListener("keyup", (e) => {
 
 window.addEventListener("resize", () => {
   updateViewportCache();
-  const currentPlayer = cache.players.find((player) => player.id === cachedPlayerId);
+  const currentPlayer = Array.from(cache.players).find((player) => player.id === cachedPlayerId);
   if (currentPlayer) {
     setCameraX(currentPlayer.position.x - window.innerWidth / 2 + 8);
     setCameraY(currentPlayer.position.y - window.innerHeight / 2 + 48);
@@ -284,7 +284,7 @@ document.addEventListener("contextmenu", (event) => {
   const y = event.clientY - rect.top;
 
   // Did we click on a player?
-  const clickedPlayer = cache.players.find(player => {
+  const clickedPlayer = Array.from(cache.players).find(player => {
     const playerX = player.position.x + 16; // Center of the player
     const playerY = player.position.y + 24; // Center of the player
     return (
@@ -328,7 +328,7 @@ document.addEventListener("click", (event) => {
   const moveX = x - canvas.width / 2 - 16;
   const moveY = y - canvas.height / 2 - 24;
   // Untarget any currently targeted player
-  const target = cache.players.find(player => player.targeted);
+  const target = Array.from(cache.players).find(player => player.targeted);
   if (target) {
     target.targeted = false;
   }

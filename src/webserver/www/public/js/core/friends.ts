@@ -6,7 +6,7 @@ import { friendsList, friendsListSearch } from "./ui.js";
 
 
 function updateFriendsList(data: any) {
-    const currentPlayer = cache.players.find(player => player.id === cachedPlayerId);
+    const currentPlayer = Array.from(cache.players).find(player => player.id === cachedPlayerId);
     if (!currentPlayer || !data?.friends) return;
 
     const list = Array.from(friendsList.querySelectorAll('.friend-name')) as HTMLElement[];
@@ -33,7 +33,7 @@ function updateFriendsList(data: any) {
             friendElement.appendChild(friendName);
 
             const friendStatus = document.createElement("div");
-            const isOnline = cache.players.some(player => player.username.toLowerCase() === friend.toLowerCase() && player.id !== cachedPlayerId);
+            const isOnline = Array.from(cache.players).some(player => player.username && player.username.toLowerCase() === friend.toLowerCase() && player.id !== cachedPlayerId);
             friendStatus.classList.add("friend-status", isOnline ? "online" : "offline");
             friendStatus.classList.add("ui");
             friendStatus.innerText = isOnline ? "Online" : "Offline";

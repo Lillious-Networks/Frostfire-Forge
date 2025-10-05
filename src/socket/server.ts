@@ -1,3 +1,4 @@
+const PROCESS_STARTED_AT = Date.now() - performance.now();
 const MAX_BUFFER_SIZE = 1024 * 1024 * 16; // 16MB
 const packetQueue = new Map<string, (() => void)[]>();
 import crypto from "crypto";
@@ -158,6 +159,7 @@ const Server = Bun.serve<Packet, any>({
       console.log(`Disconnected: ${ws.data.id} - ${ws.data.useragent} - ${code} - ${reason}`);
       // Remove the client from the set of connected clients
       if (!ws.data.id) return;
+      packetQueue.delete(ws.data.id);
       // Find the client object in the set
       let clientToDelete;
       for (const client of connections) {
@@ -195,20 +197,11 @@ const Server = Bun.serve<Packet, any>({
           }
         }
         ws.publish(
-          "DISCONNECT_PLAYER" as Subscription["event"],
-          packet.encode(
-            JSON.stringify({
-              type: "DISCONNECT_PLAYER",
-              data: {
-                id: ws.data.id,
-                username: ws.data.username || null,
-              },
-            })
-          )
-        );
+        "DISCONNECT_PLAYER" as Subscription["event"],
+        packetManager.disconnect(ws.data.id)[0]
+      );
       }
     },
-    // Use any because we aren't allowed to use ArrayBuffer
     async message(ws: any, message: any) {
       try {
         // Check if the request has an identity and a message and if the message is an ArrayBuffer
@@ -217,14 +210,20 @@ const Server = Bun.serve<Packet, any>({
         message = packet.decode(message);
         const parsedMessage = JSON.parse(message.toString());
         const packetType = parsedMessage?.type;
+
+        if (packetType === "MOVEXY") {
+          // Process immediately, independent of backpressure/ratelimit
+          packetReceiver(null, ws, message.toString());
+          return;
+        }
         
-        
-        for (const client of ClientRateLimit) {
-          // Return if the client is rate limited
-          if (client.rateLimited) return;
-          if (client.id === ws.data.id ) {
+        if (settings?.websocketRatelimit?.enabled) {
+          const idx = ClientRateLimit.findIndex((c) => c.id === ws.data.id);
+          if (idx !== -1) {
+            const client = ClientRateLimit[idx];
+            if (client.rateLimited) return;
+
             client.requests++;
-            // Check if the client has reached the rate limit
             if (client.requests >= RateLimitOptions.maxRequests) {
               client.rateLimited = true;
               client.time = Date.now();
@@ -237,13 +236,6 @@ const Server = Bun.serve<Packet, any>({
               return;
             }
           }
-        }
-        const priorityPackets = ["MOVEXY"];
-        const isPriority = priorityPackets.includes(packetType);
-        // Check if the packet is a priority packet and process it immediately
-        if (isPriority) {
-          packetReceiver(null, ws, message.toString());
-          return;
         }
         handleBackpressure(ws as any, () => packetReceiver(null, ws, message.toString()));
       } catch (e) {
@@ -290,55 +282,126 @@ listener.on("onFixedUpdate", async () => {
 
 // Server tick (every 1 second)
 listener.on("onServerTick", async () => {
-  const players = playerCache.list() as any;
+  const playersObj = playerCache.list() as any;
+  const players = Object.values(playersObj) as any[];
 
-  Object.values(players).forEach(async (playerData: any) => {
-    const now = performance.now();
-    playerData.ws.send(packetManager.serverTime()[0]);
+  // De-dupe disconnect processing across overlapping ticks
+  const inactiveSet = new Set<string>();
 
-    // Reset PvP flag if no recent attack
-    const timeSinceLastAttack = playerData.last_attack ? now - playerData.last_attack : Infinity;
-    if (timeSinceLastAttack > 5000) {
+  const nowEpoch = Date.now();
+
+  // PASS 1: find truly inactive players
+  for (const p of players) {
+    if (!p || !p.id) continue;
+
+    // Normalize lastUpdated to epoch ms regardless of its source clock:
+    const rawLU = typeof p.lastUpdated === "number" ? p.lastUpdated : 0;
+    const lastUpdatedEpoch =
+      rawLU > 1e11               // looks like Date.now()
+        ? rawLU
+        : rawLU > 0              // looks like performance.now()
+        ? PROCESS_STARTED_AT + rawLU
+        : nowEpoch;              // if missing, treat as "just updated" to avoid insta-purge
+
+    const wsClosed = !p.ws || p.ws.readyState !== WebSocket.OPEN;
+
+    // Use a less aggressive idle window; only purge if socket is closed OR idle for >30s
+    const tooIdle = (nowEpoch - lastUpdatedEpoch) > 30000;
+
+    if (wsClosed || tooIdle) {
+      inactiveSet.add(p.id);
+    }
+  }
+
+  // PASS 2: process active players only
+  for (const playerData of players) {
+    if (!playerData || inactiveSet.has(playerData.id)) continue;
+
+    handleBackpressure(playerData.ws, () =>
+      playerData.ws.send(packetManager.serverTime()[0])
+    );
+
+    // Normalize last_attack as well, then apply same-epoch logic
+    const rawLA = typeof playerData.last_attack === "number" ? playerData.last_attack : 0;
+    const lastAttackEpoch =
+      rawLA > 1e11 ? rawLA :
+      rawLA > 0 ? (PROCESS_STARTED_AT + rawLA) :
+      0;
+
+    if (lastAttackEpoch && (nowEpoch - lastAttackEpoch) > 5000) {
       playerData.pvp = false;
     }
 
     const { stats } = playerData;
-    if (!stats) return;
+    if (!stats) continue;
+
     let updated = false;
 
-    // Regenerate stamina (always)
     if (stats.stamina < stats.max_stamina) {
       stats.stamina += Math.floor(stats.max_stamina * 0.01);
       if (stats.stamina > stats.max_stamina) stats.stamina = stats.max_stamina;
       updated = true;
     }
 
-    // Regenerate health only if not in PvP
     if (!playerData.pvp && stats.health < stats.max_health) {
       stats.health += Math.floor(stats.max_health * 0.01);
       if (stats.health > stats.max_health) stats.health = stats.max_health;
       updated = true;
     }
 
-    // Only update if something changed
-    if (!updated) return;
+    if (!updated) continue;
 
     const updateStatsData = {
       id: playerData.id,
       target: playerData.id,
-      stats: stats,
+      stats,
     };
 
-    // Send only to the player themselves (or uncomment for same-map broadcasting)
-    playerData.ws.send(packetManager.updateStats(updateStatsData)[0]);
+    // to self
+    handleBackpressure(playerData.ws, () =>
+      playerData.ws.send(packetManager.updateStats(updateStatsData)[0])
+    );
 
-    // Broadcast to other players on the same map
-    Object.values(players).forEach((otherPlayer: any) => {
-      if (otherPlayer.id !== playerData.id && otherPlayer.location.map === playerData.location.map) {
-        otherPlayer.ws.send(packetManager.updateStats(updateStatsData)[0]);
+    // to others on the same map, but skip anyone we marked inactive this tick
+    for (const other of players) {
+      if (
+        other &&
+        other.id !== playerData.id &&
+        other.location?.map === playerData.location?.map &&
+        !inactiveSet.has(other.id) &&
+        other.ws &&
+        other.ws.readyState === WebSocket.OPEN
+      ) {
+        handleBackpressure(other.ws, () =>
+          other.ws.send(packetManager.updateStats(updateStatsData)[0])
+        );
       }
-    });
-  });
+    }
+  }
+
+  // PASS 3: remove and notify exactly once per inactive id (no O(N×K))
+  if (inactiveSet.size > 0) {
+    for (const id of inactiveSet) {
+      // 2a) Send the packet the client uses to remove the render
+      Server.publish(
+        "DISCONNECT_PLAYER" as Subscription["event"],
+        packetManager.disconnect(id)[0]
+      );
+
+      // 2b) Run the same server-side cleanup as a real close.
+      //     onDisconnect will decrement world counts, persist, clear session, and remove from cache.
+      listener.emit("onDisconnect", { id, reason: "inactive" });
+
+      // 2c) Hygiene: drop queued actions & rate-limit entry for this id
+      packetQueue.delete(id);
+      for (let i = 0; i < ClientRateLimit.length; i++) {
+        if (ClientRateLimit[i].id === id) {
+          ClientRateLimit.splice(i, 1);
+          break;
+        }
+      }
+    }
+  }
 });
 
 
@@ -371,8 +434,8 @@ listener.on("onDisconnect", async (data) => {
     }
 
     const thisWorld = _worlds.find(
-      (w) => w.name === playerData.location.map.replace(".json", "")
-    );
+      (w) => w.name === playerData?.location?.map?.replace(".json", "")
+    ) || null;
 
     if (thisWorld && typeof thisWorld.players === "number" && thisWorld.players > 0) {
       thisWorld.players -= 1;
@@ -404,36 +467,31 @@ listener.on("onDisconnect", async (data) => {
     await player.clearSessionId(playerData.id);
     playerCache.remove(playerData.id);
 
-    log.debug(`Disconnected: ${playerData.username}`);
+    log.debug(`Disconnected: ${playerData.username} Reason: ${data.reason}`);
   } catch (e) {
     log.error(e as string);
   }
 });
 
-
 // Save loop
 listener.on("onSave", async () => {
+  log.info("Saving player data...");
   const cache = playerCache.list();
-  for (const p in playerCache) {
-    if (!cache[p]) continue;
-    if (cache[p]?.isGuest) continue; // Skip guests
-    // Save player stats and location
+  for (const p in cache) {
+    const row = cache[p];
+    if (!row) continue;
+    if (row.isGuest) continue;
+
+    if (!row.stats || !row.location) {
+      playerCache.remove(p);
+      continue;
+    }
+
     try {
-      if (cache[p]?.stats) {
-          await player.setStats(cache[p].username, cache[p].stats);
-      } else {
-          log.warn(`No stats found for player ID ${p} during save.`);
-      }
-      if (cache[p]?.location) {
-          await player.setLocation(
-              p,
-              cache[p].location.map,
-              cache[p].location.position,
-          );
-      } else {
-          log.warn(`No location found for player ID ${p} during save.`);
-      }
+      await player.setStats(row.username, row.stats);
+      await player.setLocation(p, row.location.map, row.location.position);
     } catch (e) {
+      playerCache.remove(p);
       log.error(e as string);
     }
   }

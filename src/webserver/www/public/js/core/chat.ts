@@ -24,7 +24,7 @@ async function handleChatMessage(message: string) {
 
   // Set timeout to clear chat
   setTimeout(() => {
-    const currentPlayer = cache.players.find(p => p.id === cachedPlayerId);
+    const currentPlayer = Array.from(cache.players).find(player => player.id === cachedPlayerId);
     if (currentPlayer?.chat === message) {
       sendRequest({ type: "CHAT", data: null });
     }

@@ -117,7 +117,7 @@ async function handleEnterKey() {
 }
 
 function handleSpaceKey() {
-  const target = cache.players.find(player => player.targeted);
+  const target = Array.from(cache.players).find(p => p.targeted);
   if (target) {
     sendRequest({ type: "ATTACK", data: target });
   }

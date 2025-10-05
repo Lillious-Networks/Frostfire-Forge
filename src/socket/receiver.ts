@@ -1,3 +1,90 @@
+const BP_MAX_BUFFER_SIZE = 16 * 1024 * 1024; // keep in sync with Server.ts (16MB)
+const BP_BASE_DELAY_MS = 50;
+const BP_MAX_DELAY_MS = 500;
+const wsQueues = new WeakMap<any, any[]>();          // ws -> queued frames
+const wsRetry   = new WeakMap<any, number>();        // ws -> retry count
+const wsTimers  = new WeakMap<any, ReturnType<typeof setTimeout>>(); // ws -> timer
+
+function bpIsOpen(ws: any): boolean {
+  return ws && typeof ws.readyState !== "undefined" && ws.readyState === WebSocket.OPEN;
+}
+
+function bpScheduleFlush(ws: any) {
+  if (!bpIsOpen(ws)) return;
+  if (wsTimers.get(ws)) return; // timer already scheduled
+
+  const retry = wsRetry.get(ws) || 0;
+  const delay = Math.min(BP_BASE_DELAY_MS + retry * BP_BASE_DELAY_MS, BP_MAX_DELAY_MS);
+
+  const t = setTimeout(() => {
+    wsTimers.delete(ws);
+    wsRetry.set(ws, (wsRetry.get(ws) || 0) + 1);
+    bpFlush(ws);
+  }, delay);
+
+  wsTimers.set(ws, t);
+}
+
+function bpFlush(ws: any) {
+  // If socket is closed, drop state
+  if (!bpIsOpen(ws)) {
+    const t = wsTimers.get(ws);
+    if (t) clearTimeout(t);
+    wsTimers.delete(ws);
+    wsQueues.delete(ws);
+    wsRetry.delete(ws);
+    return;
+  }
+
+  const queue = wsQueues.get(ws);
+  if (!queue || queue.length === 0) {
+    wsRetry.set(ws, 0); // reset retries on drain
+    return;
+  }
+
+  // Send until we hit backpressure or drain the queue
+  while (queue.length > 0) {
+    if (ws.bufferedAmount > BP_MAX_BUFFER_SIZE) {
+      bpScheduleFlush(ws);
+      return;
+    }
+
+    const frame = queue.shift();
+    try {
+      ws.send(frame);
+    } catch {
+      // Put it back and retry later
+      queue.unshift(frame);
+      bpScheduleFlush(ws);
+      return;
+    }
+  }
+
+  // Drained successfully
+  wsRetry.set(ws, 0);
+}
+
+function bpEnqueue(ws: any, frame: any) {
+  if (!bpIsOpen(ws)) return;
+  let q = wsQueues.get(ws);
+  if (!q) {
+    q = [];
+    wsQueues.set(ws, q);
+  }
+  q.push(frame);
+  bpFlush(ws);
+}
+
+function flattenPackets(packets: any[]): any[] {
+  // shallow-flatten one level to be safe if any packet arrays are nested
+  const out: any[] = [];
+  for (const p of packets) {
+    if (Array.isArray(p)) out.push(...p);
+    else out.push(p);
+  }
+  return out;
+}
+
 import { packetTypes } from "./types";
 import { packetManager } from "./packet_manager";
 import log from "../modules/logger";
@@ -104,30 +191,13 @@ export default async function packetReceiver(
         break;
       }
       case "TIME_SYNC": {
-        sendPacket(ws, packetManager.timeSync(data, ws));
+        if (!currentPlayer) return;
+        currentPlayer.lastUpdated = performance.now();
         break;
       }
       // TODO:Move this to the auth packet
-      case "AUTH": {
+      case "AUTH": {      
         const token = data?.toString();
-        // Check if session already exists
-        const session = (await player.getSessionId(token)) as any[];
-        const session_id = session[0]?.session_id;
-        if (session_id) {
-          log.debug(`Session found for token: ${token}`);
-          // Find player in cache and close the connection and remove from cache
-          const existingPlayer = playerCache.get(session_id);
-          if (existingPlayer) {
-            existingPlayer.ws.close(1008, "Already logged in");
-            playerCache.remove(existingPlayer.id);
-            log.debug(`Existing player connection closed: ${existingPlayer.username}`); // Log the username of the disconnected player
-          } else {
-            log.debug(`No existing player connection found for session_id: ${session_id}`);
-          }
-        } else {
-          log.error(`Session not found for token: ${token}`);
-        }
-        // Authenticate the player
         const auth = await player.setSessionId(token, ws.data.id);
         if (!auth) {
           sendPacket(ws, packetManager.loginFailed());
@@ -202,7 +272,7 @@ export default async function packetReceiver(
             map: `${location.map}.json`,
             x: position.x || 0,
             y: position.y || 0,
-            direction: position.direction,
+            direction: position?.direction || "down",
           };
         }
         const map =
@@ -269,6 +339,8 @@ export default async function packetReceiver(
           party: partyMembers,
           currency: playerCurrency,
           isGuest,
+          created: performance.now(),
+          lastUpdated: performance.now(),
         });
         log.debug(
           `Spawn location for ${username}: ${spawnLocation.map.replace(
@@ -296,7 +368,7 @@ export default async function packetReceiver(
               map: p.location.map,
               x: p.location.position.x || 0,
               y: p.location.position.y || 0,
-              direction: p.location.position.direction,
+              direction: p.location.position?.direction || "down",
             },
             username: p.username,
             isAdmin: p.isAdmin,
@@ -349,20 +421,31 @@ export default async function packetReceiver(
             };
             sendPacket(p.ws, packetManager.spawnPlayer(spawnForOther));
           }
-          if (position.direction && ws.data.id === p.id) {
-            sendPositionAnimation(p.ws, position.direction, false);
+          if (position?.direction && ws.data.id === p.id) {
+            // self only
+            await sendAnimationTo(
+              ws,
+              getAnimationNameForDirection(position.direction, false),
+              ws.data.id
+            );
+            for (const other of playersOnMap) {
+              if (other.id !== ws.data.id && other.ws) {
+                await sendAnimationTo(
+                  other.ws,
+                  getAnimationNameForDirection(position.direction, false),
+                  ws.data.id
+                );
+              }
+            }
           }
         }
         if (playerDataForLoad.length > 0) {
-          playerDataForLoad.forEach((pl) => {
+          playerDataForLoad.forEach(async (pl) => {
             if (pl.id !== ws.data.id && pl.location.direction) {
               const pcache = playerCache.get(pl.id);
-              sendAnimation(
+              await sendAnimationTo(
                 ws,
-                getAnimationNameForDirection(
-                  pl.location.direction,
-                  pcache?.moving
-                ),
+                getAnimationNameForDirection(pl.location.direction, !!pcache?.moving),
                 pl.id
               );
             }
@@ -504,7 +587,7 @@ export default async function packetReceiver(
         const targetFPS = 60;
         const frameTime = 1000 / targetFPS;
         const lastDirection =
-          currentPlayer.location.position.direction || "down";
+          currentPlayer.location.position?.direction || "down";
         currentPlayer.moving = true;
 
         const direction = data.toString().toLowerCase();
@@ -533,7 +616,7 @@ export default async function packetReceiver(
 
         if (!directions.includes(direction)) return;
 
-        currentPlayer.location.position.direction = direction;
+        currentPlayer.location.position.direction = direction || "down";
         sendPositionAnimation(ws, direction, true);
 
         if (currentPlayer.movementInterval) {
@@ -623,7 +706,7 @@ export default async function packetReceiver(
                 {
                   x: warp.position.x || 0,
                   y: warp.position.y || 0,
-                  direction: currentPlayer.location.position.direction,
+                  direction: currentPlayer.location.position?.direction || "down",
                 }
               );
 
@@ -638,7 +721,7 @@ export default async function packetReceiver(
                   map: warp.map.replace(".json", ""),
                   x: warp.position.x || 0,
                   y: warp.position.y || 0,
-                  direction: currentPlayer.location.position.direction,
+                  direction: currentPlayer.location.position?.direction || "down",
                 };
 
                 if (currentMap !== warp.map) {
@@ -921,10 +1004,10 @@ export default async function packetReceiver(
               _data: currentPlayer.location.position,
             };
 
-            if (currentPlayer.location.position.direction) {
+            if (currentPlayer.location.position?.direction) {
               sendPositionAnimation(
                 ws,
-                currentPlayer.location.position.direction,
+                currentPlayer.location.position?.direction,
                 false
               );
               sendPacket(player.ws, packetManager.moveXY(moveXYData));
@@ -1365,7 +1448,7 @@ export default async function packetReceiver(
             targetPlayer.location.position = {
               x: currentPlayer.location.position.x,
               y: currentPlayer.location.position.y,
-              direction: targetPlayer.location.position.direction,
+              direction: targetPlayer.location.position?.direction || "down",
             };
 
             // Update the target player's position in the cache
@@ -2395,7 +2478,7 @@ export default async function packetReceiver(
                 {
                   x: 0,
                   y: 0,
-                  direction: currentPlayer.location.position.direction,
+                  direction: currentPlayer.location.position?.direction || "down",
                 }
               );
               // Check affected rows only if result is an object with affectedRows property
@@ -2409,7 +2492,7 @@ export default async function packetReceiver(
                   map: mapName,
                   x: 0,
                   y: 0,
-                  direction: currentPlayer.location.position.direction,
+                  direction: currentPlayer.location.position?.direction || "down",
                 };
 
                 sendPacket(ws, packetManager.reconnect());
@@ -3146,10 +3229,11 @@ function tryParsePacket(data: any) {
   }
 }
 
-function sendPacket(ws: any, packets: any[]) {
-  packets.forEach((packet) => {
-    ws.send(packet);
-  });
+function sendPacket(ws: any, packets: any[] | any) {
+  const list = Array.isArray(packets) ? flattenPackets(packets) : [packets];
+  for (const pkt of list) {
+    bpEnqueue(ws, pkt);
+  }
 }
 
 async function sendAnimation(ws: any, name: string, playerId?: string) {
@@ -3231,4 +3315,21 @@ function normalizeDirection(direction: string): string {
     default:
       return "down"; // safe fallback
   }
+}
+
+async function sendAnimationTo(targetWs: any, name: string, playerId?: string) {
+  const targetPlayer = playerCache.get(playerId || targetWs.data.id);
+  if (!targetPlayer) return;
+
+  const animationData = await getAnimation(name);
+  if (!animationData) return;
+
+  const animationPacketData = {
+    id: targetPlayer.id,
+    name,
+    data: animationData.data,
+  };
+
+  // send only to this client
+  sendPacket(targetWs, packetManager.animation(animationPacketData));
 }

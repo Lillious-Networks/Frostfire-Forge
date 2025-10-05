@@ -23,7 +23,7 @@ event.on("online", (data) => {
   // Save loop runs every 1 minute
   setInterval(() => {
     listener.emit("onSave");
-  }, 60000);
+  }, 5000);
   // Update every 1 second
   setInterval(() => {
     listener.emit("onServerTick");

@@ -58,6 +58,7 @@ socket.onmessage = async (event) => {
   const type = JSON.parse(packet.decode(event.data))["type"];
   switch (type) {
     case "SERVER_TIME": {
+      sendRequest({type: "TIME_SYNC"});
       if (!data) return;
       updateTime(data);
       break;
@@ -78,7 +79,7 @@ socket.onmessage = async (event) => {
       break;
     }
     case "UPDATE_FRIENDS": {
-        const currentPlayer = cache.players.find((player) => player.id === cachedPlayerId);
+        const currentPlayer = cache.players.size ? Array.from(cache.players).find(p => p.id === cachedPlayerId) : null;
         if (currentPlayer) {
           currentPlayer.friends = data.friends || [];
           updateFriendsList(data);
@@ -90,7 +91,7 @@ socket.onmessage = async (event) => {
       break;
     }
     case "UPDATE_PARTY": {
-      const currentPlayer = cache.players.find((player) => player.id === cachedPlayerId);
+      const currentPlayer = cache.players.size ? Array.from(cache.players).find(p => p.id === cachedPlayerId) : null;
       if (currentPlayer) {
         currentPlayer.party = data.members || [];
         createPartyUI(currentPlayer.party);
@@ -128,7 +129,7 @@ socket.onmessage = async (event) => {
 
         if (!(apng instanceof Error) && cache.players) {
           const findPlayer = async () => {
-            const player = cache.players.find(p => p.id === data.id);
+            const player = cache.players.size ? Array.from(cache.players).find(p => p.id === data.id) : null;
             if (player) {
               player.animation = {
                 frames: apng.frames,
@@ -158,16 +159,6 @@ socket.onmessage = async (event) => {
         data: null,
       });
       break;
-
-    case "TIME_SYNC": {
-      setTimeout(async () => {
-        sendRequest({
-              type: "TIME_SYNC",
-              data: data,
-        });
-      }, 5000);
-      break;
-    }
     case "CONNECTION_COUNT": {
       onlinecount.innerText = `${data} online`;
       break;
@@ -185,21 +176,33 @@ socket.onmessage = async (event) => {
       await isLoaded();
       if (!data) return;
       // Clear existing players that are not the current player
-      cache.players.forEach((player, index) => {
+      cache.players.forEach((player) => {
         if (player.id !== cachedPlayerId) {
-          cache.players.splice(index, 1);
+            cache.players.delete(player);
         }
       });
 
       data.forEach((player: any) => {
         if (player.id != cachedPlayerId) {
           // Check if the player is already created and remove it
-          cache.players.forEach((p, index) => {
+          cache.players.forEach((p) => {
             if (p.id === player.id) {
-              cache.players.splice(index, 1);
+              cache.players.delete(p);
             }
           });
           createPlayer(player);
+        }
+      });
+      break;
+    }
+    case "DISCONNECT_MALIFORMED": {
+      if (!data) return;
+      const arrayToDisconnect = Array.isArray(data) ? data : [data];
+      arrayToDisconnect.forEach((playerData) => {
+        console.log(`Player ${playerData.id} disconnected (malformed packet)`);
+        const player = Array.from(cache.players).find(player => player.id === playerData.id);
+        if (player) {
+          cache.players.delete(player);
         }
       });
       break;
@@ -211,22 +214,18 @@ socket.onmessage = async (event) => {
       updateFriendOnlineStatus(data.username, false);
 
       // Remove player from the array
-      const index = cache.players.findIndex(player => player.id === data.id);
-      if (index !== -1) {
-        //const wasTargeted = players[index].targeted;
-
-        cache.players.splice(index, 1); // Remove from array
-
+      const player = Array.from(cache.players).find(player => player.id === data.id);
+      if (player) {
+        cache.players.delete(player);
+      }
         // If they were targeted, hide target stats
         // if (wasTargeted) {
         //   displayElement(targetStats, false);
         // }
-      }
-
       break;
     }
     case "MOVEXY": {
-      const player = cache.players.find((player) => player.id === data.id);
+      const player = Array.from(cache.players).find((player) => player.id === data.id);
       if (!player) return;
 
       // Handle movement abort
@@ -880,7 +879,7 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
           // Escape HTML tags before setting chat message
           player.chat = data.message;
           // Username with first letter uppercase
-          const username = data?.username?.charAt(0).toUpperCase() + data?.username?.slice(1);
+          const username = data?.username?.charAt(0)?.toUpperCase() + data?.username?.slice(1);
           const timestamp = new Date().toLocaleTimeString();
           // Update chat box
           if (data.message?.trim() !== "" && username) {
@@ -931,7 +930,7 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
       break;
     }
     case "STATS": {
-      const player = cache.players.find((player) => player.id === data.id);
+      const player = Array.from(cache.players).find((player) => player.id === data.id);
       if (!player) return;
       updateXp(data.xp, data.level, data.max_xp);
       player.stats = data;
@@ -961,7 +960,7 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
       const data = JSON.parse(packet.decode(event.data))["data"];
 
       if (!data || !data.id || !data.username) {
-        const target = cache.players.find(p => p.targeted);
+        const target = Array.from(cache.players).find(p => p.targeted);
         if (target) target.targeted = false;
         //displayElement(targetStats, false);
         break;
@@ -976,7 +975,7 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
     }
     case "STEALTH": {
       const data = JSON.parse(packet.decode(event.data))["data"];
-      const currentPlayer = cache.players.find(
+      const currentPlayer = Array.from(cache.players).find(
         (player) => player.id === cachedPlayerId || player.id === cachedPlayerId
       );
 
@@ -1004,7 +1003,7 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
     }
     case "UPDATESTATS": {
       const { target, stats } = JSON.parse(packet.decode(event.data))["data"];
-      const t = cache.players.find((player) => player.id === target);
+      const t = Array.from(cache.players).find((player) => player.id === target);
       if (t) {
         t.stats = stats;
       }
@@ -1012,7 +1011,7 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
     }
     case "REVIVE": {
       const data = JSON.parse(packet.decode(event.data))["data"];
-      const target = cache.players.find((player) => player.id === data.target);
+      const target = Array.from(cache.players).find((player) => player.id === data.target);
       if (!target) return;
 
       target.stats = data.stats;
@@ -1076,7 +1075,7 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
         message.classList.add("message");
         message.style.userSelect = "text";
         // Username with first letter uppercase
-        const username = data.username.charAt(0).toUpperCase() + data.username.slice(1);
+        const username = data?.username?.charAt(0)?.toUpperCase() + data?.username?.slice(1);
         message.innerHTML = `${timestamp} <span class="whisper-username">${username}:</span> <span class="whisper-message">${escapedMessage}</span>`;
         chatMessages.appendChild(message);
         // Scroll to the bottom of the chat messages
@@ -1095,7 +1094,7 @@ const loadTilesets = async (tilesets: any[]): Promise<HTMLImageElement[]> => {
         message.classList.add("message");
         message.style.userSelect = "text";
         // Username with first letter uppercase
-        const username = data.username.charAt(0).toUpperCase() + data.username.slice(1);
+        const username = data?.username?.charAt(0)?.toUpperCase() + data?.username?.slice(1);
         message.innerHTML = `${timestamp} <span class="party-username">${username}:</span> <span class="party-message">${escapedMessage}</span>`;
         chatMessages.appendChild(message);
         // Scroll to the bottom of the chat messages

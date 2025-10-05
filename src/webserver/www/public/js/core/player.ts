@@ -213,7 +213,7 @@ async function createPlayer(data: any) {
       // Draw the player's username
       context.textAlign = "center";
 
-      const currentPlayer = cache.players.find(player => player.id === cachedPlayerId);
+      const currentPlayer = cache.players.size ? Array.from(cache.players).find(p => p.id === cachedPlayerId) : null;
       if (!currentPlayer) return;
       
       // Determine color for player name
@@ -249,12 +249,26 @@ async function createPlayer(data: any) {
       context.shadowBlur = 2;
       context.shadowOffsetX = 0;
       context.strokeStyle = "black";
-      
-      // Uppercase the first letter of the username
-      if (this.isGuest) {
+
+      const isGuest = this?.isGuest;
+      if (isGuest) {
         data.username = "Guest";
       } else {
-        data.username = data.username.charAt(0).toUpperCase() + data.username.slice(1);
+        const u = data?.username;
+        if (!u) {
+          // Clear cookies and session storage, then reload the page because we have no username due to an error
+          console.error("No username found, logging out for safety.");
+          // Clear all cookies
+          document.cookie.split(";").forEach(function(c) {
+            document.cookie = c.trim().split("=")[0] + "=;expires=Thu, 01 Jan 1970 00:00:00 GMT";
+          });
+          // Clear session storage
+          sessionStorage.clear();
+
+          window.location.href = "/";
+        } else {
+          data.username = data.username.charAt(0).toUpperCase() + data.username.slice(1);
+        }
       }
 
       context.strokeText(
@@ -331,7 +345,7 @@ async function createPlayer(data: any) {
     },
   };
 
-  cache.players.push(player);
+  cache.players.add(player);
 
   player.animation = await animationPromise;
 
