@@ -211,7 +211,8 @@ const Server = Bun.serve<Packet, any>({
         const parsedMessage = JSON.parse(message.toString());
         const packetType = parsedMessage?.type;
 
-        if (packetType === "MOVEXY") {
+        const processImmediately = ["TIME_SYNC", "MOVEXY", "STATS", "SERVER_TIME", "ANIMATION"];
+        if (processImmediately.includes(packetType)) {
           // Process immediately, independent of backpressure/ratelimit
           packetReceiver(null, ws, message.toString());
           return;

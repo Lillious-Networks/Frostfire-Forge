@@ -1,5 +1,5 @@
 import query from "../controllers/sqldatabase";
-import { randomBytes, verify } from "../modules/hash";
+import { verify, randomBytes } from "../modules/hash";
 import log from "../modules/logger";
 import assetCache from "../services/assetCache";
 import * as settings from "../../config/settings.json";
@@ -247,7 +247,7 @@ const player = {
       return;
     }
 
-    // Use existing token or generate new one
+    // Use existing token and check validity or generate new one
     const token = response[0].token || (await player.setToken(username));
 
     log.debug(`User ${username} logged in`);
@@ -312,11 +312,13 @@ const player = {
   setToken: async (username: string) => {
     const token = randomBytes(32);
     if (!username || !token) return;
+    // Store the token value in the database
     const response = await query(
       "UPDATE accounts SET token = ? WHERE username = ?",
       [token, username]
     );
     if (!response) return;
+    // Return the hashed token for client use
     return token;
   },
   isOnline: async (username: string) => {

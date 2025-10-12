@@ -1,89 +1,3 @@
-const BP_MAX_BUFFER_SIZE = 16 * 1024 * 1024; // keep in sync with Server.ts (16MB)
-const BP_BASE_DELAY_MS = 50;
-const BP_MAX_DELAY_MS = 500;
-const wsQueues = new WeakMap<any, any[]>();          // ws -> queued frames
-const wsRetry   = new WeakMap<any, number>();        // ws -> retry count
-const wsTimers  = new WeakMap<any, ReturnType<typeof setTimeout>>(); // ws -> timer
-
-function bpIsOpen(ws: any): boolean {
-  return ws && typeof ws.readyState !== "undefined" && ws.readyState === WebSocket.OPEN;
-}
-
-function bpScheduleFlush(ws: any) {
-  if (!bpIsOpen(ws)) return;
-  if (wsTimers.get(ws)) return; // timer already scheduled
-
-  const retry = wsRetry.get(ws) || 0;
-  const delay = Math.min(BP_BASE_DELAY_MS + retry * BP_BASE_DELAY_MS, BP_MAX_DELAY_MS);
-
-  const t = setTimeout(() => {
-    wsTimers.delete(ws);
-    wsRetry.set(ws, (wsRetry.get(ws) || 0) + 1);
-    bpFlush(ws);
-  }, delay);
-
-  wsTimers.set(ws, t);
-}
-
-function bpFlush(ws: any) {
-  // If socket is closed, drop state
-  if (!bpIsOpen(ws)) {
-    const t = wsTimers.get(ws);
-    if (t) clearTimeout(t);
-    wsTimers.delete(ws);
-    wsQueues.delete(ws);
-    wsRetry.delete(ws);
-    return;
-  }
-
-  const queue = wsQueues.get(ws);
-  if (!queue || queue.length === 0) {
-    wsRetry.set(ws, 0); // reset retries on drain
-    return;
-  }
-
-  // Send until we hit backpressure or drain the queue
-  while (queue.length > 0) {
-    if (ws.bufferedAmount > BP_MAX_BUFFER_SIZE) {
-      bpScheduleFlush(ws);
-      return;
-    }
-
-    const frame = queue.shift();
-    try {
-      ws.send(frame);
-    } catch {
-      // Put it back and retry later
-      queue.unshift(frame);
-      bpScheduleFlush(ws);
-      return;
-    }
-  }
-
-  // Drained successfully
-  wsRetry.set(ws, 0);
-}
-
-function bpEnqueue(ws: any, frame: any) {
-  if (!bpIsOpen(ws)) return;
-  let q = wsQueues.get(ws);
-  if (!q) {
-    q = [];
-    wsQueues.set(ws, q);
-  }
-  q.push(frame);
-  bpFlush(ws);
-}
-
-function flattenPackets(packets: any[]): any[] {
-  // shallow-flatten one level to be safe if any packet arrays are nested
-  const out: any[] = [];
-  for (const p of packets) {
-    if (Array.isArray(p)) out.push(...p);
-    else out.push(p);
-  }
-  return out;
-}
 
 import { packetTypes } from "./types";
 import { packetManager } from "./packet_manager";
@@ -421,16 +335,22 @@ export default async function packetReceiver(
             };
             sendPacket(p.ws, packetManager.spawnPlayer(spawnForOther));
           }
-          if (position?.direction) {
-            const animName = getAnimationNameForDirection(position.direction, false);
-            if (p.ws === ws) {
-              setImmediate(() => {
-                sendAnimation(ws, animName, ws.data.id);
-              });
+          if (position?.direction && ws.data.id === p.id) {
+            // self only
+            await sendAnimationTo(
+              ws,
+              getAnimationNameForDirection(position.direction, false),
+              ws.data.id
+            );
+            for (const other of playersOnMap) {
+              if (other.id !== ws.data.id && other.ws) {
+                await sendAnimationTo(
+                  other.ws,
+                  getAnimationNameForDirection(position.direction, false),
+                  ws.data.id
+                );
+              }
             }
-            setImmediate(() => {
-              sendAnimationTo(p.ws, animName, ws.data.id);
-            });
           }
         }
         if (playerDataForLoad.length > 0) {
@@ -3223,11 +3143,10 @@ function tryParsePacket(data: any) {
   }
 }
 
-function sendPacket(ws: any, packets: any[] | any) {
-  const list = Array.isArray(packets) ? flattenPackets(packets) : [packets];
-  for (const pkt of list) {
-    bpEnqueue(ws, pkt);
-  }
+function sendPacket(ws: any, packets: any[]) {
+  packets.forEach((packet) => {
+    ws.send(packet);
+  });
 }
 
 async function sendAnimation(ws: any, name: string, playerId?: string) {

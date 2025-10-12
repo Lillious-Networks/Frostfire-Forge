@@ -1,4 +1,3 @@
-import UglyifyJS from 'uglify-js';
 import path from "path";
 import fs from "fs";
 import log from "../modules/logger";
@@ -41,9 +40,7 @@ function transpileDirectory(sourceDir: string) {
             let replacedResult = result; // copy result to new variable to edit it
             envVars.forEach((env) => replacedResult = replacedResult.replaceAll(env.key, env.value || env.defaultvalue) );
 
-            const minifiedResult = UglyifyJS.minify(replacedResult);
-
-            fs.writeFileSync(outputFile, minifiedResult.code);
+            fs.writeFileSync(outputFile, replacedResult);
         } else {
             console.error(`Failed to transpile ${script}`);
         }
