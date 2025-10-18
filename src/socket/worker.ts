@@ -4,9 +4,9 @@ const packetQueue = new Map<string, (() => void)[]>();
 import crypto from "crypto";
 import { packetManager } from "./packet_manager.ts";
 import packetReceiver from "./receiver.ts";
-export const listener = new eventEmitter();
-import { event } from "../systems/events";
 import eventEmitter from "node:events";
+export const listener = new eventEmitter();
+const event = new eventEmitter();
 import log from "../modules/logger";
 import player from "../systems/player";
 import playerCache from "../services/playermanager.ts";
@@ -64,13 +64,15 @@ const ClientRateLimit = [] as ClientRateLimit[];
 
 const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
 
+const WORKER_ID = parseInt(process.env.WORKER_ID || "0");
+const WORKER_PORT = parseInt(process.env.WORKER_PORT || "3000");
+
 const Server = Bun.serve<Packet, any>({
+  port: WORKER_PORT,
+  reusePort: true,
   fetch(req, Server) {
-    // Upgrade the request to a WebSocket connection
-    // and generate a random id for the client
     const id = crypto.randomBytes(32).toString("hex");
     const useragent = req.headers.get("user-agent");
-    // Base64 encode the public key
     const chatDecryptionKey = keyPair.publicKey;
     if (!useragent) {
       log.error(`User-Agent header is missing for client with id: ${id}`);
@@ -87,14 +89,13 @@ const Server = Bun.serve<Packet, any>({
   },
   tls: options,
   websocket: {
-    perMessageDeflate: false, // Enable per-message deflate compression
-    maxPayloadLength: 1024 * 1024 * settings?.websocket?.maxPayloadMB || 1024 * 1024, // 1MB
-    // Seconds to wait for the connection to close
+    perMessageDeflate: false,
+    maxPayloadLength: 1024 * 1024 * settings?.websocket?.maxPayloadMB || 1024 * 1024,
     idleTimeout: settings?.websocket?.idleTimeout || 5,
     async open(ws: any) {
-      console.log(`New Connection: ${ws.data.id} - ${ws.data.useragent}`);
+      console.log(`Worker ${WORKER_ID}: New Connection: ${ws.data.id} - ${ws.data.useragent}`);
       ws.binaryType = "arraybuffer";
-      // Add the client to the set of connected clients
+
       if (!ws.data?.id || !ws.data?.useragent || !ws.data?.chatDecryptionKey) {
         log.error(`WebSocket connection missing identity information. Closing connection.`);
         ws.close(1000, "Missing identity information");
@@ -103,9 +104,8 @@ const Server = Bun.serve<Packet, any>({
 
       connections.add({ id: ws.data.id, useragent: ws.data.useragent, chatDecryptionKey: ws.data.chatDecryptionKey });
       packetQueue.set(ws.data.id, []);
-      // Emit the onConnection event
       listener.emit("onConnection", ws.data.id);
-      // Add the client to the clientRequests array
+
       if (settings?.websocketRatelimit?.enabled) {
         ClientRateLimit.push({
           id: ws.data.id,
@@ -114,15 +114,14 @@ const Server = Bun.serve<Packet, any>({
           time: null,
           windowTime: 0,
         });
-      // Track the clients window time and reset the requests count
-      // if the window time is greater than the max window time
+
       setInterval(() => {
         const index = ClientRateLimit.findIndex(
           (client) => client.id === ws.data.id
         );
         if (index === -1) return;
         const client = ClientRateLimit[index];
-        // Return if the client is rate limited
+
         if (client.rateLimited) {
           client.requests = 0;
           client.windowTime = 0;
@@ -136,16 +135,13 @@ const Server = Bun.serve<Packet, any>({
       }, 1000);
     }
 
-      // Subscribe to the CONNECTION_COUNT event and publish the current count
       ws.subscribe("CONNECTION_COUNT" as Subscription["event"]);
       ws.subscribe("BROADCAST" as Subscription["event"]);
       ws.subscribe("DISCONNECT_PLAYER" as Subscription["event"]);
 
-      // Set timeout to 1000 if user agent is an iOS or Mac device due to a bug with Safari not allowing immediate messages
       const timeout = ws.data.useragent.includes("iPhone") || ws.data.useragent.includes("iPad") || ws.data.useragent.includes("Macintosh") ? 1000 : 0;
-      
+
       setTimeout(() => {
-        // Publish the connection count to all clients
         Server.publish(
           "CONNECTION_COUNT" as Subscription["event"],
           packet.encode(JSON.stringify({
@@ -156,11 +152,11 @@ const Server = Bun.serve<Packet, any>({
       }, timeout);
     },
     async close(ws: any, code: number, reason: string) {
-      console.log(`Disconnected: ${ws.data.id} - ${ws.data.useragent} - ${code} - ${reason}`);
-      // Remove the client from the set of connected clients
+      console.log(`Worker ${WORKER_ID}: Disconnected: ${ws.data.id} - ${ws.data.useragent} - ${code} - ${reason}`);
+
       if (!ws.data.id) return;
       packetQueue.delete(ws.data.id);
-      // Find the client object in the set
+
       let clientToDelete;
       for (const client of connections) {
         if (client.id === ws.data.id) {
@@ -168,14 +164,12 @@ const Server = Bun.serve<Packet, any>({
           break;
         }
       }
-      // Check if we found the client object
+
       if (clientToDelete) {
         const deleted = connections.delete(clientToDelete);
         if (deleted) {
-          // Emit the onDisconnect event
           listener.emit("onDisconnect", { id: ws.data.id });
 
-          // Publish the new connection count and unsubscribe from the event
           const _packet = {
             type: "CONNECTION_COUNT",
             data: connections.size,
@@ -185,10 +179,9 @@ const Server = Bun.serve<Packet, any>({
             packet.encode(JSON.stringify(_packet))
           );
           ws.unsubscribe("CONNECTION_COUNT" as Subscription["event"]);
-          // Unsubscribe from the BROADCAST event
           ws.unsubscribe("BROADCAST" as Subscription["event"]);
           ws.unsubscribe("DISCONNECT_PLAYER" as Subscription["event"]);
-          // Remove the client from clientRequests
+
           for (let i = 0; i < ClientRateLimit.length; i++) {
             if (ClientRateLimit[i].id === ws.data.id) {
               ClientRateLimit.splice(i, 1);
@@ -204,16 +197,14 @@ const Server = Bun.serve<Packet, any>({
     },
     async message(ws: any, message: any) {
       try {
-        // Check if the request has an identity and a message and if the message is an ArrayBuffer
         if (!ws.data?.id || !message) return;
-        // Decode the message
+
         message = packet.decode(message);
         const parsedMessage = JSON.parse(message.toString());
         const packetType = parsedMessage?.type;
 
         const processImmediately = ["TIME_SYNC", "MOVEXY", "STATS", "SERVER_TIME", "ANIMATION"];
         if (processImmediately.includes(packetType)) {
-          // Process immediately, independent of backpressure/ratelimit
           packetReceiver(null, ws, message.toString());
           return;
         }
@@ -254,59 +245,67 @@ listener.on("onAwake", async () => {
 // Start event
 listener.on("onStart", async () => {});
 
-// Register the Server as online
-event.emit("online", Server);
+event.emit("online", { port: WORKER_PORT, workerId: WORKER_ID });
+
+listener.emit("onAwake");
+listener.emit("onStart");
+
+setInterval(() => {
+  listener.emit("onUpdate");
+}, 1000 / 60);
+
+setInterval(() => {
+  listener.emit("onFixedUpdate");
+}, 100);
+
+setInterval(() => {
+  listener.emit("onSave");
+}, 60000);
+
+setInterval(() => {
+  listener.emit("onServerTick");
+}, 1000);
 
 // Fixed update loop
 listener.on("onUpdate", async () => {});
 
-// Fixed update loop
 listener.on("onFixedUpdate", async () => {
-  {
-    if (settings?.websocketRatelimit?.enabled) {
-      if (ClientRateLimit.length < 1) return;
-      const timestamp = Date.now();
-      for (let i = 0; i < ClientRateLimit.length; i++) {
-        const client = ClientRateLimit[i];
-        if (client.rateLimited && client.time) {
-          if (timestamp - client.time! > RateLimitOptions.time) {
-            client.rateLimited = false;
-            client.requests = 0;
-            client.time = null;
-            log.debug(`Client with id: ${client.id} is no longer rate limited`);
-          }
+  if (settings?.websocketRatelimit?.enabled) {
+    if (ClientRateLimit.length < 1) return;
+    const timestamp = Date.now();
+    for (let i = 0; i < ClientRateLimit.length; i++) {
+      const client = ClientRateLimit[i];
+      if (client.rateLimited && client.time) {
+        if (timestamp - client.time! > RateLimitOptions.time) {
+          client.rateLimited = false;
+          client.requests = 0;
+          client.time = null;
+          log.debug(`Client with id: ${client.id} is no longer rate limited`);
         }
       }
     }
   }
 });
 
-// Server tick (every 1 second)
 listener.on("onServerTick", async () => {
   const playersObj = playerCache.list() as any;
   const players = Object.values(playersObj) as any[];
 
-  // De-dupe disconnect processing across overlapping ticks
   const inactiveSet = new Set<string>();
-
   const nowEpoch = Date.now();
 
-  // PASS 1: find truly inactive players
   for (const p of players) {
     if (!p || !p.id) continue;
 
-    // Normalize lastUpdated to epoch ms regardless of its source clock:
     const rawLU = typeof p.lastUpdated === "number" ? p.lastUpdated : 0;
     const lastUpdatedEpoch =
-      rawLU > 1e11               // looks like Date.now()
+      rawLU > 1e11
         ? rawLU
-        : rawLU > 0              // looks like performance.now()
+        : rawLU > 0
         ? PROCESS_STARTED_AT + rawLU
-        : nowEpoch;              // if missing, treat as "just updated" to avoid insta-purge
+        : nowEpoch;
 
     const wsClosed = !p.ws || p.ws.readyState !== WebSocket.OPEN;
-
-    // Use a less aggressive idle window; only purge if socket is closed OR idle for >30s
     const tooIdle = (nowEpoch - lastUpdatedEpoch) > 30000;
 
     if (wsClosed || tooIdle) {
@@ -314,7 +313,6 @@ listener.on("onServerTick", async () => {
     }
   }
 
-  // PASS 2: process active players only
   for (const playerData of players) {
     if (!playerData || inactiveSet.has(playerData.id)) continue;
 
@@ -322,7 +320,6 @@ listener.on("onServerTick", async () => {
       playerData.ws.send(packetManager.serverTime()[0])
     );
 
-    // Normalize last_attack as well, then apply same-epoch logic
     const rawLA = typeof playerData.last_attack === "number" ? playerData.last_attack : 0;
     const lastAttackEpoch =
       rawLA > 1e11 ? rawLA :
@@ -358,12 +355,10 @@ listener.on("onServerTick", async () => {
       stats,
     };
 
-    // to self
     handleBackpressure(playerData.ws, () =>
       playerData.ws.send(packetManager.updateStats(updateStatsData)[0])
     );
 
-    // to others on the same map, but skip anyone we marked inactive this tick
     for (const other of players) {
       if (
         other &&
@@ -379,21 +374,15 @@ listener.on("onServerTick", async () => {
       }
     }
   }
-
-  // PASS 3: remove and notify exactly once per inactive id (no O(N×K))
   if (inactiveSet.size > 0) {
     for (const id of inactiveSet) {
-      // 2a) Send the packet the client uses to remove the render
       Server.publish(
         "DISCONNECT_PLAYER" as Subscription["event"],
         packetManager.disconnect(id)[0]
       );
 
-      // 2b) Run the same server-side cleanup as a real close.
-      //     onDisconnect will decrement world counts, persist, clear session, and remove from cache.
       listener.emit("onDisconnect", { id, reason: "inactive" });
 
-      // 2c) Hygiene: drop queued actions & rate-limit entry for this id
       packetQueue.delete(id);
       for (let i = 0; i < ClientRateLimit.length; i++) {
         if (ClientRateLimit[i].id === id) {
@@ -405,14 +394,11 @@ listener.on("onServerTick", async () => {
   }
 });
 
-
-// On new connection
 listener.on("onConnection", (data) => {
   if (!data) return;
   log.debug(`New connection: ${data}`);
 });
 
-// On disconnect
 listener.on("onDisconnect", async (data) => {
   if (!data) return;
 
@@ -420,14 +406,13 @@ listener.on("onDisconnect", async (data) => {
     const playerData = playerCache.get(data.id);
     if (!playerData) return;
 
-    // Ensure worlds are stored/retrieved as JSON array
     let _worlds: WorldData[] = [];
     try {
       const cachedWorlds = await assetCache.get("worlds");
       if (cachedWorlds) {
         _worlds = Array.isArray(cachedWorlds)
           ? cachedWorlds
-          : JSON.parse(cachedWorlds); // handle string case
+          : JSON.parse(cachedWorlds);
       }
     } catch (err) {
       log.error(`[WorldsFetchError] Failed to fetch worlds: ${err}`);
@@ -440,8 +425,6 @@ listener.on("onDisconnect", async (data) => {
 
     if (thisWorld && typeof thisWorld.players === "number" && thisWorld.players > 0) {
       thisWorld.players -= 1;
-
-      // Always set back as JSON string to avoid type mismatch
       await assetCache.set("worlds", JSON.stringify(_worlds));
     }
 
@@ -474,11 +457,9 @@ listener.on("onDisconnect", async (data) => {
   }
 });
 
-// Save loop
 listener.on("onSave", async () => {
+  log.info("Saving player data...");
   const cache = playerCache.list();
-  if (!cache) return;
-  if (Object.keys(cache).length < 1) return;
   for (const p in cache) {
     const row = cache[p];
     if (!row) continue;
@@ -499,7 +480,6 @@ listener.on("onSave", async () => {
   }
 });
 
-// Exported Server events
 export const events = {
   GetOnlineCount() {
     return connections.size;
@@ -524,40 +504,31 @@ export const events = {
 
 
 function handleBackpressure(ws: any, action: () => void, retryCount = 0) {
-  // Check retry limit to avoid infinite retry loop
   if (retryCount > 20) {
     log.warn("Max retries reached. Action skipped to avoid infinite loop.");
     return;
   }
 
-  // Ensure WebSocket is open
   if (ws.readyState !== WebSocket.OPEN) {
     log.warn("WebSocket is not open. Action cannot proceed.");
     return;
   }
 
-  // Ensure there is a packet queue
   const queue = packetQueue.get(ws.data.id);
   if (!queue) {
     log.warn("No packet queue found for WebSocket. Action cannot proceed.");
     return;
   }
 
-  // If there's backpressure, add the current action to the queue and retry later
   if (ws.bufferedAmount > MAX_BUFFER_SIZE) {
-    const retryInterval = Math.min(50 + retryCount * 50, 500); // Capped at 500ms
+    const retryInterval = Math.min(50 + retryCount * 50, 500);
     log.debug(`Backpressure detected. Retrying in ${retryInterval}ms (Attempt ${retryCount + 1})`);
-    
-    // Queue the action to be retried
-    queue.push(action);
 
-    // Retry after backpressure clears
+    queue.push(action);
     setTimeout(() => handleBackpressure(ws, action, retryCount + 1), retryInterval);
   } else {
-    // Process the action if no backpressure, then process all queued actions
     action();
 
-    // Process queued actions while the buffer allows
     while (queue.length > 0 && ws.bufferedAmount <= MAX_BUFFER_SIZE) {
       const nextAction = queue.shift();
       if (nextAction) {

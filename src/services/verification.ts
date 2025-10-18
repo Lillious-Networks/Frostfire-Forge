@@ -1,4 +1,4 @@
-import sendEmail from "../services/email";
+import sendEmail from "./email";
 import log from "../modules/logger";
 import query from "../controllers/sqldatabase";
 

@@ -1,3 +1,4 @@
+import.meta.hot.accept;
 import { config } from "../web/global.js";
 const socket = new WebSocket(config.WEBSOCKET_URL || "ws://localhost:3000");
 import "./events.ts";
@@ -81,6 +82,7 @@ socket.onmessage = async (event) => {
   if (!(event.data instanceof ArrayBuffer)) return;
   const data = JSON.parse(packet.decode(event.data))["data"];
   const type = JSON.parse(packet.decode(event.data))["type"];
+
   switch (type) {
     case "SERVER_TIME": {
       sendRequest({ type: "TIME_SYNC" });
@@ -195,7 +197,7 @@ socket.onmessage = async (event) => {
     case "CONNECTION_COUNT": {
       onlinecount.innerText = `${data} online`;
       break;
-    }
+    } 
     case "SPAWN_PLAYER": {
       await isLoaded();
       createPlayer(data);
@@ -232,7 +234,6 @@ socket.onmessage = async (event) => {
       if (!data) return;
       const arrayToDisconnect = Array.isArray(data) ? data : [data];
       arrayToDisconnect.forEach((playerData) => {
-        console.log(`Player ${playerData.id} disconnected (malformed packet)`);
         const player = Array.from(cache.players).find(
           (player) => player.id === playerData.id
         );
@@ -245,7 +246,6 @@ socket.onmessage = async (event) => {
     case "DISCONNECT_PLAYER": {
       if (!data || !data.id || !data.username) return;
 
-      console.log(`Player (${data.username}) ${data.id} disconnected`);
       updateFriendOnlineStatus(data.username, false);
 
       // Remove player from the array
@@ -295,7 +295,6 @@ socket.onmessage = async (event) => {
     case "CREATE_NPC": {
       await isLoaded();
       if (!data) return;
-      console.log("Creating NPC:", data);
       createNPC(data);
       break;
     }
@@ -993,13 +992,11 @@ socket.onmessage = async (event) => {
       }
       break;
     case "QUESTLOG": {
-      const data = JSON.parse(packet.decode(event.data))["data"];
-      console.log(data);
+      // const data = JSON.parse(packet.decode(event.data))["data"];
       break;
     }
     case "QUESTDETAILS": {
-      const data = JSON.parse(packet.decode(event.data))["data"];
-      console.log(data);
+      // const data = JSON.parse(packet.decode(event.data))["data"];
       break;
     }
     case "CHAT": {
@@ -1247,8 +1244,6 @@ socket.onmessage = async (event) => {
       break;
     }
     case "CURRENCY": {
-      const data = JSON.parse(packet.decode(event.data))["data"];
-      console.log("Currency data received:", data);
       break;
     }
     default:

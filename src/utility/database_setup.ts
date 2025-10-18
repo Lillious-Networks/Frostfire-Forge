@@ -372,6 +372,51 @@ const createCurrencyTable = async () => {
   await query(sql);
 };
 
+// Create indexes for performance optimization
+const createIndexes = async () => {
+  log.info("Creating performance indexes...");
+
+  const indexes = [
+    // Accounts table indexes (most critical for auth queries)
+    "CREATE INDEX idx_accounts_token ON accounts(token)",
+    "CREATE INDEX idx_accounts_session_id ON accounts(session_id)",
+    "CREATE INDEX idx_accounts_username ON accounts(username)",
+    "CREATE INDEX idx_accounts_party_id ON accounts(party_id)",
+
+    // Indexes for JOIN queries in GetPlayerLoginData
+    "CREATE INDEX idx_permissions_username ON permissions(username)",
+    "CREATE INDEX idx_stats_username ON stats(username)",
+    "CREATE INDEX idx_currency_username ON currency(username)",
+    "CREATE INDEX idx_friendslist_username ON friendslist(username)",
+    "CREATE INDEX idx_clientconfig_username ON clientconfig(username)",
+    "CREATE INDEX idx_quest_log_username ON quest_log(username)",
+
+    // Inventory query optimization
+    "CREATE INDEX idx_inventory_username ON inventory(username)",
+    "CREATE INDEX idx_inventory_item ON inventory(item)",
+
+    // Party query optimization
+    "CREATE INDEX idx_parties_id ON parties(id)",
+    "CREATE INDEX idx_parties_leader ON parties(leader)",
+  ];
+
+  for (const indexSql of indexes) {
+    try {
+      await query(indexSql);
+      log.info(`✓ ${indexSql.match(/idx_\w+/)?.[0] || 'Index'} created`);
+    } catch (error: any) {
+      // Index already exists or other error - skip and continue
+      if (error.message?.includes("Duplicate key name")) {
+        log.debug(`Index already exists: ${indexSql.match(/idx_\w+/)?.[0]}`);
+      } else {
+        log.warn(`Could not create index: ${error.message}`);
+      }
+    }
+  }
+
+  log.success("Index creation complete!");
+};
+
 // Run the database setup
 const setupDatabase = async () => {
   await createDatabase();
@@ -399,6 +444,7 @@ const setupDatabase = async () => {
   await createFriendsListTable();
   await createPartiesTable();
   await createCurrencyTable();
+  await createIndexes(); // Add indexes after all tables are created
 };
 
 try {

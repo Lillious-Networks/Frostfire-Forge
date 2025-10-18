@@ -9,19 +9,20 @@ import playerCache from "../services/playermanager.ts";
 import assetCache from "../services/assetCache";
 import { reloadMap } from "../modules/assetloader";
 import language from "../systems/language";
-import questlog from "../systems/questlog";
 import quests from "../systems/quests";
 import generate from "../modules/sprites";
 import friends from "../systems/friends";
-import currency from "../systems/currency";
 import parties from "../systems/parties.ts";
 const maps = await assetCache.get("maps");
 const spritesheets = await assetCache.get("spritesheets");
+const worldsCache = await assetCache.get("worlds") as WorldData[];
+const animationsCache = await assetCache.get("animations");
+const mapPropertiesCache = await assetCache.get("mapProperties");
+const audioCache = await assetCache.get("audio");
 import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 // Load settings
 import * as settings from "../../config/settings.json";
 import { randomBytes } from "../modules/hash";
-import worlds from "../systems/worlds.ts";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 
 let restartScheduled: boolean;
@@ -110,70 +111,80 @@ export default async function packetReceiver(
         break;
       }
       // TODO:Move this to the auth packet
-      case "AUTH": {      
+      case "AUTH": {
         const token = data?.toString();
-        const auth = await player.setSessionId(token, ws.data.id);
-        if (!auth) {
-          sendPacket(ws, packetManager.loginFailed());
-          ws.close(1008, "Already logged in");
-          break;
-        }
-        const getUsername = (await player.getUsernameBySession(
-          ws.data.id
-        )) as any[];
-        const username = getUsername[0]?.username as string;
-        ws.data.username = username;
-        const id = getUsername[0]?.id as string;
-        const [
-          access,
-          itemsRaw,
-          questLogRaw,
-          stats,
-          playerCurrency,
-          friendsList,
-          partyId,
-          clientConfig,
-          location,
-          isAdmin,
-          isGuest,
-          isStealthInitial,
-          isNoclipInitial,
-        ] = await Promise.all([
-          permissions.get(username),
-          inventory.get(username),
-          questlog.get(username),
-          player.getStats(username),
-          currency.get(username),
-          friends.list(username),
-          parties.getPartyId(username),
-          player.getConfig(username),
-          player.getLocation({ username }),
-          player.isAdmin(username),
-          player.isGuest(username),
-          player.isStealth(username),
-          player.isNoclip(username),
-        ]);
-        const items = (itemsRaw || []).slice(0, 30);
-        const incompleteQuest = questLogRaw?.incomplete || [];
-        const completedQuest = questLogRaw?.completed || [];
-        let isStealth = isStealthInitial;
-        let isNoclip = isNoclipInitial;
-        if (!isAdmin && isStealth) {
-          await player.toggleStealth(username);
-          isStealth = false;
-        }
-        if (!isAdmin && isNoclip) {
-          await player.toggleNoclip(username);
-          isNoclip = false;
-        }
-        let partyMembers: string[] = [];
-        if (partyId) {
-          partyMembers = await parties.getPartyMembers(partyId);
-        }
-        sendPacket(ws, packetManager.inventory(items));
-        sendPacket(ws, packetManager.questlog(completedQuest, incompleteQuest));
-        sendPacket(ws, packetManager.clientConfig(clientConfig));
-        const position = location?.position as PositionData;
+
+        // Split AUTH into multiple setImmediate chunks to avoid blocking MOVEXY packets
+        setImmediate(async () => {
+          try {
+            // Chunk 1: Validate auth token and get username
+            const auth = await player.setSessionId(token, ws.data.id);
+            if (!auth) {
+              sendPacket(ws, packetManager.loginFailed());
+              ws.close(1008, "Already logged in");
+              return;
+            }
+            const getUsername = (await player.getUsernameBySession(
+              ws.data.id
+            )) as any[];
+            const username = getUsername[0]?.username as string;
+            ws.data.username = username;
+            const id = getUsername[0]?.id as string;
+
+            // Chunk 2: Get player data (deferred to allow MOVEXY processing)
+            setImmediate(async () => {
+              try {
+                const [playerData, itemsRaw] = await Promise.all([
+                  player.GetPlayerLoginData(username),
+                  inventory.get(username),
+                ]);
+
+                if (!playerData) {
+                  sendPacket(ws, packetManager.loginFailed());
+                  ws.close(1008, "Player data not found");
+                  return;
+                }
+
+                // Chunk 3: Process player data (deferred to allow MOVEXY processing)
+                setImmediate(async () => {
+                  try {
+                    const access = playerData.permissions;
+                    const stats = playerData.stats;
+                    const playerCurrency = playerData.currency;
+                    const friendsList = playerData.friends;
+                    const partyId = playerData.party_id;
+                    const clientConfig = playerData.config;
+                    const location = playerData.location;
+                    const isAdmin = playerData.isAdmin;
+                    const isGuest = playerData.isGuest;
+                    let isStealth = playerData.isStealth;
+                    let isNoclip = playerData.isNoclip;
+
+                    const items = (itemsRaw || []).slice(0, 30);
+                    const incompleteQuest = playerData.questlog?.incomplete || [];
+                    const completedQuest = playerData.questlog?.completed || [];
+
+                    if (!isAdmin && isStealth) {
+                      await player.toggleStealth(username);
+                      isStealth = false;
+                    }
+                    if (!isAdmin && isNoclip) {
+                      await player.toggleNoclip(username);
+                      isNoclip = false;
+                    }
+
+                    let partyMembers: string[] = [];
+                    if (partyId) {
+                      partyMembers = await parties.getPartyMembers(partyId);
+                    }
+
+                    // Chunk 4: Send packets and setup (deferred to allow MOVEXY processing)
+                    setImmediate(async () => {
+                      try {
+                        sendPacket(ws, packetManager.inventory(items));
+                        sendPacket(ws, packetManager.questlog(completedQuest, incompleteQuest));
+                        sendPacket(ws, packetManager.clientConfig(clientConfig));
+            const position = location?.position as PositionData;
         let spawnLocation;
         if (
           !location ||
@@ -195,7 +206,19 @@ export default async function packetReceiver(
         if (!map) return;
         spawnLocation.map = map.name;
 
-        const _worlds = await assetCache.get("worlds") as WorldData[];
+        // Fetch fresh worlds from Redis in a non-blocking way for accurate player counts
+        let _worlds: WorldData[] = worldsCache; // Start with cache as fallback
+        try {
+          const cachedWorlds = await assetCache.get("worlds");
+          if (cachedWorlds) {
+            _worlds = Array.isArray(cachedWorlds)
+              ? cachedWorlds
+              : JSON.parse(cachedWorlds);
+          }
+        } catch (err) {
+          log.error(`[WorldsFetchError] Failed to fetch worlds: ${err}`);
+        }
+
         const thisWorld = _worlds.find(
           (w) => w.name === spawnLocation.map.replace(".json", "")
         );
@@ -205,14 +228,12 @@ export default async function packetReceiver(
           ws.close(1008, "World is full");
           return;
         }
-        // Send weather data
-        const weather =
-          (await worlds.getCurrentWeather(
-            spawnLocation.map.replace(".json", "")
-          )) || null;
+        // Send weather data - use already-fetched thisWorld instead of redundant lookup
+        const weather = thisWorld?.weather || "clear";
         if (weather) {
           sendPacket(ws, packetManager.weather({ weather }));
         }
+
         await player.setLocation(
           ws.data.id,
           spawnLocation.map.replace(".json", ""),
@@ -222,6 +243,7 @@ export default async function packetReceiver(
             direction: spawnLocation.direction || "down",
           }
         );
+
         playerCache.add(ws.data.id, {
           username,
           animation: null,
@@ -256,12 +278,7 @@ export default async function packetReceiver(
           created: performance.now(),
           lastUpdated: performance.now(),
         });
-        log.debug(
-          `Spawn location for ${username}: ${spawnLocation.map.replace(
-            ".json",
-            ""
-          )} at ${spawnLocation.x},${spawnLocation.y}`
-        );
+
         const mapData = [
           map?.compressed,
           spawnLocation?.map,
@@ -270,6 +287,7 @@ export default async function packetReceiver(
           position?.direction || "down",
         ];
         sendPacket(ws, packetManager.loadMap(mapData));
+
         const allPlayers = playerCache.list() as Record<string, any>;
         const currentPlayerData = allPlayers[ws.data.id];
         const playersOnMap = filterPlayersByMap(spawnLocation.map);
@@ -293,58 +311,70 @@ export default async function packetReceiver(
           });
         }
         sendPacket(ws, packetManager.loadPlayers(playerDataForLoad));
-        const spawnDataForAll = {
-          id: ws.data.id,
-          userid: id,
-          location: {
-            map: spawnLocation.map,
-            x: spawnLocation.x || 0,
-            y: spawnLocation.y || 0,
-            direction: spawnLocation.direction,
-          },
-          username,
-          isAdmin,
-          isGuest,
-          isStealth,
-          stats,
-          animation: null,
-          friends: friendsList,
-          party: partyMembers,
-          currency: playerCurrency,
-        };
-        for (const p of playersOnMap) {
-          if (!p || !p.ws) continue;
-          if (p.ws === ws) {
-            sendPacket(p.ws, packetManager.spawnPlayer(spawnDataForAll));
-          } else {
-            const spawnForOther = {
-              id: ws.data.id,
-              userid: id,
-              location: {
-                map: spawnLocation.map,
-                x: spawnLocation.x || 0,
-                y: spawnLocation.y || 0,
-                direction: spawnLocation.direction,
-              },
-              username,
-              isAdmin,
-              isGuest,
-              isStealth,
-              stats,
-              animation: null,
-            };
-            sendPacket(p.ws, packetManager.spawnPlayer(spawnForOther));
+
+        // Broadcast player spawn to all players - split into separate ticks
+        // Tick 1: Send spawn packets
+        setImmediate(() => {
+          const spawnDataForAll = {
+            id: ws.data.id,
+            userid: id,
+            location: {
+              map: spawnLocation.map,
+              x: spawnLocation.x || 0,
+              y: spawnLocation.y || 0,
+              direction: spawnLocation.direction,
+            },
+            username,
+            isAdmin,
+            isGuest,
+            isStealth,
+            stats,
+            animation: null,
+            friends: friendsList,
+            party: partyMembers,
+            currency: playerCurrency,
+          };
+
+          // Send spawn packets to all players (O(N))
+          for (const p of playersOnMap) {
+            if (!p || !p.ws) continue;
+            if (p.ws === ws) {
+              sendPacket(p.ws, packetManager.spawnPlayer(spawnDataForAll));
+            } else {
+              const spawnForOther = {
+                id: ws.data.id,
+                userid: id,
+                location: {
+                  map: spawnLocation.map,
+                  x: spawnLocation.x || 0,
+                  y: spawnLocation.y || 0,
+                  direction: spawnLocation.direction,
+                },
+                username,
+                isAdmin,
+                isGuest,
+                isStealth,
+                stats,
+                animation: null,
+              };
+              sendPacket(p.ws, packetManager.spawnPlayer(spawnForOther));
+            }
           }
-          if (position?.direction && ws.data.id === p.id) {
-            // self only
-            await sendAnimationTo(
+        });
+
+        // Tick 2: Send new player's animation to all players
+        setImmediate(() => {
+          if (position?.direction) {
+            // Send animation to self
+            sendAnimationTo(
               ws,
               getAnimationNameForDirection(position.direction, false),
               ws.data.id
             );
+            // Send animation to all other players
             for (const other of playersOnMap) {
               if (other.id !== ws.data.id && other.ws) {
-                await sendAnimationTo(
+                sendAnimationTo(
                   other.ws,
                   getAnimationNameForDirection(position.direction, false),
                   ws.data.id
@@ -352,44 +382,48 @@ export default async function packetReceiver(
               }
             }
           }
-        }
-        if (playerDataForLoad.length > 0) {
-          playerDataForLoad.forEach(async (pl) => {
-            if (pl.id !== ws.data.id && pl.location.direction) {
-              const pcache = playerCache.get(pl.id);
-              await sendAnimationTo(
-                ws,
-                getAnimationNameForDirection(pl.location.direction, !!pcache?.moving),
-                pl.id
-              );
-            }
-          });
-        }
+        });
+
+        // Tick 3: Send existing players' animations to new player
         setImmediate(() => {
-          for (const [, p] of Object.entries(allPlayers)) {
-            const playerObj = p as any;
-            if (!playerObj.ws || playerObj.ws.id === ws.data.id) continue;
-            const isFriendOfNew = (currentPlayerData.friends || []).some(
-              (f: any) => f === playerObj.username
+          if (playerDataForLoad.length > 0) {
+            playerDataForLoad.forEach((pl) => {
+              if (pl.id !== ws.data.id && pl.location.direction) {
+                const pcache = playerCache.get(pl.id);
+                sendAnimationTo(
+                  ws,
+                  getAnimationNameForDirection(pl.location.direction, !!pcache?.moving),
+                  pl.id
+                );
+              }
+            });
+          }
+        });
+        setImmediate(() => {
+          // Only iterate through the new player's friends list instead of all players
+          const newPlayerFriends = currentPlayerData.friends || [];
+          for (const friendUsername of newPlayerFriends) {
+            // Find if this friend is online
+            const onlineFriend = Object.values(allPlayers).find(
+              (p: any) => p.username === friendUsername && p.ws
             );
-            const isFriendOfOther = (playerObj.friends || []).some(
-              (f: any) => f === currentPlayerData.username
-            );
-            if (isFriendOfNew) {
+
+            if (onlineFriend) {
+              // Notify the friend that the new player is online
               sendPacket(
-                playerObj.ws,
+                onlineFriend.ws,
                 packetManager.updateOnlineStatus({
                   online: true,
                   username: currentPlayerData.username,
                 })
               );
-            }
-            if (isFriendOfOther) {
+
+              // Notify the new player that this friend is online
               sendPacket(
                 currentPlayerData.ws,
                 packetManager.updateOnlineStatus({
                   online: true,
-                  username: playerObj.username,
+                  username: onlineFriend.username,
                 })
               );
             }
@@ -441,11 +475,10 @@ export default async function packetReceiver(
             sendPacket(ws, npcPackets);
           }
         });
-        setImmediate(async () => {
-          const audioAssets = await assetCache.get("audio");
+        setImmediate(() => {
           const musicData = {
             name: "music_entry",
-            data: audioAssets.find((a: SoundData) => a.name === "music_entry"),
+            data: audioCache.find((a: SoundData) => a.name === "music_entry"),
           };
           if (!musicData.data) {
             sendPacket(
@@ -460,18 +493,41 @@ export default async function packetReceiver(
           }
         });
 
-        // Increase player count in the world
-
+        // Increase player count in the world (non-blocking)
         if (thisWorld) {
           thisWorld.players = (thisWorld.players || 0) + 1;
-          await assetCache.set("worlds", _worlds);
+          // Don't await - let Redis write happen in background
+          // Use JSON.stringify for consistency with onDisconnect handler
+          assetCache.set("worlds", JSON.stringify(_worlds)).catch(err =>
+            log.error(`Failed to update world player count: ${err}`)
+          );
         }
         console.log(
           `World: ${spawnLocation.map.replace(".json", "")} now has ${
             thisWorld?.players || 0
           } players.`
         );
-        break;
+              } catch (e) {
+                log.error(`AUTH packet processing error (chunk 4): ${e}`);
+                ws.close(1011, "Internal error during authentication");
+              }
+            });
+          } catch (e) {
+            log.error(`AUTH packet processing error (chunk 3): ${e}`);
+            ws.close(1011, "Internal error during authentication");
+          }
+        });
+        } catch (e) {
+          log.error(`AUTH packet processing error (chunk 2): ${e}`);
+          ws.close(1011, "Internal error during authentication");
+        }
+      });
+    } catch (e) {
+      log.error(`AUTH packet processing error (chunk 1): ${e}`);
+      ws.close(1011, "Internal error during authentication");
+    }
+  });
+  break;
       }
       // TODO:Move this to the logout packet
       case "LOGOUT": {
@@ -591,7 +647,8 @@ export default async function packetReceiver(
             {
               width: playerWidth,
               height: playerHeight,
-            }
+            },
+            mapPropertiesCache // Pass cached mapProperties to avoid Redis calls
           );
 
           const isColliding = collision?.value === true;
@@ -1011,12 +1068,9 @@ export default async function packetReceiver(
           currentPlayer.stats.stamina = 0;
         }
 
-        const audio = await assetCache.get("audio") as SoundData[];
         const audioData = {
           name: "attack_sword",
-          data: audio.find(
-            (a: SoundData) => a.name === "attack_sword"
-          ),
+          data: audioCache.find((a: SoundData) => a.name === "attack_sword"),
           pitch: pitch,
           timestamp: performance.now(),
         };
@@ -3149,11 +3203,11 @@ function sendPacket(ws: any, packets: any[]) {
   });
 }
 
-async function sendAnimation(ws: any, name: string, playerId?: string) {
+function sendAnimation(ws: any, name: string, playerId?: string) {
   const currentPlayer = playerCache.get(playerId || ws.data.id);
   if (!currentPlayer) return;
 
-  const animationData = await getAnimation(name);
+  const animationData = getAnimation(name);
   if (!animationData) return;
 
   currentPlayer.animation = {
@@ -3184,9 +3238,9 @@ async function sendAnimation(ws: any, name: string, playerId?: string) {
   }
 }
 
-async function getAnimation(name: string) {
-  const animations = await assetCache.get("animations");
-  const animationData = animations.find((a: any) => a.name === name);
+function getAnimation(name: string) {
+  // Use cached animations instead of Redis call to prevent blocking during player spawn
+  const animationData = animationsCache.find((a: any) => a.name === name);
   if (!animationData) {
     return;
   }
@@ -3230,11 +3284,11 @@ function normalizeDirection(direction: string): string {
   }
 }
 
-async function sendAnimationTo(targetWs: any, name: string, playerId?: string) {
+function sendAnimationTo(targetWs: any, name: string, playerId?: string) {
   const targetPlayer = playerCache.get(playerId || targetWs.data.id);
   if (!targetPlayer) return;
 
-  const animationData = await getAnimation(name);
+  const animationData = getAnimation(name);
   if (!animationData) return;
 
   const animationPacketData = {

@@ -623,7 +623,8 @@ const player = {
   checkIfWouldCollide: async function (
     map: string,
     position: PositionData,
-    playerProperties: PlayerProperties
+    playerProperties: PlayerProperties,
+    mapPropertiesCache?: any // Optional cached mapProperties to avoid Redis calls
   ) {
     const playerWidth = playerProperties.width || 32;
     const playerHeight = playerProperties.height || 32;
@@ -632,8 +633,9 @@ const player = {
     // Load map from cache or Redis
     let mapDataCached = mapCache.get(mapKey);
     if (!mapDataCached) {
-      const mapProperties = (await assetCache.get("mapProperties")) as MapProperties[];
-      const mapData = mapProperties.find((m) => m.name.replace(".json", "") === mapKey);
+      // Use provided cache or fall back to Redis
+      const mapProperties = mapPropertiesCache || (await assetCache.get("mapProperties")) as MapProperties[];
+      const mapData = mapProperties.find((m: any) => m.name.replace(".json", "") === mapKey);
       if (!mapData) return { value: true, reason: "no_map_data" };
 
       let collisionData: any;
@@ -842,6 +844,104 @@ const player = {
       }
     }
     return closestPlayer;
+  },
+  GetPlayerLoginData: async (username: string) => {
+    if (!username) return null;
+    username = username.toLowerCase();
+
+    // Single optimized query to get all player data using JOINs
+    const mainQuery = `
+      SELECT
+        a.id,
+        a.username,
+        a.map,
+        a.position,
+        a.direction,
+        a.role,
+        a.guest_mode,
+        a.stealth,
+        a.noclip,
+        a.party_id,
+        p.permissions,
+        s.max_health,
+        s.health,
+        s.max_stamina,
+        s.stamina,
+        s.xp,
+        s.max_xp,
+        s.level,
+        c.copper,
+        c.silver,
+        c.gold,
+        f.friends,
+        cc.fps,
+        cc.music_volume,
+        cc.effects_volume,
+        cc.muted,
+        ql.completed_quests,
+        ql.incomplete_quests
+      FROM accounts a
+      LEFT JOIN permissions p ON a.username = p.username
+      LEFT JOIN stats s ON a.username = s.username
+      LEFT JOIN currency c ON a.username = c.username
+      LEFT JOIN friendslist f ON a.username = f.username
+      LEFT JOIN clientconfig cc ON a.username = cc.username
+      LEFT JOIN quest_log ql ON a.username = ql.username
+      WHERE a.username = ?
+    `;
+
+    const result = await query(mainQuery, [username]) as any[];
+    if (!result || result.length === 0) return null;
+
+    const data = result[0];
+
+    // Get inventory separately since it's an array of items
+    const inventoryRaw = await query("SELECT * FROM inventory WHERE username = ?", [username]) as any[];
+
+    return {
+      id: data.id,
+      username: data.username,
+      location: {
+        map: data.map,
+        position: {
+          x: Number(data.position?.split(",")[0] || 0),
+          y: Number(data.position?.split(",")[1] || 0),
+          direction: data.direction || "down"
+        }
+      },
+      permissions: data.permissions || [],
+      stats: {
+        max_health: data.max_health,
+        health: data.health,
+        max_stamina: data.max_stamina,
+        stamina: data.stamina,
+        xp: data.xp,
+        max_xp: data.max_xp,
+        level: data.level
+      },
+      currency: {
+        copper: data.copper || 0,
+        silver: data.silver || 0,
+        gold: data.gold || 0
+      },
+      friends: data.friends ? data.friends.split(",").map((f: string) => f.trim()).filter((f: string) => f !== "") : [],
+      party_id: data.party_id,
+      config: data.fps ? [{
+        fps: data.fps,
+        music_volume: data.music_volume,
+        effects_volume: data.effects_volume,
+        muted: data.muted
+      }] : [],
+      questlog: {
+        completed: data.completed_quests ? data.completed_quests.split(",") : [],
+        incomplete: data.incomplete_quests ? data.incomplete_quests.split(",") : []
+      },
+      isAdmin: data.role === 1,
+      isGuest: data.guest_mode === 1,
+      isStealth: data.stealth === 1,
+      isNoclip: data.noclip === 1,
+      inventoryRaw: inventoryRaw
+    };
   },
 };
 

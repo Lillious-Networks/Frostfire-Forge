@@ -18,6 +18,8 @@ import register_html from "./www/public/register.html";
 import game_html from "./www/public/game.html";
 import forgotpassword_html from "./www/public/forgot-password.html";
 import changepassword_html from "./www/public/change-password.html";
+import os from "os";
+const cpuCount = os.cpus().length;
 
 // Load whitelisted and blacklisted IPs and functions
 import { w_ips, b_ips, blacklistAdd } from "../systems/security";
@@ -91,9 +93,13 @@ const routes = {
   },
 } as Record<string, any>;
 
-Bun.serve({
-  port: _https ? (process.env.WEBSRV_PORTSSL || 443) : (process.env.WEBSRV_PORT || 80),
-  routes: {
+// Don't start HTTP server if we're a WebSocket worker
+const IS_WORKER = process.env.IS_WORKER === "true";
+
+if (!IS_WORKER) {
+  Bun.serve({
+    port: _https ? (process.env.WEBSRV_PORTSSL || 443) : (process.env.WEBSRV_PORT || 80),
+    routes: {
     "/docs": routes["/docs"],
     "/benchmark": routes["/benchmark"],
     "/connection-test": routes["/connection-test"],
@@ -152,23 +158,24 @@ Bun.serve({
       key: fs.readFileSync(_key),
     }
   : {}),
-});
-
-// If HTTPS is enabled, also start an HTTP server that redirects to HTTPS
-if (_https) {
-  Bun.serve({
-    port: process.env.WEBSRV_PORT || 80,
-    fetch(req: Request) {
-      const url = tryParseURL(req.url);
-      if (!url) {
-        return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
-      }
-      // Always redirect to https with same host/path/query
-      // If the port is 443, don't include it in the redirect
-      const port = process.env.WEBSRV_PORTSSL === "443" ? "" : `:${process.env.WEBSRV_PORTSSL || 443}`;
-      return Response.redirect(`https://${url.hostname}${port}${url.pathname}${url.search}`, 301);
-    }
   });
+
+  // If HTTPS is enabled, also start an HTTP server that redirects to HTTPS
+  if (_https) {
+    Bun.serve({
+      port: process.env.WEBSRV_PORT || 80,
+      fetch(req: Request) {
+        const url = tryParseURL(req.url);
+        if (!url) {
+          return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
+        }
+        // Always redirect to https with same host/path/query
+        // If the port is 443, don't include it in the redirect
+        const port = process.env.WEBSRV_PORTSSL === "443" ? "" : `:${process.env.WEBSRV_PORTSSL || 443}`;
+        return Response.redirect(`https://${url.hostname}${port}${url.pathname}${url.search}`, 301);
+      }
+    });
+  }
 }
 
 async function authenticate(req: Request, server: any) {
@@ -491,6 +498,27 @@ function tryParseURL(url: string) : URL | null {
   }
 }
 
-const readyTimeMs = performance.now() - now;
-log.success(`Webserver started on port ${_https ? "443 (HTTPS)" : "80 (HTTP)"} - Ready in ${(readyTimeMs / 1000).toFixed(3)}s (${readyTimeMs.toFixed(0)}ms)`);
-import '../socket/server';
+if (!IS_WORKER) {
+  const readyTimeMs = performance.now() - now;
+  log.success(`Webserver started on port ${_https ? "443 (HTTPS)" : "80 (HTTP)"} - Ready in ${(readyTimeMs / 1000).toFixed(3)}s (${readyTimeMs.toFixed(0)}ms)`);
+}
+
+// Clustering support - start WebSocket workers if enabled
+const ENABLE_CLUSTERING = process.env.ENABLE_CLUSTERING === "true";
+
+if (IS_WORKER) {
+  // This process is a worker, start WebSocket server only
+  log.info("Running as worker process - starting WebSocket server only");
+  await import('../socket/worker.ts');
+} else if (ENABLE_CLUSTERING) {
+  // Start cluster manager to spawn workers
+  log.info("Clustering enabled - starting WebSocket workers");
+  const ClusterManager = (await import('../socket/cluster.ts')).default;
+  const workerCount = parseInt(cpuCount as unknown as string || "0");
+  const cluster = new ClusterManager(workerCount, 3000);
+  await cluster.start();
+} else {
+  // Single-threaded mode - start WebSocket server directly
+  log.info("Single-threaded mode - starting WebSocket server");
+  await import('../socket/server.ts');
+}
