@@ -458,8 +458,11 @@ listener.on("onDisconnect", async (data) => {
 });
 
 listener.on("onSave", async () => {
-  log.info("Saving player data...");
   const cache = playerCache.list();
+  if (!cache) return;
+  if (Object.keys(cache).length < 1) return;
+  log.info("Saving player data...");
+  const startTime = Date.now();
   for (const p in cache) {
     const row = cache[p];
     if (!row) continue;
@@ -478,6 +481,8 @@ listener.on("onSave", async () => {
       log.error(e as string);
     }
   }
+  const endTime = Date.now();
+  log.info(`Player data saved in ${endTime - startTime}ms`);
 });
 
 export const events = {

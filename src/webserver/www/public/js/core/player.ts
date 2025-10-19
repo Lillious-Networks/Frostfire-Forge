@@ -119,36 +119,40 @@ async function createPlayer(data: any) {
       context.shadowOffsetY = 0;
     },
     renderAnimation: function (context: CanvasRenderingContext2D) {
-        if (this.isStealth) {
-        context.globalAlpha = 0.5;
-      } else {
-        context.globalAlpha = 1;
-      }
-
       if (!this.animation?.frames?.length) {
         return;
       }
 
       const now = performance.now();
       const frame = this.animation.frames[this.animation.currentFrame];
-      
+
       if (now - this.animation.lastFrameTime > frame.delay) {
         this.animation.currentFrame = (this.animation.currentFrame + 1) % this.animation.frames.length;
         this.animation.lastFrameTime = now;
       }
 
       if (frame.imageElement?.complete) {
-        context.drawImage(
-          frame.imageElement,
-          this.position.x + 16 - frame.width/2,
-          this.position.y + 24 - frame.height/2,
-          frame.width,
-          frame.height
-        );
+        // Only change alpha if needed
+        if (this.isStealth) {
+          context.globalAlpha = 0.5;
+          context.drawImage(
+            frame.imageElement,
+            this.position.x + 16 - frame.width/2,
+            this.position.y + 24 - frame.height/2,
+            frame.width,
+            frame.height
+          );
+          context.globalAlpha = 1;
+        } else {
+          context.drawImage(
+            frame.imageElement,
+            this.position.x + 16 - frame.width/2,
+            this.position.y + 24 - frame.height/2,
+            frame.width,
+            frame.height
+          );
+        }
       }
-
-      // Reset global alpha for other rendering
-      context.globalAlpha = 1;
     },
     show: function (context: CanvasRenderingContext2D) {
       let shadow: { width: number; height: number; fillStyle: string; borderColor: string } = { width: 0, height: 0, fillStyle: "black", borderColor: "black" };

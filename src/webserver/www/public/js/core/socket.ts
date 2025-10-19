@@ -164,15 +164,34 @@ socket.onmessage = async (event) => {
               ? Array.from(cache.players).find((p) => p.id === data.id)
               : null;
             if (player) {
+              // Preload all images before switching animation
+              if (apng.frames && apng.frames.length > 0) {
+                // Create images for all frames
+                apng.frames.forEach((frame: any) => frame.createImage());
+
+                // Wait for all images to load
+                await Promise.all(
+                  apng.frames.map((frame: any) => {
+                    return new Promise<void>((resolve) => {
+                      if (frame.imageElement?.complete) {
+                        resolve();
+                      } else if (frame.imageElement) {
+                        frame.imageElement.onload = () => resolve();
+                        frame.imageElement.onerror = () => resolve(); // Resolve even on error to prevent hanging
+                      } else {
+                        resolve();
+                      }
+                    });
+                  })
+                );
+              }
+
+              // Now assign the animation with all images preloaded
               player.animation = {
                 frames: apng.frames,
                 currentFrame: 0,
                 lastFrameTime: performance.now(),
               };
-
-              if (apng.frames && apng.frames.length > 0) {
-                apng.frames.forEach((frame: any) => frame.createImage());
-              }
             } else {
               await new Promise((resolve) => setTimeout(resolve, 100));
               await findPlayer();
@@ -278,16 +297,11 @@ socket.onmessage = async (event) => {
       const targetX = canvas.width / 2 + data._data.x;
       const targetY = canvas.height / 2 + data._data.y;
 
-      // Update position directly for non-client players
-      if (data.id !== cachedPlayerId) {
-        player.position.x = targetX;
-        player.position.y = targetY;
-      } else {
-        // For the client player, update position directly to avoid input lag
-        player.position.x = targetX;
-        player.position.y = targetY;
+      // Direct position update - no prediction, no interpolation
+      player.position.x = targetX;
+      player.position.y = targetY;
 
-        // Update position text
+      if (data.id === cachedPlayerId) {
         positionText.innerText = `Position: ${data._data.x}, ${data._data.y}`;
       }
       break;
@@ -535,14 +549,10 @@ socket.onmessage = async (event) => {
                 chunkPixelSize,
                 layers: {},
                 chunks: chunkCanvases,
-                redrawMainCanvas: () => {
+                redrawMainCanvas: (visibleChunksOnly = false, visibleChunks: Set<string> | null = null) => {
                   if (!mainCtx) return;
 
                   try {
-                    // Clear canvas with white background
-                    mainCtx.fillStyle = "#ffffff";
-                    mainCtx.fillRect(0, 0, mapWidth, mapHeight);
-
                     const layerNames = Object.keys(
                       window.mapChunks.layers
                     ).sort((a, b) => {
@@ -552,15 +562,28 @@ socket.onmessage = async (event) => {
                       );
                     });
 
-                    for (const layerName of layerNames) {
-                      const layer = window.mapChunks.layers[layerName];
-                      if (!layer.visible) continue;
+                    // If only redrawing visible chunks, we'll clear and redraw specific regions
+                    if (visibleChunksOnly && visibleChunks) {
+                      // Clear only the visible chunk areas
+                      mainCtx.fillStyle = "#ffffff";
+                      for (const chunkKey of visibleChunks) {
+                        const [cx, cy] = chunkKey.split('-').map(Number);
+                        mainCtx.fillRect(
+                          cx * chunkPixelSize,
+                          cy * chunkPixelSize,
+                          chunkPixelSize,
+                          chunkPixelSize
+                        );
+                      }
 
-                      for (let chunkY = 0; chunkY < chunksY; chunkY++) {
-                        for (let chunkX = 0; chunkX < chunksX; chunkX++) {
-                          const chunkKey = `${chunkX}-${chunkY}`;
-                          const chunkCanvas =
-                            chunkCanvases[layerName]?.[chunkKey];
+                      // Redraw only visible chunks
+                      for (const layerName of layerNames) {
+                        const layer = window.mapChunks.layers[layerName];
+                        if (!layer.visible) continue;
+
+                        for (const chunkKey of visibleChunks) {
+                          const [chunkX, chunkY] = chunkKey.split('-').map(Number);
+                          const chunkCanvas = chunkCanvases[layerName]?.[chunkKey];
 
                           if (
                             chunkCanvas &&
@@ -577,6 +600,41 @@ socket.onmessage = async (event) => {
                                 `Error drawing chunk ${chunkKey} of layer ${layerName}:`,
                                 drawError
                               );
+                            }
+                          }
+                        }
+                      }
+                    } else {
+                      // Full redraw (original behavior)
+                      mainCtx.fillStyle = "#ffffff";
+                      mainCtx.fillRect(0, 0, mapWidth, mapHeight);
+
+                      for (const layerName of layerNames) {
+                        const layer = window.mapChunks.layers[layerName];
+                        if (!layer.visible) continue;
+
+                        for (let chunkY = 0; chunkY < chunksY; chunkY++) {
+                          for (let chunkX = 0; chunkX < chunksX; chunkX++) {
+                            const chunkKey = `${chunkX}-${chunkY}`;
+                            const chunkCanvas =
+                              chunkCanvases[layerName]?.[chunkKey];
+
+                            if (
+                              chunkCanvas &&
+                              layer.chunkVisibility?.[chunkKey] !== false
+                            ) {
+                              try {
+                                mainCtx.drawImage(
+                                  chunkCanvas,
+                                  chunkX * chunkPixelSize,
+                                  chunkY * chunkPixelSize
+                                );
+                              } catch (drawError) {
+                                console.error(
+                                  `Error drawing chunk ${chunkKey} of layer ${layerName}:`,
+                                  drawError
+                                );
+                              }
                             }
                           }
                         }

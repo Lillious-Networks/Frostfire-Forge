@@ -20,7 +20,7 @@ declare global {
   interface Window {
     mapLayerCanvases?: Array<{ canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, zIndex: number }>;
     playerZIndex?: number;
-    mapChunks?: any; 
+    mapChunks?: any;
   }
 }
 
@@ -67,10 +67,14 @@ function getViewportChunks(): Set<string> {
 function updateChunkVisibility() {
   if (!window.mapChunks) return;
   const currentViewportChunks = getViewportChunks();
-  const chunksChanged = 
+  const chunksChanged =
     currentViewportChunks.size !== lastViewportChunks.size ||
     [...currentViewportChunks].some(chunk => !lastViewportChunks.has(chunk));
   if (!chunksChanged) return;
+
+  // Collect chunks that need to be redrawn (old + new visible chunks)
+  const chunksToRedraw = new Set([...lastViewportChunks, ...currentViewportChunks]);
+
   for (const layerName in window.mapChunks.layers) {
     const layer = window.mapChunks.layers[layerName];
     for (const chunkKey in layer.chunkVisibility) {
@@ -85,7 +89,9 @@ function updateChunkVisibility() {
       }
     }
   }
-  window.mapChunks.redrawMainCanvas();
+
+  // Use optimized partial redraw instead of full canvas redraw
+  window.mapChunks.redrawMainCanvas(true, chunksToRedraw);
   lastViewportChunks = currentViewportChunks;
 }
 
@@ -127,7 +133,10 @@ function animationLoop() {
     return;
   }
   lastFrameTime = now;
-  const currentPlayer = Array.from(cache.players).find(player => player.id === cachedPlayerId);
+
+  // Cache players array to avoid repeated Array.from() calls
+  const playersArray = Array.from(cache.players);
+  const currentPlayer = playersArray.find(player => player.id === cachedPlayerId);
   if (!currentPlayer) {
     requestAnimationFrame(animationLoop);
     return;
@@ -170,12 +179,16 @@ function animationLoop() {
     viewportUpdateThrottle = 0;
   }
   ctx.clearRect(cachedViewport.x, cachedViewport.y, cachedViewport.w, cachedViewport.h);
+
+  // Disable image smoothing for better performance without hardware acceleration
+  ctx.imageSmoothingEnabled = false;
+
   const isInView = (x: number, y: number) =>
     x >= cachedPaddedBounds.x &&
     y >= cachedPaddedBounds.y &&
     x <= cachedPaddedBounds.x + cachedPaddedBounds.w &&
     y <= cachedPaddedBounds.y + cachedPaddedBounds.h;
-  const visiblePlayers = Array.from(cache.players).filter(p =>
+  const visiblePlayers = playersArray.filter(p =>
     isInView(p.position.x, p.position.y) &&
     (p.id === cachedPlayerId || !p.isStealth || (p.isStealth && currentPlayer.isAdmin))
   );
@@ -186,7 +199,7 @@ function animationLoop() {
     updateHealthBar(healthBar, healthPercent);
     updateStaminaBar(staminaBar, staminaPercent);
   }
-  const targetPlayer = Array.from(cache.players).find(p => p.targeted);
+  const targetPlayer = playersArray.find(p => p.targeted);
   if (targetPlayer) {
     const { health, max_health, stamina, max_stamina } = targetPlayer.stats;
     const healthPercent = (health / max_health) * 100;
