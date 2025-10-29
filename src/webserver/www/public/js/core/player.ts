@@ -228,8 +228,9 @@ async function createPlayer(data: any) {
 
       // Admin color animation (only when visible)
       if (this.isAdmin && isVisible) {
-        this._adminColorHue = (this._adminColorHue + 2) % 360;
-        nameColor = `hsl(${this._adminColorHue}, 100%, 50%)`;
+        // this._adminColorHue = (this._adminColorHue + 2) % 360;
+        // nameColor = `hsl(${this._adminColorHue}, 100%, 50%)`;
+        nameColor = "#ff2252ff";
       }
 
       if (isCurrent && isVisible && !this.isAdmin) {

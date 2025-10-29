@@ -1,4 +1,5 @@
 import '../utility/validate_config';
+import SwaggerHTML from './swagger';
 const now = performance.now();
 import log from "../modules/logger";
 import sendEmail from "../services/email";
@@ -18,8 +19,6 @@ import register_html from "./www/public/register.html";
 import game_html from "./www/public/game.html";
 import forgotpassword_html from "./www/public/forgot-password.html";
 import changepassword_html from "./www/public/change-password.html";
-import os from "os";
-const cpuCount = os.cpus().length;
 
 // Load whitelisted and blacklisted IPs and functions
 import { w_ips, b_ips, blacklistAdd } from "../systems/security";
@@ -45,6 +44,29 @@ const _key = path.join(import.meta.dir, "../certs/key.pem");
 const _https = process.env.WEBSRV_USESSL === "true" && fs.existsSync(_cert) && fs.existsSync(_key);
 
 const routes = {
+  "/swaggerui": {
+    GET: async () => {
+      return new Response(SwaggerHTML, {
+        headers: {
+          "Content-Type": "text/html",
+        },
+      });
+    }
+  },
+  "/api.json": {
+    GET: async () => {
+      const apiSpecPath = path.join(import.meta.dir, "./www/public/api.json");
+      if (!fs.existsSync(apiSpecPath)) {
+        return new Response(JSON.stringify({ message: "API specification not found" }), { status: 404 });
+      }
+      const apiSpec = fs.readFileSync(apiSpecPath, "utf8");
+      return new Response(apiSpec, {
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+    }
+  },
   "/docs": docs_html,
   "/benchmark": benchmark_html,
   "/connection-test": connectiontest_html,
@@ -93,30 +115,27 @@ const routes = {
   },
 } as Record<string, any>;
 
-// Don't start HTTP server if we're a WebSocket worker
-const IS_WORKER = process.env.IS_WORKER === "true";
-
-if (!IS_WORKER) {
-  Bun.serve({
+Bun.serve({
     port: _https ? (process.env.WEBSRV_PORTSSL || 443) : (process.env.WEBSRV_PORT || 80),
     routes: {
-    "/docs": routes["/docs"],
-    "/benchmark": routes["/benchmark"],
-    "/connection-test": routes["/connection-test"],
-    "/": routes["/"],
-    "/registration": routes["/registration"],
-    "/register": routes["/register"],
-    "/guest-login": routes["/guest-login"],
-    "/forgot-password": routes["/forgot-password"],
-    "/change-password": routes["/change-password"],
-    "/reset-password": routes["/reset-password"],
-    "/update-password": routes["/update-password"],
-    "/game": routes["/game"],
-    "/editor": routes["/editor"],
-    "/login": routes["/login"],
-    "/verify": routes["/verify"],
-    "/tileset": routes["/tileset"],
-  },
+      "/swaggerui": routes["/swaggerui"],
+      "/docs": routes["/docs"],
+      "/benchmark": routes["/benchmark"],
+      "/connection-test": routes["/connection-test"],
+      "/": routes["/"],
+      "/registration": routes["/registration"],
+      "/register": routes["/register"],
+      "/guest-login": routes["/guest-login"],
+      "/forgot-password": routes["/forgot-password"],
+      "/change-password": routes["/change-password"],
+      "/reset-password": routes["/reset-password"],
+      "/update-password": routes["/update-password"],
+      "/game": routes["/game"],
+      "/editor": routes["/editor"],
+      "/login": routes["/login"],
+      "/verify": routes["/verify"],
+      "/tileset": routes["/tileset"],
+    },
   async fetch(req: Request, server: any) {
     const url = tryParseURL(req.url);
     if (!url) {
@@ -158,24 +177,22 @@ if (!IS_WORKER) {
       key: fs.readFileSync(_key),
     }
   : {}),
-  });
-
-  // If HTTPS is enabled, also start an HTTP server that redirects to HTTPS
-  if (_https) {
-    Bun.serve({
-      port: process.env.WEBSRV_PORT || 80,
-      fetch(req: Request) {
-        const url = tryParseURL(req.url);
-        if (!url) {
-          return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
-        }
-        // Always redirect to https with same host/path/query
-        // If the port is 443, don't include it in the redirect
-        const port = process.env.WEBSRV_PORTSSL === "443" ? "" : `:${process.env.WEBSRV_PORTSSL || 443}`;
-        return Response.redirect(`https://${url.hostname}${port}${url.pathname}${url.search}`, 301);
+});
+// If HTTPS is enabled, also start an HTTP server that redirects to HTTPS
+if (_https) {
+  Bun.serve({
+    port: process.env.WEBSRV_PORT || 80,
+    fetch(req: Request) {
+      const url = tryParseURL(req.url);
+      if (!url) {
+        return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
       }
-    });
-  }
+      // Always redirect to https with same host/path/query
+      // If the port is 443, don't include it in the redirect
+      const port = process.env.WEBSRV_PORTSSL === "443" ? "" : `:${process.env.WEBSRV_PORTSSL || 443}`;
+      return Response.redirect(`https://${url.hostname}${port}${url.pathname}${url.search}`, 301);
+    }
+  });
 }
 
 async function authenticate(req: Request, server: any) {
@@ -203,7 +220,7 @@ async function authenticate(req: Request, server: any) {
 
   await query("UPDATE accounts SET verified = 1 WHERE token = ?", [token]);
   await query("UPDATE accounts SET verification_code = NULL WHERE token = ?", [token]);
-  
+
   // Send to /game
   return Response.redirect(`${process.env.DOMAIN}/game`, 301);
 }
@@ -296,7 +313,7 @@ async function register(req: Request, server: any) {
 
     if (settings['2fa'].enabled) {
       const result = await verify(token, email.toLowerCase(), username.toLowerCase()) as any;
-      
+
       if (result instanceof Error) {
         return new Response(JSON.stringify({ message: "Failed to send verification email" }), { status: 500 });
       }
@@ -375,7 +392,7 @@ async function resetPassword(req: Request, server: any) {
     }
   const body = await req.json();
 
-  if (!body.email) { 
+  if (!body.email) {
     return new Response(JSON.stringify({ message: "Email is required" }), { status: 400 });
   }
 
@@ -438,7 +455,7 @@ async function updatePassword(req: Request, server: any) {
   if (!validatePasswordComplexity(body.password)) {
     return new Response(JSON.stringify({ message: "Password must be between 8 and 20 characters long, contain at least one uppercase letter, one lowercase letter, one number, and one special character." }), { status: 400 });
   }
-  
+
   // Check if the account exists
   const account = await query("SELECT * FROM accounts WHERE email = ? LIMIT 1", [body.email.toLowerCase()]) as any;
   if (account.length === 0) {
@@ -467,7 +484,7 @@ async function updatePassword(req: Request, server: any) {
     // If the user is logged in, we need to logout the user
     player.logout(account.session_id);
   }
-  
+
   return new Response(JSON.stringify({ message: "Password updated successfully" }), { status: 200 });
 }
 
@@ -498,27 +515,6 @@ function tryParseURL(url: string) : URL | null {
   }
 }
 
-if (!IS_WORKER) {
-  const readyTimeMs = performance.now() - now;
-  log.success(`Webserver started on port ${_https ? "443 (HTTPS)" : "80 (HTTP)"} - Ready in ${(readyTimeMs / 1000).toFixed(3)}s (${readyTimeMs.toFixed(0)}ms)`);
-}
-
-// Clustering support - start WebSocket workers if enabled
-const ENABLE_CLUSTERING = process.env.ENABLE_CLUSTERING === "true";
-
-if (IS_WORKER) {
-  // This process is a worker, start WebSocket server only
-  log.info("Running as worker process - starting WebSocket server only");
-  await import('../socket/worker.ts');
-} else if (ENABLE_CLUSTERING) {
-  // Start cluster manager to spawn workers
-  log.info("Clustering enabled - starting WebSocket workers");
-  const ClusterManager = (await import('../socket/cluster.ts')).default;
-  const workerCount = parseInt(cpuCount as unknown as string || "0");
-  const cluster = new ClusterManager(workerCount, 3000);
-  await cluster.start();
-} else {
-  // Single-threaded mode - start WebSocket server directly
-  log.info("Single-threaded mode - starting WebSocket server");
-  await import('../socket/server.ts');
-}
+const readyTimeMs = performance.now() - now;
+log.success(`Webserver started on port ${_https ? "443 (HTTPS)" : "80 (HTTP)"} - Ready in ${(readyTimeMs / 1000).toFixed(3)}s (${readyTimeMs.toFixed(0)}ms)`);
+await import('../socket/server');

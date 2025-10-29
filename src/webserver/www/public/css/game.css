@@ -372,26 +372,25 @@ body {
 
 #chat-container {
   position: fixed;
-  bottom: -162;
+  bottom: 25;
   left: 10;
   z-index: 100;
   background: url("../img/ui/ui-chat-container.png");
   background-repeat: no-repeat;
   background-size: 100% 100%;
-  width: 500px;
-  height: 226px;
-  transition: bottom ease-in-out 1s;
-  will-change: bottom;
+  width: 600px;
+  height: 250px;
 }
 
 #chat-messages {
   position: absolute;
-  top: 75;
-  left: 50;
-  right: 35;
-  bottom: 28;
+  top: 50px;
+  left: 40px;
+  right: 40px;
+  bottom: 28px;
   overflow-y: auto;
   overflow-x: hidden;
+  max-height: 125px;
 }
 
 /* Chat messages scrollbar */
@@ -410,7 +409,7 @@ body {
 #chat-messages .message {
     color: #FFF1DA;
     font-size: 0.8em;
-    font-weight: 600;
+    font-weight: 200;
     text-shadow: 2px 2px 5px rgba(0,0,0,0.8);
     white-space: pre-wrap;
     word-break: break-all;
@@ -418,14 +417,22 @@ body {
 
 .whisper-username, .whisper-message {
     color: #d670e4;
-    font-weight: 600;
+    font-weight: 200;
     text-shadow: 2px 2px 5px rgba(0,0,0,0.8);
 }
 
 .party-username, .party-message {
     color: #5389ff;
-    font-weight: 600;
+    font-weight: 200;
     text-shadow: 2px 2px 5px rgba(0,0,0,0.8);
+}
+
+.bold {
+    font-weight: 600;
+}
+
+.admin {
+    color: #ff2252ff;
 }
 
 #chat {
@@ -438,21 +445,17 @@ body {
 #chat input {
   position: absolute;
   padding: 6px;
-  top: 22;
-  right: 44;
-  left: 40;
+  bottom: 40px;
+  right: 40px;
+  left: 40px;
   box-sizing: border-box;
   background: transparent;
+  border-bottom: 2px solid #815E44;
   color: #FFF1DA;
   font-size: 0.8em;
   font-weight: 600;
   text-shadow: 2px 2px 5px rgba(0,0,0,0.8);
   font-family: 'Comic Relief';
-}
-
-#chat-container:focus-within {
-  bottom: 25;
-  transition: bottom ease-in-out 1s;
 }
 
 input {

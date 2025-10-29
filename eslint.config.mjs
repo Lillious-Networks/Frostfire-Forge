@@ -8,6 +8,7 @@ export default defineConfig(
         rules: {
             "@typescript-eslint/no-explicit-any": "off",
             "@typescript-eslint/no-unused-expressions": "off",
+            "no-useless-escape": "off",
         },
         files: ["**/*.ts"],
         extends: [

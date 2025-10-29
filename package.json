@@ -2,6 +2,7 @@
   "name": "frostfire-forge",
   "module": "./src/webserver/server.ts",
   "dependencies": {
+    "install": "^0.13.0",
     "nodemailer": "^6.10.1",
     "openai": "^4.104.0",
     "sharp": "^0.33.5",
@@ -18,10 +19,10 @@
     "typescript-eslint": "^8.43.0"
   },
   "scripts": {
-    "production": "bun transpile-production && ENABLE_CLUSTERING=true bun --env-file=.env.production ./src/webserver/server.ts",
+    "production": "bun transpile-production && bun --env-file=.env.production ./src/webserver/server.ts",
     "transpile-development": "bun --env-file=.env.development ./src/utility/transpiler.ts",
     "transpile-production": "bun --env-file=.env.production ./src/utility/transpiler.ts",
-    "development": "bun transpile-development && ENABLE_CLUSTERING=true bun --inspect --env-file=.env.development ./src/webserver/server.ts",
+    "development": "bun transpile-development && bun --inspect --env-file=.env.development ./src/webserver/server.ts",
     "setup": "bun --env-file=.env.production ./src/utility/database_setup.ts",
     "setup-sqlite": "bun --env-file=.env.development ./src/utility/database_setup_sqlite.ts",
     "docs": "bun ./src/utility/generate_docs.ts",

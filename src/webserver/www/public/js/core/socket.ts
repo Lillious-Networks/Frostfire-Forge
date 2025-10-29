@@ -1075,7 +1075,7 @@ socket.onmessage = async (event) => {
             const escapedMessage = data.message
               .replace(/</g, "&lt;")
               .replace(/>/g, "&gt;");
-            message.innerHTML = `${timestamp} ${username}: ${escapedMessage}`;
+            message.innerHTML = `<span class='bold'>[${timestamp}] </span><span ${player.isAdmin ? "class='admin'" : ""}>${username}: </span><span>${escapedMessage.toString()}</span>`
             chatMessages.appendChild(message);
             // Scroll to the bottom of the chat messages
             chatMessages.scrollTop = chatMessages.scrollHeight;

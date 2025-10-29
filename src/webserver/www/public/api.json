@@ -1,0 +1,187 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Web Server API",
+    "version": "1.0.0",
+    "description": "API documentation for Frostfire Forge web server."
+  },
+  "paths": {
+    "/login": {
+      "post": {
+        "summary": "Login a user",
+        "description": "Authenticates a user with username and password. Returns a session token cookie on success.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "username": { "type": "string" },
+                  "password": { "type": "string" }
+                },
+                "required": ["username", "password"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Verification email sent (2FA enabled)" },
+          "301": { "description": "Logged in successfully" },
+          "400": { "description": "Invalid credentials" },
+          "403": { "description": "IP banned or invalid request" },
+          "500": { "description": "Failed to authenticate" }
+        }
+      }
+    },
+    "/register": {
+      "post": {
+        "summary": "Register a new user",
+        "description": "Registers a new account. Optionally sends a verification email if 2FA is enabled.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "username": { "type": "string" },
+                  "email": { "type": "string", "format": "email" },
+                  "password": { "type": "string" },
+                  "password2": { "type": "string" }
+                },
+                "required": ["username", "email", "password", "password2"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Verification email sent" },
+          "301": { "description": "Logged in successfully" },
+          "400": { "description": "Validation error or user already exists" },
+          "403": { "description": "IP banned" },
+          "500": { "description": "Internal server error" }
+        }
+      }
+    },
+    "/verify": {
+      "get": {
+        "summary": "Verify user account",
+        "description": "Verifies a user’s email address via a verification link containing `email`, `token`, and `code` query parameters.",
+        "parameters": [
+          { "name": "email", "in": "query", "required": true, "schema": { "type": "string", "format": "email" } },
+          { "name": "token", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "code", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "301": { "description": "Redirects to /game after successful verification" },
+          "403": { "description": "Invalid verification data" }
+        }
+      }
+    },
+    "/guest-login": {
+      "get": {
+        "summary": "Create a guest account",
+        "description": "Creates a temporary guest account and logs in automatically.",
+        "responses": {
+          "301": { "description": "Guest account created and logged in" },
+          "403": { "description": "Guest mode disabled or IP banned" },
+          "500": { "description": "Server error" }
+        }
+      }
+    },
+    "/reset-password": {
+      "post": {
+        "summary": "Request password reset",
+        "description": "Sends a password reset email if the user exists in the system.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": { "type": "string", "format": "email" }
+                },
+                "required": ["email"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Password reset email sent (or generic success message)" },
+          "400": { "description": "Invalid or missing email" },
+          "403": { "description": "IP banned" },
+          "500": { "description": "Email service failed" }
+        }
+      }
+    },
+    "/update-password": {
+      "post": {
+        "summary": "Update password",
+        "description": "Updates a user’s password after verifying reset code.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": { "type": "string", "format": "email" },
+                  "password": { "type": "string" },
+                  "password2": { "type": "string" },
+                  "code": { "type": "string" }
+                },
+                "required": ["email", "password", "password2", "code"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Password updated successfully" },
+          "400": { "description": "Validation failed" },
+          "403": { "description": "Invalid reset code or IP banned" },
+          "500": { "description": "Failed to update password" }
+        }
+      }
+    },
+    "/tileset": {
+      "get": {
+        "summary": "Get tileset by name",
+        "description": "Fetches a tileset definition from the asset cache using a `name` query parameter.",
+        "parameters": [
+          { "name": "name", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tileset found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tileset": { "type": "object" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid request" },
+          "404": { "description": "Tileset not found" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "cookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "token"
+      }
+    }
+  },
+  "security": [
+    { "cookieAuth": [] }
+  ]
+}

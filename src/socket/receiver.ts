@@ -2935,11 +2935,20 @@ export default async function packetReceiver(
           // Process friend request
           case "FRIEND_REQUEST": {
             if (response.toUpperCase() === "ACCEPT") {
+              /* Windows mysql bug */
               // If the response is accept, we need to add each other as friends
               const updatedCurrentPlayersFriendsList = await friends.add(
                 currentPlayer.username.toLowerCase(),
                 inviter.username.toLowerCase()
               );
+
+              // Add the inviter to the current player's friends list as well
+              // This is done so that both players can see each other as friends
+              const updatedFriendsList = await friends.add(
+                inviter.username.toLowerCase(),
+                currentPlayer.username.toLowerCase()
+              );
+
               sendPacket(
                 ws,
                 packetManager.notify({
@@ -2956,12 +2965,6 @@ export default async function packetReceiver(
                 })
               );
 
-              // Add the inviter to the current player's friends list as well
-              // This is done so that both players can see each other as friends
-              const updatedFriendsList = await friends.add(
-                inviter.username.toLowerCase(),
-                currentPlayer.username.toLowerCase()
-              );
               sendPacket(
                 inviter.ws,
                 packetManager.notify({
@@ -2971,6 +2974,7 @@ export default async function packetReceiver(
                   }`,
                 })
               );
+
               sendPacket(
                 inviter.ws,
                 packetManager.updateFriends({ friends: updatedFriendsList })

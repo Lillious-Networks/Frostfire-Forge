@@ -12,11 +12,8 @@ import quest from "../systems/quests";
 import assetCache from "../services/assetCache";
 import generate from "../modules/sprites";
 import zlib from "zlib";
-import query from "../controllers/sqldatabase";
 import * as settings from "../../config/settings.json";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
-// Warm up the database connection
-await query("SELECT 1 + 1 AS solution -- Warm up the database connection");
 
 import assetConfig from "../services/assetConfig";
 const assetPath = assetConfig.getAssetConfig();

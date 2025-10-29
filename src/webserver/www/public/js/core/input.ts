@@ -21,7 +21,7 @@ const pressedKeys = new Set();
 const movementKeys = new Set(["KeyW", "KeyA", "KeyS", "KeyD"]);
 let lastTypingPacket = 0;
 const cooldowns: { [key: string]: number } = {};
-const COOLDOWN_DURATION = 500; // milliseconds
+const COOLDOWN_DURATION = 100; // milliseconds
 
 export const keyHandlers = {
   F2: () => toggleDebugContainer(),
@@ -93,7 +93,6 @@ async function handleEnterKey() {
   const isTyping = chatInput === document.activeElement;
   
   if (!isTyping) {
-    
     chatInput.focus();
     return;
   }
@@ -107,13 +106,14 @@ async function handleEnterKey() {
     return;
   }
 
+  chatInput.blur();
+  chatInput.value = "";
+
   if (message.startsWith("/")) {
     await handleCommand(message);
   } else {
     await handleChatMessage(message);
   }
-
-  chatInput.value = "";
 }
 
 function handleSpaceKey() {

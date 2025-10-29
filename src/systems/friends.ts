@@ -5,10 +5,10 @@ const friends = {
   async list(username: string) {
     if (!username) return [];
     try {
-      const response = (await query(
+      const response = await query(
         "SELECT friends FROM friendslist WHERE username = ?",
         [username]
-      )) as any[];
+      ) as any[];
       if (response.length === 0 || !response[0].friends) {
         return [];
       }
@@ -29,9 +29,12 @@ const friends = {
         "SELECT username FROM accounts WHERE username = ?",
         [friend_username]
       )) as any;
+      console.log("Query Result:", queryResult);
       const user = queryResult[0]?.username;
-      if (!user) return await this.list(username); // Friend not found
+      console.log("User:", user);
+      if (!user) return await this.list(username);
       const currentFriends = await this.list(username);
+      console.log("Current Friends:", currentFriends);
 
       if (currentFriends.includes(user.toString())) {
         return currentFriends; // Already a friend
@@ -44,6 +47,8 @@ const friends = {
         "INSERT INTO friendslist (username, friends) VALUES (?, ?) ON DUPLICATE KEY UPDATE friends = ?",
         [username, friendsString, friendsString]
       )) as any;
+
+      console.log(result);
 
       if (result.affectedRows > 0) {
         return currentFriends;

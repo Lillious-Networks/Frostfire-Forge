@@ -7,13 +7,13 @@ import packetReceiver from "./receiver.ts";
 import eventEmitter from "node:events";
 export const listener = new eventEmitter();
 const event = new eventEmitter();
-import log from "../modules/logger";
-import player from "../systems/player";
+import log from "../modules/logger.ts";
+import player from "../systems/player.ts";
 import playerCache from "../services/playermanager.ts";
-import packet from "../modules/packet";
+import packet from "../modules/packet.ts";
 import path from "node:path";
 import fs from "node:fs";
-import { generateKeyPair } from "../modules/cipher";
+import { generateKeyPair } from "../modules/cipher.ts";
 
 // Load settings
 import * as settings from "../../config/settings.json";
@@ -64,12 +64,9 @@ const ClientRateLimit = [] as ClientRateLimit[];
 
 const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
 
-const WORKER_ID = parseInt(process.env.WORKER_ID || "0");
-const WORKER_PORT = parseInt(process.env.WORKER_PORT || "3000");
-
 const Server = Bun.serve<Packet, any>({
-  port: WORKER_PORT,
-  reusePort: true,
+  port: 3000,
+  reusePort: false,
   fetch(req, Server) {
     const id = crypto.randomBytes(32).toString("hex");
     const useragent = req.headers.get("user-agent");
@@ -93,7 +90,6 @@ const Server = Bun.serve<Packet, any>({
     maxPayloadLength: 1024 * 1024 * settings?.websocket?.maxPayloadMB || 1024 * 1024,
     idleTimeout: settings?.websocket?.idleTimeout || 5,
     async open(ws: any) {
-      console.log(`Worker ${WORKER_ID}: New Connection: ${ws.data.id} - ${ws.data.useragent}`);
       ws.binaryType = "arraybuffer";
 
       if (!ws.data?.id || !ws.data?.useragent || !ws.data?.chatDecryptionKey) {
@@ -151,8 +147,7 @@ const Server = Bun.serve<Packet, any>({
         );
       }, timeout);
     },
-    async close(ws: any, code: number, reason: string) {
-      console.log(`Worker ${WORKER_ID}: Disconnected: ${ws.data.id} - ${ws.data.useragent} - ${code} - ${reason}`);
+    async close(ws: any) {
 
       if (!ws.data.id) return;
       packetQueue.delete(ws.data.id);
@@ -208,7 +203,7 @@ const Server = Bun.serve<Packet, any>({
           packetReceiver(null, ws, message.toString());
           return;
         }
-        
+
         if (settings?.websocketRatelimit?.enabled) {
           const idx = ClientRateLimit.findIndex((c) => c.id === ws.data.id);
           if (idx !== -1) {
@@ -245,7 +240,7 @@ listener.on("onAwake", async () => {
 // Start event
 listener.on("onStart", async () => {});
 
-event.emit("online", { port: WORKER_PORT, workerId: WORKER_ID });
+event.emit("online");
 
 listener.emit("onAwake");
 listener.emit("onStart");

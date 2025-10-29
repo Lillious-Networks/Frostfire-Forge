@@ -5,9 +5,9 @@ import { listener } from "../socket/server";
 const now = performance.now();
 
 // Online runs once the Server is online
-event.on("online", (data) => {
+event.on("online", () => {
   const readyTimeMs = performance.now() - now;
-  log.success(`TCP server is listening on port ${data.port} - Ready in ${(readyTimeMs / 1000).toFixed(3)}s (${readyTimeMs.toFixed(0)}ms)`);
+  log.success(`TCP server is listening on port 3000 - Ready in ${(readyTimeMs / 1000).toFixed(3)}s (${readyTimeMs.toFixed(0)}ms)`);
   // Emit awake event
   listener.emit("onAwake");
   // Emit start event
