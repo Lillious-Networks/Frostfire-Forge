@@ -158,6 +158,16 @@ export default (async () => {
   // Generate a random RSA passphrase
   process.env.RSA_PASSPHRASE = crypto.randomBytes(32).toString("hex");
 
+  // Test redis connection if redis cache is selected
+  if (process.env.CACHE?.toLowerCase() === "redis") {
+    if (!process.env.REDIS_URL) {
+      startUpWarnings.push(
+        "No Redis URL is set, aborting... Please set the REDIS_URL environment variable to suppress this message."
+      );
+      process.env.CACHE = "memory";
+    }
+  }
+
   // Check if there are any warnings
   if (startUpWarnings.length > 0) {
     for (const warning of startUpWarnings) {

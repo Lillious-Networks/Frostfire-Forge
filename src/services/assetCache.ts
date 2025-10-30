@@ -2,7 +2,116 @@ import { redis } from "bun";
 
 type RedisValue = any;
 
-class AssetCacheService {
+interface CacheService {
+  add(key: string, value: any): Promise<void>;
+  get(key: string): Promise<any>;
+  remove(key: string): Promise<void>;
+  clear(): Promise<void>;
+  list(): Promise<Record<string, RedisValue>>;
+  addNested(key: string, nestedKey: string, value: RedisValue): Promise<void>;
+  getNested(key: string, nestedKey: string): Promise<RedisValue>;
+  removeNested(key: string, nestedKey: string): Promise<void>;
+  set(key: string, value: any): Promise<void>;
+  setNested(key: string, nestedKey: string, value: RedisValue): Promise<void>;
+  close(): void;
+}
+
+class MemoryCacheService implements CacheService {
+  private cache = new Map<string, any>();
+  private hashes = new Map<string, Map<string, any>>();
+  private prefix: string;
+
+  constructor(prefix = "asset:") {
+    this.prefix = prefix;
+  }
+
+  private prefixed(key: string) {
+    return `${this.prefix}${key}`;
+  }
+
+  async add(key: string, value: any): Promise<void> {
+    this.cache.set(this.prefixed(key), value);
+  }
+
+  async get(key: string): Promise<any> {
+    return this.cache.get(this.prefixed(key)) ?? null;
+  }
+
+  async remove(key: string): Promise<void> {
+    this.cache.delete(this.prefixed(key));
+    this.hashes.delete(this.prefixed(key));
+  }
+
+  async clear(): Promise<void> {
+    const keysToDelete: string[] = [];
+    for (const key of this.cache.keys()) {
+      if (key.startsWith(this.prefix)) {
+        keysToDelete.push(key);
+      }
+    }
+    for (const key of keysToDelete) {
+      this.cache.delete(key);
+    }
+
+    const hashesToDelete: string[] = [];
+    for (const key of this.hashes.keys()) {
+      if (key.startsWith(this.prefix)) {
+        hashesToDelete.push(key);
+      }
+    }
+    for (const key of hashesToDelete) {
+      this.hashes.delete(key);
+    }
+  }
+
+  async list(): Promise<Record<string, RedisValue>> {
+    const out: Record<string, RedisValue> = {};
+    for (const [key, value] of this.cache.entries()) {
+      if (key.startsWith(this.prefix)) {
+        const shortKey = key.slice(this.prefix.length);
+        out[shortKey] = value;
+      }
+    }
+    return out;
+  }
+
+  async addNested(key: string, nestedKey: string, value: RedisValue): Promise<void> {
+    const prefixedKey = this.prefixed(key);
+    if (!this.hashes.has(prefixedKey)) {
+      this.hashes.set(prefixedKey, new Map());
+    }
+    this.hashes.get(prefixedKey)!.set(nestedKey, value);
+  }
+
+  async getNested(key: string, nestedKey: string): Promise<RedisValue> {
+    const prefixedKey = this.prefixed(key);
+    const hash = this.hashes.get(prefixedKey);
+    return hash?.get(nestedKey) ?? undefined;
+  }
+
+  async removeNested(key: string, nestedKey: string): Promise<void> {
+    const prefixedKey = this.prefixed(key);
+    const hash = this.hashes.get(prefixedKey);
+    if (hash) {
+      hash.delete(nestedKey);
+    }
+  }
+
+  async set(key: string, value: any): Promise<void> {
+    await this.add(key, value);
+  }
+
+  async setNested(key: string, nestedKey: string, value: RedisValue): Promise<void> {
+    await this.addNested(key, nestedKey, value);
+  }
+
+  close(): void {
+    this.cache.clear();
+    this.hashes.clear();
+  }
+}
+
+class RedisCacheService implements CacheService {
   private client = redis;
   private prefix: string;
 
@@ -127,5 +236,9 @@ class AssetCacheService {
   }
 }
 
-const assetCache = new AssetCacheService();
+const cacheType = process.env.CACHE?.toLowerCase() || "memory";
+const assetCache: CacheService = cacheType === "redis"
+  ? new RedisCacheService()
+  : new MemoryCacheService();
+
 export default assetCache;
