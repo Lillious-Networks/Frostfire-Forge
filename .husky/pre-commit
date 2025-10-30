@@ -1,5 +1,2 @@
 echo "Running ESLint..."
 bun eslint
-
-echo "Generating Documentation..."
-bun docs
