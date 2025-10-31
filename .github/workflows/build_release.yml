@@ -53,7 +53,7 @@ jobs:
           echo 'DOMAIN="https://forge.lillious.com"' >> .env.production
           echo 'GAME_NAME="Frostfire Forge"' >> .env.production
           echo 'CACHE="redis"' >> .env.production
-          echo 'REDIS_URL="${{ secrets.REDIS_URL }}"' >> .env.production
+          echo 'REDIS_URL="redis://default:password@redis:6379"' >> .env.production
 
       - name: Create Certificate Chain
         working-directory: src/certs
