@@ -2,7 +2,7 @@ import query from "../controllers/sqldatabase";
 import { verify, randomBytes } from "../modules/hash";
 import log from "../modules/logger";
 import assetCache from "../services/assetCache";
-import * as settings from "../../config/settings.json";
+import * as settings from "../config/settings.json";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 const mapCache: Map<
   string,

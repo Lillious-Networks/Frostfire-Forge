@@ -21,7 +21,7 @@ const mapPropertiesCache = await assetCache.get("mapProperties");
 const audioCache = await assetCache.get("audio");
 import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 // Load settings
-import * as settings from "../../config/settings.json";
+import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 

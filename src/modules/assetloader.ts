@@ -12,7 +12,7 @@ import quest from "../systems/quests";
 import assetCache from "../services/assetCache";
 import generate from "../modules/sprites";
 import zlib from "zlib";
-import * as settings from "../../config/settings.json";
+import * as settings from "../config/settings.json";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 
 import assetConfig from "../services/assetConfig";
@@ -399,7 +399,7 @@ export async function reloadMap(mapName: string): Promise<MapData> {
     if (!newMap) {
       throw new Error(`Failed to load map ${file}`);
     }
-  
+
     assetCache.removeNested(mapName, "collision");
     assetCache.removeNested(mapName, "nopvp");
 

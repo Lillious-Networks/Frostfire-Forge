@@ -7,7 +7,7 @@ import player from "../systems/player";
 import verify from "../services/verification";
 import { hash, randomBytes } from "../modules/hash";
 import query from "../controllers/sqldatabase";
-import * as settings from "../../config/settings.json";
+import * as settings from "../config/settings.json";
 import path from "path";
 import fs from "fs";
 import docs_html from "./www/public/docs.html";

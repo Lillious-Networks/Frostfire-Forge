@@ -16,7 +16,7 @@ import fs from "node:fs";
 import { generateKeyPair } from "../modules/cipher.ts";
 
 // Load settings
-import * as settings from "../../config/settings.json";
+import * as settings from "../config/settings.json";
 import assetCache from "../services/assetCache.ts";
 
 const _cert = path.join(import.meta.dir, "../certs/cert.pem");
@@ -76,7 +76,7 @@ const Server = Bun.serve<Packet, any>({
       return new Response("User-Agent header is missing", { status: 400 });
     }
 
-    const success = Server.upgrade(req, { data: { id, useragent, chatDecryptionKey } });
+    const success = Server.upgrade(req, { data: { id, useragent, chatDecryptionKey } as any });
     if (!success) {
       log.error(`WebSocket upgrade failed for client with id: ${id}`);
     }

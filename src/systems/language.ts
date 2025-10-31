@@ -1,5 +1,5 @@
 import log from "../modules/logger";
-import swears from "../../config/swears.json";
+import swears from "../config/swears.json";
 const GOOGLE_TRANSLATE_API_KEY = process.env.GOOGLE_TRANSLATE_API_KEY;
 const TRANSLATION_SERVICE = process.env.TRANSLATION_SERVICE || "google_translate";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;

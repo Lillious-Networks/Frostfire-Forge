@@ -3,7 +3,7 @@ import assetCache from "../services/assetCache";
 import log from "../modules/logger";
 import weather from "./weather";
 import worlds from "./worlds";
-import * as settings from "../../config/settings.json";
+import * as settings from "../config/settings.json";
 const worldList = await worlds.list();
 const world = worldList.find((w) => w.name === settings.world);
 
@@ -25,7 +25,7 @@ const particles = {
     await assetCache.set("particles", response);
     return response;
   },
-  
+
   async update(particle: Particle) {
     const response = await query("UPDATE particles SET size = ?, color = ?, velocity = ?, lifetime = ?, scale = ?, opacity = ?, visible = ?, gravity = ?, name = ?, localposition = ?, interval = ?, amount = ?, staggertime = ?, spread = ?, affected_by_weather = ? WHERE name = ?", [particle.size, particle.color, particle.velocity, particle.lifetime, particle.scale, particle.opacity, particle.visible, particle.gravity, particle.name, particle.localposition, particle.interval, particle.amount, particle.staggertime, particle.spread, particle.affected_by_weather, particle.name]);
     await assetCache.set("particles", response);

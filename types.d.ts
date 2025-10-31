@@ -11,6 +11,7 @@ declare interface Packet {
   useragent: Nullable<string>;
   language: Nullable<string>;
   publicKey: Nullable<string>;
+  chatDecryptionKey: Nullable<string>;
 }
 
 // Define the packet type

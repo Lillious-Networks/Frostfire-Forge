@@ -1,32 +1,32 @@
 import path from "path";
 import fs from "fs";
 
-const configPath = path.join("config");
+const configPath = path.join("src", "config");
 if (!fs.existsSync(configPath)) {
   fs.mkdirSync(configPath);
 }
 
 const assetConfig = {
   maps: {
-    path: "../../assets/maps/",
+    path: "../assets/maps/",
   },
   tilesets: {
-    path: "../../assets/tilesets/",
+    path: "../assets/tilesets/",
   },
   sfx: {
-    path: "../../assets/sfx/",
+    path: "../assets/sfx/",
   },
   spritesheets: {
-    path: "../../assets/spritesheets/",
+    path: "../assets/spritesheets/",
   },
   sprites: {
-    path: "../../assets/sprites/",
+    path: "../assets/sprites/",
   },
   animations: {
-    path: "../../assets/animations/",
+    path: "../assets/animations/",
   },
   icons: {
-    path: "../../assets/icons/",
+    path: "../assets/icons/",
   }
 };
 
@@ -53,7 +53,7 @@ const settings = {
     "benchmarkenabled": false,
     "idleTimeout": 5
   },
-  "world": "default",
+  "world": "overworld",
   "default_map": "main",
   "guest_mode": {
     "enabled": true
@@ -78,6 +78,44 @@ if (!fs.existsSync(path.join(configPath, "settings.json"))) {
   console.log(`Created settings file at ${path.join(configPath, "settings.json")}`);
 } else {
   console.log(`Settings loaded from ${path.join(configPath, "settings.json")}`);
+}
+
+const security_definitions = `# Security Definitions
+.env
+ajax.js
+drupal.js
+jquery.js
+jquery.once.js
+drupal.js
+drupalSettingsLoader.js
+l10n.js
+drupal.js
+view-source
+wlwmanifest.xml
+credentials
+.aws
+wp-admin
+shell
+wget
+curl
+showLogin.cc
+get_targets
+bablosoft
+console
+Autodiscover.xml
+execute-solution
+mt-xmlrpc.cgi
+php
+`
+
+if (!fs.existsSync(path.join(configPath, "security.cfg"))) {
+  fs.writeFileSync(
+    path.join(configPath, "security.cfg"),
+    security_definitions
+  );
+  console.log(`Created security definitions file at ${path.join(configPath, "security.cfg")}`);
+} else {
+  console.log(`Security definitions loaded from ${path.join(configPath, "security.cfg")}`);
 }
 
 const swears = [

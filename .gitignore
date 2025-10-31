@@ -16,21 +16,16 @@ config/
 .env
 .env.production
 
-assets/scripts/*
-!assets/scripts/gamepad.ts
-!assets/scripts/packets.ts
-!assets/scripts/websocket.ts
+src/assets/maps/*
+!src/assets/maps/main.json
 
-assets/maps/*
-!assets/maps/main.json
+src/assets/sfx/*
+!src/assets/sfx/attack_sword.mp3
+!src/assets/sfx/music_morning_dew.mp3
+!src/assets/sfx/music_entry.mp3
 
-assets/sfx/*
-!assets/sfx/attack_sword.mp3
-!assets/sfx/music_morning_dew.mp3
-!assets/sfx/music_entry.mp3
-
-assets/tilesets/*
-!assets/tilesets/tiles.png
+src/assets/tilesets/*
+!src/assets/tilesets/tiles.png
 
 src/webserver/www/public/js/web/*.js
 *.sqlite
@@ -40,9 +35,9 @@ src/utility/*.md
 .VSCodeCounter
 bun.lockb
 
-assets/sprites/*
+src/assets/sprites/*
 
-assets/spritesheets/*
-!assets/spritesheets/frostfire-player.png
+src/assets/spritesheets/*
+!src/assets/spritesheets/frostfire-player.png
 
 .vscode/

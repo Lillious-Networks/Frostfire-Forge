@@ -1,6 +1,6 @@
 import path from "path";
 import fs from "fs";
-import * as settings from "../../config/settings.json";
+import * as settings from "../config/settings.json";
 
 const types = {
   info: "\x1b[97m",
