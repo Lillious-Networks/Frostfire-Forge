@@ -4,7 +4,7 @@ const socket = new WebSocket(config.WEBSOCKET_URL || "ws://localhost:3000");
 import "./events.ts";
 import pako from "../libs/pako.js";
 import packet from "./packetencoder.ts";
-import Cache from "./cache";
+import Cache from "./cache.ts";
 import { updateTime } from "./ambience.ts";
 import { setWeatherType } from "./renderer.ts";
 const cache = Cache.getInstance();
