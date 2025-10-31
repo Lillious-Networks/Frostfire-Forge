@@ -36,14 +36,14 @@
     "service:restart": "sudo systemctl restart frostfire-forge-production",
     "service:status": "systemctl status frostfire-forge-production --no-pager",
     "service:logs": "journalctl -u frostfire-forge-production -f",
-    "docker:dev": "docker-compose -f docker-compose.dev.yml up -d",
-    "docker:dev:down": "docker-compose -f docker-compose.dev.yml down",
-    "docker:dev:logs": "docker-compose -f docker-compose.dev.yml logs -f",
-    "docker:dev:build": "docker-compose -f docker-compose.dev.yml build",
-    "docker:prod": "docker-compose -f docker-compose.prod.yml up -d",
-    "docker:prod:down": "docker-compose -f docker-compose.prod.yml down",
-    "docker:prod:logs": "docker-compose -f docker-compose.prod.yml logs -f",
-    "docker:prod:build": "docker-compose -f docker-compose.prod.yml build"
+    "docker:dev": "docker compose -f docker-compose.dev.yml up -d",
+    "docker:dev:down": "docker compose -f docker-compose.dev.yml down",
+    "docker:dev:logs": "docker compose -f docker-compose.dev.yml logs -f",
+    "docker:dev:build": "docker compose -f docker-compose.dev.yml build",
+    "docker:prod": "docker compose -f docker-compose.prod.yml up -d",
+    "docker:prod:down": "docker compose -f docker-compose.prod.yml down",
+    "docker:prod:logs": "docker compose -f docker-compose.prod.yml logs -f",
+    "docker:prod:build": "docker compose -f docker-compose.prod.yml build"
   },
   "type": "module"
 }
