@@ -3,25 +3,16 @@ import path from "path";
 import sharp from "sharp";
 import assetConfig from "../services/assetConfig";
 const assetPath = assetConfig.getAssetConfig();
+const assetData = assetConfig.getAssetData() as any;
 import zlib from "zlib";
 import crypto from "crypto";
 
 // Generates the sprite frames from the sprite sheet
 const sprites = [] as SpriteData[];
 export default async function generate(data: SpriteSheetData) {
-    if (!assetPath || !fs.existsSync(path.join(import.meta.dir, assetPath))) {
+    if (!assetPath || !fs.existsSync(path.join(assetPath))) {
       throw new Error(`Asset path not found at ${assetPath}`);
     }
-
-    const asset = fs.readFileSync(
-      path.join(import.meta.dir, assetPath),
-      "utf-8"
-    );
-    if (!asset) {
-      throw new Error("Failed to load asset config");
-    }
-
-    const assetData = JSON.parse(asset);
 
     const output = path.join(
       import.meta.dir,

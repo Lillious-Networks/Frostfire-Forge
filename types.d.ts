@@ -187,6 +187,7 @@ declare interface SpriteSheetData {
 declare interface SpriteData {
   name: string;
   data: Buffer;
+  hash?: string;
 }
 
 // Define Spell data

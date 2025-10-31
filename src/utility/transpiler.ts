@@ -1,21 +1,6 @@
 import path from "path";
 import fs from "fs";
 import log from "../modules/logger";
-import assetConfig from "../services/assetConfig";
-if (!assetConfig.getAssetConfig()) {
-  throw new Error("Asset path not found");
-}
-
-const assetPath = path.join(import.meta.dir, assetConfig.getAssetConfig() as string);
-
-if (!assetPath || !fs.existsSync(assetPath)) {
-  throw new Error(`Asset path not found at ${assetPath}`);
-}
-
-const asset = fs.readFileSync(assetPath, "utf-8");
-if (!asset) {
-  throw new Error("Failed to load asset config");
-}
 
 const transpiler = new Bun.Transpiler({
     loader: "tsx",

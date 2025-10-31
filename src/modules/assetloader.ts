@@ -16,22 +16,17 @@ import * as settings from "../config/settings.json";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 
 import assetConfig from "../services/assetConfig";
-const assetPath = assetConfig.getAssetConfig();
-if (!assetPath || !fs.existsSync(path.join(import.meta.dir, assetPath))) {
-  throw new Error(`Asset path not found at ${assetPath}`);
-}
+const assetPath = assetConfig.getAssetConfig() as string;
+const assetData = assetConfig.getAssetData() as any;
 
-const asset = fs.readFileSync(path.join(import.meta.dir, assetPath), "utf-8");
-if (!asset) {
-  throw new Error("Failed to load asset config");
+if (!assetConfig.getAssetConfig()) {
+  throw new Error("Asset path not found");
 }
-
-const assetData = JSON.parse(asset);
 
 function loadAnimations() {
   const now = performance.now();
 
-  const animationPath = path.join(import.meta.dir, assetData.animations.path);
+  const animationPath = path.join(assetPath, assetData.animations.path);
   if (!fs.existsSync(animationPath)) {
     console.log("No animations found");
     return;
@@ -68,7 +63,7 @@ loadAnimations();
 function loadIcons() {
   const now = performance.now();
   const icons = [] as any[];
-  const iconDir = path.join(import.meta.dir, assetData.icons.path);
+  const iconDir = path.join(assetPath, assetData.icons.path);
 
   if (!fs.existsSync(iconDir)) {
     throw new Error(`Icons directory not found at ${iconDir}`);
@@ -168,7 +163,7 @@ log.success(`Loaded ${quests.length} quest(s) from the database in ${(performanc
 const mapProperties: MapProperties[] = [];
 function loadAllMaps() {
   const now = performance.now();
-  const mapDir = path.join(import.meta.dir, assetData.maps.path);
+  const mapDir = path.join(assetPath, assetData.maps.path);
   const maps: MapData[] = [];
 
   if (!fs.existsSync(mapDir)) throw new Error(`Maps directory not found at ${mapDir}`);
@@ -201,7 +196,7 @@ function loadAllMaps() {
 }
 
 function processMapFile(file: string): MapData | null {
-  const mapDir = path.join(import.meta.dir, assetData.maps.path);
+  const mapDir = path.join(assetPath, assetData.maps.path);
   const fullPath = path.join(mapDir, file);
   const parsed = tryParse(fs.readFileSync(fullPath, "utf-8"));
 
@@ -387,7 +382,7 @@ function extractAndCompressLayers(map: MapData) {
 
 export async function reloadMap(mapName: string): Promise<MapData> {
   try {
-    const mapDir = path.join(import.meta.dir, assetData.maps.path);
+    const mapDir = path.join(assetPath, assetData.maps.path);
     const file = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
     const fullPath = path.join(mapDir, file);
 
@@ -443,7 +438,7 @@ loadAllMaps();
 async function loadTilesets() {
   const now = performance.now();
   const tilesets = [] as TilesetData[];
-  const tilesetDir = path.join(import.meta.dir, assetData.tilesets.path);
+  const tilesetDir = path.join(assetPath, assetData.tilesets.path);
 
   if (!fs.existsSync(tilesetDir)) {
     throw new Error(`Tilesets directory not found at ${tilesetDir}`);
@@ -497,7 +492,7 @@ function tryParse(data: string): any {
 function loadSoundEffects() {
   const now = performance.now();
   const soundEffects = [] as SoundData[];
-  const soundEffectDir = path.join(import.meta.dir, assetData.sfx.path);
+  const soundEffectDir = path.join(assetPath, assetData.sfx.path);
 
   if (!fs.existsSync(soundEffectDir)) {
     throw new Error(`Sound effects directory not found at ${soundEffectDir}`);
@@ -533,7 +528,7 @@ loadSoundEffects();
 async function loadSpriteSheets() {
   const spritesheetnow = performance.now();
   const spritesheets = [] as SpriteSheetData[];
-  const spriteDir = path.join(import.meta.dir, assetData.spritesheets.path);
+  const spriteDir = path.join(assetPath, assetData.spritesheets.path);
   if (!fs.existsSync(spriteDir)) {
     throw new Error(`Sprites directory not found at ${spriteDir}`);
   }
@@ -569,7 +564,7 @@ await loadSpriteSheets();
 
 function parseAnimations() {
   const animationFiles = fs
-    .readdirSync(path.join(import.meta.dir, assetData.animations.path))
+    .readdirSync(path.join(assetPath, assetData.animations.path))
     .filter((file) => file.toLowerCase().endsWith(".png"));
   return animationFiles;
 }
@@ -577,7 +572,7 @@ function parseAnimations() {
 function validateAnimationFile(file: string) {
   // Check for PNG byte
   const buffer = fs.readFileSync(
-    path.join(import.meta.dir, assetData.animations.path, file)
+    path.join(assetPath, assetData.animations.path, file)
   );
   if (
     buffer[0] !== 0x89 ||

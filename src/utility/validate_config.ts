@@ -1,5 +1,7 @@
 import crypto from "crypto";
 import log from "../modules/logger";
+import path from "path";
+import fs from "fs";
 
 export default (async () => {
   // Track start up errors and warnings
@@ -133,12 +135,13 @@ export default (async () => {
     process.env.SESSION_KEY = crypto.randomBytes(20).toString("hex");
   }
 
-  // Asset Path
-  if (!process.env.ASSET_PATH) {
-    startUpWarnings.push(
-      "No asset path is set, defaulting to ../../config/assets.json. Please set the ASSET_PATH environment variable to suppress this message."
+  const assetPath = path.join(import.meta.dir, "..", "config", "assets.json");
+  if (!fs.existsSync(assetPath)) {
+    startUpErrors.push(
+      `Asset config not found at ${assetPath}, aborting... Please ensure the assets.json file exists to suppress this message.`
     );
-    process.env.ASSET_PATH = "../../config/assets.json";
+  } else {
+    log.info(`Asset config found at ${assetPath}`);
   }
 
   // Game Name
