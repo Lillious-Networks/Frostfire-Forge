@@ -70,10 +70,6 @@ jobs:
           # Create database Certificate
           echo "${{ secrets.DB_CERT }}" > db.crt
 
-      - name: Create Configuration
-        run: |
-          bun create-config
-
       - name: Start Docker Container
         run: |
-          bun run docker:prod:rebuild
+          bun production
