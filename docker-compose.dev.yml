@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  frostfire-forge-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: frostfire-forge-dev
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "3000:3000"
+    volumes:
+      - ./.env.development:/app/.env.development:ro
+    env_file:
+      - .env.development
+    environment:
+      - NODE_ENV=development
+    networks:
+      - frostfire-network-dev
+
+networks:
+  frostfire-network-dev:
+    driver: bridge

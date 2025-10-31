@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  frostfire-forge:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: frostfire-forge-prod
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "3000:3000"
+    volumes:
+      - ./.env.production:/app/.env.production:ro
+    env_file:
+      - .env.production
+    environment:
+      - NODE_ENV=production
+    networks:
+      - frostfire-network
+
+networks:
+  frostfire-network:
+    driver: bridge

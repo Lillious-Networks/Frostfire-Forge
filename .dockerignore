@@ -1,0 +1,55 @@
+# Dependencies
+node_modules
+npm-debug.log
+yarn-error.log
+bun.lockb
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.*.local
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+coverage
+*.test.ts
+*.spec.ts
+
+# Documentation
+*.md
+docs
+
+# CI/CD
+.github
+.gitlab-ci.yml
+
+# Development tools
+.husky
+.eslintrc*
+.prettierrc*
+
+# Build artifacts
+dist
+build
+*.log
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore

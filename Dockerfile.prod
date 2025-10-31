@@ -1,0 +1,37 @@
+# Production Dockerfile for Frostfire Forge
+FROM oven/bun:latest AS base
+WORKDIR /app
+
+# Install dependencies stage
+FROM base AS deps
+COPY package.json bun.lockb* ./
+RUN bun install --frozen-lockfile --production
+
+# Build stage
+FROM base AS build
+COPY package.json bun.lockb* ./
+RUN bun install --frozen-lockfile
+COPY . .
+
+# Production stage
+FROM base AS production
+WORKDIR /app
+
+# Copy dependencies from deps stage
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=build /app .
+
+# Create .env.production file placeholder
+# Note: You should mount your actual .env.production file at runtime
+RUN touch .env.production
+
+# Expose required ports
+EXPOSE 80
+EXPOSE 443
+EXPOSE 3000
+
+# Set production environment
+ENV NODE_ENV=production
+
+# Run production setup and start server
+CMD ["bun", "run", "production"]

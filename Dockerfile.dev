@@ -1,0 +1,37 @@
+# Development Dockerfile for Frostfire Forge
+FROM oven/bun:canary AS base
+WORKDIR /app
+
+# Install dependencies stage
+FROM base AS deps
+COPY package.json bun.lockb* ./
+RUN bun install --frozen-lockfile
+
+# Build stage
+FROM base AS build
+COPY package.json bun.lockb* ./
+RUN bun install --frozen-lockfile
+COPY . .
+
+# Development stage
+FROM base AS development
+WORKDIR /app
+
+# Copy dependencies from deps stage
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=build /app .
+
+# Create .env.development file placeholder
+# Note: You should mount your actual .env.development file at runtime
+RUN touch .env.development
+
+# Expose required ports
+EXPOSE 80
+EXPOSE 443
+EXPOSE 3000
+
+# Set development environment
+ENV NODE_ENV=development
+
+# Run development setup and start server
+CMD ["bun", "run", "development"]
