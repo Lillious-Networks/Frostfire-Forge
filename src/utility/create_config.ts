@@ -8,25 +8,25 @@ if (!fs.existsSync(configPath)) {
 
 const assetConfig = {
   maps: {
-    path: "../assets/maps/",
+    path: "/maps/",
   },
   tilesets: {
-    path: "../assets/tilesets/",
+    path: "/tilesets/",
   },
   sfx: {
-    path: "../assets/sfx/",
+    path: "/sfx/",
   },
   spritesheets: {
-    path: "../assets/spritesheets/",
+    path: "/spritesheets/",
   },
   sprites: {
-    path: "../assets/sprites/",
+    path: "/sprites/",
   },
   animations: {
-    path: "../assets/animations/",
+    path: "/animations/",
   },
   icons: {
-    path: "../assets/icons/",
+    path: "/icons/",
   }
 };
 
