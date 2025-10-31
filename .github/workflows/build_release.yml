@@ -72,7 +72,7 @@ jobs:
 
       - name: Create Configuration
         run: |
-          bun run create-config
+          bun create-config
 
       - name: Start Docker Container
         run: |

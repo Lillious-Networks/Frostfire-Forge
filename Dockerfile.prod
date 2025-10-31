@@ -33,5 +33,8 @@ EXPOSE 3000
 # Set production environment
 ENV NODE_ENV=production
 
+# Create configuration file for asset cache
+RUN bun run create-config
+
 # Run production setup and start server
 CMD ["bun", "run", "production"]
