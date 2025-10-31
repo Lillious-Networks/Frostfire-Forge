@@ -2,8 +2,8 @@ name: Build and Release
 
 permissions:
   contents: read
-  
-on: 
+
+on:
   push:
     paths:
       - 'src/**'
@@ -13,19 +13,62 @@ on:
 jobs:
   build:
     name: Build and Release
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
+    environment: production
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-            bun-version: canary
-
-      - name: ESLint
+      - name: Install Dependencies
         run: |
-          # Delete package.json as a workaround to only install eslint
-          rm package.json
-          bun install eslint
-          bun install typescript-eslint
-          bun eslint
+          bun install
+
+      - name: Create .env.production file
+        run: |
+          echo 'DATABASE_ENGINE=mysql' >> .env.production
+          echo 'DATABASE_HOST="${{ secrets.DATABASE_HOST }}"' >> .env.production
+          echo 'DATABASE_NAME="${{ secrets.DATABASE_NAME }}"' >> .env.production
+          echo 'DATABASE_PASSWORD="${{ secrets.DATABASE_PASSWORD }}"' >> .env.production
+          echo 'DATABASE_PORT="${{ secrets.DATABASE_PORT }}"' >> .env.production
+          echo 'DATABASE_USER="${{ secrets.DATABASE_USER }}"' >> .env.production
+          echo 'EMAIL_PASSWORD="${{ secrets.EMAIL_PASSWORD }}"' >> .env.production
+          echo 'EMAIL_SERVICE="${{ secrets.EMAIL_SERVICE }}"' >> .env.production
+          echo 'EMAIL_USER="${{ secrets.EMAIL_USER }}"' >> .env.production
+          echo 'EMAIL_TEST="${{ secrets.EMAIL_TEST }}"' >> .env.production
+          echo 'SESSION_KEY="${{ secrets.SESSION_KEY }}"' >> .env.production
+          echo 'SQL_SSL_MODE=DISABLED' >> .env.production
+          echo 'WEBSRV_PORT=80' >> .env.production
+          echo 'WEBSRV_PORTSSL=443' >> .env.production
+          echo 'WEBSRV_USESSL=true' >> .env.production
+          echo 'GOOGLE_TRANSLATE_API_KEY="${{ secrets.GOOGLE_TRANSLATE_API_KEY }}"' >> .env.production
+          echo 'OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}"' >> .env.production
+          echo 'TRANSLATION_SERVICE="openai"' >> .env.production
+          echo 'OPEN_AI_MODEL="gpt-4.1-nano-2025-04-14"' >> .env.production
+          echo 'WEB_SOCKET_URL="https://forge.lillious.com:3000"' >> .env.production
+          echo 'ASSET_PATH="../config/assets.json"' >> .env.production
+          echo 'DOMAIN="https://forge.lillious.com"' >> .env.production
+          echo 'GAME_NAME="Frostfire Forge"' >> .env.production
+          echo 'CACHE="redis"' >> .env.production
+          echo 'REDIS_URL="${{ secrets.REDIS_URL }}"' >> .env.production
+
+      - name: Create Certificate Chain
+        working-directory: ./certs
+        run: |
+          # Create CA Bundle using CERT_CA_BUNDLE secret
+          echo "${{ secrets.CERT_CA_BUNDLE }}" > cert.ca-bundle
+
+          # Create pem
+          echo "${{ secrets.CERT_PEM }}" > cert.pem
+
+          # Create private key
+          echo "${{ secrets.CERT_PRIVATE_KEY }}" > key.pem
+
+          # Create database Certificate
+          echo "${{ secrets.DB_CERT }}" > db.crt
+
+      - name: Create Configuration
+        run: |
+          bun run create-config
+
+      - name: Start Docker Container
+        run: |
+          bun run docker:prod
