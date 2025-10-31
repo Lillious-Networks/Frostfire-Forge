@@ -18,6 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Bun Canary
+        uses: oven-sh/bun-install@v1
+        with:
+          version: 'canary'
+
       - name: Install Dependencies
         run: |
           bun install
