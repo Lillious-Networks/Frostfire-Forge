@@ -56,7 +56,7 @@ jobs:
           echo 'REDIS_URL="${{ secrets.REDIS_URL }}"' >> .env.production
 
       - name: Create Certificate Chain
-        working-directory: ./certs
+        working-directory: src/certs
         run: |
           # Create CA Bundle using CERT_CA_BUNDLE secret
           echo "${{ secrets.CERT_CA_BUNDLE }}" > cert.ca-bundle
