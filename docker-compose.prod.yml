@@ -17,6 +17,7 @@ services:
       - .env.production
     environment:
       - NODE_ENV=production
+      - ASSET_PATH=./config/assets.json
     networks:
       - frostfire-network
     depends_on:

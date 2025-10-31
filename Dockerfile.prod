@@ -22,7 +22,6 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app .
 
 # Create .env.production file placeholder
-# Note: You should mount your actual .env.production file at runtime
 RUN touch .env.production
 
 # Expose required ports
