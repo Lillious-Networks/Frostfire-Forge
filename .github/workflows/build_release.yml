@@ -76,4 +76,4 @@ jobs:
 
       - name: Start Docker Container
         run: |
-          bun run docker:prod
+          bun run docker:prod:rebuild
