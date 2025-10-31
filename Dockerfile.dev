@@ -13,6 +13,8 @@ COPY package.json bun.lockb* ./
 RUN bun install --frozen-lockfile
 COPY . .
 
+RUN bun create-config
+
 # Development stage
 FROM base AS development
 WORKDIR /app
