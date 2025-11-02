@@ -49,7 +49,6 @@ jobs:
           echo 'TRANSLATION_SERVICE="openai"' >> .env.production
           echo 'OPEN_AI_MODEL="gpt-4.1-nano-2025-04-14"' >> .env.production
           echo 'WEB_SOCKET_URL="https://forge.lillious.com:3000"' >> .env.production
-          echo 'ASSET_PATH="../config/assets.json"' >> .env.production
           echo 'DOMAIN="https://forge.lillious.com"' >> .env.production
           echo 'GAME_NAME="Frostfire Forge"' >> .env.production
           echo 'CACHE="redis"' >> .env.production
