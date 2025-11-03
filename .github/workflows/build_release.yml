@@ -69,6 +69,16 @@ jobs:
           # Create database Certificate
           echo "${{ secrets.DB_CERT }}" > db.crt
 
+      - name: Create Config Files
+        run: |
+          bun run create-config
+
       - name: Start Docker Container
         run: |
           bun run docker:prod:rebuild
+
+      - name: Clean Up Files
+        working-directory: .
+        run: |
+          cd ../../
+          rm -f Frostfire-Forge
