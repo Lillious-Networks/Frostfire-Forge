@@ -81,4 +81,4 @@ jobs:
         working-directory: .
         run: |
           cd ../../
-          rm -f Frostfire-Forge
+          rm -rf Frostfire-Forge
