@@ -53,7 +53,7 @@ const settings = {
     "benchmarkenabled": false,
     "idleTimeout": 5
   },
-  "world": "overworld",
+  "world": "default",
   "default_map": "main",
   "guest_mode": {
     "enabled": true
