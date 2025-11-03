@@ -1,7 +1,7 @@
 import path from "path";
 import fs from "fs";
-
-const configPath = path.join("src", "config");
+const pwd = process.cwd();
+const configPath = path.join(pwd, "src", "config");
 if (!fs.existsSync(configPath)) {
   fs.mkdirSync(configPath);
 }
