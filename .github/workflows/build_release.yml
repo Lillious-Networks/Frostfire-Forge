@@ -10,6 +10,8 @@ on:
       - 'docker-compose.prod.yml'
       - 'Dockerfile.prod'
       - '.github/workflows/build_release.yml'
+    branches:
+      - main
 
   workflow_dispatch:
 

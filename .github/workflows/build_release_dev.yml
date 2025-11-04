@@ -9,7 +9,9 @@ on:
       - 'src/**'
       - 'docker-compose.dev.yml'
       - 'Dockerfile.dev'
-      - '.github/workflows/build_release_dev.yml'
+      - '.github/workflows/**'
+    branches:
+      - development
 
   workflow_dispatch:
 
