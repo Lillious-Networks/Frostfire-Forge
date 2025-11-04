@@ -65,26 +65,29 @@ jobs:
 
       - name: Build Docker Image
         run: |
+          export REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"
           docker compose -f docker-compose.prod.yml build
 
-  stop-docker-container:
-    name: Stop Docker Container
+  stop-docker-containers:
+    name: Stop Existing Docker Containers
     runs-on: self-hosted
     environment: production
     needs: [build]
     steps:
       - name: Stop Docker Container
         run: |
+          export REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"
           docker compose -f docker-compose.prod.yml down || echo "No container to stop"
 
   start-docker-container:
     name: Start Docker Container
     runs-on: self-hosted
     environment: production
-    needs: [stop-docker-container]
+    needs: [stop-docker-containers]
     steps:
       - name: Start Docker Services
         run: |
+          export REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"
           docker compose -f docker-compose.prod.yml up -d
 
   cleanup:
