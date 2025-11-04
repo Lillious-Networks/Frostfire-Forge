@@ -49,9 +49,8 @@ jobs:
     steps:
       - name: Stop Docker Services
         run: |
-          PID=$(sudo docker inspect --format '{{.State.Pid}}' frostfire-forge-dev)
-          sudo kill -9 $PID
-          sudo docker rm frostfire-forge-dev || sudo rm -rf /var/lib/docker/containers/$(sudo docker inspect --format '{{.Id}}' frostfire-forge-dev)
+          PID=$(sudo docker inspect --format '{{.State.Pid}}' frostfire-forge-dev 2>/dev/null); \
+          [[ -n "$PID" && "$PID" != "0" ]] && sudo kill -9 "$PID" || echo "No valid PID found."
 
   start-docker-container:
     name: Start Docker Container
