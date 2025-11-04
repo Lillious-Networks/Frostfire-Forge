@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.prod
-    container_name: frostfire-forge-prod:latest
+    container_name: frostfire-forge-prod
     restart: on-failure
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD}

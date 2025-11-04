@@ -17,7 +17,7 @@ on:
 concurrency:
   group: 'build-release-development'
   cancel-in-progress: true
-
+  
 jobs:
   build:
     name: Build and Release (Development)
