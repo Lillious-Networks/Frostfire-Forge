@@ -30,18 +30,9 @@ jobs:
     environment: production
     needs: [build]
     steps:
-      - name: Stop Docker Services
+      - name: Stop Docker Container
         run: |
-          set +e  # disable exit-on-error
-          CONTAINER_ID=$(sudo docker ps -aq -f name=frostfire-forge-dev)
-          if [ -n "$CONTAINER_ID" ]; then
-            echo "Stopping container $CONTAINER_ID..."
-            sudo docker stop "$CONTAINER_ID" || true
-            sudo docker rm -f "$CONTAINER_ID" || true
-          else
-            echo "No container named frostfire-forge-dev found."
-          fi
-          set -e  # re-enable exit-on-error
+          docker compose -f docker-compose.dev.yml down || echo "No container to stop"
 
   start-docker-container:
     name: Start Docker Container
