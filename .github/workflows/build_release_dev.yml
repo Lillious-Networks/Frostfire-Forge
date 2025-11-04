@@ -1,4 +1,4 @@
-name: Build and Release
+name: Build and Release (Development)
 
 permissions:
   contents: read
@@ -17,3 +17,5 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: ../
