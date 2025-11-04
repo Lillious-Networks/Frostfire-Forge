@@ -49,7 +49,7 @@ jobs:
     steps:
       - name: Stop Docker Services
         run: |
-          docker compose -f docker-compose.dev.yml down
+          sudo docker compose -f docker-compose.dev.yml down
 
   start-docker-container:
     name: Start Docker Container
