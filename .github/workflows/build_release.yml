@@ -83,7 +83,6 @@ jobs:
     steps:
       - name: Stop Docker Container
         run: |
-          export REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"
           docker compose -f docker-compose.prod.yml down || echo "No container to stop"
 
   start-docker-container:
@@ -94,7 +93,7 @@ jobs:
     steps:
       - name: Start Docker Services
         run: |
-          export REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"
+
           docker compose -f docker-compose.prod.yml up -d
 
   cleanup:
