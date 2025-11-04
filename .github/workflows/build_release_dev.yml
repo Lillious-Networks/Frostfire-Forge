@@ -4,14 +4,13 @@ permissions:
   contents: read
 
 on:
-  push:
   workflow_dispatch:
 
 jobs:
   build:
     name: Build and Release
     runs-on: self-hosted
-    environment: production
+    environment: development
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -27,7 +26,7 @@ jobs:
   stop-docker-container:
     name: Stop Docker Container
     runs-on: self-hosted
-    environment: production
+    environment: development
     needs: [build]
     steps:
       - name: Stop Docker Container
@@ -37,7 +36,7 @@ jobs:
   start-docker-container:
     name: Start Docker Container
     runs-on: self-hosted
-    environment: production
+    environment: development
     needs: [stop-docker-container]
     steps:
       - name: Start Docker Services
@@ -47,7 +46,7 @@ jobs:
   cleanup:
     name: Cleanup Old Docker Images
     runs-on: self-hosted
-    environment: production
+    environment: development
     needs: [start-docker-container]
     steps:
       - name: Remove Unused Docker Images

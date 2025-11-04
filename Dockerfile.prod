@@ -2,6 +2,11 @@
 FROM oven/bun:latest AS base
 WORKDIR /app
 
+# Copy .env file stage
+FROM base AS envcopy
+WORKDIR /app
+COPY .env.production .env.production
+
 # Install dependencies stage
 FROM base AS deps
 COPY package.json bun.lockb* ./
@@ -22,9 +27,10 @@ WORKDIR /app
 # Copy dependencies from deps stage
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app .
+COPY --from=envcopy /app/.env.development .env.development
 
-# Create .env.production file placeholder
-RUN touch .env.production
+RUN bun create-config
+RUN bun setup-development
 
 # Expose required ports
 EXPOSE 80

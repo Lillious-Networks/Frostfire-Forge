@@ -16,18 +16,10 @@ jobs:
     runs-on: self-hosted
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Install Bun Canary
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: canary
-
-      - name: Install Dependencies
-        run: |
-          bun install
-
-      - name: Create .env.production file
+      - name: Update environment variables
         run: |
           echo 'DATABASE_ENGINE=mysql' >> .env.production
           echo 'DATABASE_HOST="${{ secrets.DATABASE_HOST }}"' >> .env.production
@@ -69,15 +61,41 @@ jobs:
           # Create database Certificate
           echo "${{ secrets.DB_CERT }}" > db.crt
 
-      - name: Create Config Files
+      - name: Build Docker Image
         run: |
-          bun run create-config
+          docker compose -f docker-compose.prod.yml build
 
-      - name: Start Docker Container
+  stop-docker-container:
+    name: Stop Docker Container
+    runs-on: self-hosted
+    environment: production
+    needs: [build]
+    steps:
+      - name: Stop Docker Container
         run: |
-          bun run docker:prod:rebuild
+          docker compose -f docker-compose.prod.yml down || echo "No container to stop"
 
-      - name: Clean Up Files
+  start-docker-container:
+    name: Start Docker Container
+    runs-on: self-hosted
+    environment: production
+    needs: [stop-docker-container]
+    steps:
+      - name: Start Docker Services
+        run: |
+          docker compose -f docker-compose.prod.yml up -d
+
+  cleanup:
+    name: Cleanup Old Docker Images
+    runs-on: self-hosted
+    environment: production
+    needs: [start-docker-container]
+    steps:
+      - name: Remove Unused Docker Images
+        run: |
+          docker image prune -f
+
+      - name: Clean Up Stale Files
         working-directory: .
         run: |
           cd ../../
