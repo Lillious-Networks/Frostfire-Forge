@@ -8,6 +8,16 @@ on:
   workflow_dispatch:
 
 jobs:
+  clean-up:
+    name: Clean Up Previous Build Files
+    runs-on: self-hosted
+    steps:
+      - name: Clean Up Files
+        working-directory: .
+        run: |
+          cd ../../
+          rm -rf Frostfire-Forge
+
   build:
     name: Build and Release
     runs-on: self-hosted
@@ -32,3 +42,9 @@ jobs:
       - name: Setup SQLite Database
         run: |
           bun setup-development
+
+      - name: Update environment variables
+        run: |
+          sed -i 's|localhost|forge.lillious.com|g' env.development
+
+      
