@@ -170,7 +170,7 @@ npm run docker:prod:build
 - **Production**: Multi-stage build with optimized dependencies
 - **Environment Files**: `.env.production` or `.env.development` is automatically loaded
 - **Ports Exposed**: 80 (HTTP), 443 (HTTPS), 3000 (Application)
-- **Redis**: If `CACHE=redis`, configure `REDIS_URL` in your `.env` file
+- **Redis**: If `CACHE=redis`, configure `REDIS_URL` and `REDIS_PASSWORD` in your `.env` file
 
 ---
 
@@ -178,7 +178,6 @@ npm run docker:prod:build
 
 > [!IMPORTANT]
 > The following environment variables are required for production.
-> Reference `.env.development` for default values.
 
 ```bash
 # Database Configuration

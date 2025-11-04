@@ -17,7 +17,7 @@ on:
 concurrency:
   group: 'build-release-development'
   cancel-in-progress: true
-  
+
 jobs:
   build:
     name: Build and Release (Development)
@@ -29,11 +29,9 @@ jobs:
 
       - name: Update environment variables
         run: |
-          rm -f .env.development
           echo 'DATABASE_ENGINE=sqlite' >> .env.development
           echo 'DATABASE_NAME="frostfire-forge"' >> .env.development
           echo 'WEBSRV_PORT=8080' >> .env.development
-          echo 'WEBSRV_PORTSSL=8443' >> .env.development
           echo 'WEBSRV_USESSL=false' >> .env.development
           echo 'WEB_SOCKET_URL="ws://forge.lillious.com"' >> .env.development
           echo 'WEB_SOCKET_PORT=3001' >> .env.development
