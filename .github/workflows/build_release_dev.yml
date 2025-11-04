@@ -11,7 +11,7 @@ on:
 
 jobs:
   build:
-    name: Build and Release
+    name: Build and Release (Development)
     runs-on: self-hosted
     environment: development
     steps:
