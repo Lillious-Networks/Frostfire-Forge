@@ -36,3 +36,27 @@ jobs:
       - name: Update environment variables
         run: |
           sed -i 's|localhost|forge.lillious.com|g' .env.development
+
+      - name: Build Docker Image
+        run: |
+          docker compose -f docker-compose.dev.yml build --force-recreate
+
+  stop-docker-container:
+    name: Stop Docker Container
+    runs-on: self-hosted
+    environment: production
+    needs: [build]
+    steps:
+      - name: Stop Docker Services
+        run: |
+          docker compose -f docker-compose.dev.yml down
+
+  start-docker-container:
+    name: Start Docker Container
+    runs-on: self-hosted
+    environment: production
+    needs: [stop-docker-container]
+    steps:
+      - name: Start Docker Services
+        run: |
+          docker compose -f docker-compose.dev.yml up -d
