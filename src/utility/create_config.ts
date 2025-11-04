@@ -4252,7 +4252,7 @@ if (!fs.existsSync(path.join(configPath, "swears.json"))) {
     path.join(configPath, "swears.json"),
     JSON.stringify(swears, null, 2)
   );
-  console.log(`Created sweear filter file at ${path.join(configPath, "swears.json")}`);
+  console.log(`Created swear filter file at ${path.join(configPath, "swears.json")}`);
 } else {
   console.log(`Swear filter loaded from ${path.join(configPath, "swears.json")}`);
 }

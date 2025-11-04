@@ -5,7 +5,6 @@ permissions:
 
 on:
   push:
-
   workflow_dispatch:
 
 jobs:
@@ -29,3 +28,7 @@ jobs:
       - name: Create Configuration
         run: |
           bun create-config
+
+      - name: Setup SQLite Database
+        run: |
+          bun setup-development
