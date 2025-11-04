@@ -8,9 +8,10 @@ on:
   workflow_dispatch:
 
 jobs:
-  clean-up:
-    name: Clean Up Previous Build Files
+  build:
+    name: Build and Release
     runs-on: self-hosted
+    environment: production
     steps:
       - name: Clean Up Files
         working-directory: .
@@ -18,11 +19,6 @@ jobs:
           cd ../../
           rm -rf Frostfire-Forge
 
-  build:
-    name: Build and Release
-    runs-on: self-hosted
-    environment: production
-    steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
