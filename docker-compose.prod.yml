@@ -10,9 +10,9 @@ services:
       - "443:443"
       - "3000:3000"
     volumes:
-      - ./.env.production:/app/.env.production:ro
+      - ./.env.development:/app/.env.development:ro
     env_file:
-      - .env.production
+      - .env.development
     networks:
       - frostfire-network
 

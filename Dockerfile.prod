@@ -5,7 +5,7 @@ WORKDIR /app
 # Copy .env file stage
 FROM base AS envcopy
 WORKDIR /app
-COPY .env.production .env.production
+COPY .env.development .env.development
 
 # Install dependencies stage
 FROM base AS deps
@@ -25,7 +25,7 @@ WORKDIR /app
 # Copy dependencies from deps stage
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app .
-COPY --from=envcopy /app/.env.production .env.production
+COPY --from=envcopy /app/.env.development .env.development
 
 RUN bun create-config
 
@@ -33,9 +33,6 @@ RUN bun create-config
 EXPOSE 80
 EXPOSE 443
 EXPOSE 3000
-
-# Set production environment
-ENV NODE_ENV=production
 
 # Run production setup and start server
 # Note: create-config will run as part of the production script

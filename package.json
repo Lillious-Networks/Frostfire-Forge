@@ -18,9 +18,9 @@
     "typescript-eslint": "^8.46.2"
   },
   "scripts": {
-    "production": "bun transpile-production && bun --env-file=.env.production ./src/webserver/server.ts",
+    "production": "bun transpile-production && bun --env-file=.env.development ./src/webserver/server.ts",
     "transpile-development": "bun --env-file=.env.development ./src/utility/transpiler.ts",
-    "transpile-production": "bun --env-file=.env.production ./src/utility/transpiler.ts",
+    "transpile-production": "bun --env-file=.env.development ./src/utility/transpiler.ts",
     "development": "bun transpile-development && bun --inspect --env-file=.env.development ./src/webserver/server.ts",
     "setup": "bun --env-file=.env.production ./src/utility/database_setup.ts",
     "setup-sqlite": "bun --env-file=.env.development ./src/utility/database_setup_sqlite.ts",
