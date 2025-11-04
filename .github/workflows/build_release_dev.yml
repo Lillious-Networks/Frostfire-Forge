@@ -16,18 +16,6 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
-        run: |
-          bun install
-
-      - name: Create Configuration
-        run: |
-          bun create-config
-
-      - name: Setup SQLite Database
-        run: |
-          bun setup-development
-
       - name: Update environment variables
         run: |
           sed -i 's|localhost|forge.lillious.com|g' .env.development
