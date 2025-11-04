@@ -20,10 +20,7 @@ WORKDIR /app
 # Copy dependencies from deps stage
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app .
-
-# Create .env.development file placeholder
-# Note: You should mount your actual .env.development file at runtime
-RUN touch .env.development
+COPY .env.development ./env.development
 
 RUN bun create-config
 RUN bun setup-development
