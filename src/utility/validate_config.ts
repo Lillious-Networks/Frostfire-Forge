@@ -18,14 +18,14 @@ export default (async () => {
   }
 
   // Database Host
-  if (!process.env.DATABASE_HOST) {
+  if (!process.env.DATABASE_HOST && process.env.DATABASE_ENGINE !== "sqlite") {
     startUpErrors.push(
       "No database host is set, aborting... Please set the DATABASE_HOST environment variable to suppress this message."
     );
   }
 
   // Database Port
-  if (!process.env.DATABASE_PORT) {
+  if (!process.env.DATABASE_PORT && process.env.DATABASE_ENGINE !== "sqlite") {
     startUpWarnings.push(
       "No database port is set, defaulting to 3306. Please set the DATABASE_PORT environment variable to suppress this message."
     );
@@ -33,14 +33,14 @@ export default (async () => {
   }
 
   // Database Username
-  if (!process.env.DATABASE_USER) {
+  if (!process.env.DATABASE_USER && process.env.DATABASE_ENGINE !== "sqlite") {
     startUpErrors.push(
       "No database username is set, aborting... Please set the DATABASE_USER environment variable to suppress this message."
     );
   }
 
   // Database Password
-  if (!process.env.DATABASE_PASSWORD) {
+  if (!process.env.DATABASE_PASSWORD && process.env.DATABASE_ENGINE !== "sqlite") {
     startUpErrors.push(
       "No database password is set, aborting... Please set the DATABASE_PASSWORD environment variable to suppress this message."
     );
@@ -54,7 +54,7 @@ export default (async () => {
   }
 
   // Database SSL
-  if (!process.env.SQL_SSL_MODE) {
+  if (!process.env.SQL_SSL_MODE && process.env.DATABASE_ENGINE !== "sqlite") {
     startUpWarnings.push(
       "No database SSL is set, defaulting to false. Please set the SQL_SSL_MODE environment variable to suppress this message."
     );
@@ -118,6 +118,14 @@ export default (async () => {
     startUpErrors.push(
       "No websocket URL is set, aborting... Please set the WEB_SOCKET_URL environment variable to suppress this message."
     );
+  }
+
+  // Websocket Port
+  if (!process.env.WEB_SOCKET_PORT) {
+    startUpWarnings.push(
+      "No websocket port is set, defaulting to 3001. Please set the WEB_SOCKET_PORT environment variable to suppress this message."
+    );
+    process.env.WEB_SOCKET_PORT = "3001";
   }
 
   // Domain

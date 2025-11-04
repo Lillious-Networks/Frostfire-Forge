@@ -29,8 +29,8 @@ jobs:
 
       - name: Update environment variables
         run: |
-          echo 'DATABASE_ENGINE=sqlite' >> .env.development
-          echo 'DATABASE_NAME="frostfire-forge"' >> .env.development
+          echo 'DATABASE_ENGINE="sqlite"' >> .env.development
+          echo 'DATABASE_NAME="frostfire-forge-dev"' >> .env.development
           echo 'WEBSRV_PORT=8080' >> .env.development
           echo 'WEBSRV_USESSL=false' >> .env.development
           echo 'WEB_SOCKET_URL="ws://forge.lillious.com"' >> .env.development
