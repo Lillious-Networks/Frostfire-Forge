@@ -14,6 +14,14 @@ jobs:
     runs-on: self-hosted
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Bun Canary
+        uses: oven-sh/setup-bun@v2
         with:
-          path: app
+          bun-version: canary
+
+      - name: Install Dependencies
+        run: |
+          bun install
