@@ -45,6 +45,4 @@ jobs:
 
       - name: Update environment variables
         run: |
-          sed -i 's|localhost|forge.lillious.com|g' env.development
-
-      
+          sed -i 's|localhost|forge.lillious.com|g' .env.development
