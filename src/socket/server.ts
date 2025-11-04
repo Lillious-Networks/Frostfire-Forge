@@ -65,7 +65,7 @@ const ClientRateLimit = [] as ClientRateLimit[];
 const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
 
 const Server = Bun.serve<Packet, any>({
-  port: 3000,
+  port: process.env.WEB_SOCKET_PORT || 3000,
   reusePort: false,
   fetch(req, Server) {
     const id = crypto.randomBytes(32).toString("hex");

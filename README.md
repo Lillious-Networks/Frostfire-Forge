@@ -209,7 +209,8 @@ TRANSLATION_SERVICE=google_translate | openai
 OPEN_AI_MODEL=gpt-4
 
 # Application Settings
-WEB_SOCKET_URL=ws://localhost:3000
+WEB_SOCKET_URL=ws://localhost
+WEB_SOCKET_PORT=3000
 ASSET_PATH=/path/to/assets
 DOMAIN=yourdomain.com
 GAME_NAME=Your Game Name

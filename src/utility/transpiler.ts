@@ -20,7 +20,7 @@ function transpileDirectory(sourceDir: string) {
 
             // Token-replace known variables in script
             const envVars = [ // TODO maybe move this to a config ts file or something to make it more visible or something
-                { key: "__VAR.WEBSOCKETURL__", value: (process.env.WEB_SOCKET_URL as string), defaultvalue: "ws://localhost:3000" },
+                { key: "__VAR.WEBSOCKETURL__", value: (`${process.env.WEB_SOCKET_URL}:${process.env.WEB_SOCKET_PORT}` as string), defaultvalue: "ws://localhost:3000" },
             ];
             let replacedResult = result; // copy result to new variable to edit it
             envVars.forEach((env) => replacedResult = replacedResult.replaceAll(env.key, env.value || env.defaultvalue) );

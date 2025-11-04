@@ -4,6 +4,7 @@ permissions:
   contents: read
 
 on:
+  push:
   workflow_dispatch:
 
 jobs:
@@ -52,9 +53,3 @@ jobs:
       - name: Remove Unused Docker Images
         run: |
           docker image prune -f
-
-      - name: Clean Up Stale Files
-        working-directory: .
-        run: |
-          cd ../../
-          rm -rf Frostfire-Forge
