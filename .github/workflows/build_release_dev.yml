@@ -13,13 +13,6 @@ jobs:
     runs-on: self-hosted
     environment: production
     steps:
-      - name: Clean Up Files
-        working-directory: .
-        run: |
-          cd ../../
-          rm -rf Frostfire-Forge
-          mkdir Frostfire-Forge
-
       - name: Checkout Repository
         uses: actions/checkout@v4
 
