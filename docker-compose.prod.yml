@@ -23,7 +23,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: frostfire-redis-prod
-    restart: unless-stopped
+    restart: on-failure
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
