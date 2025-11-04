@@ -25,3 +25,7 @@ jobs:
       - name: Install Dependencies
         run: |
           bun install
+
+      - name: Create Configuration
+        run: |
+          bun create-config
