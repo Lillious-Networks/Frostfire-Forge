@@ -31,9 +31,8 @@ RUN bun create-config
 RUN bun setup-development
 
 # Expose required ports
-EXPOSE 80
-EXPOSE 443
-EXPOSE 3000
+EXPOSE 8080
+EXPOSE 3001
 
 # Set development environment
 ENV NODE_ENV=development
