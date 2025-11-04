@@ -18,8 +18,6 @@ COPY package.json bun.lockb* ./
 RUN bun install --frozen-lockfile
 COPY . .
 
-RUN bun create-config
-
 # Production stage
 FROM base AS production
 WORKDIR /app
@@ -27,10 +25,9 @@ WORKDIR /app
 # Copy dependencies from deps stage
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app .
-COPY --from=envcopy /app/.env.development .env.development
+COPY --from=envcopy /app/.env.production .env.production
 
 RUN bun create-config
-RUN bun setup-development
 
 # Expose required ports
 EXPOSE 80
