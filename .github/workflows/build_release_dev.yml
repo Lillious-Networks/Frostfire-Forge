@@ -16,14 +16,6 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js environment
-        uses: actions/setup-node@v6.0.0
-
-      - name: Install Bun Canary
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: canary
-
       - name: Install Dependencies
         run: |
           bun install
@@ -52,8 +44,16 @@ jobs:
     steps:
       - name: Stop Docker Services
         run: |
-          PID=$(sudo docker inspect --format '{{.State.Pid}}' frostfire-forge-dev 2>/dev/null); \
-          [[ -n "$PID" && "$PID" != "0" ]] && sudo kill -9 "$PID" || echo "No valid PID found."
+          set +e  # disable exit-on-error
+          CONTAINER_ID=$(sudo docker ps -aq -f name=frostfire-forge-dev)
+          if [ -n "$CONTAINER_ID" ]; then
+            echo "Stopping container $CONTAINER_ID..."
+            sudo docker stop "$CONTAINER_ID" || true
+            sudo docker rm -f "$CONTAINER_ID" || true
+          else
+            echo "No container named frostfire-forge-dev found."
+          fi
+          set -e  # re-enable exit-on-error
 
   start-docker-container:
     name: Start Docker Container
