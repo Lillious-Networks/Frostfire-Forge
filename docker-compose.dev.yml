@@ -6,9 +6,8 @@ services:
     container_name: frostfire-forge-dev
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
-      - "3000:3000"
+      - "8080:8080"
+      - "3001:3001"
     volumes:
       - ./.env.development:/app/.env.development:ro
     env_file:
