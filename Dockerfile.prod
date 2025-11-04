@@ -1,16 +1,16 @@
 # Production Dockerfile for Frostfire Forge
-FROM oven/bun:latest AS base
+FROM oven/bun:canary AS base
 WORKDIR /app
 
 # Copy .env file stage
 FROM base AS envcopy
 WORKDIR /app
-COPY .env.development .env.development
+COPY .env.production .env.production
 
 # Install dependencies stage
 FROM base AS deps
 COPY package.json bun.lockb* ./
-RUN bun install --frozen-lockfile --production
+RUN bun install --frozen-lockfile
 
 # Build stage
 FROM base AS build
@@ -25,7 +25,7 @@ WORKDIR /app
 # Copy dependencies from deps stage
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app .
-COPY --from=envcopy /app/.env.development .env.development
+COPY --from=envcopy /app/.env.production .env.production
 
 RUN bun create-config
 

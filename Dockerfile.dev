@@ -34,8 +34,5 @@ RUN bun setup-development
 EXPOSE 8080
 EXPOSE 3001
 
-# Set development environment
-ENV NODE_ENV=development
-
 # Run development setup and start server
 CMD ["bun", "run", "development"]
