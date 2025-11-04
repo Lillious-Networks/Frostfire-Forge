@@ -39,7 +39,7 @@ jobs:
 
       - name: Build Docker Image
         run: |
-          docker compose -f docker-compose.dev.yml build --force-recreate
+          docker compose -f docker-compose.dev.yml build
 
   stop-docker-container:
     name: Stop Docker Container
@@ -60,3 +60,13 @@ jobs:
       - name: Start Docker Services
         run: |
           docker compose -f docker-compose.dev.yml up -d
+
+  cleanup:
+    name: Cleanup Old Docker Images
+    runs-on: self-hosted
+    environment: production
+    needs: [start-docker-container]
+    steps:
+      - name: Remove Unused Docker Images
+        run: |
+          docker image prune -f
