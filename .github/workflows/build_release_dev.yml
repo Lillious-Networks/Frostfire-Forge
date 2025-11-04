@@ -21,6 +21,9 @@ jobs:
         with:
           bun-version: canary
 
+      - name: Setup Node.js environment
+        uses: actions/setup-node@v6.0.0
+
       - name: Install Dependencies
         run: |
           bun install
