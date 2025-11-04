@@ -5,8 +5,6 @@ permissions:
 
 on:
   push:
-    paths:
-      - 'src/**'
 
   workflow_dispatch:
 
