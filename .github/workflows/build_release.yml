@@ -93,7 +93,7 @@ jobs:
     steps:
       - name: Start Docker Services
         run: |
-
+          export REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"
           docker compose -f docker-compose.prod.yml up -d
 
   cleanup:
