@@ -13,9 +13,6 @@ COPY package.json bun.lockb* ./
 RUN bun install --frozen-lockfile
 COPY . .
 
-RUN bun create-config
-RUN bun setup-development
-
 # Development stage
 FROM base AS development
 WORKDIR /app
@@ -24,6 +21,12 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app .
 
+# Create .env.development file placeholder
+# Note: You should mount your actual .env.development file at runtime
+RUN touch .env.development
+
+RUN bun create-config
+RUN bun setup-development
 
 # Expose required ports
 EXPOSE 80
