@@ -13,6 +13,10 @@ on:
 
   workflow_dispatch:
 
+concurrency:
+  group: 'build-release-production'
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build and Release (Production)

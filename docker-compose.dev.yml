@@ -3,8 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.dev
-    container_name: frostfire-forge-dev
-    restart: unless-stopped
+    container_name: frostfire-forge-dev:latest
+    restart: on-failure
     ports:
       - "8080:8080"
       - "3001:3001"
