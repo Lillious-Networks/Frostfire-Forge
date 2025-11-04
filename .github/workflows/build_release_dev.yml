@@ -49,7 +49,9 @@ jobs:
     steps:
       - name: Stop Docker Services
         run: |
-          sudo docker compose -f docker-compose.dev.yml down
+          PID=$(sudo docker inspect --format '{{.State.Pid}}' frostfire-forge-dev)
+          sudo kill -9 $PID
+          sudo docker rm frostfire-forge-dev || sudo rm -rf /var/lib/docker/containers/$(sudo docker inspect --format '{{.Id}}' frostfire-forge-dev)
 
   start-docker-container:
     name: Start Docker Container
