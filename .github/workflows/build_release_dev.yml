@@ -6,7 +6,12 @@ permissions:
 on:
   push:
     paths:
-      - '**'
+      - 'src/**'
+      - 'docker-compose.dev.yml'
+      - 'Dockerfile.dev'
+      - '.env.development'
+      - '.github/workflows/build_release_dev.yml'
+
   workflow_dispatch:
 
 jobs:
