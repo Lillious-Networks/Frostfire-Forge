@@ -180,43 +180,42 @@ npm run docker:prod:build
 > The following environment variables are required for production.
 
 ```bash
-# Database Configuration
-DATABASE_ENGINE=mysql | sqlite
-DATABASE_HOST=your_db_host
-DATABASE_NAME=your_db_name
-DATABASE_PASSWORD=your_db_password
-DATABASE_PORT=3306
-DATABASE_USER=your_db_user
-SQL_SSL_MODE=DISABLED | REQUIRED
+DATABASE_ENGINE="mysql" | "sqlite"
+DATABASE_HOST="your_db_host"
+DATABASE_NAME="your_db_name"
+DATABASE_PASSWORD="your_db_password"
+DATABASE_PORT="3306"
+DATABASE_USER="your_db_user"
+SQL_SSL_MODE="DISABLED" | "REQUIRED"
 
 # Email Configuration
-EMAIL_PASSWORD=your_email_password
-EMAIL_SERVICE=gmail | smtp
-EMAIL_USER=your_email@example.com
-EMAIL_TEST=false
+EMAIL_PASSWORD="your_email_password"
+EMAIL_SERVICE="gmail" | "smtp"
+EMAIL_USER="your_email@example.com"
+EMAIL_TEST="false"
 
 # Server Configuration
-WEBSRV_PORT=3000
-WEBSRV_PORTSSL=443
-WEBSRV_USESSL=false
-SESSION_KEY=your_session_secret_key
+WEBSRV_PORT="3000"
+WEBSRV_PORTSSL="443"
+WEBSRV_USESSL="false"
+SESSION_KEY="your_session_secret_key"
 
 # Translation Services
-GOOGLE_TRANSLATE_API_KEY=your_google_api_key
-OPENAI_API_KEY=your_openai_api_key
-TRANSLATION_SERVICE=google_translate | openai
-OPEN_AI_MODEL=gpt-4
+GOOGLE_TRANSLATE_API_KEY="your_google_api_key"
+OPENAI_API_KEY="your_openai_api_key"
+TRANSLATION_SERVICE="google_translate" | "openai"
+OPEN_AI_MODEL="gpt-4"
 
 # Application Settings
-WEB_SOCKET_URL=ws://localhost
-WEB_SOCKET_PORT=3000
-ASSET_PATH=/path/to/assets
-DOMAIN=yourdomain.com
-GAME_NAME=Your Game Name
+WEB_SOCKET_URL="ws://localhost"
+WEB_SOCKET_PORT="3000"
+ASSET_PATH="/path/to/assets"
+DOMAIN="yourdomain.com"
+GAME_NAME="Your Game Name"
 
 # Caching
-CACHE=redis | memory
-REDIS_URL=redis://localhost:6379  # Required if CACHE=redis
+CACHE="redis" | "memory"
+REDIS_URL="redis://localhost:6379"  # Required if CACHE=redis
 ```
 
 ---

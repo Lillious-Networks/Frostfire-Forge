@@ -1,10 +1,77 @@
 import path from "path";
 import fs from "fs";
 const pwd = process.cwd();
+const args = process.argv.slice(2);
+const environment_index = args.indexOf("--environment");
+const environment = environment_index !== -1 ? args[environment_index + 1]?.toLowerCase() : 'local';
+const domain_index = args.indexOf("--domain");
+const domain = domain_index !== -1 ? args[domain_index + 1]?.toLowerCase() : null;
+
 const configPath = path.join(pwd, "src", "config");
 if (!fs.existsSync(configPath)) {
   fs.mkdirSync(configPath);
 }
+
+const getIp = async () => {
+  if (domain) return domain;
+  try {
+    const res = await fetch('https://api.ipify.org?format=json');
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.ip || null;
+  } catch (err) {
+    console.error(`Failed to fetch public IP address: ${err}`);
+    return null;
+  }
+};
+
+const ip = environment === "local"
+  ? "localhost"
+  : await getIp() || "localhost";
+
+const environment_variables = `DATABASE_ENGINE="sqlite"
+DATABASE_NAME="frostfire-forge-dev"
+WEBSRV_PORT=80
+WEBSRV_USESSL=false
+WEB_SOCKET_URL="ws://${ip}"
+WEB_SOCKET_PORT=3000
+DOMAIN="http://${ip}:80"
+GAME_NAME="Frostfire Forge - ${environment.charAt(0).toUpperCase() + environment.slice(1)} Environment"
+CACHE="memory"
+`;
+
+const production_environment_variables = `DATABASE_ENGINE=""
+DATABASE_HOST=""
+DATABASE_NAME=""
+DATABASE_PASSWORD=""
+DATABASE_PORT=""
+DATABASE_USER=""
+SQL_SSL_MODE=""
+
+EMAIL_PASSWORD=""
+EMAIL_SERVICE=""
+EMAIL_USER=""
+EMAIL_TEST=""
+
+WEBSRV_PORT=""
+WEBSRV_PORTSSL=""
+WEBSRV_USESSL=""
+SESSION_KEY=""
+
+GOOGLE_TRANSLATE_API_KEY=""
+OPENAI_API_KEY=""
+TRANSLATION_SERVICE=""
+OPEN_AI_MODEL=""
+
+WEB_SOCKET_URL=""
+WEB_SOCKET_PORT=""
+ASSET_PATH=""
+DOMAIN=""
+GAME_NAME=""
+
+CACHE=""
+REDIS_URL=""
+`;
 
 const assetConfig = {
   maps: {
@@ -59,6 +126,21 @@ const settings = {
     "enabled": true
   }
 };
+
+if (!fs.existsSync(path.join(".env.local")) && environment === "local") {
+  console.info("Creating .env.local file for local environment...");
+  fs.writeFileSync(path.join(".env.local"), environment_variables);
+}
+
+if (!fs.existsSync(path.join(".env.development")) && environment === "development") {
+  console.info("Creating .env.development file for development environment...");
+  fs.writeFileSync(path.join(".env.development"), environment_variables);
+}
+
+if (!fs.existsSync(path.join(".env.production")) && environment === "production") {
+  console.info("Creating .env.production file for production environment...");
+  fs.writeFileSync(path.join(".env.production"), production_environment_variables);
+}
 
 if (!fs.existsSync(path.join(configPath, "assets.json"))) {
   fs.writeFileSync(

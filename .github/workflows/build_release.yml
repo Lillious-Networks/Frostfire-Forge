@@ -30,6 +30,18 @@ jobs:
 
       - name: Update environment variables
         run: |
+          # Check if .env.production is a directory (should not be)
+          if [ -d ".env.production" ]; then
+            echo ".env.production is a directory. Removing it."
+            rm -rf .env.production
+          fi
+
+          # Remove existing .env.production file if it exists and is not a directory
+          if [ -f ".env.production" ]; then
+            echo ".env.production file exists. Removing it."
+            rm .env.production
+          fi
+
           echo 'DATABASE_ENGINE=mysql' >> .env.production
           echo 'DATABASE_HOST="${{ secrets.DATABASE_HOST }}"' >> .env.production
           echo 'DATABASE_NAME="${{ secrets.DATABASE_NAME }}"' >> .env.production

@@ -6,7 +6,7 @@ WORKDIR /app
 FROM base AS envcopy
 WORKDIR /app
 # Copy if exists otherwise create during build
-COPY .env.development .env.development
+COPY .env.local .env.local
 
 # Install dependencies stage
 FROM base AS deps
@@ -19,21 +19,21 @@ COPY package.json bun.lockb* ./
 RUN bun install --frozen-lockfile
 COPY . .
 
-# Development stage
-FROM base AS development
+# Local stage
+FROM base AS local
 WORKDIR /app
 
 # Copy dependencies from deps stage
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app .
-COPY --from=envcopy /app/.env.development .env.development
+COPY --from=envcopy /app/.env.local .env.local
 
-RUN bun create-config --environment development
-RUN bun setup-development
+RUN bun create-config --environment local
+RUN bun setup-local
 
 # Expose required ports
-EXPOSE 8080
-EXPOSE 3001
+EXPOSE 80
+EXPOSE 3000
 
-# Run development setup and start server
-CMD ["bun", "run", "development"]
+# Run local setup and start server
+CMD ["bun", "run", "local"]

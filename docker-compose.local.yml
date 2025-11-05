@@ -1,0 +1,20 @@
+services:
+  frostfire-forge-local:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    container_name: frostfire-forge-local
+    restart: on-failure
+    ports:
+      - "80:80"
+      - "3000:3000"
+    volumes:
+      - ./.env.local:/app/.env.local:ro
+    env_file:
+      - .env.local
+    networks:
+      - frostfire-network-local
+
+networks:
+  frostfire-network-local:
+    driver: bridge
