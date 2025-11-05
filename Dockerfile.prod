@@ -29,7 +29,7 @@ COPY --from=envcopy /app/.env.production .env.production
 
 # This will result in an empty .env.production file being created if it does not exist
 # Note: create-config will also run as part of the setup-production script
-RUN bun create-config --environment=production
+RUN bun create-config --environment production
 
 # Expose required ports
 EXPOSE 80
