@@ -21,6 +21,7 @@ const getPublicIP = async () => {
     const data = await res.json();
     return data?.ip || null;
   } catch (err) {
+    log.error(`Failed to fetch public IP address: ${err}`);
     return null;
   }
 };
