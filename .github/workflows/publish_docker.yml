@@ -36,6 +36,30 @@ jobs:
             echo "tag=dev-latest" >> $GITHUB_OUTPUT
           fi
 
+      - name: Update environment variables
+        run: |
+          # Check if .env.local is a directory (should not be)
+          if [ -d ".env.local" ]; then
+            echo ".env.local is a directory. Removing it."
+            rm -rf .env.local
+          fi
+
+          # Remove existing .env.local file if it exists and is not a directory
+          if [ -f ".env.local" ]; then
+            echo ".env.local file exists. Removing it."
+            rm .env.local
+          fi
+
+          echo 'DATABASE_ENGINE="sqlite"' >> .env.local
+          echo 'DATABASE_NAME="frostfire-forge-local"' >> .env.local
+          echo 'WEBSRV_PORT=80' >> .env.local
+          echo 'WEBSRV_USESSL=false' >> .env.local
+          echo 'WEB_SOCKET_URL="ws://localhost"' >> .env.local
+          echo 'WEB_SOCKET_PORT=3000' >> .env.local
+          echo 'DOMAIN="http://localhost:80"' >> .env.local
+          echo 'GAME_NAME="Frostfire Forge Beta"' >> .env.local
+          echo 'CACHE="memory"' >> .env.local
+
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
