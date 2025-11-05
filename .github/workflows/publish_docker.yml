@@ -40,7 +40,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile.dev
+          file: ./Dockerfile.local
           push: true
           tags: |
             ghcr.io/lillious/frostfire-forge:${{ steps.vars.outputs.tag }}

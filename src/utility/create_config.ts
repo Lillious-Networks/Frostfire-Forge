@@ -6,15 +6,15 @@ const args = process.argv.slice(2);
 const environment_index = args.indexOf("--environment");
 const environment = environment_index !== -1 ? args[environment_index + 1]?.toLowerCase() : 'local';
 const domain_index = args.indexOf("--domain");
-const domain = domain_index !== -1 ? args[domain_index + 1]?.toLowerCase() : 'localhost';
+const domain = domain_index !== -1 ? args[domain_index + 1]?.toLowerCase() : null;
 
 const configPath = path.join(pwd, "src", "config");
 if (!fs.existsSync(configPath)) {
   fs.mkdirSync(configPath);
 }
 
-const getPublicIP = async () => {
-  if (domain && domain !== "localhost") return domain;
+const getIp = async () => {
+  if (domain) return domain;
   try {
     const res = await fetch('https://api.ipify.org?format=json');
     if (!res.ok) return null;
@@ -26,17 +26,17 @@ const getPublicIP = async () => {
   }
 };
 
-const publicIP = environment === "local" 
-  ? "localhost" 
-  : await getPublicIP() || "localhost";
+const ip = environment === "local"
+  ? "localhost"
+  : await getIp() || "localhost";
 
 const environment_variables = `DATABASE_ENGINE="sqlite"
 DATABASE_NAME="frostfire-forge-dev"
 WEBSRV_PORT=80
 WEBSRV_USESSL=false
-WEB_SOCKET_URL="ws://${publicIP}"
+WEB_SOCKET_URL="ws://${ip}"
 WEB_SOCKET_PORT=3000
-DOMAIN="http://${publicIP}:80"
+DOMAIN="http://${ip}:80"
 GAME_NAME="Frostfire Forge - ${environment.charAt(0).toUpperCase() + environment.slice(1)} Environment"
 CACHE="memory"
 `;
