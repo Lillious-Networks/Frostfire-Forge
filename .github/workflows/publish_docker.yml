@@ -67,6 +67,6 @@ jobs:
           file: ./Dockerfile.local
           push: true
           tags: |
-            ghcr.io/Lillious-Networks/Frostfire-Forge:${{ steps.vars.outputs.tag }}
-            ghcr.io/Lillious-Networks/Frostfire-Forge:latest
-            ghcr.io/Lillious-Networks/Frostfire-Forge:${{ github.sha }}
+            ghcr.io/lillious-networks/frostfire-forge:${{ steps.vars.outputs.tag }}
+            ghcr.io/lillious-networks/frostfire-forge:latest
+            ghcr.io/lillious-networks/frostfire-forge:${{ github.sha }}
