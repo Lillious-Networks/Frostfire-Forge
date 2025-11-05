@@ -19,10 +19,11 @@
   },
   "scripts": {
     "production": "bun transpile-production && bun --env-file=.env.production ./src/webserver/server.ts",
+    "transpile-local": "bun --env-file=.env.local ./src/utility/transpiler.ts",
     "transpile-development": "bun --env-file=.env.development ./src/utility/transpiler.ts",
     "transpile-production": "bun --env-file=.env.production ./src/utility/transpiler.ts",
     "development": "bun transpile-development && bun --inspect --env-file=.env.development ./src/webserver/server.ts",
-    "local": "bun transpile-development && bun --inspect --env-file=.env.local ./src/webserver/server.ts",
+    "local": "bun transpile-local && bun --inspect --env-file=.env.local ./src/webserver/server.ts",
     "setup": "bun --env-file=.env.production ./src/utility/database_setup.ts",
     "setup-sqlite": "bun --env-file=.env.development ./src/utility/database_setup_sqlite.ts",
     "setup-sqlite-local": "bun --env-file=.env.local ./src/utility/database_setup_sqlite.ts",
