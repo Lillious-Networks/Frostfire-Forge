@@ -10,6 +10,7 @@ on:
 
 jobs:
   build-and-push:
+    name: Build and Push Docker Image
     runs-on: ubuntu-latest
 
     permissions:
