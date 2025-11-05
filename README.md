@@ -124,7 +124,7 @@ docker pull ghcr.io/lillious-networks/frostfire-forge-local:latest
 
 Run the pulled image:
 ```bash
-docker run -P ghcr.io/lillious-networks/frostfire-forge-local:latest
+docker run -p 80:80 -p 3000:3000 --name frostfire-forge-local ghcr.io/lillious-networks/frostfire-forge-local:latest
 ```
 
 #### Prerequisites
