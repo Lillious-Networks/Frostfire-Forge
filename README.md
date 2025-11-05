@@ -115,6 +115,18 @@ bun service:start
 
 ### Docker Deployment
 
+#### Pull Pre-built Local Image
+
+Pull the latest pre-built local Docker image:
+```bash
+docker pull ghcr.io/lillious-networks/frostfire-forge-local:latest
+```
+
+Run the pulled image:
+```bash
+docker run -P ghcr.io/lillious-networks/frostfire-forge-local:latest
+```
+
 #### Prerequisites
 
 - Docker and Docker Compose installed
