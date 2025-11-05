@@ -33,7 +33,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
           else
-            echo "tag=dev-latest" >> $GITHUB_OUTPUT
+            echo "tag=local-latest" >> $GITHUB_OUTPUT
           fi
 
       - name: Update environment variables
@@ -67,6 +67,6 @@ jobs:
           file: ./Dockerfile.local
           push: true
           tags: |
-            ghcr.io/lillious/frostfire-forge:${{ steps.vars.outputs.tag }}
-            ghcr.io/lillious/frostfire-forge:latest
-            ghcr.io/lillious/frostfire-forge:${{ github.sha }}
+            ghcr.io/Lillious-Networks/Frostfire-Forge:${{ steps.vars.outputs.tag }}
+            ghcr.io/Lillious-Networks/Frostfire-Forge:latest
+            ghcr.io/Lillious-Networks/Frostfire-Forge:${{ github.sha }}
