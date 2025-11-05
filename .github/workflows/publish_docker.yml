@@ -1,0 +1,48 @@
+name: Publish Docker image
+
+on:
+  workflow_dispatch:
+#   push:
+#     branches:
+#       - main
+#   release:
+#     types: [published]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine image tag
+        id: vars
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=dev-latest" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.dev
+          push: true
+          tags: |
+            ghcr.io/lillious/frostfire-forge:${{ steps.vars.outputs.tag }}
+            ghcr.io/lillious/frostfire-forge:latest
+            ghcr.io/lillious/frostfire-forge:${{ github.sha }}

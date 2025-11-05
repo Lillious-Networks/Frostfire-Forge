@@ -5,6 +5,7 @@ WORKDIR /app
 # Copy .env file stage
 FROM base AS envcopy
 WORKDIR /app
+# Copy if exists otherwise create during build
 COPY .env.development .env.development
 
 # Install dependencies stage
@@ -27,7 +28,7 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app .
 COPY --from=envcopy /app/.env.development .env.development
 
-RUN bun create-config
+RUN bun create-config --environment=development
 RUN bun setup-development
 
 # Expose required ports

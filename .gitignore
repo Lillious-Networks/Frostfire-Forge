@@ -13,8 +13,7 @@ src/certs/*.jceks
 src/certs/*.ca-bundle
 src/logs/
 config/
-.env
-.env.production
+.env*
 
 src/assets/maps/*
 !src/assets/maps/main.json
