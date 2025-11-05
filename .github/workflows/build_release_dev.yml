@@ -30,6 +30,18 @@ jobs:
 
       - name: Update environment variables
         run: |
+          # Check if .env.development is a directory (should not be)
+          if [ -d ".env.development" ]; then
+            echo ".env.development is a directory. Removing it."
+            rm -rf .env.development
+          fi
+
+          # Remove existing .env.development file if it exists and is not a directory
+          if [ -f ".env.development" ]; then
+            echo ".env.development file exists. Removing it."
+            rm .env.development
+          fi
+
           echo 'DATABASE_ENGINE="sqlite"' >> .env.development
           echo 'DATABASE_NAME="frostfire-forge-dev"' >> .env.development
           echo 'WEBSRV_PORT=8080' >> .env.development
