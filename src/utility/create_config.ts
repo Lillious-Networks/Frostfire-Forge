@@ -1,5 +1,4 @@
 import path from "path";
-import log from "../modules/logger";
 import fs from "fs";
 const pwd = process.cwd();
 const args = process.argv.slice(2);
@@ -21,7 +20,7 @@ const getIp = async () => {
     const data = await res.json();
     return data?.ip || null;
   } catch (err) {
-    log.error(`Failed to fetch public IP address: ${err}`);
+    console.error(`Failed to fetch public IP address: ${err}`);
     return null;
   }
 };
@@ -129,17 +128,17 @@ const settings = {
 };
 
 if (!fs.existsSync(path.join(".env.local")) && environment === "local") {
-  log.info("Creating .env.local file for local environment...");
+  console.info("Creating .env.local file for local environment...");
   fs.writeFileSync(path.join(".env.local"), environment_variables);
 }
 
 if (!fs.existsSync(path.join(".env.development")) && environment === "development") {
-  log.info("Creating .env.development file for development environment...");
+  console.info("Creating .env.development file for development environment...");
   fs.writeFileSync(path.join(".env.development"), environment_variables);
 }
 
 if (!fs.existsSync(path.join(".env.production")) && environment === "production") {
-  log.info("Creating .env.production file for production environment...");
+  console.info("Creating .env.production file for production environment...");
   fs.writeFileSync(path.join(".env.production"), production_environment_variables);
 }
 
