@@ -120,8 +120,8 @@ const settings = {
     "benchmarkenabled": false,
     "idleTimeout": 5
   },
-  "world": "default",
-  "default_map": "main",
+  "world": "overworld",
+  "default_map": "overworld",
   "guest_mode": {
     "enabled": true
   }

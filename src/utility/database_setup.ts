@@ -299,10 +299,10 @@ const createWorldTable = async () => {
   await query(sql);
 };
 
-const createDefaultWorld = async () => {
-  log.info("Creating default world...");
+const createWorld = async (name: string, weather: string, max_players: number, default_map: string) => {
+  log.info("Creating world...");
   const sql = `
-    INSERT IGNORE INTO worlds (name, weather, max_players, default_map) VALUES ('default', 'clear', 100, 'main');
+    INSERT IGNORE INTO worlds (name, weather, max_players, default_map) VALUES ('${name}', '${weather}', ${max_players}, '${default_map}');
   `;
   await query(sql);
 }
@@ -438,7 +438,8 @@ const setupDatabase = async () => {
   await createWeatherTable();
   await createDefaultWeather();
   await createWorldTable();
-  await createDefaultWorld();
+  await createWorld('default', 'clear', 200, 'main');
+  await createWorld('overworld', 'rainy', 200, 'overworld');
   await createQuestsTable();
   await createQuestLogTable();
   await createFriendsListTable();

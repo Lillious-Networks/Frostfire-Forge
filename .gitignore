@@ -17,6 +17,7 @@ config/
 
 src/assets/maps/*
 !src/assets/maps/main.json
+!src/assets/maps/overworld.json
 
 src/assets/sfx/*
 !src/assets/sfx/attack_sword.mp3
@@ -25,6 +26,8 @@ src/assets/sfx/*
 
 src/assets/tilesets/*
 !src/assets/tilesets/tiles.png
+!src/assets/tilesets/MystcialValley_Environment.png
+!src/assets/tilesets/MystcialValley_Structures.png
 
 src/webserver/www/public/js/web/*.js
 *.sqlite
