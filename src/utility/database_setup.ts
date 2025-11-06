@@ -329,8 +329,8 @@ const createQuestLogTable = async () => {
     CREATE TABLE IF NOT EXISTS quest_log (
       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
       username VARCHAR(255) UNIQUE NOT NULL,
-      completed_quests TEXT NOT NULL default '0',
-      incomplete_quests TEXT NOT NULL default '0'
+      completed_quests VARCHAR(5000) NOT NULL default '0',
+      incomplete_quests VARCHAR(5000) NOT NULL default '0'
     )
   `;
   await query(sql);
