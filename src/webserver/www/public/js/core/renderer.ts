@@ -221,7 +221,7 @@ function animationLoop() {
         );
       }
     }
-    for (const p of visiblePlayers) p.show(ctx);
+    for (const p of visiblePlayers) p.show(ctx, currentPlayer);
     for (const npc of visibleNpcs) {
       npc.show(ctx);
       if (npc.particles) {
@@ -242,7 +242,7 @@ function animationLoop() {
         );
       }
     }
-    for (const p of visiblePlayers) p.showChat(ctx);
+    for (const p of visiblePlayers) p.showChat(ctx, currentPlayer);
   }
   if (times.length > 60) times.shift();
   times.push(now);
