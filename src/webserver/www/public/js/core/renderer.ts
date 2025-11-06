@@ -7,7 +7,6 @@ import { updateHealthBar, updateStaminaBar } from "./ui.js";
 import { updateWeatherCanvas, weather } from './weather.ts';
 import { chatInput } from "./chat.js";
 import { friendsListSearch } from "./friends.js";
-let lastUpdate = performance.now();
 const times = [] as number[];
 let lastDirection = "";
 let pendingRequest = false;
@@ -102,22 +101,36 @@ function updateViewportCache() {
   cachedPaddedBounds.h = cachedViewport.h + cachedViewport.padding * 2;
 }
 
-const cameraSmoothing = 0.05;
-function updateCamera(currentPlayer: any) {
+const cameraSmoothing = 0.08;
+const snapThreshold = 0.5;
+
+function updateCamera(currentPlayer: any, deltaTime: number) {
   if (!getIsLoaded()) return;
   if (currentPlayer) {
-    const now = performance.now();
-    const deltaTime = Math.min((now - lastUpdate) / 16.67, 2);
-    lastUpdate = now;
     const targetX = currentPlayer.position.x - window.innerWidth / 2 + 8;
     const targetY = currentPlayer.position.y - window.innerHeight / 2 + 48;
-    const smoothing = 1 - Math.pow(1 - cameraSmoothing, deltaTime);
-    cameraX = lerp(cameraX, targetX, smoothing);
-    cameraY = lerp(cameraY, targetY, smoothing);
+
+    // Calculate distance to target
+    const distX = Math.abs(targetX - cameraX);
+    const distY = Math.abs(targetY - cameraY);
+
+    // If very close, snap directly to avoid micro-jitter
+    if (distX < snapThreshold && distY < snapThreshold) {
+      cameraX = targetX;
+      cameraY = targetY;
+    } else {
+      // Use frame-rate independent smoothing
+      const smoothing = 1 - Math.pow(1 - cameraSmoothing, deltaTime);
+      cameraX = lerp(cameraX, targetX, smoothing);
+      cameraY = lerp(cameraY, targetY, smoothing);
+    }
+
     if (weatherType) {
       updateWeatherCanvas(cameraX, cameraY);
       weather(weatherType);
     }
+
+    // Use rounded values for scrolling to prevent sub-pixel rendering issues
     window.scrollTo(Math.round(cameraX), Math.round(cameraY));
   }
 }
@@ -141,7 +154,7 @@ function animationLoop() {
     requestAnimationFrame(animationLoop);
     return;
   }
-  updateCamera(currentPlayer);
+  updateCamera(currentPlayer, deltaTime * 60);
   if (getIsMoving() && getIsKeyPressed()) {
     if (document.activeElement === chatInput || document.activeElement === friendsListSearch) {
       setIsMoving(false);
