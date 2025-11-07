@@ -125,57 +125,57 @@ docker run -p 80:80 -p 3000:3000 --name frostfire-forge-local ghcr.io/lillious-n
 #### Prerequisites
 
 - Docker and Docker Compose installed
-- `.env.production` or `.env.development` file configured
+- Proper environment variable file configured
 
 #### Development Environment
 
 **Start the development container:**
 ```bash
-npm run docker:dev
+bun run docker:dev
 ```
 
 **View logs:**
 ```bash
-npm run docker:dev:logs
+bun run docker:dev:logs
 ```
 
 **Stop the container:**
 ```bash
-npm run docker:dev:down
+bun run docker:dev:down
 ```
 
 **Rebuild the container:**
 ```bash
-npm run docker:dev:build
+bun run docker:dev:build
 ```
 
 #### Production Environment
 
 **Start the production container:**
 ```bash
-npm run docker:prod
+bun run docker:prod
 ```
 
 **View logs:**
 ```bash
-npm run docker:prod:logs
+bun run docker:prod:logs
 ```
 
 **Stop the container:**
 ```bash
-npm run docker:prod:down
+bun run docker:prod:down
 ```
 
 **Rebuild the container:**
 ```bash
-npm run docker:prod:build
+bun run docker:prod:build
 ```
 
 #### Docker Configuration Notes
 
 - **Development**: Source code is mounted as a volume for hot-reload
 - **Production**: Multi-stage build with optimized dependencies
-- **Environment Files**: `.env.production` or `.env.development` is automatically loaded
+- **Environment Files**: `.env.production`, `.env.development` or `.env.local` is automatically loaded
 - **Ports Exposed**: 80 (HTTP), 443 (HTTPS), 3000 (Application)
 - **Redis**: If `CACHE=redis`, configure `REDIS_URL` and `REDIS_PASSWORD` in your `.env` file
 
@@ -193,18 +193,18 @@ DATABASE_NAME="your_db_name"
 DATABASE_PASSWORD="your_db_password"
 DATABASE_PORT="3306"
 DATABASE_USER="your_db_user"
-SQL_SSL_MODE="DISABLED" | "REQUIRED"
+SQL_SSL_MODE="DISABLED" | "ENABLED"
 
 # Email Configuration
 EMAIL_PASSWORD="your_email_password"
-EMAIL_SERVICE="gmail" | "smtp"
+EMAIL_SERVICE="mail.example.com"
 EMAIL_USER="your_email@example.com"
-EMAIL_TEST="false"
+EMAIL_TEST="your_test_email@example.com"
 
 # Server Configuration
-WEBSRV_PORT="3000"
+WEBSRV_PORT="80"
 WEBSRV_PORTSSL="443"
-WEBSRV_USESSL="false"
+WEBSRV_USESSL="true"
 SESSION_KEY="your_session_secret_key"
 
 # Translation Services
@@ -214,15 +214,14 @@ TRANSLATION_SERVICE="google_translate" | "openai"
 OPEN_AI_MODEL="gpt-4"
 
 # Application Settings
-WEB_SOCKET_URL="ws://localhost"
+WEB_SOCKET_URL="wss://localhost"
 WEB_SOCKET_PORT="3000"
-ASSET_PATH="/path/to/assets"
-DOMAIN="yourdomain.com"
+DOMAIN="https://yourdomain.com"
 GAME_NAME="Your Game Name"
 
 # Caching
 CACHE="redis" | "memory"
-REDIS_URL="redis://localhost:6379"  # Required if CACHE=redis
+REDIS_URL="redis://default@redis:6379"  # Required if CACHE=redis
 
 # Versioning (can be provided at runtime)
 VERSION="1.0.0"
