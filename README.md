@@ -228,6 +228,9 @@ GAME_NAME="Your Game Name"
 # Caching
 CACHE="redis" | "memory"
 REDIS_URL="redis://localhost:6379"  # Required if CACHE=redis
+
+# Versioning (can be provided at runtime)
+VERSION="1.0.0"
 ```
 
 ---

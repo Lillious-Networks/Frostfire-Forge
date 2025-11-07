@@ -51,6 +51,7 @@ jobs:
           echo 'DOMAIN="http://forge.lillious.com:8080"' >> .env.development
           echo 'GAME_NAME="Frostfire Forge Beta"' >> .env.development
           echo 'CACHE="memory"' >> .env.development
+          echo 'VERSION="${{ github.run_number }}-development"' >> .env.development
 
       - name: Build Docker Image
         run: |

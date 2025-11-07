@@ -68,6 +68,7 @@ jobs:
           echo 'CACHE="redis"' >> .env.production
           echo 'REDIS_URL="redis://default:${{ secrets.REDIS_PASSWORD }}@redis:6379"' >> .env.production
           echo 'REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"' >> .env.production
+          echo 'VERSION="${{ github.run_number }}-production"' >> .env.production
 
       - name: Create Certificate Chain
         working-directory: src/certs

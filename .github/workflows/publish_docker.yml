@@ -34,7 +34,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
           else
-            echo "tag=local-latest" >> $GITHUB_OUTPUT
+            echo "tag=${{ github.run_number }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Update environment variables
@@ -60,6 +60,7 @@ jobs:
           echo 'DOMAIN="http://localhost:80"' >> .env.local
           echo 'GAME_NAME="Frostfire Forge Beta"' >> .env.local
           echo 'CACHE="memory"' >> .env.local
+          echo 'VERSION="${{ steps.vars.outputs.tag }}-rc"' >> .env.local
 
       - name: Build and push image
         uses: docker/build-push-action@v6
