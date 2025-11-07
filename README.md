@@ -214,7 +214,7 @@ TRANSLATION_SERVICE="google_translate" | "openai"
 OPEN_AI_MODEL="gpt-4"
 
 # Application Settings
-WEB_SOCKET_URL="wss://localhost"
+WEB_SOCKET_URL="wss://yourdomain.com"
 WEB_SOCKET_PORT="3000"
 DOMAIN="https://yourdomain.com"
 GAME_NAME="Your Game Name"
