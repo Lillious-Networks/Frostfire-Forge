@@ -15,7 +15,7 @@ export default async function generate(data: SpriteSheetData) {
     }
 
     const output = path.join(
-      import.meta.dir,
+      assetPath,
       assetData.sprites.path,
       data.name
     );

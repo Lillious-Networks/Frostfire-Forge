@@ -458,26 +458,40 @@ listener.on("onSave", async () => {
   if (Object.keys(cache).length < 1) return;
   log.info("Saving player data...");
   const startTime = Date.now();
-  for (const p in cache) {
-    const row = cache[p];
-    if (!row) continue;
-    if (row.isGuest) continue;
+
+  // Build array of save promises for parallel execution
+  const savePromises = Object.entries(cache).map(async ([playerId, row]) => {
+    if (!row) return { success: false, playerId, reason: "no_row" };
+    if (row.isGuest) return { success: true, playerId, reason: "guest_skipped" };
 
     if (!row.stats || !row.location) {
-      playerCache.remove(p);
-      continue;
+      playerCache.remove(playerId);
+      return { success: false, playerId, reason: "invalid_data" };
     }
 
     try {
-      await player.setStats(row.username, row.stats);
-      await player.setLocation(p, row.location.map, row.location.position);
+      // Execute both save operations in parallel for each player
+      await Promise.all([
+        player.setStats(row.username, row.stats),
+        player.setLocation(playerId, row.location.map, row.location.position)
+      ]);
+      return { success: true, playerId };
     } catch (e) {
-      playerCache.remove(p);
-      log.error(e as string);
+      playerCache.remove(playerId);
+      log.error(`Failed to save player ${playerId}: ${e as string}`);
+      return { success: false, playerId, error: e };
     }
-  }
+  });
+
+  // Execute all saves in parallel
+  const results = await Promise.allSettled(savePromises);
+
+  // Count successes and failures
+  const successful = results.filter(r => r.status === "fulfilled" && r.value.success).length;
+  const failed = results.filter(r => r.status === "rejected" || (r.status === "fulfilled" && !r.value.success)).length;
+
   const endTime = Date.now();
-  log.info(`Player data saved in ${endTime - startTime}ms`);
+  log.info(`Player data saved in ${endTime - startTime}ms (${successful} successful, ${failed} failed/skipped)`);
 });
 
 export const events = {
