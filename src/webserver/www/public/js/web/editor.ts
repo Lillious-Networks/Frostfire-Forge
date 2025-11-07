@@ -24,18 +24,42 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // Handle dropped files
-    dropzone?.addEventListener('drop', (e) => {
+    dropzone?.addEventListener('drop', async (e) => {
         const dt = e.dataTransfer;
         if (!dt) return;
-        
+
         const files = Array.from(dt.files);
-        
-        files.forEach(file => {
+
+        for (const file of files) {
             if (file.type === 'image/png') {
-                addImageToContainer(file);
+                // Check if it's actually an APNG
+                const isAPNG = await checkIfAPNG(file);
+                if (!isAPNG) {
+                    addImageToContainer(file);
+                } else {
+                    console.warn('APNG files are not supported. File skipped:', file.name);
+                }
             }
-        });
+        }
     });
+
+    // Function to detect APNG files
+    async function checkIfAPNG(file: File): Promise<boolean> {
+        return new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const arr = new Uint8Array(e.target?.result as ArrayBuffer);
+                // PNG signature: 89 50 4E 47 0D 0A 1A 0A
+                // Check for 'acTL' chunk which indicates APNG
+                const decoder = new TextDecoder();
+                const content = decoder.decode(arr);
+                const hasActlChunk = content.includes('acTL');
+                resolve(hasActlChunk);
+            };
+            reader.onerror = () => resolve(false);
+            reader.readAsArrayBuffer(file.slice(0, 8192)); // Read first 8KB to check
+        });
+    }
 
     // Add autosave functionality
     const AUTOSAVE_KEY = 'animation_editor_autosave';
@@ -251,46 +275,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
         previewSection = document.createElement('div');
         previewSection.id = 'preview-section';
-        previewSection.style.position = 'fixed';
-        previewSection.style.top = '90px';
-        previewSection.style.right = '-3px';
-        previewSection.style.zIndex = '1000';
-        previewSection.style.backgroundColor = 'transparent';
-        previewSection.style.padding = '10px';
-        previewSection.style.borderRadius = '4px';
-        
+
         const closeButton = document.createElement('button');
         closeButton.innerHTML = '×';
-        closeButton.style.position = 'absolute';
-        closeButton.style.right = '5px';
-        closeButton.style.top = '5px';
-        closeButton.style.background = 'none';
-        closeButton.style.border = 'none';
-        closeButton.style.color = '#fff';
-        closeButton.style.fontSize = '20px';
-        closeButton.style.cursor = 'pointer';
-        closeButton.style.padding = '0 5px';
+        closeButton.className = 'preview-close-button';
         closeButton.onclick = () => previewSection?.remove();
-        
+
         const container = document.createElement('div');
         container.id = 'preview-container';
-        container.style.width = 'fit-content';
-        container.style.height = 'fit-content';
-        
+
         previewImage = document.createElement('img');
+        previewImage.draggable = false;
         previewImage.id = 'preview-image';
-        previewImage.style.maxWidth = '300px';
-        previewImage.style.height = 'auto';
         previewImage.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24"%3E%3Cpath fill="%23666" d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/%3E%3C/svg%3E';
-        
+
         container.appendChild(previewImage);
         previewSection.appendChild(closeButton);
         previewSection.appendChild(container);
-        
-        const navbar = document.getElementById('editor-navbar');
-        if (navbar && navbar.parentNode) {
-            navbar.parentNode.insertBefore(previewSection, navbar.nextSibling);
-        }
+
+        document.body.appendChild(previewSection);
     }
 
     function generateAnimation() {
@@ -389,9 +392,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // Add save button to the navbar
     const saveButton = document.createElement('button');
     saveButton.id = 'save-button';
+    saveButton.className = 'btn btn-primary';
     saveButton.textContent = 'Save';
     saveButton.onclick = saveConfiguration;
-    document.getElementById('editor-navbar')?.appendChild(saveButton);
+    document.getElementById('editor-navbar-right')?.appendChild(saveButton);
 
     // Add load button and file input
     const loadInput = document.createElement('input');
@@ -399,12 +403,13 @@ document.addEventListener('DOMContentLoaded', () => {
     loadInput.accept = '.forge';
     loadInput.style.display = 'none';
     loadInput.onchange = loadConfiguration;
-    
+
     const loadButton = document.createElement('button');
     loadButton.id = 'load-button';
+    loadButton.className = 'btn btn-primary';
     loadButton.textContent = 'Load';
     loadButton.onclick = () => loadInput.click();
-    document.getElementById('editor-navbar')?.appendChild(loadButton);
+    document.getElementById('editor-navbar-right')?.appendChild(loadButton);
     document.body.appendChild(loadInput);
 
     function saveConfiguration() {
