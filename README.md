@@ -106,11 +106,6 @@ Configure your production environment variables.
 bun production
 ```
 
-**As a system service:**
-```bash
-bun service:start
-```
-
 ---
 
 ### Docker Deployment
