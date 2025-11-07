@@ -77,14 +77,18 @@ const insertDemoAccount = async () => {
       password_hash,
       online,
       role,
-      banned
+      banned,
+      map,
+      position
     ) VALUES (
       'demo@example.com',
       'demo_user',
       '$argon2id$v=19$m=65536,t=2,p=1$t10G4CvyWPSnL53oJjhAeUwxVn3npXudy6CN41Z8JZE$/Rz8vPge3ECpIeYqJ2XbmBsrXipWuVPLmEGFyQfliWM',
       0,
       1,
-      0
+      0,
+      'overworld',
+      '0,0'
     );
     `;
   await query(sql);
