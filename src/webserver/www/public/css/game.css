@@ -3,6 +3,7 @@
   --red : #974747;
   --orange: #db933b;
   --blue: #0D80D8;
+  --chat-placeholder-color: #b17767;
 }
 
 /* Load font from file */
@@ -465,7 +466,7 @@ input {
 }
 
 input::placeholder {
-  color: #b17767;
+  color: var(--chat-placeholder-color, #b17767);
   font-family: 'Comic Relief';
 }
 

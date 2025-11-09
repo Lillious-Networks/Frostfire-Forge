@@ -86,19 +86,70 @@ function handleEscapeKey() {
     }
   });
 }
+addEventListener("keypress", (event: KeyboardEvent) => {
+  // Check if chatinput is focused to avoid interfering with typing
+  if (chatInput === document.activeElement) {
+    const inputValue = chatInput.value.trim();
+
+    switch (true) {
+      case inputValue === "/party" || inputValue === "/p":
+        // Check for space key to set party chat mode
+        if (event.key === " ") {
+          event.preventDefault();
+          chatInput.value = "";
+          chatInput.dataset.mode = "party";
+          chatInput.style.color = "#5389ff";
+          // Update placeholder text
+          chatInput.placeholder = "[Party] Type here...";
+          // Make placeholder the same color as party mode
+          chatInput.style.setProperty('--chat-placeholder-color', '#5389ff');
+        }
+        break;
+      case inputValue === "/say" || inputValue === "/s":
+        // Check for space key to set say chat mode
+        if (event.key === " ") {
+          event.preventDefault();
+          chatInput.value = "";
+          // Remove any existing mode
+          delete chatInput.dataset.mode;
+          chatInput.style.color = "#ffffff";
+          // Reset placeholder text
+          chatInput.placeholder = "Type here...";
+          // Reset placeholder color
+          chatInput.style.setProperty('--chat-placeholder-color', '#b17767');
+        }
+        break;
+      case inputValue.startsWith("/whisper ") || inputValue.startsWith("/w "):
+        // Check for space key after whisper command and name
+        if (event.key === " " && inputValue.split(" ").length >= 2) {
+          event.preventDefault();
+          const name = inputValue.split(" ")[1];
+          chatInput.value = "";
+          chatInput.dataset.mode = `whisper ${name}`;
+          chatInput.style.color = "#d670e4";
+          // Update placeholder text
+          chatInput.placeholder = `[${name}] Type here...`;
+          chatInput.style.setProperty('--chat-placeholder-color', '#d670e4');
+        }
+        break;
+      default:
+        break;
+    }
+  }
+});
 
 async function handleEnterKey() {
   // Check if friendslist search is focused
   if (friendsListSearch === document.activeElement) return;
   const isTyping = chatInput === document.activeElement;
-  
+
   if (!isTyping) {
     chatInput.focus();
     return;
   }
 
   sendRequest({ type: "STOPTYPING", data: null });
-  
+
   const message = chatInput.value.trim();
   if (!message) {
     chatInput.value = "";
@@ -108,6 +159,12 @@ async function handleEnterKey() {
 
   chatInput.blur();
   chatInput.value = "";
+
+  if (chatInput.dataset.mode) {
+    const _message = `/${chatInput.dataset.mode} ${message}`;
+    await handleCommand(_message);
+    return;
+  }
 
   if (message.startsWith("/")) {
     await handleCommand(message);
