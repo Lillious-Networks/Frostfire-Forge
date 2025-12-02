@@ -1,4 +1,4 @@
-# Development Dockerfile for Frostfire Forge
+# Local Dockerfile for Frostfire Forge
 FROM oven/bun:canary AS base
 WORKDIR /app
 

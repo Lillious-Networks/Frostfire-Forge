@@ -9,9 +9,14 @@ const result = document.getElementById('result') as HTMLParagraphElement;
 const interval = document.getElementById('interval') as HTMLInputElement;
 const intervalLabel = document.getElementById('interval-label') as HTMLLabelElement;
 const stop = document.getElementById('stop') as HTMLButtonElement;
+const progressWrapper = document.getElementById('progress-wrapper') as HTMLDivElement;
+const progressBar = document.getElementById('progress-bar') as HTMLDivElement;
+const progressText = document.getElementById('progress-text') as HTMLSpanElement;
+const progressPercentage = document.getElementById('progress-percentage') as HTMLSpanElement;
 let stopped = false;
 let errored = false;
 let total = 0;
+let totalExpected = 0;
 
 // Write logs to the logs element
 const logs = document.getElementById('logs') as HTMLParagraphElement;
@@ -74,6 +79,14 @@ function calculateDataArrayBytes(dataValueInMB: number, bytesPerElement: number)
     return elements * bytesPerElement;
 }
 
+// Update progress bar
+function updateProgress(current: number, expected: number): void {
+    const percentage = Math.min(100, Math.round((current / expected) * 100));
+    progressBar.style.width = `${percentage}%`;
+    progressText.innerText = `${current} / ${expected} messages`;
+    progressPercentage.innerText = `${percentage}%`;
+}
+
 // Initialize inputs with default values
 clients.value = '50';
 clientsLabel.innerText = `Clients: ${clients.value}`;
@@ -124,8 +137,13 @@ start.addEventListener('click', async () => {
 
     const clientsValue = parseInt(clients.value);
     const iterationsValue = parseInt(iterations.value);
+    totalExpected = clientsValue * iterationsValue;
     const dataValue = parseFloat(data.value);
     const dataArray = createPacket(dataValue);
+
+    // Show and initialize progress bar
+    progressWrapper.classList.add('active');
+    updateProgress(0, totalExpected);
 
     async function createClients(amount: number): Promise<WebSocket[]> {
         const websockets: WebSocket[] = [];
@@ -166,6 +184,7 @@ start.addEventListener('click', async () => {
             websocket.close();
             // Check the connections size
             if (connections.size === 0) {
+                progressWrapper.classList.remove('active');
                 result.innerHTML = 'Benchmark aborted';
                 setTimeout(() => {
                     result.style.display = 'none';
@@ -220,6 +239,9 @@ start.addEventListener('click', async () => {
                         ? averageResponseTimes.reduce((a, b) => a + b, 0) / averageResponseTimes.length
                         : 0;
 
+                // Hide progress bar
+                progressWrapper.classList.remove('active');
+
                 if (stopped) {
                     result.textContent = 'Benchmark aborted';
                     setTimeout(() => {
@@ -252,9 +274,10 @@ start.addEventListener('click', async () => {
             const sent_timestamp = data["sent_timestamp"];
             const returned_timestamp = data["returned_timestamp"];
             const responseTime = returned_timestamp - sent_timestamp;
-            averageResponseTimes.push(responseTime);           
+            averageResponseTimes.push(responseTime);
             total++;
             counter++;
+            updateProgress(total, totalExpected);
             result.innerText = `Received ${total} messages`;
             if (counter >= iterationsValue) {
                 websocket.close();

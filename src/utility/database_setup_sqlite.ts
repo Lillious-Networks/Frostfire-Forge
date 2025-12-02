@@ -28,6 +28,7 @@ const createAccountsTable = async () => {
         verified INTEGER DEFAULT 0 NOT NULL,
         noclip INTEGER DEFAULT 0 NOT NULL,
         party_id INTEGER DEFAULT NULL,
+        guild_id INTEGER DEFAULT NULL,
         guest_mode INTEGER DEFAULT 0 NOT NULL
       );
   `;
@@ -77,14 +78,18 @@ const insertDemoAccount = async () => {
       password_hash,
       online,
       role,
-      banned
+      banned,
+      map,
+      position
     ) VALUES (
       'demo@example.com',
       'demo_user',
       '$argon2id$v=19$m=65536,t=2,p=1$t10G4CvyWPSnL53oJjhAeUwxVn3npXudy6CN41Z8JZE$/Rz8vPge3ECpIeYqJ2XbmBsrXipWuVPLmEGFyQfliWM',
       0,
       1,
-      0
+      0,
+      'overworld',
+      '0,0'
     );
     `;
   await query(sql);
@@ -369,10 +374,10 @@ const createWorldTable = async () => {
   await query(sql);
 }
 
-const createDefaultWorld = async () => {
-  log.info("Creating default world...");
+const createWorld = async (name: string, weather: string, max_players: number, default_map: string) => {
+  log.info("Creating world...");
   const sql = `
-    INSERT OR IGNORE INTO worlds (name, weather, max_players, default_map) VALUES ('default', 'clear', 100, 'main');
+    INSERT OR IGNORE INTO worlds (name, weather, max_players, default_map) VALUES ('${name}', '${weather}', ${max_players}, '${default_map}');
   `;
   await query(sql);
 }
@@ -444,6 +449,23 @@ const createCurrencyTable = async () => {
   await query(sql);
 }
 
+const createGuildsTable = async () => {
+  log.info("Creating guilds table...");
+  const sql = `
+    CREATE TABLE IF NOT EXISTS guilds (
+      id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
+      name TEXT NOT NULL UNIQUE,
+      leader TEXT NOT NULL,
+      members TEXT DEFAULT NULL,
+      bank TEXT DEFAULT NULL,
+      rank_permissions TEXT DEFAULT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+    );
+  `;
+  await query(sql);
+}
+
 // Run the database setup
 const setupDatabase = async () => {
   await createAccountsTable();
@@ -464,12 +486,14 @@ const setupDatabase = async () => {
   await createWeatherTable();
   await createDefaultWeather();
   await createWorldTable();
-  await createDefaultWorld();
+  await createWorld('default', 'clear', 200, 'main');
+  await createWorld('overworld', 'rainy', 200, 'overworld');
   await createQuestsTable();
   await createQuestLogTable();
   await createFriendsListTable();
   await createPartiesTable();
   await createCurrencyTable();
+  await createGuildsTable();
 };
 
 try {

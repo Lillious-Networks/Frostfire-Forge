@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile.prod
     container_name: frostfire-forge-prod
-    restart: on-failure
+    restart: unless-stopped
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
     ports:

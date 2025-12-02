@@ -1,4 +1,4 @@
-import { weatherCanvas, weatherCtx } from "./ui.ts";
+import { weatherCanvas, weatherCtx, canvas } from "./ui.ts";
 
 // Set initial canvas size with buffer
 let width: number = (weatherCanvas.width = window.innerWidth + 800);
@@ -141,8 +141,40 @@ function weather(type: string): void {
 // Adjust canvas position relative to camera
 function updateWeatherCanvas(cameraX: number, cameraY: number): void {
   const buffer = 400;
-  weatherCanvas.style.left = `${cameraX - buffer}px`;
-  weatherCanvas.style.top = `${cameraY - buffer}px`;
+
+  // Calculate desired weather canvas position (centered around viewport with buffer)
+  let weatherLeft = cameraX - buffer;
+  let weatherTop = cameraY - buffer;
+
+  // Game canvas is at (0, 0) and represents the entire game world
+  // Constrain weather canvas to not go beyond game canvas boundaries
+
+  // Left boundary: weather canvas should not go below 0
+  weatherLeft = Math.max(0, weatherLeft);
+
+  // Top boundary: weather canvas should not go below 0
+  weatherTop = Math.max(0, weatherTop);
+
+  // Right boundary: weather canvas right edge should not exceed game canvas width
+  const maxLeft = canvas.width - weatherCanvas.width;
+  if (maxLeft >= 0) {
+    weatherLeft = Math.min(weatherLeft, maxLeft);
+  } else {
+    // If weather canvas is larger than game canvas, center it
+    weatherLeft = 0;
+  }
+
+  // Bottom boundary: weather canvas bottom edge should not exceed game canvas height
+  const maxTop = canvas.height - weatherCanvas.height;
+  if (maxTop >= 0) {
+    weatherTop = Math.min(weatherTop, maxTop);
+  } else {
+    // If weather canvas is larger than game canvas, center it
+    weatherTop = 0;
+  }
+
+  weatherCanvas.style.left = `${weatherLeft}px`;
+  weatherCanvas.style.top = `${weatherTop}px`;
 }
 
 export { weather, updateWeatherCanvas };

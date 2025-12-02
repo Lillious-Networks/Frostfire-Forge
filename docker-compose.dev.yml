@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile.dev
     container_name: frostfire-forge-dev
-    restart: on-failure
+    restart: unless-stopped
     ports:
       - "8080:8080"
       - "3001:3001"

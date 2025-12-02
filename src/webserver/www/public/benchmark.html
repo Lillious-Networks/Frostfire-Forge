@@ -1,35 +1,77 @@
-<html>
-    <head>
-        <link rel="icon" type="image/ico" href="./img/icons/favicon.ico">
-        <meta charset="utf-8">
-        <title>Benchmark</title>
-        <script defer src="./js/web/benchmark.js" type="text/javascript"></script>
-        <link rel="stylesheet" href="./css/benchmark.css">
-    </head>
-    <body>
-        <div class="home-button" onclick="location.href='/'"></div>
-        <div id="benchmark">
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/ico" href="./img/icons/favicon.ico">
+    <title>Frostfire Forge - Benchmark</title>
+    <link rel="stylesheet" href="./css/benchmark.css">
+    <script defer src="./js/web/benchmark.js" type="text/javascript"></script>
+</head>
+<body>
+    <div class="home-button" onclick="location.href='/'"></div>
+
+    <div class="container">
+        <div class="header">
             <h1>Benchmark</h1>
-            <div id="benchmark-container">
-                <label for="clients" id="clients-label">Clients:</label>
-                <input type="range" id="clients" min="1" max="250">
-                <hr>
-                <label for="interval" id="interval-label">Interval:</label>
-                <input type="range" id="interval" min="1" max="100" step="1">
-                <hr>
-                <label for="iterations" id="iterations-label">Iterations:</label>
-                <input type="range" id="iterations" min="1" max="10000">
-                <hr>
-                <label for="data" id="data-label">Data:</label>
-                <input type="range" id="data" min="0.00001" max="0.001" step="0.000001">
-                <hr>
-                <div class="button-container">
-                    <button id="start">Start</button>
-                    <button id="stop" disabled>Stop</button>
-                </div>
-                <p id="result"></p>
-                <p id="logs"></p>
-            </div>
+            <p>Performance Testing & WebSocket Stress Analysis</p>
         </div>
-    </body>
+
+        <div id="benchmark-container">
+            <div class="control-group">
+                <label for="clients" id="clients-label" class="control-label">
+                    <span class="label-text">Clients</span>
+                    <span class="label-value">1</span>
+                </label>
+                <input type="range" id="clients" class="slider" min="1" max="250" value="1">
+            </div>
+
+            <div class="control-group">
+                <label for="interval" id="interval-label" class="control-label">
+                    <span class="label-text">Interval</span>
+                    <span class="label-value">1</span>
+                </label>
+                <input type="range" id="interval" class="slider" min="1" max="100" step="1" value="1">
+            </div>
+
+            <div class="control-group">
+                <label for="iterations" id="iterations-label" class="control-label">
+                    <span class="label-text">Iterations</span>
+                    <span class="label-value">1</span>
+                </label>
+                <input type="range" id="iterations" class="slider" min="1" max="10000" value="1">
+            </div>
+
+            <div class="control-group">
+                <label for="data" id="data-label" class="control-label">
+                    <span class="label-text">Data Size</span>
+                    <span class="label-value">0.00001</span>
+                </label>
+                <input type="range" id="data" class="slider" min="0.00001" max="0.001" step="0.000001" value="0.00001">
+            </div>
+
+            <div class="button-container">
+                <button id="start" class="btn btn-primary">Start Benchmark</button>
+                <button id="stop" class="btn btn-danger" disabled>Stop</button>
+            </div>
+
+            <div id="progress-wrapper" class="progress-wrapper">
+                <div class="progress-info">
+                    <span id="progress-text" class="progress-text">0 / 0 messages</span>
+                    <span id="progress-percentage" class="progress-percentage">0%</span>
+                </div>
+                <div class="progress-bar-container">
+                    <div id="progress-bar" class="progress-bar"></div>
+                </div>
+            </div>
+
+            <div id="result" class="result-container"></div>
+            <div id="logs" class="logs-container"></div>
+        </div>
+
+        <div class="stats">
+            <p>Internal Benchmarking Statistics</p>
+        </div>
+    </div>
+</body>
 </html>

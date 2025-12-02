@@ -38,6 +38,13 @@ const serverTime = document.getElementById("server-time-value") as HTMLDivElemen
 const ambience = document.getElementById("ambience-overlay") as HTMLDivElement;
 const weatherCanvas = document.getElementById("weather") as HTMLCanvasElement;
 const weatherCtx = weatherCanvas.getContext("2d");
+const guildContainer = document.getElementById("guild-container") as HTMLDivElement;
+const guildName = document.getElementById("guild-name") as HTMLDivElement;
+const guildRank = document.getElementById("guild-rank") as HTMLDivElement;
+const guildMembersList = document.getElementById("guild-members-list") as HTMLDivElement;
+const guildMemberCount = document.getElementById("guild-member-count") as HTMLDivElement;
+const guildMemberInviteInput = document.getElementById("guild-invite-input") as HTMLInputElement;
+const guildMemberInviteButton = document.getElementById("guild-invite-button") as HTMLButtonElement;
 
 function toggleUI(element: HTMLElement, toggleFlag: boolean, hidePosition: number) {
   element.style.transition = "1s";
@@ -165,5 +172,6 @@ export {
     staminaBar, targetHealthBar, targetStaminaBar, xpBar, musicSlider, effectsSlider, mutedCheckbox, statUI, overlay,
     packetsSentReceived, optionsMenu, friendsList, friendsListSearch, onlinecount, progressBar, progressBarContainer,
     inventoryGrid, chatMessages, loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage,
-    serverTime, ambience, weatherCanvas, weatherCtx
+    serverTime, ambience, weatherCanvas, weatherCtx, guildContainer, guildName, guildRank, guildMembersList,
+    guildMemberCount, guildMemberInviteInput, guildMemberInviteButton
 };

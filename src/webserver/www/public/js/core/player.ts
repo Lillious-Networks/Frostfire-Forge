@@ -154,7 +154,7 @@ async function createPlayer(data: any) {
         }
       }
     },
-    show: function (context: CanvasRenderingContext2D) {
+    show: function (context: CanvasRenderingContext2D, currentPlayer?: any) {
       let shadow: { width: number; height: number; fillStyle: string; borderColor: string } = { width: 0, height: 0, fillStyle: "black", borderColor: "black" };
       if (this.targeted) {
         shadow = {
@@ -217,7 +217,6 @@ async function createPlayer(data: any) {
       // Draw the player's username
       context.textAlign = "center";
 
-      const currentPlayer = cache.players.size ? Array.from(cache.players).find(p => p.id === cachedPlayerId) : null;
       if (!currentPlayer) return;
       
       // Determine color for player name

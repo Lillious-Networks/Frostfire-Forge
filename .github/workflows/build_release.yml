@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build and Release (Production)
+    name: Build and Release v${{ github.run_number }}-production
     runs-on: self-hosted
     environment: production
     steps:
@@ -68,6 +68,7 @@ jobs:
           echo 'CACHE="redis"' >> .env.production
           echo 'REDIS_URL="redis://default:${{ secrets.REDIS_PASSWORD }}@redis:6379"' >> .env.production
           echo 'REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"' >> .env.production
+          echo 'VERSION="${{ github.run_number }}-production"' >> .env.production
 
       - name: Create Certificate Chain
         working-directory: src/certs
@@ -80,9 +81,6 @@ jobs:
 
           # Create private key
           echo "${{ secrets.CERT_PRIVATE_KEY }}" > key.pem
-
-          # Create database Certificate
-          echo "${{ secrets.DB_CERT }}" > db.crt
 
       - name: Build Docker Image
         run: |

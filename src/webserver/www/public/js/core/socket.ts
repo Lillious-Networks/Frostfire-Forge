@@ -1,6 +1,7 @@
 import.meta.hot.accept;
 import { config } from "../web/global.js";
 const socket = new WebSocket(config.WEBSOCKET_URL || "ws://localhost:3000");
+const version = config?.VERSION;
 import "./events.ts";
 import pako from "../libs/pako.js";
 import packet from "./packetencoder.ts";
@@ -1308,6 +1309,20 @@ socket.onmessage = async (event) => {
       break;
   }
 };
+
+// Create text on bottom right that displays the version at half opacity
+if (version) {
+  const versionText = document.createElement("div");
+  versionText.style.position = "fixed";
+  versionText.style.bottom = "5px";
+  versionText.style.right = "10px";
+  versionText.style.fontSize = "14px";
+  versionText.style.color = "rgba(255, 255, 255, 0.5)";
+  versionText.style.zIndex = "1000";
+  versionText.style.userSelect = "none";
+  versionText.innerText = `v${version}`;
+  document.body.appendChild(versionText);
+}
 
 function showNotification(
   message: string,
