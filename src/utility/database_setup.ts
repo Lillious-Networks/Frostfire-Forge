@@ -41,6 +41,7 @@ const createAccountsTable = async () => {
         verified INT DEFAULT 0 NOT NULL,
         noclip INT DEFAULT 0 NOT NULL,
         party_id INT DEFAULT NULL,
+        guild_id INT DEFAULT NULL,
         guest_mode INT DEFAULT 0 NOT NULL
       );
   `;
@@ -372,6 +373,23 @@ const createCurrencyTable = async () => {
   await query(sql);
 };
 
+const createGuildsTable = async () => {
+  log.info("Creating guilds table...");
+  const sql = `
+    CREATE TABLE IF NOT EXISTS guilds (
+      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+      name VARCHAR(255) NOT NULL UNIQUE,
+      leader VARCHAR(255) NOT NULL,
+      members TEXT DEFAULT NULL,
+      bank TEXT DEFAULT NULL,
+      rank_permissions TEXT DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )
+  `;
+  await query(sql);
+};
+
 // Create indexes for performance optimization
 const createIndexes = async () => {
   log.info("Creating performance indexes...");
@@ -382,6 +400,7 @@ const createIndexes = async () => {
     "CREATE INDEX idx_accounts_session_id ON accounts(session_id)",
     "CREATE INDEX idx_accounts_username ON accounts(username)",
     "CREATE INDEX idx_accounts_party_id ON accounts(party_id)",
+    "CREATE INDEX idx_accounts_guild_id ON accounts(guild_id)",
 
     // Indexes for JOIN queries in GetPlayerLoginData
     "CREATE INDEX idx_permissions_username ON permissions(username)",
@@ -398,6 +417,9 @@ const createIndexes = async () => {
     // Party query optimization
     "CREATE INDEX idx_parties_id ON parties(id)",
     "CREATE INDEX idx_parties_leader ON parties(leader)",
+    "CREATE INDEX idx_guilds_id ON guilds(id)",
+    "CREATE INDEX idx_guilds_name ON guilds(name)",
+    "CREATE INDEX idx_guilds_leader ON guilds(leader)",
   ];
 
   for (const indexSql of indexes) {
@@ -445,6 +467,7 @@ const setupDatabase = async () => {
   await createFriendsListTable();
   await createPartiesTable();
   await createCurrencyTable();
+  await createGuildsTable();
   await createIndexes(); // Add indexes after all tables are created
 };
 

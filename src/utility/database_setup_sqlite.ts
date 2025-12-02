@@ -28,6 +28,7 @@ const createAccountsTable = async () => {
         verified INTEGER DEFAULT 0 NOT NULL,
         noclip INTEGER DEFAULT 0 NOT NULL,
         party_id INTEGER DEFAULT NULL,
+        guild_id INTEGER DEFAULT NULL,
         guest_mode INTEGER DEFAULT 0 NOT NULL
       );
   `;
@@ -448,6 +449,23 @@ const createCurrencyTable = async () => {
   await query(sql);
 }
 
+const createGuildsTable = async () => {
+  log.info("Creating guilds table...");
+  const sql = `
+    CREATE TABLE IF NOT EXISTS guilds (
+      id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
+      name TEXT NOT NULL UNIQUE,
+      leader TEXT NOT NULL,
+      members TEXT DEFAULT NULL,
+      bank TEXT DEFAULT NULL,
+      rank_permissions TEXT DEFAULT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+    );
+  `;
+  await query(sql);
+}
+
 // Run the database setup
 const setupDatabase = async () => {
   await createAccountsTable();
@@ -475,6 +493,7 @@ const setupDatabase = async () => {
   await createFriendsListTable();
   await createPartiesTable();
   await createCurrencyTable();
+  await createGuildsTable();
 };
 
 try {

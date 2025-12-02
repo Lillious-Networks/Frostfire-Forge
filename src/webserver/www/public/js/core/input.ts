@@ -6,13 +6,14 @@ import { handleCommand, handleChatMessage } from "./chat.js";
 import { setDirection, setPendingRequest } from "./renderer.js";
 import { chatInput } from "./chat.js";
 import { friendsListSearch } from "./friends.js";
-import { inventoryUI, spellBookUI, friendsListUI, pauseMenu, menuElements } from "./ui.js";
+import { inventoryUI, spellBookUI, friendsListUI, pauseMenu, menuElements, guildContainer } from "./ui.js";
 let userHasInteracted: boolean = false;
 let lastSentDirection = "";
 
 let toggleInventory = false;
 let toggleSpellBook = false;
 let toggleFriendsList = false;
+let toggleGuild = false;
 let controllerConnected: boolean = false;
 let contextMenuKeyTriggered = false;
 let isKeyPressed = false;
@@ -34,11 +35,19 @@ export const keyHandlers = {
       toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -425);
     }
 
+    if (toggleGuild) {
+      toggleGuild = toggleUI(guildContainer, toggleGuild, -450);
+    }
+
     toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -425);
   },
   KeyO: () => {
     if (toggleSpellBook) {
       toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -425);
+    }
+
+    if (toggleGuild) {
+      toggleGuild = toggleUI(guildContainer, toggleGuild, -450);
     }
 
     toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -425);
@@ -48,6 +57,17 @@ export const keyHandlers = {
   KeyZ: () => sendRequest({ type: "NOCLIP", data: null }),
   Enter: async () => handleEnterKey(),
   Space: () => handleSpaceKey(),
+  KeyG: () => {
+    if (toggleFriendsList) {
+      toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -425);
+    }
+
+    if (toggleSpellBook) {
+      toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -425);
+    }
+
+    toggleGuild = toggleUI(guildContainer, toggleGuild, -450);
+  }
 } as const;
 
 // Movement keys configuration
