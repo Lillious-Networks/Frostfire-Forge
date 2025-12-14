@@ -3,7 +3,7 @@ const cache = Cache.getInstance();
 import { cachedPlayerId } from "./socket.js";
 import { updateFriendOnlineStatus, updateFriendsList } from "./friends.js";
 import { initializeAnimationWithWorker } from "./animation.js";
-import { canvas, getCameraX, getCameraY, setCameraX, setCameraY } from "./renderer.js";
+import { getCameraX, getCameraY, setCameraX, setCameraY } from "./renderer.js";
 import { createPartyUI, positionText } from "./ui.js";
 import { updateXp } from "./xp.js";
 import  { typingImage } from "./images.js";
@@ -40,8 +40,8 @@ async function createPlayer(data: any) {
     animation: null as null | Awaited<ReturnType<typeof initializeAnimationWithWorker>>,
     friends: data.friends || [],
     position: {
-      x: canvas.width / 2 + data.location.x,
-      y: canvas.height / 2 + data.location.y,
+      x: data.location.x,
+      y: data.location.y,
     },
     chat: "",
     isStealth: data.isStealth,
@@ -55,35 +55,7 @@ async function createPlayer(data: any) {
     typingImage: typingImage,
     party: data.party || null,
     showChat: function (context: CanvasRenderingContext2D) {
-      if (this.chat) {
-        if (this.chat.trim() !== "") {
-          context.fillStyle = "black";
-          context.fillStyle = "white";
-          context.textAlign = "center";
-          context.shadowBlur = 1;
-          context.shadowColor = "black";
-          context.shadowOffsetX = 1;
-          context.shadowOffsetY = 1;
-          context.font = "14px 'Comic Relief'";
-          const lines = getLines(context, this.chat, 500).reverse();
-          let startingPosition = this.position.y;
-
-          for (let i = 0; i < lines.length; i++) {
-            startingPosition -= 20;
-            const textWidth = context.measureText(lines[i]).width;
-            context.fillStyle = "rgba(0, 0, 0, 0.2)";
-            context.fillRect(
-              this.position.x + 16 - textWidth/2 - 5,
-              startingPosition - 17,
-              textWidth + 10,
-              20
-            );
-            context.fillStyle = "white";
-            context.fillText(lines[i], this.position.x + 16, startingPosition);
-          }
-        }
-      }
-
+      // Draw typing indicator first (below in z-order)
       if (this.typing && this.typingImage) {
         // Show typing image at top left, using image's natural dimensions
         // Update opacity to 0.5 if the player is in stealth mode
@@ -97,19 +69,49 @@ async function createPlayer(data: any) {
         context.shadowOffsetX = 0;
         context.shadowOffsetY = 0;
         // Shrink the image in half
-        
+
         context.drawImage(
           this.typingImage,
-          this.position.x - this.typingImage.width + 15, 
-          this.position.y - this.typingImage.height + 15,
+          this.position.x - this.typingImage.width / 1.5,
+          this.position.y - this.typingImage.height - 25,
           this.typingImage.width / 1.5,
           this.typingImage.height / 1.5
         );
-        
+
         // Reset opacity
         context.globalAlpha = 1;
         context.shadowColor = "transparent";
         context.shadowBlur = 0;
+      }
+
+      // Draw chat bubbles on top
+      if (this.chat) {
+        if (this.chat.trim() !== "") {
+          context.fillStyle = "black";
+          context.fillStyle = "white";
+          context.textAlign = "center";
+          context.shadowBlur = 1;
+          context.shadowColor = "black";
+          context.shadowOffsetX = 1;
+          context.shadowOffsetY = 1;
+          context.font = "14px 'Comic Relief'";
+          const lines = getLines(context, this.chat, 500).reverse();
+          let startingPosition = this.position.y - 20;
+
+          for (let i = 0; i < lines.length; i++) {
+            startingPosition -= 20;
+            const textWidth = context.measureText(lines[i]).width;
+            context.fillStyle = "rgba(0, 0, 0, 0.2)";
+            context.fillRect(
+              this.position.x - textWidth/2 - 5,
+              startingPosition - 17,
+              textWidth + 10,
+              20
+            );
+            context.fillStyle = "white";
+            context.fillText(lines[i], this.position.x, startingPosition);
+          }
+        }
       }
 
       // Reset shadow settings
@@ -137,8 +139,8 @@ async function createPlayer(data: any) {
           context.globalAlpha = 0.5;
           context.drawImage(
             frame.imageElement,
-            this.position.x + 16 - frame.width/2,
-            this.position.y + 24 - frame.height/2,
+            this.position.x - frame.width/2,
+            this.position.y - frame.height/2,
             frame.width,
             frame.height
           );
@@ -146,8 +148,8 @@ async function createPlayer(data: any) {
         } else {
           context.drawImage(
             frame.imageElement,
-            this.position.x + 16 - frame.width/2,
-            this.position.y + 24 - frame.height/2,
+            this.position.x - frame.width/2,
+            this.position.y - frame.height/2,
             frame.width,
             frame.height
           );
@@ -176,8 +178,8 @@ async function createPlayer(data: any) {
       context.save();
       context.beginPath();
       context.ellipse(
-        this.position.x + 16,
-        this.position.y + 40,
+        this.position.x,
+        this.position.y + 16,
         shadow.width,
         shadow.height,
         0,
@@ -191,8 +193,8 @@ async function createPlayer(data: any) {
       // Inner fill (lighter)
       context.beginPath();
       context.ellipse(
-        this.position.x + 16,
-        this.position.y + 40,
+        this.position.x,
+        this.position.y + 16,
         shadow.width,
         shadow.height,
         0,
@@ -277,24 +279,24 @@ async function createPlayer(data: any) {
 
       context.strokeText(
         data.username,
-        this.position.x + 16,
-        this.position.y + 65
+        this.position.x,
+        this.position.y + 40
       );
       context.fillText(
         data.username,
-        this.position.x + 16,
-        this.position.y + 65
+        this.position.x,
+        this.position.y + 40
       );
 
       // Draw the player's health bar below the player's name with a width of 100px, centered below the player name
       if (!this.isStealth) {
         if (data.id === cachedPlayerId || this.targeted) {
           context.fillStyle = "rgba(0, 0, 0, 0.8)";
-          context.fillRect(this.position.x - 34, this.position.y + 71, 100, 3);
+          context.fillRect(this.position.x - 50, this.position.y + 46, 100, 3);
 
           // Update the shadowblur to 2
           context.shadowBlur = 2;
-        
+
           // Set health bar color based on health percentage
           const healthPercent = this.stats.health / this.stats.max_health;
           if (healthPercent < 0.3) {
@@ -306,10 +308,10 @@ async function createPlayer(data: any) {
           } else {
             context.fillStyle = "#519D41"; // green
           }
-          
+
           context.fillRect(
-            this.position.x - 34,
-            this.position.y + 71,
+            this.position.x - 50,
+            this.position.y + 46,
             healthPercent * 100,
             3
           );
@@ -319,11 +321,11 @@ async function createPlayer(data: any) {
         // Check if current player is the same as the player we are drawing
         if (data.id === cachedPlayerId || this.targeted) {
         context.fillStyle = "rgba(0, 0, 0, 0.8)";
-        context.fillRect(this.position.x - 34, this.position.y + 76, 100, 3);
+        context.fillRect(this.position.x - 50, this.position.y + 51, 100, 3);
         context.fillStyle = "#469CD9";
         context.fillRect(
-          this.position.x - 34,
-            this.position.y + 76,
+          this.position.x - 50,
+            this.position.y + 51,
             (this.stats.stamina / this.stats.max_stamina) * 100,
             3
           );
@@ -337,7 +339,7 @@ async function createPlayer(data: any) {
           // Text shadow for better visibility
           context.shadowColor = "black";
           context.shadowBlur = 2;
-          context.fillText(`${this.stats.level}`, this.position.x - 50, this.position.y + 81);
+          context.fillText(`${this.stats.level}`, this.position.x - 66, this.position.y + 56);
         }
       }
 

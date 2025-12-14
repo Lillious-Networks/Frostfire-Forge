@@ -113,6 +113,94 @@ const routes = {
     }
     return new Response(JSON.stringify({ message: "Tileset not found" }), { status: 404 });
   },
+  "/map-chunk": async (req: Request) => {
+    if (req.method !== "GET") {
+      return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
+    }
+    const url = tryParseURL(req.url);
+    if (!url) {
+      return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
+    }
+
+    const mapName = url.searchParams.get("map");
+    const chunkX = parseInt(url.searchParams.get("x") || "");
+    const chunkY = parseInt(url.searchParams.get("y") || "");
+    const chunkSize = parseInt(url.searchParams.get("size") || "25");
+
+    if (!mapName || isNaN(chunkX) || isNaN(chunkY) || isNaN(chunkSize)) {
+      return new Response(JSON.stringify({ message: "Invalid parameters" }), { status: 400 });
+    }
+
+    try {
+      const maps = await assetCache.get("maps") as any[];
+      const map = maps.find((m: any) => m.name === mapName || m.name === `${mapName}.json`);
+
+      if (!map) {
+        return new Response(JSON.stringify({ message: "Map not found" }), { status: 404 });
+      }
+
+      const mapData = map.data;
+      const startX = chunkX * chunkSize;
+      const startY = chunkY * chunkSize;
+      const endX = Math.min(startX + chunkSize, mapData.width);
+      const endY = Math.min(startY + chunkSize, mapData.height);
+
+      // Validate chunk bounds
+      if (startX >= mapData.width || startY >= mapData.height) {
+        return new Response(JSON.stringify({ message: "Chunk out of bounds" }), { status: 400 });
+      }
+
+      // Extract chunk data for each layer
+      const chunkLayers = mapData.layers
+        .filter((layer: any) => layer.type === "tilelayer" && layer.visible)
+        .map((layer: any, index: number) => {
+          const chunkData: number[] = [];
+          for (let y = startY; y < endY; y++) {
+            for (let x = startX; x < endX; x++) {
+              const tileIndex = layer.data[y * mapData.width + x];
+              chunkData.push(tileIndex);
+            }
+          }
+
+          // Use custom zIndex property if available, otherwise use layer index from original array
+          let zIndex = layer.zIndex;
+          if (zIndex === undefined) {
+            // Find original index in unfiltered layers array
+            const originalIndex = mapData.layers.findIndex((l: any) => l === layer);
+            zIndex = originalIndex !== -1 ? originalIndex : index;
+          }
+
+          return {
+            name: layer.name,
+            zIndex: zIndex,
+            data: chunkData,
+            width: endX - startX,
+            height: endY - startY,
+          };
+        });
+
+      const response = {
+        chunkX,
+        chunkY,
+        startX,
+        startY,
+        width: endX - startX,
+        height: endY - startY,
+        tilewidth: mapData.tilewidth,
+        tileheight: mapData.tileheight,
+        tilesets: mapData.tilesets,
+        layers: chunkLayers,
+      };
+
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    } catch (error: any) {
+      log.error(`Error serving map chunk: ${error.message}`);
+      return new Response(JSON.stringify({ message: "Internal server error" }), { status: 500 });
+    }
+  },
 } as Record<string, any>;
 
 Bun.serve({
@@ -135,6 +223,7 @@ Bun.serve({
       "/login": routes["/login"],
       "/verify": routes["/verify"],
       "/tileset": routes["/tileset"],
+      "/map-chunk": routes["/map-chunk"],
     },
   async fetch(req: Request, server: any) {
     const url = tryParseURL(req.url);

@@ -1508,12 +1508,12 @@
                         {
                          "name":"x",
                          "type":"int",
-                         "value":0
+                         "value":3760
                         }, 
                         {
                          "name":"y",
                          "type":"int",
-                         "value":0
+                         "value":3760
                         }],
                  "rotation":0,
                  "type":"warp",

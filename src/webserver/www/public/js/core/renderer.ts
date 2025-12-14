@@ -11,104 +11,30 @@ const times = [] as number[];
 let lastDirection = "";
 let pendingRequest = false;
 let cameraX: number = 0, cameraY: number = 0, lastFrameTime: number = 0;
-import { canvas, ctx, fpsSlider, healthBar, staminaBar, targetHealthBar, targetStaminaBar } from "./ui.js";
+import { canvas, ctx, fpsSlider, healthBar, staminaBar, targetHealthBar, targetStaminaBar, collisionDebugCheckbox } from "./ui.js";
 
-canvas.style.position = 'absolute';
+canvas.style.position = 'fixed';
 
 declare global {
   interface Window {
-    mapLayerCanvases?: Array<{ canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, zIndex: number }>;
-    playerZIndex?: number;
-    mapChunks?: any;
+    mapData?: any;
   }
 }
 
-const cachedViewport = {
-  x: 0,
-  y: 0,
-  w: window.innerWidth,
-  h: window.innerHeight,
-  padding: 64,
-};
-const cachedPaddedBounds = {
-  x: 0,
-  y: 0,
-  w: 0,
-  h: 0,
-};
-let lastViewportChunks = new Set<string>();
-let viewportUpdateThrottle = 0;
+const cameraSmoothing = 1;
+const snapThreshold = 0.1;
+const loadedChunksSet = new Set<string>();
+const pendingChunks = new Set<string>();
 
 function lerp(start: number, end: number, amount: number) {
   return start + (end - start) * amount;
 }
 
-function getViewportChunks(): Set<string> {
-  if (!window.mapChunks) return new Set();
-
-  const { chunkPixelSize, chunksX, chunksY } = window.mapChunks;
-  const paddingPx = chunkPixelSize * 0.5;
-
-  const left = Math.max(0, Math.floor((cachedViewport.x - paddingPx) / chunkPixelSize));
-  const top = Math.max(0, Math.floor((cachedViewport.y - paddingPx) / chunkPixelSize));
-  const right = Math.min(chunksX - 1, Math.floor((cachedViewport.x + cachedViewport.w + paddingPx) / chunkPixelSize));
-  const bottom = Math.min(chunksY - 1, Math.floor((cachedViewport.y + cachedViewport.h + paddingPx) / chunkPixelSize));
-
-  const visible = new Set<string>();
-  for (let cy = top; cy <= bottom; cy++) {
-    for (let cx = left; cx <= right; cx++) {
-      visible.add(`${cx}-${cy}`);
-    }
-  }
-  return visible;
-}
-
-function updateChunkVisibility() {
-  if (!window.mapChunks) return;
-  const currentViewportChunks = getViewportChunks();
-  const chunksChanged =
-    currentViewportChunks.size !== lastViewportChunks.size ||
-    [...currentViewportChunks].some(chunk => !lastViewportChunks.has(chunk));
-  if (!chunksChanged) return;
-
-  // Collect chunks that need to be redrawn (old + new visible chunks)
-  const chunksToRedraw = new Set([...lastViewportChunks, ...currentViewportChunks]);
-
-  for (const layerName in window.mapChunks.layers) {
-    const layer = window.mapChunks.layers[layerName];
-    for (const chunkKey in layer.chunkVisibility) {
-      layer.chunkVisibility[chunkKey] = false;
-    }
-  }
-  for (const chunkKey of currentViewportChunks) {
-    for (const layerName in window.mapChunks.layers) {
-      const layer = window.mapChunks.layers[layerName];
-      if (layer.chunks[chunkKey]?.hasContent) {
-        layer.chunkVisibility[chunkKey] = true;
-      }
-    }
-  }
-
-  // Use optimized partial redraw instead of full canvas redraw
-  window.mapChunks.redrawMainCanvas(true, chunksToRedraw);
-  lastViewportChunks = currentViewportChunks;
-}
-
-function updateViewportCache() {
-  cachedViewport.w = window.innerWidth;
-  cachedViewport.h = window.innerHeight;
-  cachedPaddedBounds.w = cachedViewport.w + cachedViewport.padding * 2;
-  cachedPaddedBounds.h = cachedViewport.h + cachedViewport.padding * 2;
-}
-
-const cameraSmoothing = 0.08;
-const snapThreshold = 0.5;
-
 function updateCamera(currentPlayer: any, deltaTime: number) {
   if (!getIsLoaded()) return;
-  if (currentPlayer) {
-    const targetX = currentPlayer.position.x - window.innerWidth / 2 + 8;
-    const targetY = currentPlayer.position.y - window.innerHeight / 2 + 48;
+  if (currentPlayer && window.mapData) {
+    const targetX = currentPlayer.position.x;
+    const targetY = currentPlayer.position.y;
 
     // Calculate distance to target
     const distX = Math.abs(targetX - cameraX);
@@ -119,24 +45,149 @@ function updateCamera(currentPlayer: any, deltaTime: number) {
       cameraX = targetX;
       cameraY = targetY;
     } else {
-      // Use frame-rate independent smoothing
-      const smoothing = 1 - Math.pow(1 - cameraSmoothing, deltaTime);
-      cameraX = lerp(cameraX, targetX, smoothing);
-      cameraY = lerp(cameraY, targetY, smoothing);
+      // Use frame-rate independent smoothing with adaptive speed
+      // Smoother camera that follows more closely
+      const baseSmoothness = 1 - Math.pow(1 - cameraSmoothing, deltaTime);
+      cameraX = lerp(cameraX, targetX, baseSmoothness);
+      cameraY = lerp(cameraY, targetY, baseSmoothness);
     }
+
+    // Clamp camera to map bounds to prevent showing black area outside map
+    const mapWidth = window.mapData.width * window.mapData.tilewidth;
+    const mapHeight = window.mapData.height * window.mapData.tileheight;
+    const halfViewportWidth = window.innerWidth / 2;
+    const halfViewportHeight = window.innerHeight / 2;
+
+    // Prevent camera from showing area beyond map edges
+    cameraX = Math.max(halfViewportWidth, Math.min(mapWidth - halfViewportWidth, cameraX));
+    cameraY = Math.max(halfViewportHeight, Math.min(mapHeight - halfViewportHeight, cameraY));
 
     if (weatherType) {
       updateWeatherCanvas(cameraX, cameraY);
       weather(weatherType);
     }
+  }
+}
 
-    // Use rounded values for scrolling to prevent sub-pixel rendering issues
-    window.scrollTo(Math.round(cameraX), Math.round(cameraY));
+function getVisibleChunks(): Array<{x: number, y: number}> {
+  if (!window.mapData) return [];
+
+  const chunkPixelSize = window.mapData.chunkSize * window.mapData.tilewidth;
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+
+  // Calculate camera bounds in world space
+  const cameraLeft = cameraX - viewportWidth / 2;
+  const cameraTop = cameraY - viewportHeight / 2;
+  const cameraRight = cameraX + viewportWidth / 2;
+  const cameraBottom = cameraY + viewportHeight / 2;
+
+  // Add padding to load chunks slightly off-screen
+  const padding = chunkPixelSize;
+
+  // Convert to chunk coordinates
+  const startChunkX = Math.max(0, Math.floor((cameraLeft - padding) / chunkPixelSize));
+  const startChunkY = Math.max(0, Math.floor((cameraTop - padding) / chunkPixelSize));
+  const endChunkX = Math.min(window.mapData.chunksX - 1, Math.floor((cameraRight + padding) / chunkPixelSize));
+  const endChunkY = Math.min(window.mapData.chunksY - 1, Math.floor((cameraBottom + padding) / chunkPixelSize));
+
+  const visible: Array<{x: number, y: number}> = [];
+  for (let cy = startChunkY; cy <= endChunkY; cy++) {
+    for (let cx = startChunkX; cx <= endChunkX; cx++) {
+      visible.push({ x: cx, y: cy });
+    }
+  }
+  return visible;
+}
+
+async function loadVisibleChunks() {
+  if (!window.mapData) return;
+
+  const visibleChunks = getVisibleChunks();
+  const visibleKeys = new Set(visibleChunks.map(c => `${c.x}-${c.y}`));
+
+  // Unload chunks that are far away
+  const unloadDistance = window.mapData.chunkSize * window.mapData.tilewidth * 3;
+  for (const chunkKey of loadedChunksSet) {
+    if (!visibleKeys.has(chunkKey)) {
+      const [cx, cy] = chunkKey.split('-').map(Number);
+      const chunkPixelSize = window.mapData.chunkSize * window.mapData.tilewidth;
+      const chunkCenterX = (cx + 0.5) * chunkPixelSize;
+      const chunkCenterY = (cy + 0.5) * chunkPixelSize;
+      const distance = Math.hypot(chunkCenterX - cameraX, chunkCenterY - cameraY);
+
+      if (distance > unloadDistance) {
+        window.mapData.loadedChunks.delete(chunkKey);
+        loadedChunksSet.delete(chunkKey);
+      }
+    }
+  }
+
+  // Load new visible chunks
+  for (const chunk of visibleChunks) {
+    const chunkKey = `${chunk.x}-${chunk.y}`;
+
+    if (!loadedChunksSet.has(chunkKey) && !pendingChunks.has(chunkKey)) {
+      pendingChunks.add(chunkKey);
+
+      window.mapData.requestChunk(chunk.x, chunk.y)
+        .then((chunkData: any) => {
+          if (chunkData) {
+            loadedChunksSet.add(chunkKey);
+          }
+        })
+        .catch((error: any) => {
+          console.error(`Failed to load chunk ${chunkKey}:`, error);
+        })
+        .finally(() => {
+          pendingChunks.delete(chunkKey);
+        });
+    }
+  }
+}
+
+let chunkLoadThrottle = 0;
+
+function renderMap(layer: 'lower' | 'upper' = 'lower') {
+  if (!ctx || !window.mapData) return;
+
+  // Ensure image smoothing is disabled for pixel-perfect map rendering
+  ctx.imageSmoothingEnabled = false;
+
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+
+  // Calculate camera offset (center camera on player) and round to avoid seams
+  const offsetX = Math.round(viewportWidth / 2 - cameraX);
+  const offsetY = Math.round(viewportHeight / 2 - cameraY);
+
+  const visibleChunks = getVisibleChunks();
+
+  for (const chunk of visibleChunks) {
+    const chunkCanvas = layer === 'lower'
+      ? window.mapData.getChunkLowerCanvas(chunk.x, chunk.y)
+      : window.mapData.getChunkUpperCanvas(chunk.x, chunk.y);
+    if (!chunkCanvas) continue;
+
+    const chunkPixelSize = window.mapData.chunkSize * window.mapData.tilewidth;
+    const chunkWorldX = chunk.x * chunkPixelSize;
+    const chunkWorldY = chunk.y * chunkPixelSize;
+
+    // Transform chunk position to screen space
+    const screenX = chunkWorldX + offsetX;
+    const screenY = chunkWorldY + offsetY;
+
+    try {
+      ctx.drawImage(chunkCanvas, screenX, screenY);
+    } catch (error) {
+      console.error(`Error rendering chunk ${chunk.x}-${chunk.y}:`, error);
+    }
   }
 }
 
 function animationLoop() {
   if (!ctx) return;
+  // Pixel perfect
   const fpsTarget = parseFloat(fpsSlider.value);
   const frameDuration = 1000 / fpsTarget;
   const now = performance.now();
@@ -154,7 +205,15 @@ function animationLoop() {
     requestAnimationFrame(animationLoop);
     return;
   }
+
+  // Initialize camera to spawn position on first frame
+  if (cameraX === 0 && cameraY === 0 && window.mapData) {
+    cameraX = window.mapData.spawnX || currentPlayer.position.x;
+    cameraY = window.mapData.spawnY || currentPlayer.position.y;
+  }
+
   updateCamera(currentPlayer, deltaTime * 60);
+
   if (getIsMoving() && getIsKeyPressed()) {
     if (document.activeElement === chatInput || document.activeElement === friendsListSearch) {
       setIsMoving(false);
@@ -182,29 +241,39 @@ function animationLoop() {
     setIsMoving(false);
     lastDirection = "";
   }
-  cachedViewport.x = window.scrollX;
-  cachedViewport.y = window.scrollY;
-  cachedPaddedBounds.x = cachedViewport.x - cachedViewport.padding;
-  cachedPaddedBounds.y = cachedViewport.y - cachedViewport.padding;
-  viewportUpdateThrottle++;
-  if (viewportUpdateThrottle >= 5) {
-    updateChunkVisibility();
-    viewportUpdateThrottle = 0;
-  }
-  ctx.clearRect(cachedViewport.x, cachedViewport.y, cachedViewport.w, cachedViewport.h);
 
-  // Disable image smoothing for better performance without hardware acceleration
+  // Load visible chunks periodically
+  chunkLoadThrottle++;
+  if (chunkLoadThrottle >= 10) {
+    loadVisibleChunks();
+    chunkLoadThrottle = 0;
+  }
+
+  // Clear viewport
+  ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
   ctx.imageSmoothingEnabled = false;
 
+  // Render lower map layers (below players/NPCs)
+  renderMap('lower');
+
+  // Calculate viewport bounds in world space for entity culling
+  const viewportLeft = cameraX - window.innerWidth / 2;
+  const viewportTop = cameraY - window.innerHeight / 2;
+  const viewportRight = cameraX + window.innerWidth / 2;
+  const viewportBottom = cameraY + window.innerHeight / 2;
+  const padding = 64;
+
   const isInView = (x: number, y: number) =>
-    x >= cachedPaddedBounds.x &&
-    y >= cachedPaddedBounds.y &&
-    x <= cachedPaddedBounds.x + cachedPaddedBounds.w &&
-    y <= cachedPaddedBounds.y + cachedPaddedBounds.h;
+    x >= viewportLeft - padding &&
+    y >= viewportTop - padding &&
+    x <= viewportRight + padding &&
+    y <= viewportBottom + padding;
+
   const visiblePlayers = playersArray.filter(p =>
     isInView(p.position.x, p.position.y) &&
     (p.id === cachedPlayerId || !p.isStealth || (p.isStealth && currentPlayer.isAdmin))
   );
+
   if (currentPlayer) {
     const { health, max_health, stamina, max_stamina } = currentPlayer.stats;
     const healthPercent = (health / max_health) * 100;
@@ -212,6 +281,7 @@ function animationLoop() {
     updateHealthBar(healthBar, healthPercent);
     updateStaminaBar(staminaBar, staminaPercent);
   }
+
   const targetPlayer = playersArray.find(p => p.targeted);
   if (targetPlayer) {
     const { health, max_health, stamina, max_stamina } = targetPlayer.stats;
@@ -220,50 +290,76 @@ function animationLoop() {
     updateHealthBar(targetHealthBar, healthPercent);
     updateStaminaBar(targetStaminaBar, staminaPercent);
   }
+
   const visibleNpcs = cache.npcs.filter(npc =>
     isInView(npc.position.x, npc.position.y)
   );
-  const playerZ = 3;
-  if (window.mapLayerCanvases) {
-    for (const layer of window.mapLayerCanvases) {
-      if (layer.zIndex < playerZ) {
-        ctx.drawImage(
-          layer.canvas,
-          cachedViewport.x, cachedViewport.y, cachedViewport.w, cachedViewport.h,
-          cachedViewport.x, cachedViewport.y, cachedViewport.w, cachedViewport.h
-        );
-      }
-    }
-    for (const p of visiblePlayers) p.show(ctx, currentPlayer);
-    for (const npc of visibleNpcs) {
-      npc.show(ctx);
-      if (npc.particles) {
-        for (const particle of npc.particles) {
-          if (particle.visible) {
-            npc.updateParticle(particle, npc, ctx, deltaTime);
-          }
+
+  // Save context state
+  ctx.save();
+
+  // Translate to camera space (round to avoid subpixel rendering)
+  const offsetX = Math.round(window.innerWidth / 2 - cameraX);
+  const offsetY = Math.round(window.innerHeight / 2 - cameraY);
+  ctx.translate(offsetX, offsetY);
+
+  // Ensure image smoothing is disabled for crisp pixel art rendering
+  ctx.imageSmoothingEnabled = false;
+
+  // Render players and NPCs in world space
+  for (const p of visiblePlayers) p.show(ctx, currentPlayer);
+
+  for (const npc of visibleNpcs) {
+    npc.show(ctx);
+    if (npc.particles) {
+      for (const particle of npc.particles) {
+        if (particle.visible) {
+          npc.updateParticle(particle, npc, ctx, deltaTime);
         }
       }
-      npc.dialogue(ctx);
     }
-    for (const layer of window.mapLayerCanvases) {
-      if (layer.zIndex >= playerZ) {
-        ctx.drawImage(
-          layer.canvas,
-          cachedViewport.x, cachedViewport.y, cachedViewport.w, cachedViewport.h,
-          cachedViewport.x, cachedViewport.y, cachedViewport.w, cachedViewport.h
-        );
+    npc.dialogue(ctx);
+  }
+
+  for (const p of visiblePlayers) p.showChat(ctx, currentPlayer);
+
+  // Render collision debug boxes (blue boxes for collision tiles)
+  if (collisionDebugCheckbox.checked && (window as any).collisionTiles && window.mapData) {
+    const collisionTiles = (window as any).collisionTiles as Array<{ x: number; y: number; time: number }>;
+    const currentTime = Date.now();
+    const maxAge = 3000; // Keep collision tiles visible for 3 seconds
+
+    // Filter out old collision tiles
+    (window as any).collisionTiles = collisionTiles.filter(tile => currentTime - tile.time < maxAge);
+
+    // Render blue boxes for recent collisions
+    ctx.fillStyle = 'rgba(0, 100, 255, 0.5)';
+    ctx.strokeStyle = 'rgba(0, 150, 255, 0.8)';
+    ctx.lineWidth = 2;
+
+    for (const tile of (window as any).collisionTiles) {
+      const tileWorldX = tile.x * window.mapData.tilewidth;
+      const tileWorldY = tile.y * window.mapData.tileheight;
+
+      // Only render if in view
+      if (isInView(tileWorldX, tileWorldY)) {
+        ctx.fillRect(tileWorldX, tileWorldY, window.mapData.tilewidth, window.mapData.tileheight);
+        ctx.strokeRect(tileWorldX, tileWorldY, window.mapData.tilewidth, window.mapData.tileheight);
       }
     }
-    for (const p of visiblePlayers) p.showChat(ctx, currentPlayer);
   }
+
+  // Restore context
+  ctx.restore();
+
+  // Render upper map layers (above players/NPCs)
+  renderMap('upper');
+
   if (times.length > 60) times.shift();
   times.push(now);
   requestAnimationFrame(animationLoop);
-  `requestAnimationFrame(weather);`
 }
 
-updateViewportCache();
 animationLoop();
 
 function setDirection(dir: string) {
@@ -298,4 +394,15 @@ function setWeatherType(type: string | null) {
   weatherType = type;
 }
 
-export { lastDirection, setDirection, setPendingRequest, canvas, setCameraX, setCameraY, getCameraX, getCameraY, updateChunkVisibility, updateViewportCache, lastViewportChunks, setWeatherType, getWeatherType };
+export {
+  lastDirection,
+  setDirection,
+  setPendingRequest,
+  canvas,
+  setCameraX,
+  setCameraY,
+  getCameraX,
+  getCameraY,
+  setWeatherType,
+  getWeatherType
+};

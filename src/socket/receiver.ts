@@ -190,7 +190,15 @@ export default async function packetReceiver(
           (!position?.x && position.x !== 0) ||
           (!position?.y && position.y !== 0)
         ) {
-          spawnLocation = { map: `${defaultMap}.json`, x: 0, y: 0 };
+          // Calculate center of default map for initial spawn
+          const defaultMapProps = mapPropertiesCache.find((m: any) => m.name === `${defaultMap}.json`);
+          const centerX = defaultMapProps
+            ? (defaultMapProps.width * defaultMapProps.tileWidth) / 2
+            : 0;
+          const centerY = defaultMapProps
+            ? (defaultMapProps.height * defaultMapProps.tileHeight) / 2
+            : 0;
+          spawnLocation = { map: `${defaultMap}.json`, x: centerX, y: centerY };
         } else {
           spawnLocation = {
             map: `${location.map}.json`,
@@ -663,6 +671,14 @@ export default async function packetReceiver(
 
             const reason = collision.reason;
 
+            // Send collision tile for debugging
+            if (reason === "tile_collision" && collision.tile) {
+              sendPacket(ws, packetManager.collisionDebug({
+                tileX: collision.tile.x,
+                tileY: collision.tile.y
+              }));
+            }
+
             if (reason === "warp_collision" && collision.warp) {
               const currentMap = currentPlayer.location.map;
               const warp = collision.warp as {
@@ -1036,10 +1052,10 @@ export default async function packetReceiver(
         );
         const playersInMapAdminNearBy = playersNearBy.filter((p) => p.isAdmin);
 
-        const canAttack = player.canAttack(currentPlayer, target, {
+        const canAttack = await player.canAttack(currentPlayer, target, {
           width: 24,
           height: 40,
-        }) as { value: boolean; reason: string } | null;
+        });
 
         // Check if target is in range and can be attacked
         if (!playersInAttackRange.includes(target) || !canAttack?.value) {
@@ -1089,7 +1105,18 @@ export default async function packetReceiver(
         if (target.stats.health <= 0) {
           target.stats.health = target.stats.max_health;
           target.stats.stamina = target.stats.max_stamina;
-          target.location.position = { x: 0, y: 0, direction: "down" };
+
+          // Calculate center of map for respawn position
+          const currentMapName = target.location.map;
+          const respawnMapProps = mapPropertiesCache.find((m: any) => m.name === `${currentMapName}.json`);
+          const centerX = respawnMapProps
+            ? (respawnMapProps.width * respawnMapProps.tileWidth) / 2
+            : 0;
+          const centerY = respawnMapProps
+            ? (respawnMapProps.height * respawnMapProps.tileHeight) / 2
+            : 0;
+
+          target.location.position = { x: centerX, y: centerY, direction: "down" };
 
           // Give the attacker xp
           const xp = 10;
@@ -2012,17 +2039,28 @@ export default async function packetReceiver(
             }
 
             // Respawn the player
+            // Calculate center of map for spawn position
+            const defaultMapProps = mapPropertiesCache.find(
+              (m: any) => m.name === `${defaultMap}.json`
+            );
+            const centerX = defaultMapProps
+              ? (defaultMapProps.width * defaultMapProps.tileWidth) / 2
+              : 0;
+            const centerY = defaultMapProps
+              ? (defaultMapProps.height * defaultMapProps.tileHeight) / 2
+              : 0;
+
             await player.setLocation(targetPlayer.username, `${defaultMap}`, {
-              x: 0,
-              y: 0,
+              x: centerX,
+              y: centerY,
               direction: "down",
             });
 
             // Update cache if player is online
             if (playerCache.get(targetPlayer.id)) {
               targetPlayer.location.position = {
-                x: 0,
-                y: 0,
+                x: centerX,
+                y: centerY,
                 direction: "down",
               };
               playerCache.set(targetPlayer.id, targetPlayer);
@@ -2374,10 +2412,10 @@ export default async function packetReceiver(
                 const mapData = [
                   result?.compressed,
                   player.location.map,
-                  player.location.x || 0,
-                  player.location.y || 0,
-                  player.location.direction || "down",
-                  player.location.moving || false,
+                  player.location.position?.x || 0,
+                  player.location.position?.y || 0,
+                  player.location.position?.direction || "down",
+                  player.location.position?.moving || false,
                 ];
                 sendPacket(player.ws, packetManager.loadMap(mapData));
               });
@@ -2438,13 +2476,23 @@ export default async function packetReceiver(
             const identifier = args[1]?.toLowerCase() || null;
             // If no identifier is provided, warp the current player
             if (!identifier) {
+              // Calculate center of map for spawn position
+              // Player coordinates are now centered on the sprite
+              const mapProps = mapPropertiesCache.find((m: any) => m.name === `${mapName}.json`);
+              const centerX = mapProps
+                ? (mapProps.width * mapProps.tileWidth) / 2
+                : 0;
+              const centerY = mapProps
+                ? (mapProps.height * mapProps.tileHeight) / 2
+                : 0;
+
               // Warp the current player
               const result = await player.setLocation(
                 currentPlayer.id,
                 mapName,
                 {
-                  x: 0,
-                  y: 0,
+                  x: centerX,
+                  y: centerY,
                   direction: currentPlayer.location.position?.direction || "down",
                 }
               );
@@ -2457,8 +2505,8 @@ export default async function packetReceiver(
               ) {
                 currentPlayer.location = {
                   map: mapName,
-                  x: 0,
-                  y: 0,
+                  x: centerX,
+                  y: centerY,
                   direction: currentPlayer.location.position?.direction || "down",
                 };
 

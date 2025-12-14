@@ -255,11 +255,9 @@ function extractAndCompressLayers(map: MapData) {
             const x = obj.properties?.find((p: any) => p.name === "x")?.value;
             const y = obj.properties?.find((p: any) => p.name === "y")?.value;
 
-            // Normalize position: top-left (map) is (0,0), canvas center is (0,0)
-            const mapWidth = map.data.width * map.data.tilewidth;
-            const mapHeight = map.data.height * map.data.tileheight;
-            const posX = Math.floor(obj.x - mapWidth / 2);
-            const posY = Math.floor(obj.y - mapHeight / 2);
+            // Warp position in world coordinates (0,0) = top-left of map
+            const posX = Math.floor(obj.x);
+            const posY = Math.floor(obj.y);
             const width = Math.floor(obj.width);
             const height = Math.floor(obj.height);
 

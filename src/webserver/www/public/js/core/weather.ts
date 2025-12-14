@@ -1,13 +1,30 @@
 import { weatherCanvas, weatherCtx, canvas } from "./ui.ts";
 
-// Set initial canvas size with buffer
-let width: number = (weatherCanvas.width = window.innerWidth + 800);
-let height: number = (weatherCanvas.height = window.innerHeight + 800);
+// Set initial canvas size with buffer and device pixel ratio
+const dpr = window.devicePixelRatio || 1;
+let width: number = window.innerWidth + 800;  // Logical width
+let height: number = window.innerHeight + 800;  // Logical height
+weatherCanvas.width = width * dpr;
+weatherCanvas.height = height * dpr;
+weatherCanvas.style.width = width + "px";
+weatherCanvas.style.height = height + "px";
+if (weatherCtx) {
+  weatherCtx.scale(dpr, dpr);
+}
 
 // Handle window resize
 window.addEventListener("resize", () => {
-  width = weatherCanvas.width = window.innerWidth + 800;
-  height = weatherCanvas.height = window.innerHeight + 800;
+  const dpr = window.devicePixelRatio || 1;
+  width = window.innerWidth + 800;
+  height = window.innerHeight + 800;
+  weatherCanvas.width = width * dpr;
+  weatherCanvas.height = height * dpr;
+  weatherCanvas.style.width = width + "px";
+  weatherCanvas.style.height = height + "px";
+  if (weatherCtx) {
+    weatherCtx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform
+    weatherCtx.scale(dpr, dpr);
+  }
 });
 
 // Splash particle

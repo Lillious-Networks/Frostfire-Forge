@@ -16,7 +16,6 @@ import { updateFriendOnlineStatus } from "./friends.js";
 import loadMap from "./map.ts";
 import {
   createPartyUI,
-  canvas,
   positionText,
   fpsSlider,
   musicSlider,
@@ -98,6 +97,19 @@ socket.onmessage = async (event) => {
     case "CONSOLE_MESSAGE": {
       if (!data || !data.message) return;
       window.Notify(data.type, data.message);
+      break;
+    }
+    case "COLLISION_DEBUG": {
+      if (!data || data.tileX === undefined || data.tileY === undefined) return;
+      // Store collision tile for rendering
+      if (!(window as any).collisionTiles) {
+        (window as any).collisionTiles = [];
+      }
+      (window as any).collisionTiles.push({ x: data.tileX, y: data.tileY, time: Date.now() });
+      // Keep only last 10 collision tiles
+      if ((window as any).collisionTiles.length > 10) {
+        (window as any).collisionTiles.shift();
+      }
       break;
     }
     case "INVITATION": {
@@ -293,13 +305,9 @@ socket.onmessage = async (event) => {
 
       player.typing = false;
 
-      // Smoothly update player position
-      const targetX = canvas.width / 2 + data._data.x;
-      const targetY = canvas.height / 2 + data._data.y;
-
-      // Direct position update - no prediction, no interpolation
-      player.position.x = targetX;
-      player.position.y = targetY;
+      // Update player position (data from server is in world coordinates)
+      player.position.x = data._data.x;
+      player.position.y = data._data.y;
 
       if (data.id === cachedPlayerId) {
         positionText.innerText = `Position: ${data._data.x}, ${data._data.y}`;
