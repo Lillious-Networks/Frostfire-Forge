@@ -185,10 +185,12 @@ export default async function packetReceiver(
                         sendPacket(ws, packetManager.clientConfig(clientConfig));
             const position = location?.position as PositionData;
         let spawnLocation;
+        // Check if player needs initial spawn (no location, invalid position, or at default 0,0)
         if (
           !location ||
           (!position?.x && position.x !== 0) ||
-          (!position?.y && position.y !== 0)
+          (!position?.y && position.y !== 0) ||
+          (position.x === 0 && position.y === 0)
         ) {
           // Calculate center of default map for initial spawn
           const defaultMapProps = mapPropertiesCache.find((m: any) => m.name === `${defaultMap}.json`);
