@@ -1,4 +1,3 @@
-
 import { packetTypes } from "./types";
 import { packetManager } from "./packet_manager";
 import log from "../modules/logger";

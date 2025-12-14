@@ -1,6 +1,6 @@
 import { getIsLoaded, cachedPlayerId, sendRequest } from "./socket.js";
 import { getIsKeyPressed, pressedKeys, setIsMoving, getIsMoving } from "./input.js";
-import Cache from "./cache";
+import Cache from "./cache.ts";
 let weatherType = null as string | null;
 const cache = Cache.getInstance();
 import { updateHealthBar, updateStaminaBar } from "./ui.js";

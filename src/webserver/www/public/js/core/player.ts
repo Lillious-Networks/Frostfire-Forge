@@ -1,4 +1,4 @@
-import Cache from "./cache";
+import Cache from "./cache.js";
 const cache = Cache.getInstance();
 import { cachedPlayerId } from "./socket.js";
 import { updateFriendOnlineStatus, updateFriendsList } from "./friends.js";

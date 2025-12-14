@@ -1,5 +1,5 @@
 import { sendRequest, getIsLoaded, cachedPlayerId } from "./socket.js";
-import Cache from "./cache";
+import Cache from "./cache.js";
 const cache = Cache.getInstance();
 import { updateChunkVisibility, updateViewportCache, lastViewportChunks, getCameraX, getCameraY, setCameraX, setCameraY } from "./renderer.js";
 import { chatInput, pauseMenu, optionsMenu, fpsSlider, musicSlider, effectsSlider, mutedCheckbox, canvas, friendsList } from "./ui.js";

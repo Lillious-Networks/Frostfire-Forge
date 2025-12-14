@@ -1,4 +1,4 @@
-import Cache from "./cache";
+import Cache from "./cache.js";
 const cache = Cache.getInstance();
 import {cachedPlayerId, sendRequest} from "./socket.js";
 import { friendsList, friendsListSearch } from "./ui.js";
