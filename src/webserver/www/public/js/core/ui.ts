@@ -46,6 +46,10 @@ const guildMemberCount = document.getElementById("guild-member-count") as HTMLDi
 const guildMemberInviteInput = document.getElementById("guild-invite-input") as HTMLInputElement;
 const guildMemberInviteButton = document.getElementById("guild-invite-button") as HTMLButtonElement;
 const collisionDebugCheckbox = document.getElementById("collision-debug-checkbox") as HTMLInputElement;
+const chunkOutlineDebugCheckbox = document.getElementById("chunk-outline-debug-checkbox") as HTMLInputElement;
+const collisionTilesDebugCheckbox = document.getElementById("collision-tiles-debug-checkbox") as HTMLInputElement;
+const wireframeDebugCheckbox = document.getElementById("wireframe-debug-checkbox") as HTMLInputElement;
+const showGridCheckbox = document.getElementById("show-grid-checkbox") as HTMLInputElement;
 
 function toggleUI(element: HTMLElement, toggleFlag: boolean, hidePosition: number) {
   element.style.transition = "1s";
@@ -174,5 +178,6 @@ export {
     packetsSentReceived, optionsMenu, friendsList, friendsListSearch, onlinecount, progressBar, progressBarContainer,
     inventoryGrid, chatMessages, loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage,
     serverTime, ambience, weatherCanvas, weatherCtx, guildContainer, guildName, guildRank, guildMembersList,
-    guildMemberCount, guildMemberInviteInput, guildMemberInviteButton, collisionDebugCheckbox
+    guildMemberCount, guildMemberInviteInput, guildMemberInviteButton, collisionDebugCheckbox, chunkOutlineDebugCheckbox,
+    collisionTilesDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox
 };

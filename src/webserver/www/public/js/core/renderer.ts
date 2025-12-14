@@ -11,7 +11,7 @@ const times = [] as number[];
 let lastDirection = "";
 let pendingRequest = false;
 let cameraX: number = 0, cameraY: number = 0, lastFrameTime: number = 0;
-import { canvas, ctx, fpsSlider, healthBar, staminaBar, targetHealthBar, targetStaminaBar, collisionDebugCheckbox } from "./ui.js";
+import { canvas, ctx, fpsSlider, healthBar, staminaBar, targetHealthBar, targetStaminaBar, collisionDebugCheckbox, chunkOutlineDebugCheckbox, collisionTilesDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox } from "./ui.js";
 
 canvas.style.position = 'fixed';
 
@@ -253,8 +253,10 @@ function animationLoop() {
   ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
   ctx.imageSmoothingEnabled = false;
 
-  // Render lower map layers (below players/NPCs)
-  renderMap('lower');
+  // Render lower map layers (below players/NPCs) - skip in wireframe mode
+  if (!wireframeDebugCheckbox.checked) {
+    renderMap('lower');
+  }
 
   // Calculate viewport bounds in world space for entity culling
   const viewportLeft = cameraX - window.innerWidth / 2;
@@ -306,22 +308,119 @@ function animationLoop() {
   // Ensure image smoothing is disabled for crisp pixel art rendering
   ctx.imageSmoothingEnabled = false;
 
-  // Render players and NPCs in world space
-  for (const p of visiblePlayers) p.show(ctx, currentPlayer);
+  // Render in wireframe mode or normal mode
+  if (wireframeDebugCheckbox.checked) {
+    // Wireframe mode: render entities as boxes
+    ctx.strokeStyle = 'rgba(0, 255, 255, 0.8)';
+    ctx.fillStyle = 'rgba(0, 255, 255, 0.2)';
+    ctx.lineWidth = 2;
 
-  for (const npc of visibleNpcs) {
-    npc.show(ctx);
-    if (npc.particles) {
-      for (const particle of npc.particles) {
-        if (particle.visible) {
-          npc.updateParticle(particle, npc, ctx, deltaTime);
+    // Draw players as wireframe boxes
+    for (const p of visiblePlayers) {
+      const width = 24;
+      const height = 40;
+      const x = p.position.x - width / 2;
+      const y = p.position.y - height / 2;
+
+      ctx.fillRect(x, y, width, height);
+      ctx.strokeRect(x, y, width, height);
+
+      // Draw player name above
+      ctx.fillStyle = 'rgba(255, 255, 255, 1)';
+      ctx.font = '12px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(p.username || 'Player', p.position.x, y - 5);
+      ctx.fillStyle = 'rgba(0, 255, 255, 0.2)';
+    }
+
+    // Draw NPCs as wireframe boxes
+    ctx.strokeStyle = 'rgba(255, 165, 0, 0.8)';
+    ctx.fillStyle = 'rgba(255, 165, 0, 0.2)';
+
+    for (const npc of visibleNpcs) {
+      const width = 32;
+      const height = 48;
+      const x = npc.position.x - width / 2;
+      const y = npc.position.y - height / 2;
+
+      ctx.fillRect(x, y, width, height);
+      ctx.strokeRect(x, y, width, height);
+
+      // Draw NPC name above
+      ctx.fillStyle = 'rgba(255, 255, 255, 1)';
+      ctx.font = '12px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(npc.name || 'NPC', npc.position.x, y - 5);
+      ctx.fillStyle = 'rgba(255, 165, 0, 0.2)';
+    }
+  } else {
+    // Normal mode: render sprites
+    for (const p of visiblePlayers) p.show(ctx, currentPlayer);
+
+    for (const npc of visibleNpcs) {
+      npc.show(ctx);
+      if (npc.particles) {
+        for (const particle of npc.particles) {
+          if (particle.visible) {
+            npc.updateParticle(particle, npc, ctx, deltaTime);
+          }
+        }
+      }
+      npc.dialogue(ctx);
+    }
+
+    for (const p of visiblePlayers) p.showChat(ctx, currentPlayer);
+  }
+
+  // Restore context
+  ctx.restore();
+
+  // Render upper map layers (above players/NPCs) - skip in wireframe mode
+  if (!wireframeDebugCheckbox.checked) {
+    renderMap('upper');
+  } else {
+    // In wireframe mode, draw chunk grid
+    ctx.save();
+    const offsetX = Math.round(window.innerWidth / 2 - cameraX);
+    const offsetY = Math.round(window.innerHeight / 2 - cameraY);
+    ctx.translate(offsetX, offsetY);
+
+    if (window.mapData) {
+      const visibleChunks = getVisibleChunks();
+      ctx.strokeStyle = 'rgba(128, 128, 128, 0.5)';
+      ctx.lineWidth = 1;
+
+      for (const chunk of visibleChunks) {
+        const chunkPixelSize = window.mapData.chunkSize * window.mapData.tilewidth;
+        const chunkWorldX = chunk.x * chunkPixelSize;
+        const chunkWorldY = chunk.y * chunkPixelSize;
+
+        // Draw grid lines for tiles within chunk
+        for (let i = 0; i <= window.mapData.chunkSize; i++) {
+          // Vertical lines
+          const lineX = chunkWorldX + (i * window.mapData.tilewidth);
+          ctx.beginPath();
+          ctx.moveTo(lineX, chunkWorldY);
+          ctx.lineTo(lineX, chunkWorldY + chunkPixelSize);
+          ctx.stroke();
+
+          // Horizontal lines
+          const lineY = chunkWorldY + (i * window.mapData.tileheight);
+          ctx.beginPath();
+          ctx.moveTo(chunkWorldX, lineY);
+          ctx.lineTo(chunkWorldX + chunkPixelSize, lineY);
+          ctx.stroke();
         }
       }
     }
-    npc.dialogue(ctx);
+
+    ctx.restore();
   }
 
-  for (const p of visiblePlayers) p.showChat(ctx, currentPlayer);
+  // Render debug visuals on top of everything
+  ctx.save();
+  ctx.translate(offsetX, offsetY);
+  ctx.imageSmoothingEnabled = false;
 
   // Render collision debug boxes (blue boxes for collision tiles)
   if (collisionDebugCheckbox.checked && (window as any).collisionTiles && window.mapData) {
@@ -349,11 +448,99 @@ function animationLoop() {
     }
   }
 
-  // Restore context
-  ctx.restore();
+  // Render chunk outline debug (green outlines around loaded chunks)
+  if (chunkOutlineDebugCheckbox.checked && window.mapData) {
+    const visibleChunks = getVisibleChunks();
 
-  // Render upper map layers (above players/NPCs)
-  renderMap('upper');
+    ctx.strokeStyle = 'rgba(0, 255, 0, 0.8)';
+    ctx.lineWidth = 3;
+
+    for (const chunk of visibleChunks) {
+      const chunkPixelSize = window.mapData.chunkSize * window.mapData.tilewidth;
+      const chunkWorldX = chunk.x * chunkPixelSize;
+      const chunkWorldY = chunk.y * chunkPixelSize;
+
+      // Draw outline around chunk
+      ctx.strokeRect(chunkWorldX, chunkWorldY, chunkPixelSize, chunkPixelSize);
+    }
+  }
+
+  // Render collision tiles debug (red outlines around all collision tiles)
+  if (collisionTilesDebugCheckbox.checked && window.mapData) {
+    const visibleChunks = getVisibleChunks();
+
+    ctx.strokeStyle = 'rgba(255, 0, 0, 0.6)';
+    ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
+    ctx.lineWidth = 1;
+
+    for (const chunk of visibleChunks) {
+      const chunkKey = `${chunk.x}-${chunk.y}`;
+      const chunkData = window.mapData.loadedChunks.get(chunkKey);
+
+      if (!chunkData) continue;
+
+      const chunkPixelSize = window.mapData.chunkSize * window.mapData.tilewidth;
+      const chunkWorldX = chunk.x * chunkPixelSize;
+      const chunkWorldY = chunk.y * chunkPixelSize;
+
+      // Find collision layer (layer name contains "collision" case-insensitive)
+      const collisionLayer = chunkData.layers.find((layer: any) =>
+        layer.name && layer.name.toLowerCase().includes('collision')
+      );
+
+      if (collisionLayer) {
+        // Draw outline for each collision tile
+        for (let y = 0; y < chunkData.height; y++) {
+          for (let x = 0; x < chunkData.width; x++) {
+            const tileIndex = collisionLayer.data[y * chunkData.width + x];
+
+            // If tile has a value (non-zero means collision)
+            if (tileIndex !== 0) {
+              const tileWorldX = chunkWorldX + (x * window.mapData.tilewidth);
+              const tileWorldY = chunkWorldY + (y * window.mapData.tileheight);
+
+              ctx.fillRect(tileWorldX, tileWorldY, window.mapData.tilewidth, window.mapData.tileheight);
+              ctx.strokeRect(tileWorldX, tileWorldY, window.mapData.tilewidth, window.mapData.tileheight);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Render tile grid overlay
+  if (showGridCheckbox.checked && window.mapData) {
+    const visibleChunks = getVisibleChunks();
+
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx.lineWidth = 1;
+
+    for (const chunk of visibleChunks) {
+      const chunkPixelSize = window.mapData.chunkSize * window.mapData.tilewidth;
+      const chunkWorldX = chunk.x * chunkPixelSize;
+      const chunkWorldY = chunk.y * chunkPixelSize;
+
+      // Draw vertical grid lines
+      for (let x = 0; x <= window.mapData.chunkSize; x++) {
+        const lineX = chunkWorldX + (x * window.mapData.tilewidth);
+        ctx.beginPath();
+        ctx.moveTo(lineX, chunkWorldY);
+        ctx.lineTo(lineX, chunkWorldY + chunkPixelSize);
+        ctx.stroke();
+      }
+
+      // Draw horizontal grid lines
+      for (let y = 0; y <= window.mapData.chunkSize; y++) {
+        const lineY = chunkWorldY + (y * window.mapData.tileheight);
+        ctx.beginPath();
+        ctx.moveTo(chunkWorldX, lineY);
+        ctx.lineTo(chunkWorldX + chunkPixelSize, lineY);
+        ctx.stroke();
+      }
+    }
+  }
+
+  ctx.restore();
 
   if (times.length > 60) times.shift();
   times.push(now);

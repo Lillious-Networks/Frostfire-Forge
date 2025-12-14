@@ -152,7 +152,13 @@ const routes = {
 
       // Extract chunk data for each layer
       const chunkLayers = mapData.layers
-        .filter((layer: any) => layer.type === "tilelayer" && layer.visible)
+        .filter((layer: any) => {
+          // Include visible layers and collision layers for debug purposes
+          if (layer.type !== "tilelayer") return false;
+          if (layer.visible) return true;
+          // Include invisible collision layers
+          return layer.name && layer.name.toLowerCase().includes('collision');
+        })
         .map((layer: any, index: number) => {
           const chunkData: number[] = [];
           for (let y = startY; y < endY; y++) {

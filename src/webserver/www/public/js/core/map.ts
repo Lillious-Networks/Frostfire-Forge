@@ -422,6 +422,11 @@ async function renderChunkToCanvas(chunkData: ChunkData): Promise<{lowerCanvas: 
 
   // Draw each layer to appropriate canvas
   for (const layer of sortedLayers) {
+    // Skip collision layers - they're only for debug visualization
+    if (layer.name && layer.name.toLowerCase().includes('collision')) {
+      continue;
+    }
+
     const ctx = layer.zIndex < PLAYER_Z_INDEX ? lowerCtx : upperCtx;
 
     for (let y = 0; y < chunkData.height; y++) {
