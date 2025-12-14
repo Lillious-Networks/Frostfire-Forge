@@ -8,13 +8,37 @@ const mapCache: Map<
   string,
   {
     warps: Record<string, WarpObject>;
-    grid: Uint8Array;
+    collisionRLE?: number[];
+    grid?: Uint8Array;
     width: number;
     height: number;
     tileWidth: number;
     tileHeight: number;
   }
 > = new Map();
+
+// Helper function to query RLE data directly without decompressing entire array
+// RLE format: [width, height, value1, count1, value2, count2, ...]
+function queryRLE(rleData: number[], targetIndex: number): number {
+  if (!rleData || rleData.length < 2) return 0;
+
+  let currentIndex = 0;
+
+  // Skip width and height, start at index 2
+  for (let i = 2; i < rleData.length; i += 2) {
+    const value = rleData[i];
+    const count = rleData[i + 1];
+
+    // Check if target index falls within this RLE segment
+    if (currentIndex + count > targetIndex) {
+      return value;
+    }
+
+    currentIndex += count;
+  }
+
+  return 0; // Out of bounds or not found
+}
 
 const player = {
   clear: async () => {
@@ -568,49 +592,40 @@ const player = {
 
     // Fetch PvP tile data from Redis hash
     const pvpData = await assetCache.getNested(mapKey, "nopvp");
-    if (!pvpData || !Array.isArray(pvpData) || pvpData.length < 3) return false;
+    // If no nopvp data exists, PVP is allowed by default
+    if (!pvpData || !Array.isArray(pvpData) || pvpData.length < 3) return true;
 
     // Fetch map properties (can be stored as a hash or a string)
     const mapPropertiesRaw = await assetCache.get("mapProperties") as MapProperties[];
-    if (!mapPropertiesRaw) return false;
+    if (!mapPropertiesRaw) return true; // Allow PVP if map properties not found
 
     const mapData = mapPropertiesRaw.find(m => m.name.replace(".json", "") === mapKey);
-    if (!mapData) return false;
-
-    const tileData = pvpData.slice(2);
+    if (!mapData) return true; // Allow PVP if specific map data not found
     const tileWidth = mapData.tileWidth;
     const tileHeight = mapData.tileHeight;
-    const gridOffsetWidth = Math.floor(mapData.width / 2);
-    const gridOffsetHeight = Math.floor(mapData.height / 2);
 
+    // Convert world coordinates to tile coordinates
+    // position.x and position.y are the CENTER of the player sprite
+    // Player sprite: 24px wide, 40px tall
     const margin = 0.1;
-    const adjustedX = position.x + tileWidth / 2;
-    const adjustedY = position.y + tileHeight / 2;
 
-    const left = Math.floor((adjustedX + margin) / tileWidth);
-    const right = Math.floor((adjustedX + playerWidth - margin) / tileWidth);
-    const top = Math.floor((adjustedY + margin) / tileHeight);
-    const bottom = Math.floor((adjustedY + playerHeight - margin) / tileHeight);
+    // Horizontal collision: center ± half width
+    const left = Math.floor((position.x - playerWidth / 2 + margin) / tileWidth);
+    const right = Math.floor((position.x + playerWidth / 2 - margin) / tileWidth);
 
-    for (let y = top; y <= bottom; y++) {
-      for (let x = left; x <= right; x++) {
-        const indexX = x + gridOffsetWidth;
-        const indexY = y + gridOffsetHeight;
-        const targetIndex = indexY * mapData.width + indexX;
+    // Vertical collision: top half can overlap (start from middle), bottom at feet
+    const top = Math.floor((position.y - playerHeight / 2 + playerHeight / 2 + margin) / tileHeight); // Start from vertical center
+    const bottom = Math.floor((position.y + playerHeight / 2 - margin) / tileHeight); // End at bottom
 
-        let currentIndex = 0;
-        let tileValue = 0;
+    for (let tileY = top; tileY <= bottom; tileY++) {
+      for (let tileX = left; tileX <= right; tileX++) {
+        // Validate tile is within map bounds
+        if (tileX < 0 || tileY < 0 || tileX >= mapData.width || tileY >= mapData.height) continue;
 
-        for (let i = 0; i < tileData.length; i += 2) {
-          const value = tileData[i];
-          const count = tileData[i + 1];
+        const targetIndex = tileY * mapData.width + tileX;
 
-          if (currentIndex + count > targetIndex) {
-            tileValue = value;
-            break;
-          }
-          currentIndex += count;
-        }
+        // Query RLE data directly without decompressing
+        const tileValue = queryRLE(pvpData, targetIndex);
 
         if (tileValue !== 0) {
           return false; // No-PvP tile → cannot attack here
@@ -648,25 +663,16 @@ const player = {
         return { value: true, reason: "redis_error" };
       }
 
-      // Decode RLE once
-      const data = collisionData.slice(2);
-      const grid = new Uint8Array(mapData.width * mapData.height);
-      let currentIndex = 0;
-      for (let i = 0; i < data.length; i += 2) {
-        const value = data[i];
-        const count = data[i + 1];
-        for (let j = 0; j < count; j++) grid[currentIndex++] = value;
-      }
-
+      // Store RLE data directly, no decompression
       mapDataCached = {
         warps: Array.isArray(mapData.warps)
           ? Object.fromEntries(
               (mapData.warps as WarpObject[]).map((warp, idx) => [warp.name ?? String(idx), warp])
             )
           : (mapData.warps || {}),
-        grid,
-        width: mapData.width,
-        height: mapData.height,
+        collisionRLE: collisionData, // Store RLE data directly
+        width: collisionData[0], // Width from RLE header
+        height: collisionData[1], // Height from RLE header
         tileWidth: mapData.tileWidth,
         tileHeight: mapData.tileHeight,
       };
@@ -674,11 +680,7 @@ const player = {
       mapCache.set(mapKey, mapDataCached);
     }
 
-    const { warps, grid, width, height, tileWidth, tileHeight } = mapDataCached;
-
-    // Add offsets to align player coordinates with the collision grid
-    const gridOffsetWidth = Math.floor(width / 2);
-    const gridOffsetHeight = Math.floor(height / 2);
+    const { warps, collisionRLE, width, height, tileWidth, tileHeight } = mapDataCached;
 
     // Warp collision
     for (const key in warps) {
@@ -697,22 +699,30 @@ const player = {
       }
     }
 
-    // Tile collision
+    // Tile collision - Convert world coordinates to tile coordinates
+    // position.x and position.y are the CENTER of the player sprite
+    // Player sprite: 24px wide, 40px tall
+    // Collision box should be centered on sprite with pixel-perfect accuracy
     const margin = 0.1;
-    const left = Math.floor(((position.x + margin) / tileWidth) + 0.6);
-    const right = Math.floor(((position.x + playerWidth - margin) / tileWidth) + 0.6);
-    const top = Math.floor(((position.y + margin) / tileHeight) + 1.5);
-    const bottom = Math.floor((position.y + playerHeight - margin) / tileHeight + 0.7);
 
-    for (let y = top; y <= bottom; y++) {
-      for (let x = left; x <= right; x++) {
-        const tileX = x + gridOffsetWidth;
-        const tileY = y + gridOffsetHeight;
+    // Horizontal collision: center ± half width
+    const left = Math.floor((position.x - playerWidth / 2 + margin) / tileWidth);
+    const right = Math.floor((position.x + playerWidth / 2 - margin) / tileWidth);
 
+    // Vertical collision: top half can overlap (start from middle), bottom at feet
+    const top = Math.floor((position.y - playerHeight / 2 + playerHeight / 2 + margin) / tileHeight); // Start from vertical center
+    const bottom = Math.floor((position.y + playerHeight / 2 - margin) / tileHeight); // End at bottom
+
+    for (let tileY = top; tileY <= bottom; tileY++) {
+      for (let tileX = left; tileX <= right; tileX++) {
+        // Validate tile is within map bounds
         if (tileX < 0 || tileY < 0 || tileX >= width || tileY >= height) continue;
 
-        const tileValue = grid[tileY * width + tileX];
-        if (tileValue !== 0) return { value: true, reason: "tile_collision", tile: { x, y } };
+        // Query RLE data directly without decompressing entire grid
+        const tileIndex = tileY * width + tileX;
+        const tileValue = collisionRLE ? queryRLE(collisionRLE, tileIndex) : 0;
+
+        if (tileValue !== 0) return { value: true, reason: "tile_collision", tile: { x: tileX, y: tileY } };
       }
     }
 
@@ -751,11 +761,11 @@ const player = {
     );
     return response;
   },
-  canAttack: (
+  canAttack: async (
     self: Player,
     target: Player,
     playerProperties: PlayerProperties
-  ): { value: boolean; reason?: string } => {
+  ): Promise<{ value: boolean; reason?: string }> => {
     // No self or target or no range
     if (!self || !target) return { value: false, reason: "invalid" };
 
@@ -803,13 +813,13 @@ const player = {
       return { value: false, reason: "direction" };
 
     // Check if the target is in PvP zone
-    const isPvpAllowedTarget = player.isInPvPZone(
+    const isPvpAllowedTarget = await player.isInPvPZone(
       self.location.map,
       targetPosition,
       playerProperties
     );
     if (!isPvpAllowedTarget) return { value: false, reason: "nopvp" };
-    const isPvpAllowedSelf = player.isInPvPZone(
+    const isPvpAllowedSelf = await player.isInPvPZone(
       self.location.map,
       selfPosition,
       playerProperties

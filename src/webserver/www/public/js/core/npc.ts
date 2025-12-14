@@ -1,9 +1,8 @@
-import { canvas } from "./ui.js";
 import { getLines } from "./chat.js";
 import { npcImage } from "./images.js";
-import Cache from "./cache";
+import Cache from "./cache.js";
 const cache = Cache.getInstance();
-import { getIsLoaded } from "./socket";
+import { getIsLoaded } from "./socket.js";
 
 function createNPC(data: any) {
   const npc: {
@@ -20,8 +19,8 @@ function createNPC(data: any) {
     id: data.id,
     dialog: data.dialog || "",
     position: {
-      x: canvas.width / 2 + data.location.x,
-      y: canvas.height / 2 + data.location.y,
+      x: data.location.x,
+      y: data.location.y,
     },
     particles: data.particles || [],
     quest: data.quest || null,

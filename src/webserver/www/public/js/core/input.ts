@@ -1,5 +1,5 @@
 import { sendRequest, getIsLoaded } from "./socket.js";
-import Cache from "./cache";
+import Cache from "./cache.js";
 const cache = Cache.getInstance();
 import { toggleUI, toggleDebugContainer, handleStatsUI } from "./ui.js";
 import { handleCommand, handleChatMessage } from "./chat.js";

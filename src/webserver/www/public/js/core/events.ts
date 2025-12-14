@@ -1,8 +1,8 @@
-import { sendRequest, getIsLoaded, cachedPlayerId } from "./socket.js";
-import Cache from "./cache";
+import { sendRequest, getIsLoaded } from "./socket.js";
+import Cache from "./cache.js";
 const cache = Cache.getInstance();
-import { updateChunkVisibility, updateViewportCache, lastViewportChunks, getCameraX, getCameraY, setCameraX, setCameraY } from "./renderer.js";
-import { chatInput, pauseMenu, optionsMenu, fpsSlider, musicSlider, effectsSlider, mutedCheckbox, canvas, friendsList } from "./ui.js";
+import { getCameraX, getCameraY } from "./renderer.js";
+import { chatInput, pauseMenu, optionsMenu, fpsSlider, musicSlider, effectsSlider, mutedCheckbox, canvas, ctx, friendsList } from "./ui.js";
 import { getUserHasInteracted, setUserHasInteracted, setControllerConnected, getLastSentDirection, setLastSentDirection,
     getLastTypingPacket, setLastTypingPacket, getContextMenuKeyTriggered, setContextMenuKeyTriggered, blacklistedKeys, movementKeys, 
     pressedKeys,
@@ -32,11 +32,6 @@ window.addEventListener("gamepadconnected", () => {
 });
 window.addEventListener("gamepaddisconnected", () => {
   setControllerConnected(false);
-});
-window.addEventListener('resize', () => {
-  updateViewportCache();
-  lastViewportChunks.clear();
-  updateChunkVisibility();
 });
 
 window.addEventListener("gamepadjoystick", (e: CustomEventInit) => {
@@ -183,16 +178,26 @@ window.addEventListener("keyup", (e) => {
 });
 
 window.addEventListener("resize", () => {
-  updateViewportCache();
-  const currentPlayer = Array.from(cache.players).find((player) => player.id === cachedPlayerId);
-  if (currentPlayer) {
-    setCameraX(currentPlayer.position.x - window.innerWidth / 2 + 8);
-    setCameraY(currentPlayer.position.y - window.innerHeight / 2 + 48);
-    window.scrollTo(getCameraX(), getCameraY());
+  // Update canvas size to match new window size with device pixel ratio support
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = window.innerWidth * dpr;
+  canvas.height = window.innerHeight * dpr;
+  canvas.style.width = window.innerWidth + "px";
+  canvas.style.height = window.innerHeight + "px";
+
+  // Re-scale context to match device pixel ratio after resize
+  if (ctx) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform
+    ctx.scale(dpr, dpr);
   }
+
+  // Remove any open context menu on resize
   if (document.getElementById("context-menu")) {
     document.getElementById("context-menu")!.remove();
   }
+
+  // Note: Camera position is maintained in world coordinates, which are independent
+  // of viewport size. The renderer will automatically recalculate offsets on next frame.
 });
 
 window.addEventListener("blur", () => {
@@ -280,16 +285,20 @@ document.addEventListener("contextmenu", (event) => {
   }
   // Check where we clicked on the canvas
   const rect = canvas.getBoundingClientRect();
-  const x = event.clientX - rect.left;
-  const y = event.clientY - rect.top;
+  const screenX = event.clientX - rect.left;
+  const screenY = event.clientY - rect.top;
+
+  // Convert screen coordinates to world coordinates
+  const worldX = screenX - window.innerWidth / 2 + getCameraX();
+  const worldY = screenY - window.innerHeight / 2 + getCameraY();
 
   // Did we click on a player?
   const clickedPlayer = Array.from(cache.players).find(player => {
-    const playerX = player.position.x + 16; // Center of the player
-    const playerY = player.position.y + 24; // Center of the player
+    const playerX = player.position.x;
+    const playerY = player.position.y;
     return (
-      x >= playerX - 16 && x <= playerX + 16 &&
-      y >= playerY - 24 && y <= playerY + 24
+      worldX >= playerX - 16 && worldX <= playerX + 32 &&
+      worldY >= playerY - 24 && worldY <= playerY + 48
     );
   });
 
@@ -303,11 +312,10 @@ document.addEventListener("contextmenu", (event) => {
   // Remove any existing context menu
   const existingMenu = document.getElementById("context-menu");
   if (existingMenu) existingMenu.remove();
-  const moveX = Math.floor(x - canvas.width / 2 - 16);
-  const moveY = Math.floor(y - canvas.height / 2 - 24);
+
   sendRequest({
     type: "TELEPORTXY",
-        data: { x: moveX, y: moveY },
+    data: { x: Math.floor(worldX), y: Math.floor(worldY) },
   });
 });
 
@@ -322,11 +330,13 @@ document.addEventListener("click", (event) => {
   }
 
   const rect = canvas.getBoundingClientRect();
-  const x = event.clientX - rect.left;
-  const y = event.clientY - rect.top;
+  const screenX = event.clientX - rect.left;
+  const screenY = event.clientY - rect.top;
 
-  const moveX = x - canvas.width / 2 - 16;
-  const moveY = y - canvas.height / 2 - 24;
+  // Convert screen coordinates to world coordinates
+  const worldX = screenX - window.innerWidth / 2 + getCameraX();
+  const worldY = screenY - window.innerHeight / 2 + getCameraY();
+
   // Untarget any currently targeted player
   const target = Array.from(cache.players).find(player => player.targeted);
   if (target) {
@@ -335,7 +345,7 @@ document.addEventListener("click", (event) => {
 
   sendRequest({
     type: "SELECTPLAYER",
-    data: { x: moveX, y: moveY },
+    data: { x: Math.floor(worldX), y: Math.floor(worldY) },
   });
 });
 

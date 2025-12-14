@@ -1,5 +1,5 @@
 import { cachedPlayerId, sendRequest, getIsLoaded } from './socket.js';
-import Cache from "./cache";
+import Cache from "./cache.js";
 const cache = Cache.getInstance();
 import { overlay } from './ui.js';
 

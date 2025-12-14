@@ -1,5 +1,5 @@
 import {sendRequest, cachedPlayerId} from "./socket.js";
-import Cache from "./cache";
+import Cache from "./cache.js";
 const cache = Cache.getInstance();
 import encryptRsa from "./crypto.js";
 import { chatInput } from "./ui.js";

@@ -45,6 +45,7 @@ const guildMembersList = document.getElementById("guild-members-list") as HTMLDi
 const guildMemberCount = document.getElementById("guild-member-count") as HTMLDivElement;
 const guildMemberInviteInput = document.getElementById("guild-invite-input") as HTMLInputElement;
 const guildMemberInviteButton = document.getElementById("guild-invite-button") as HTMLButtonElement;
+const collisionDebugCheckbox = document.getElementById("collision-debug-checkbox") as HTMLInputElement;
 
 function toggleUI(element: HTMLElement, toggleFlag: boolean, hidePosition: number) {
   element.style.transition = "1s";
@@ -173,5 +174,5 @@ export {
     packetsSentReceived, optionsMenu, friendsList, friendsListSearch, onlinecount, progressBar, progressBarContainer,
     inventoryGrid, chatMessages, loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage,
     serverTime, ambience, weatherCanvas, weatherCtx, guildContainer, guildName, guildRank, guildMembersList,
-    guildMemberCount, guildMemberInviteInput, guildMemberInviteButton
+    guildMemberCount, guildMemberInviteInput, guildMemberInviteButton, collisionDebugCheckbox
 };
