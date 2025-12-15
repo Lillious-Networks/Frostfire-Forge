@@ -228,16 +228,27 @@ function extractAndCompressLayers(map: MapData) {
   const warps: any[] = [];
 
   map.data.layers.forEach((layer: any) => {
-    // Collisions
-    if (layer.properties?.[0]?.name.toLowerCase() === "collision" && layer.properties[0].value === true) {
-      collisions.push(layer.data);
-    }
-    // No PvP zones
-    if (layer.properties?.[0]?.name.toLowerCase() === "nopvp" && layer.properties[0].value === true) {
-      noPvpZones.push(layer.data);
+    // Skip object groups
+    if (layer.type === "objectgroup") {
+      return;
     }
 
-    // Check if layer is an object group
+    const layerName = layer.name ? layer.name.toLowerCase() : "";
+
+    // Collisions - check both property and layer name
+    if ((layer.properties?.[0]?.name.toLowerCase() === "collision" && layer.properties[0].value === true) ||
+        layerName.includes("collision")) {
+      collisions.push(layer.data);
+    }
+    // No PvP zones - check both property and layer name
+    if ((layer.properties?.[0]?.name.toLowerCase() === "nopvp" && layer.properties[0].value === true) ||
+        layerName.includes("nopvp") || layerName.includes("no-pvp")) {
+      noPvpZones.push(layer.data);
+    }
+  });
+
+  // Process object groups for warps
+  map.data.layers.forEach((layer: any) => {
     if (layer.type === "objectgroup") {
       const objects = layer.objects;
       objects.forEach((obj: any) => {
@@ -423,6 +434,97 @@ export async function saveMapChunks(mapName: string, chunks: any[]): Promise<voi
     // Write the updated map back to disk
     fs.writeFileSync(fullPath, JSON.stringify(mapData, null, 2), "utf-8");
     log.success(`Saved ${chunks.length} chunk(s) to ${file}`);
+
+    // Reprocess collision and no-pvp maps
+    try {
+      const collisions: number[][] = [];
+      const noPvpZones: number[][] = [];
+
+      // Extract collision and no-pvp layers
+      mapData.layers.forEach((layer: any) => {
+        if (layer.type !== "objectgroup") {
+          const layerName = layer.name ? layer.name.toLowerCase() : "";
+          if (layerName.includes("collision")) {
+            collisions.push(layer.data);
+          } else if (layerName.includes("nopvp") || layerName.includes("no-pvp")) {
+            noPvpZones.push(layer.data);
+          }
+        }
+      });
+
+      // Get map dimensions
+      let width: number | null = null;
+      let height: number | null = null;
+
+      for (const layer of mapData.layers) {
+        if (layer.type !== "objectgroup" && layer.width && layer.height) {
+          width = layer.width;
+          height = layer.height;
+          break;
+        }
+      }
+
+      if (width && height) {
+        const tileCount = width * height;
+
+        // Compress collision layer
+        if (collisions.length > 0) {
+          const rawMap = new Array(tileCount).fill(0);
+          collisions.forEach(layer => {
+            for (let i = 0; i < layer.length; i++) {
+              if (layer[i] !== 0) rawMap[i] = 1;
+            }
+          });
+
+          const compressed: (number | [number, number])[] = [Number(width), Number(height)];
+          let current = rawMap[0];
+          let count = 1;
+          for (let i = 1; i < rawMap.length; i++) {
+            if (rawMap[i] === current) {
+              count++;
+            } else {
+              compressed.push(current, count);
+              current = rawMap[i];
+              count = 1;
+            }
+          }
+          compressed.push(current, count);
+
+          assetCache.addNested(mapName.replace(".json", ""), "collision", compressed);
+          log.success(`Reprocessed collision map for ${mapName}`);
+        }
+
+        // Compress no-pvp layer
+        if (noPvpZones.length > 0) {
+          const rawMap = new Array(tileCount).fill(0);
+          noPvpZones.forEach(layer => {
+            for (let i = 0; i < layer.length; i++) {
+              if (layer[i] !== 0) rawMap[i] = 1;
+            }
+          });
+
+          const compressed: (number | [number, number])[] = [Number(width), Number(height)];
+          let current = rawMap[0];
+          let count = 1;
+          for (let i = 1; i < rawMap.length; i++) {
+            if (rawMap[i] === current) {
+              count++;
+            } else {
+              compressed.push(current, count);
+              current = rawMap[i];
+              count = 1;
+            }
+          }
+          compressed.push(current, count);
+
+          assetCache.addNested(mapName.replace(".json", ""), "nopvp", compressed);
+          log.success(`Reprocessed no-pvp map for ${mapName}`);
+        }
+      }
+    } catch (collisionError) {
+      log.error(`Failed to reprocess collision maps for ${mapName}: ${collisionError}`);
+      // Don't throw - the map data was still saved successfully
+    }
   } catch (error) {
     log.error(`Failed to save map chunks: ${mapName}: ${error}`);
     throw error;

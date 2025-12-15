@@ -7,6 +7,7 @@ import inventory from "../systems/inventory";
 import playerCache from "../services/playermanager.ts";
 import assetCache from "../services/assetCache";
 import { reloadMap } from "../modules/assetloader";
+import { clearMapCache } from "../systems/player";
 import language from "../systems/language";
 import quests from "../systems/quests";
 import generate from "../modules/sprites";
@@ -1261,8 +1262,20 @@ export default async function packetReceiver(
           // Update the asset cache
           assetCache.add("maps", maps);
 
-          // Write changes to disk for persistence
+          // Write changes to disk for persistence (this also reprocesses collision/no-pvp maps)
           await saveMapChunks(saveData.mapName, saveData.chunks);
+
+          // Clear the map cache to force reload of collision data
+          clearMapCache(saveData.mapName);
+
+          // Reload the map to get updated collision data
+          const reloadedMap = await reloadMap(saveData.mapName);
+          if (reloadedMap) {
+            maps[mapIndex].compressed = reloadedMap.compressed;
+            maps[mapIndex].data = reloadedMap.data;
+            assetCache.add("maps", maps);
+            log.info(`Reloaded collision data for map: ${saveData.mapName}`);
+          }
 
           sendPacket(ws, packetManager.notify({
             message: `Map saved successfully! ${saveData.chunks.length} chunks updated.`

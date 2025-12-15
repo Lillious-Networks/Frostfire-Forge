@@ -1,6 +1,6 @@
 import { sendRequest } from "./socket.js";
 import { canvas, ctx, collisionTilesDebugCheckbox, noPvpDebugCheckbox } from "./ui.js";
-import { renderChunkToCanvas } from "./map.js";
+import { renderChunkToCanvas, clearChunkFromCache } from "./map.js";
 
 declare global {
   interface Window {
@@ -18,6 +18,10 @@ interface TileChange {
   newTileId: number;
 }
 
+interface TileChangeGroup {
+  changes: TileChange[];
+}
+
 interface CopiedRegion {
   startX: number;
   startY: number;
@@ -26,25 +30,35 @@ interface CopiedRegion {
   tiles: Map<string, number>; // key: "layerName:x:y", value: tileId
 }
 
+interface PanelDragState {
+  panel: HTMLElement;
+  header: HTMLElement;
+  isDragging: boolean;
+  startX: number;
+  startY: number;
+  offsetX: number;
+  offsetY: number;
+}
+
 class TileEditor {
   public isActive: boolean = false;
   private currentTool: 'paint' | 'erase' | 'copy' | 'paste' = 'paint';
   private selectedTile: number | null = null;
   public selectedLayer: string | null = null;
   private currentTilesetIndex: number = 0;
-  private undoStack: TileChange[] = [];
-  private redoStack: TileChange[] = [];
+  private dimOtherLayers: boolean = false;
+  private undoStack: (TileChange | TileChangeGroup)[] = [];
+  private redoStack: (TileChange | TileChangeGroup)[] = [];
   private copiedTile: number | null = null;
   private isMouseDown: boolean = false;
   private previewTilePos: { x: number, y: number } | null = null;
   private hoveredTilesetPos: { x: number, y: number } | null = null;
 
-  // Drag state
-  private isDragging: boolean = false;
-  private dragStartX: number = 0;
-  private dragStartY: number = 0;
-  private editorStartX: number = 0;
-  private editorStartY: number = 0;
+  // Tileset selection state
+  private isSelectingTiles: boolean = false;
+  private selectionStartTile: { x: number, y: number } | null = null;
+  private selectionEndTile: { x: number, y: number } | null = null;
+  private selectedTiles: number[][] = []; // 2D array of selected tile IDs
 
   // Tileset pan state
   private isPanningTileset: boolean = false;
@@ -57,17 +71,20 @@ class TileEditor {
   private isResizing: boolean = false;
   private resizeStartX: number = 0;
   private resizeStartY: number = 0;
-  private editorStartWidth: number = 0;
-  private editorStartHeight: number = 0;
-  private minWidth: number = 800;
-  private minHeight: number = 700;
+  private resizeStartWidth: number = 0;
+  private resizeStartHeight: number = 0;
+
+  // Panel drag state
+  private panels: Map<string, PanelDragState> = new Map();
 
   // UI Elements
   private container: HTMLElement;
-  private editor: HTMLElement;
-  private header: HTMLElement;
-  private closeBtn: HTMLElement;
-  private resizeHandle: HTMLElement;
+  private toolbarPanel: HTMLElement;
+  private layersPanel: HTMLElement;
+  private tilesetPanel: HTMLElement;
+  private toolbarHeader: HTMLElement;
+  private layersHeader: HTMLElement;
+  private tilesetHeader: HTMLElement;
   private paintBtn: HTMLElement;
   private eraseBtn: HTMLElement;
   private copyBtn: HTMLElement;
@@ -75,19 +92,29 @@ class TileEditor {
   private undoBtn: HTMLElement;
   private redoBtn: HTMLElement;
   private saveBtn: HTMLElement;
+  private resetViewBtn: HTMLElement;
+  private toggleOpacityBtn: HTMLElement;
+  private toggleGridBtn: HTMLElement;
   private layersList: HTMLElement;
   private tilesetTabs: HTMLElement;
   private tilesetContainer: HTMLElement;
   private tilesetCanvas: HTMLCanvasElement;
   private tilesetCtx: CanvasRenderingContext2D;
+  private resizeHandle: HTMLElement;
 
   constructor() {
     // Get UI elements
     this.container = document.getElementById('tile-editor-container') as HTMLElement;
-    this.editor = document.getElementById('tile-editor') as HTMLElement;
-    this.header = document.getElementById('tile-editor-header') as HTMLElement;
-    this.closeBtn = document.getElementById('tile-editor-close') as HTMLElement;
-    this.resizeHandle = document.getElementById('tile-editor-resize-handle') as HTMLElement;
+    this.toolbarPanel = document.getElementById('tile-editor-toolbar-panel') as HTMLElement;
+    this.layersPanel = document.getElementById('tile-editor-layers-panel') as HTMLElement;
+    this.tilesetPanel = document.getElementById('tile-editor-tileset-panel') as HTMLElement;
+
+    // Toolbar and layers don't have headers, so use the panels themselves as draggable elements
+    this.toolbarHeader = this.toolbarPanel;
+    this.layersHeader = this.layersPanel;
+    this.tilesetHeader = this.tilesetPanel.querySelector('.te-panel-header') as HTMLElement;
+    this.resizeHandle = this.tilesetPanel.querySelector('.te-resize-handle') as HTMLElement;
+
     this.paintBtn = document.getElementById('te-tool-paint') as HTMLElement;
     this.eraseBtn = document.getElementById('te-tool-erase') as HTMLElement;
     this.copyBtn = document.getElementById('te-copy') as HTMLElement;
@@ -95,18 +122,72 @@ class TileEditor {
     this.undoBtn = document.getElementById('te-undo') as HTMLElement;
     this.redoBtn = document.getElementById('te-redo') as HTMLElement;
     this.saveBtn = document.getElementById('te-save') as HTMLElement;
+    this.resetViewBtn = document.getElementById('te-reset-view') as HTMLElement;
+    this.toggleOpacityBtn = document.getElementById('te-toggle-opacity') as HTMLElement;
+    this.toggleGridBtn = document.getElementById('te-toggle-grid') as HTMLElement;
     this.layersList = document.getElementById('tile-editor-layers-list') as HTMLElement;
     this.tilesetTabs = document.getElementById('tile-editor-tileset-tabs') as HTMLElement;
     this.tilesetContainer = document.getElementById('tile-editor-tileset-container') as HTMLElement;
     this.tilesetCanvas = document.getElementById('tile-editor-tileset-canvas') as HTMLCanvasElement;
     this.tilesetCtx = this.tilesetCanvas.getContext('2d')!;
 
+    this.initializePanels();
     this.setupEventListeners();
+  }
+
+  private initializePanels() {
+    // Initialize panel drag state
+    // Toolbar: entire panel is draggable (no header)
+    this.panels.set('toolbar', {
+      panel: this.toolbarPanel,
+      header: this.toolbarPanel, // Use panel as header for dragging
+      isDragging: false,
+      startX: 0,
+      startY: 0,
+      offsetX: 0,
+      offsetY: 0
+    });
+
+    // Layers: entire panel is draggable (no header)
+    this.panels.set('layers', {
+      panel: this.layersPanel,
+      header: this.layersPanel, // Use panel as header for dragging
+      isDragging: false,
+      startX: 0,
+      startY: 0,
+      offsetX: 0,
+      offsetY: 0
+    });
+
+    this.panels.set('tileset', {
+      panel: this.tilesetPanel,
+      header: this.tilesetHeader,
+      isDragging: false,
+      startX: 0,
+      startY: 0,
+      offsetX: 0,
+      offsetY: 0
+    });
+
+    // Load saved positions
+    this.loadPanelPositions();
+
+    // Setup close buttons
+    const closeButtons = document.querySelectorAll('.te-panel-close');
+    closeButtons.forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const target = e.target as HTMLElement;
+        const panelType = target.getAttribute('data-panel');
+        if (panelType === 'tileset') {
+          // Close the entire tile editor when closing the main tileset panel
+          this.toggle();
+        }
+      });
+    });
   }
 
   private setupEventListeners() {
     // Tool buttons
-    this.closeBtn.addEventListener('click', () => this.toggle());
     this.paintBtn.addEventListener('click', () => this.setTool('paint'));
     this.eraseBtn.addEventListener('click', () => this.setTool('erase'));
     this.copyBtn.addEventListener('click', () => this.setTool('copy'));
@@ -121,20 +202,22 @@ class TileEditor {
     this.undoBtn.addEventListener('click', () => this.undo());
     this.redoBtn.addEventListener('click', () => this.redo());
     this.saveBtn.addEventListener('click', () => this.save());
+    this.resetViewBtn.addEventListener('click', () => this.resetPanelPositions());
+    this.toggleOpacityBtn.addEventListener('click', () => this.toggleLayerOpacity());
+    this.toggleGridBtn.addEventListener('click', () => this.toggleGrid());
 
-    // Drag events for header
-    this.header.addEventListener('mousedown', (e) => this.onDragStart(e));
-    document.addEventListener('mousemove', (e) => this.onDrag(e));
-    document.addEventListener('mouseup', () => this.onDragEnd());
+    // Setup drag for each panel
+    this.panels.forEach((panelState, id) => {
+      panelState.header.addEventListener('mousedown', (e) => this.onPanelDragStart(id, e));
+    });
 
-    // Resize events for resize handle
-    this.resizeHandle.addEventListener('mousedown', (e) => this.onResizeStart(e));
-    document.addEventListener('mousemove', (e) => this.onResize(e));
-    document.addEventListener('mouseup', () => this.onResizeEnd());
+    document.addEventListener('mousemove', (e) => this.onPanelDrag(e));
+    document.addEventListener('mouseup', () => this.onPanelDragEnd());
 
     // Tileset canvas events
-    this.tilesetCanvas.addEventListener('click', (e) => this.onTilesetClick(e));
+    this.tilesetCanvas.addEventListener('mousedown', (e) => this.onTilesetMouseDown(e));
     this.tilesetCanvas.addEventListener('mousemove', (e) => this.onTilesetMouseMove(e));
+    this.tilesetCanvas.addEventListener('mouseup', (e) => this.onTilesetMouseUp(e));
     this.tilesetCanvas.addEventListener('mouseleave', () => this.onTilesetMouseLeave());
 
     // Tileset panning events (middle mouse button)
@@ -142,6 +225,11 @@ class TileEditor {
     this.tilesetContainer.addEventListener('mousemove', (e) => this.onTilesetPan(e));
     this.tilesetContainer.addEventListener('mouseup', (e) => this.onTilesetPanEnd(e));
     this.tilesetContainer.addEventListener('mouseleave', (e) => this.onTilesetPanEnd(e));
+
+    // Resize handle events
+    this.resizeHandle.addEventListener('mousedown', (e) => this.onResizeStart(e));
+    document.addEventListener('mousemove', (e) => this.onResize(e));
+    document.addEventListener('mouseup', () => this.onResizeEnd());
 
     // Game canvas events for tile placement
     canvas.addEventListener('mousemove', (e) => this.onMapMouseMove(e));
@@ -155,14 +243,25 @@ class TileEditor {
 
   public toggle() {
     this.isActive = !this.isActive;
-    this.container.style.display = this.isActive ? 'flex' : 'none';
+    this.container.style.display = this.isActive ? 'block' : 'none';
 
     if (this.isActive) {
+      // Show all panels when opening
+      this.panels.forEach(panelState => {
+        panelState.panel.style.display = 'flex';
+      });
       this.initialize();
     } else {
       // Turn off debug checkboxes when closing tile editor
       collisionTilesDebugCheckbox.checked = false;
       noPvpDebugCheckbox.checked = false;
+
+      // Turn off grid when closing tile editor
+      const gridCheckbox = document.getElementById('show-grid-checkbox') as HTMLInputElement;
+      if (gridCheckbox) {
+        gridCheckbox.checked = false;
+      }
+      this.toggleGridBtn.classList.remove('active');
     }
   }
 
@@ -177,6 +276,9 @@ class TileEditor {
 
     // Update paste button state
     this.updatePasteButtonState();
+
+    // Ensure opacity button starts inactive
+    this.toggleOpacityBtn.classList.remove('active');
   }
 
   private loadLayers() {
@@ -200,23 +302,20 @@ class TileEditor {
       const isCollision = layer.name.toLowerCase().includes('collision');
       const isNoPvp = layer.name.toLowerCase().includes('nopvp') || layer.name.toLowerCase().includes('no-pvp');
 
-      let displayName = layer.name;
       if (isCollision) {
-        displayName += ' [Collision]';
         layerItem.style.color = '#ff9999';
       } else if (isNoPvp) {
-        displayName += ' [No-PVP]';
         layerItem.style.color = '#99ff99';
       }
 
-      layerItem.textContent = displayName;
+      layerItem.textContent = layer.name;
 
       layerItem.addEventListener('click', () => this.selectLayer(layer.name));
       this.layersList.appendChild(layerItem);
     });
 
     // Select first non-special layer by default
-    if (layers.length > 0 && !this.selectedLayer) {
+    if (layers.length > 0) {
       const firstNonSpecial = layers.find((l: any) => {
         const name = l.name.toLowerCase();
         return !name.includes('collision') && !name.includes('nopvp') && !name.includes('no-pvp');
@@ -328,8 +427,63 @@ class TileEditor {
       this.tilesetCtx.stroke();
     }
 
-    // Draw selected tile highlight (blue outline)
-    if (this.selectedTile && this.selectedTile >= tileset.firstgid && this.selectedTile < tileset.firstgid + tileset.tilecount) {
+    // Draw active selection rectangle (while dragging)
+    if (this.isSelectingTiles && this.selectionStartTile && this.selectionEndTile) {
+      const minX = Math.min(this.selectionStartTile.x, this.selectionEndTile.x);
+      const maxX = Math.max(this.selectionStartTile.x, this.selectionEndTile.x);
+      const minY = Math.min(this.selectionStartTile.y, this.selectionEndTile.y);
+      const maxY = Math.max(this.selectionStartTile.y, this.selectionEndTile.y);
+
+      this.tilesetCtx.fillStyle = 'rgba(0, 150, 255, 0.3)';
+      this.tilesetCtx.fillRect(
+        minX * tileWidth,
+        minY * tileHeight,
+        (maxX - minX + 1) * tileWidth,
+        (maxY - minY + 1) * tileHeight
+      );
+
+      this.tilesetCtx.strokeStyle = 'rgba(0, 150, 255, 1)';
+      this.tilesetCtx.lineWidth = 2;
+      this.tilesetCtx.strokeRect(
+        minX * tileWidth,
+        minY * tileHeight,
+        (maxX - minX + 1) * tileWidth,
+        (maxY - minY + 1) * tileHeight
+      );
+    }
+    // Draw selected tiles highlight (after selection complete)
+    else if (this.selectedTiles.length > 0) {
+      const height = this.selectedTiles.length;
+      const width = this.selectedTiles[0].length;
+
+      // Find the top-left tile position in tileset coordinates
+      const firstTileId = this.selectedTiles[0][0];
+      if (firstTileId >= tileset.firstgid && firstTileId < tileset.firstgid + tileset.tilecount) {
+        const localTileId = firstTileId - tileset.firstgid;
+        const tilesPerRow = Math.floor(tileset.imagewidth / tileset.tilewidth);
+        const startX = (localTileId % tilesPerRow);
+        const startY = Math.floor(localTileId / tilesPerRow);
+
+        this.tilesetCtx.fillStyle = 'rgba(0, 150, 255, 0.3)';
+        this.tilesetCtx.fillRect(
+          startX * tileWidth,
+          startY * tileHeight,
+          width * tileWidth,
+          height * tileHeight
+        );
+
+        this.tilesetCtx.strokeStyle = 'rgba(0, 150, 255, 1)';
+        this.tilesetCtx.lineWidth = 3;
+        this.tilesetCtx.strokeRect(
+          startX * tileWidth,
+          startY * tileHeight,
+          width * tileWidth,
+          height * tileHeight
+        );
+      }
+    }
+    // Draw single selected tile highlight (blue outline)
+    else if (this.selectedTile && this.selectedTile >= tileset.firstgid && this.selectedTile < tileset.firstgid + tileset.tilecount) {
       const localTileId = this.selectedTile - tileset.firstgid;
       const tilesPerRow = Math.floor(tileset.imagewidth / tileset.tilewidth);
       const selectedX = (localTileId % tilesPerRow);
@@ -345,8 +499,8 @@ class TileEditor {
       );
     }
 
-    // Draw hover highlight
-    if (this.hoveredTilesetPos) {
+    // Draw hover highlight (only when not selecting)
+    if (this.hoveredTilesetPos && !this.isSelectingTiles) {
       this.tilesetCtx.fillStyle = 'rgba(0, 150, 255, 0.4)';
       this.tilesetCtx.fillRect(
         this.hoveredTilesetPos.x * tileWidth,
@@ -357,31 +511,76 @@ class TileEditor {
     }
   }
 
-  private onTilesetClick(e: MouseEvent) {
-    if (!window.mapData) return;
+  private onTilesetMouseDown(e: MouseEvent) {
+    if (!window.mapData || e.button !== 0) return; // Only left click
 
     const tileset = window.mapData.tilesets[this.currentTilesetIndex];
     if (!tileset) return;
 
     const rect = this.tilesetCanvas.getBoundingClientRect();
+    const containerRect = this.tilesetContainer.getBoundingClientRect();
+
+    // Check if click is within the visible container area
+    if (e.clientX < containerRect.left || e.clientX > containerRect.right ||
+        e.clientY < containerRect.top || e.clientY > containerRect.bottom) {
+      return;
+    }
+
     const scale = 1;
     const x = (e.clientX - rect.left) / scale;
     const y = (e.clientY - rect.top) / scale;
 
     const tileX = Math.floor(x / tileset.tilewidth);
     const tileY = Math.floor(y / tileset.tileheight);
+
+    // Start selection
+    this.isSelectingTiles = true;
+    this.selectionStartTile = { x: tileX, y: tileY };
+    this.selectionEndTile = { x: tileX, y: tileY };
+
+    this.drawTileset();
+  }
+
+  private onTilesetMouseUp(e: MouseEvent) {
+    if (!window.mapData || !this.isSelectingTiles) return;
+
+    this.isSelectingTiles = false;
+
+    const tileset = window.mapData.tilesets[this.currentTilesetIndex];
+    if (!tileset || !this.selectionStartTile || !this.selectionEndTile) return;
+
+    // Calculate selection bounds
+    const minX = Math.min(this.selectionStartTile.x, this.selectionEndTile.x);
+    const maxX = Math.max(this.selectionStartTile.x, this.selectionEndTile.x);
+    const minY = Math.min(this.selectionStartTile.y, this.selectionEndTile.y);
+    const maxY = Math.max(this.selectionStartTile.y, this.selectionEndTile.y);
+
     const tilesPerRow = Math.floor(tileset.imagewidth / tileset.tilewidth);
 
-    const localTileId = tileY * tilesPerRow + tileX;
-    this.selectedTile = tileset.firstgid + localTileId;
+    // Build 2D array of selected tiles
+    this.selectedTiles = [];
+    for (let y = minY; y <= maxY; y++) {
+      const row: number[] = [];
+      for (let x = minX; x <= maxX; x++) {
+        const localTileId = y * tilesPerRow + x;
+        const globalTileId = tileset.firstgid + localTileId;
+        row.push(globalTileId);
+      }
+      this.selectedTiles.push(row);
+    }
+
+    // For single tile selection, set selectedTile for backward compatibility
+    if (this.selectedTiles.length === 1 && this.selectedTiles[0].length === 1) {
+      this.selectedTile = this.selectedTiles[0][0];
+    } else {
+      this.selectedTile = null; // Clear single tile when multi-selecting
+    }
 
     // Always switch to paint mode when selecting from tileset
     this.setTool('paint');
 
-    // Redraw tileset to show selection
+    console.log('Selected tiles:', this.selectedTiles);
     this.drawTileset();
-
-    console.log('Selected tile:', this.selectedTile);
   }
 
   private onTilesetMouseMove(e: MouseEvent) {
@@ -398,7 +597,14 @@ class TileEditor {
     const tileX = Math.floor(x / tileset.tilewidth);
     const tileY = Math.floor(y / tileset.tileheight);
 
-    // Only update if the hovered tile changed
+    // If selecting, update end position
+    if (this.isSelectingTiles) {
+      this.selectionEndTile = { x: tileX, y: tileY };
+      this.drawTileset();
+      return;
+    }
+
+    // Only update hover if the hovered tile changed
     if (!this.hoveredTilesetPos || this.hoveredTilesetPos.x !== tileX || this.hoveredTilesetPos.y !== tileY) {
       this.hoveredTilesetPos = { x: tileX, y: tileY };
       this.drawTileset();
@@ -406,6 +612,12 @@ class TileEditor {
   }
 
   private onTilesetMouseLeave() {
+    // End selection if dragging out
+    if (this.isSelectingTiles) {
+      this.isSelectingTiles = false;
+      this.drawTileset();
+    }
+
     if (this.hoveredTilesetPos) {
       this.hoveredTilesetPos = null;
       this.drawTileset();
@@ -473,50 +685,78 @@ class TileEditor {
     this.isMouseDown = false;
   }
 
-  private onDragStart(e: MouseEvent) {
+  private onPanelDragStart(panelId: string, e: MouseEvent) {
+    const panelState = this.panels.get(panelId);
+    if (!panelState) return;
+
+    const target = e.target as HTMLElement;
+
     // Don't start drag if clicking on close button
-    if (e.target === this.closeBtn) return;
+    if (target.classList.contains('te-panel-close')) return;
 
-    this.isDragging = true;
-    this.dragStartX = e.clientX;
-    this.dragStartY = e.clientY;
+    // Don't start drag if clicking on a button in the toolbar
+    if (panelId === 'toolbar' && target.tagName === 'BUTTON') return;
 
-    // Get current position of editor
-    const rect = this.editor.getBoundingClientRect();
-    this.editorStartX = rect.left;
-    this.editorStartY = rect.top;
+    // Don't start drag if clicking on a layer item in the layers panel
+    if (panelId === 'layers' && (target.classList.contains('te-layer-item') || target.closest('.te-layer-item'))) return;
+
+    panelState.isDragging = true;
+    panelState.startX = e.clientX;
+    panelState.startY = e.clientY;
+
+    // Get current position of panel
+    const rect = panelState.panel.getBoundingClientRect();
+    panelState.offsetX = rect.left;
+    panelState.offsetY = rect.top;
 
     // Change cursor
-    this.header.style.cursor = 'grabbing';
+    panelState.header.style.cursor = 'grabbing';
+    panelState.panel.style.zIndex = '1001'; // Bring to front
   }
 
-  private onDrag(e: MouseEvent) {
-    if (!this.isDragging) return;
+  private onPanelDrag(e: MouseEvent) {
+    this.panels.forEach(panelState => {
+      if (!panelState.isDragging) return;
 
-    const deltaX = e.clientX - this.dragStartX;
-    const deltaY = e.clientY - this.dragStartY;
+      const deltaX = e.clientX - panelState.startX;
+      const deltaY = e.clientY - panelState.startY;
 
-    let newX = this.editorStartX + deltaX;
-    let newY = this.editorStartY + deltaY;
+      let newX = panelState.offsetX + deltaX;
+      let newY = panelState.offsetY + deltaY;
 
-    // Constrain to viewport bounds
-    const editorRect = this.editor.getBoundingClientRect();
-    const maxX = window.innerWidth - editorRect.width;
-    const maxY = window.innerHeight - editorRect.height;
+      // Constrain to viewport bounds
+      const panelRect = panelState.panel.getBoundingClientRect();
+      const maxX = window.innerWidth - panelRect.width;
+      const maxY = window.innerHeight - panelRect.height;
 
-    newX = Math.max(0, Math.min(newX, maxX));
-    newY = Math.max(0, Math.min(newY, maxY));
+      newX = Math.max(0, Math.min(newX, maxX));
+      newY = Math.max(0, Math.min(newY, maxY));
 
-    // Update position
-    this.editor.style.left = `${newX}px`;
-    this.editor.style.top = `${newY}px`;
+      // Update position and clear transform to avoid conflicts with initial CSS positioning
+      panelState.panel.style.transform = 'none';
+      panelState.panel.style.left = `${newX}px`;
+      panelState.panel.style.top = `${newY}px`;
+      panelState.panel.style.right = 'auto';
+      panelState.panel.style.bottom = 'auto';
+    });
   }
 
-  private onDragEnd() {
-    if (!this.isDragging) return;
+  private onPanelDragEnd() {
+    this.panels.forEach((panelState, id) => {
+      if (!panelState.isDragging) return;
 
-    this.isDragging = false;
-    this.header.style.cursor = '';
+      panelState.isDragging = false;
+      // Reset cursor - toolbar and layers use grab on the panel, tileset uses grab on header
+      if (id === 'toolbar' || id === 'layers') {
+        panelState.panel.style.cursor = 'grab';
+      } else {
+        panelState.header.style.cursor = 'grab';
+      }
+      panelState.panel.style.zIndex = '1000';
+
+      // Save position
+      this.savePanelPosition(id, panelState.panel);
+    });
   }
 
   private onTilesetPanStart(e: MouseEvent) {
@@ -561,41 +801,134 @@ class TileEditor {
     this.isResizing = true;
     this.resizeStartX = e.clientX;
     this.resizeStartY = e.clientY;
+    this.resizeStartWidth = this.tilesetPanel.offsetWidth;
+    this.resizeStartHeight = this.tilesetPanel.offsetHeight;
 
-    // Get current dimensions
-    const rect = this.editor.getBoundingClientRect();
-    this.editorStartWidth = rect.width;
-    this.editorStartHeight = rect.height;
+    // Disable transitions during resize for smoother experience
+    this.tilesetPanel.style.transition = 'none';
   }
 
   private onResize(e: MouseEvent) {
     if (!this.isResizing) return;
 
+    e.preventDefault();
+
     const deltaX = e.clientX - this.resizeStartX;
     const deltaY = e.clientY - this.resizeStartY;
 
-    let newWidth = this.editorStartWidth + deltaX;
-    let newHeight = this.editorStartHeight + deltaY;
+    let newWidth = this.resizeStartWidth + deltaX;
+    let newHeight = this.resizeStartHeight + deltaY;
 
-    // Apply minimum constraints
-    newWidth = Math.max(this.minWidth, newWidth);
-    newHeight = Math.max(this.minHeight, newHeight);
+    // Apply constraints from CSS
+    const minWidth = 400;
+    const minHeight = 300;
+    const maxWidth = window.innerWidth * 0.9;
+    const maxHeight = window.innerHeight * 0.9;
 
-    // Apply maximum constraints (viewport bounds)
-    const maxWidth = window.innerWidth - 20; // 20px margin
-    const maxHeight = window.innerHeight - 20;
-    newWidth = Math.min(newWidth, maxWidth);
-    newHeight = Math.min(newHeight, maxHeight);
+    newWidth = Math.max(minWidth, Math.min(newWidth, maxWidth));
+    newHeight = Math.max(minHeight, Math.min(newHeight, maxHeight));
 
-    // Update editor dimensions
-    this.editor.style.width = `${newWidth}px`;
-    this.editor.style.height = `${newHeight}px`;
+    this.tilesetPanel.style.width = `${newWidth}px`;
+    this.tilesetPanel.style.height = `${newHeight}px`;
   }
 
   private onResizeEnd() {
     if (!this.isResizing) return;
 
     this.isResizing = false;
+    // Re-enable transitions
+    this.tilesetPanel.style.transition = '';
+  }
+
+  private loadPanelPositions() {
+    try {
+      const saved = localStorage.getItem('tile-editor-panel-positions');
+      if (!saved) return;
+
+      const positions = JSON.parse(saved);
+      this.panels.forEach((panelState, id) => {
+        const position = positions[id];
+        if (position) {
+          panelState.panel.style.transform = 'none'; // Clear CSS transform
+          panelState.panel.style.left = `${position.x}px`;
+          panelState.panel.style.top = `${position.y}px`;
+          panelState.panel.style.right = 'auto';
+          panelState.panel.style.bottom = 'auto';
+        }
+      });
+    } catch (e) {
+      console.warn('Failed to load tile editor panel positions:', e);
+    }
+  }
+
+  private savePanelPosition(panelId: string, panel: HTMLElement) {
+    try {
+      const saved = localStorage.getItem('tile-editor-panel-positions');
+      const positions = saved ? JSON.parse(saved) : {};
+
+      const rect = panel.getBoundingClientRect();
+      positions[panelId] = {
+        x: rect.left,
+        y: rect.top
+      };
+
+      localStorage.setItem('tile-editor-panel-positions', JSON.stringify(positions));
+    } catch (e) {
+      console.warn('Failed to save tile editor panel position:', e);
+    }
+  }
+
+  private resetPanelPositions() {
+    // Clear saved positions from localStorage
+    localStorage.removeItem('tile-editor-panel-positions');
+
+    // Reset each panel to its default CSS position
+    this.panels.forEach(panelState => {
+      panelState.panel.style.left = '';
+      panelState.panel.style.top = '';
+      panelState.panel.style.right = '';
+      panelState.panel.style.bottom = '';
+      panelState.panel.style.transform = '';
+    });
+
+    // Reset tileset panel size
+    this.tilesetPanel.style.width = '';
+    this.tilesetPanel.style.height = '';
+
+    console.log('Panel positions and sizes reset to default');
+  }
+
+  private toggleLayerOpacity() {
+    this.dimOtherLayers = !this.dimOtherLayers;
+
+    // Update button visual state
+    if (this.dimOtherLayers) {
+      this.toggleOpacityBtn.classList.add('active');
+    } else {
+      this.toggleOpacityBtn.classList.remove('active');
+    }
+
+    console.log('Layer opacity toggled:', this.dimOtherLayers ? 'Dimming non-selected layers' : 'Showing all layers normally');
+  }
+
+  public shouldDimLayer(layerName: string): boolean {
+    return this.dimOtherLayers && layerName !== this.selectedLayer;
+  }
+
+  private toggleGrid() {
+    const gridCheckbox = document.getElementById('show-grid-checkbox') as HTMLInputElement;
+    if (gridCheckbox) {
+      gridCheckbox.checked = !gridCheckbox.checked;
+
+      // Update button visual state
+      if (gridCheckbox.checked) {
+        this.toggleGridBtn.classList.add('active');
+      } else {
+        this.toggleGridBtn.classList.remove('active');
+      }
+
+      console.log('Grid toggled:', gridCheckbox.checked ? 'On' : 'Off');
+    }
   }
 
   private screenToWorld(screenX: number, screenY: number): { x: number, y: number } {
@@ -610,7 +943,16 @@ class TileEditor {
   }
 
   private placeTile(tileX: number, tileY: number) {
-    if (!this.selectedTile || !this.selectedLayer || !window.mapData) return;
+    if (!this.selectedLayer || !window.mapData) return;
+
+    // Handle multi-tile placement
+    if (this.selectedTiles.length > 0) {
+      this.placeMultipleTiles(tileX, tileY);
+      return;
+    }
+
+    // Handle single tile placement
+    if (!this.selectedTile) return;
 
     const chunkSize = window.mapData.chunkSize;
     const chunkX = Math.floor(tileX / chunkSize);
@@ -648,6 +990,70 @@ class TileEditor {
 
     // Re-render chunk
     this.rerenderChunk(chunkX, chunkY);
+  }
+
+  private placeMultipleTiles(startTileX: number, startTileY: number) {
+    if (!this.selectedLayer || !window.mapData || this.selectedTiles.length === 0) return;
+
+    const chunkSize = window.mapData.chunkSize;
+    const affectedChunks = new Set<string>();
+    const changeGroup: TileChange[] = [];
+
+    // Place each tile in the selection
+    for (let row = 0; row < this.selectedTiles.length; row++) {
+      for (let col = 0; col < this.selectedTiles[row].length; col++) {
+        const tileId = this.selectedTiles[row][col];
+        const worldTileX = startTileX + col;
+        const worldTileY = startTileY + row;
+
+        const chunkX = Math.floor(worldTileX / chunkSize);
+        const chunkY = Math.floor(worldTileY / chunkSize);
+        const localTileX = worldTileX % chunkSize;
+        const localTileY = worldTileY % chunkSize;
+
+        const chunkKey = `${chunkX}-${chunkY}`;
+        const chunk = window.mapData.loadedChunks.get(chunkKey);
+
+        if (!chunk) continue;
+
+        const layer = chunk.layers.find((l: any) => l.name === this.selectedLayer);
+        if (!layer) continue;
+
+        const tileIndex = localTileY * chunk.width + localTileX;
+        const oldTileId = layer.data[tileIndex];
+
+        if (oldTileId === tileId) continue; // No change
+
+        // Record change in group
+        changeGroup.push({
+          chunkX,
+          chunkY,
+          layerName: this.selectedLayer,
+          tileX: localTileX,
+          tileY: localTileY,
+          oldTileId,
+          newTileId: tileId
+        });
+
+        // Update tile data
+        layer.data[tileIndex] = tileId;
+
+        // Track affected chunk
+        affectedChunks.add(chunkKey);
+      }
+    }
+
+    // Push entire group as one undo action
+    if (changeGroup.length > 0) {
+      this.undoStack.push({ changes: changeGroup });
+      this.redoStack = []; // Clear redo stack on new action
+    }
+
+    // Re-render all affected chunks
+    affectedChunks.forEach(chunkKey => {
+      const [chunkX, chunkY] = chunkKey.split('-').map(Number);
+      this.rerenderChunk(chunkX, chunkY);
+    });
   }
 
   private eraseTile(tileX: number, tileY: number) {
@@ -798,41 +1204,99 @@ class TileEditor {
   }
 
   private undo() {
-    const change = this.undoStack.pop();
-    if (!change) return;
+    const item = this.undoStack.pop();
+    if (!item) return;
 
-    // Apply reverse change
-    const chunkKey = `${change.chunkX}-${change.chunkY}`;
-    const chunk = window.mapData.loadedChunks.get(chunkKey);
-    if (!chunk) return;
+    const affectedChunks = new Set<string>();
 
-    const layer = chunk.layers.find((l: any) => l.name === change.layerName);
-    if (!layer) return;
+    // Check if it's a group or single change
+    if ('changes' in item) {
+      // Handle group of changes
+      const group = item as TileChangeGroup;
+      group.changes.forEach(change => {
+        const chunkKey = `${change.chunkX}-${change.chunkY}`;
+        const chunk = window.mapData.loadedChunks.get(chunkKey);
+        if (!chunk) return;
 
-    const tileIndex = change.tileY * chunk.width + change.tileX;
-    layer.data[tileIndex] = change.oldTileId;
+        const layer = chunk.layers.find((l: any) => l.name === change.layerName);
+        if (!layer) return;
 
-    this.redoStack.push(change);
-    this.rerenderChunk(change.chunkX, change.chunkY);
+        const tileIndex = change.tileY * chunk.width + change.tileX;
+        layer.data[tileIndex] = change.oldTileId;
+
+        affectedChunks.add(chunkKey);
+      });
+      this.redoStack.push(group);
+    } else {
+      // Handle single change
+      const change = item as TileChange;
+      const chunkKey = `${change.chunkX}-${change.chunkY}`;
+      const chunk = window.mapData.loadedChunks.get(chunkKey);
+      if (!chunk) return;
+
+      const layer = chunk.layers.find((l: any) => l.name === change.layerName);
+      if (!layer) return;
+
+      const tileIndex = change.tileY * chunk.width + change.tileX;
+      layer.data[tileIndex] = change.oldTileId;
+
+      affectedChunks.add(chunkKey);
+      this.redoStack.push(change);
+    }
+
+    // Re-render all affected chunks
+    affectedChunks.forEach(chunkKey => {
+      const [chunkX, chunkY] = chunkKey.split('-').map(Number);
+      this.rerenderChunk(chunkX, chunkY);
+    });
   }
 
   private redo() {
-    const change = this.redoStack.pop();
-    if (!change) return;
+    const item = this.redoStack.pop();
+    if (!item) return;
 
-    // Apply forward change
-    const chunkKey = `${change.chunkX}-${change.chunkY}`;
-    const chunk = window.mapData.loadedChunks.get(chunkKey);
-    if (!chunk) return;
+    const affectedChunks = new Set<string>();
 
-    const layer = chunk.layers.find((l: any) => l.name === change.layerName);
-    if (!layer) return;
+    // Check if it's a group or single change
+    if ('changes' in item) {
+      // Handle group of changes
+      const group = item as TileChangeGroup;
+      group.changes.forEach(change => {
+        const chunkKey = `${change.chunkX}-${change.chunkY}`;
+        const chunk = window.mapData.loadedChunks.get(chunkKey);
+        if (!chunk) return;
 
-    const tileIndex = change.tileY * chunk.width + change.tileX;
-    layer.data[tileIndex] = change.newTileId;
+        const layer = chunk.layers.find((l: any) => l.name === change.layerName);
+        if (!layer) return;
 
-    this.undoStack.push(change);
-    this.rerenderChunk(change.chunkX, change.chunkY);
+        const tileIndex = change.tileY * chunk.width + change.tileX;
+        layer.data[tileIndex] = change.newTileId;
+
+        affectedChunks.add(chunkKey);
+      });
+      this.undoStack.push(group);
+    } else {
+      // Handle single change
+      const change = item as TileChange;
+      const chunkKey = `${change.chunkX}-${change.chunkY}`;
+      const chunk = window.mapData.loadedChunks.get(chunkKey);
+      if (!chunk) return;
+
+      const layer = chunk.layers.find((l: any) => l.name === change.layerName);
+      if (!layer) return;
+
+      const tileIndex = change.tileY * chunk.width + change.tileX;
+      layer.data[tileIndex] = change.newTileId;
+
+      affectedChunks.add(chunkKey);
+      this.undoStack.push(change);
+    }
+
+    // Re-render all affected chunks
+    affectedChunks.forEach(chunkKey => {
+      const [chunkX, chunkY] = chunkKey.split('-').map(Number);
+      this.rerenderChunk(chunkX, chunkY);
+    });
   }
 
   private save() {
@@ -847,26 +1311,31 @@ class TileEditor {
     // Group changes by chunk
     const chunkChanges = new Map<string, any>();
 
-    this.undoStack.forEach(change => {
-      const chunkKey = `${change.chunkX}-${change.chunkY}`;
+    this.undoStack.forEach(item => {
+      // Handle both single changes and change groups
+      const changes: TileChange[] = 'changes' in item ? item.changes : [item as TileChange];
 
-      if (!chunkChanges.has(chunkKey)) {
-        const chunk = window.mapData.loadedChunks.get(chunkKey);
-        if (chunk) {
-          // Deep copy the chunk data
-          chunkChanges.set(chunkKey, {
-            chunkX: change.chunkX,
-            chunkY: change.chunkY,
-            width: chunk.width,
-            height: chunk.height,
-            layers: chunk.layers.map((layer: any) => ({
-              name: layer.name,
-              zIndex: layer.zIndex,
-              data: [...layer.data]
-            }))
-          });
+      changes.forEach(change => {
+        const chunkKey = `${change.chunkX}-${change.chunkY}`;
+
+        if (!chunkChanges.has(chunkKey)) {
+          const chunk = window.mapData.loadedChunks.get(chunkKey);
+          if (chunk) {
+            // Deep copy the chunk data
+            chunkChanges.set(chunkKey, {
+              chunkX: change.chunkX,
+              chunkY: change.chunkY,
+              width: chunk.width,
+              height: chunk.height,
+              layers: chunk.layers.map((layer: any) => ({
+                name: layer.name,
+                zIndex: layer.zIndex,
+                data: [...layer.data]
+              }))
+            });
+          }
         }
-      }
+      });
     });
 
     // Convert map to array for sending
@@ -881,6 +1350,11 @@ class TileEditor {
         mapName: window.mapData.name,
         chunks: chunks
       }
+    });
+
+    // Clear cached chunks so they reload with new data
+    chunks.forEach(chunk => {
+      clearChunkFromCache(window.mapData.name, chunk.chunkX, chunk.chunkY);
     });
 
     // Clear undo/redo stacks after save
@@ -900,6 +1374,12 @@ class TileEditor {
 
   private onKeyDown(e: KeyboardEvent) {
     if (!this.isActive) return;
+
+    // Don't trigger hotkeys when typing in input fields
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
+      return;
+    }
 
     // Tool shortcuts
     if (e.key === 'p') this.setTool('paint');
@@ -975,7 +1455,79 @@ class TileEditor {
   public renderPreview() {
     if (!this.isActive || !this.previewTilePos || !window.mapData) return;
 
-    // Show preview for paint mode (selected tile) or paste mode (copied tile)
+    ctx.save();
+    ctx.globalAlpha = 0.6;
+
+    // Handle multi-tile preview
+    if (this.currentTool === 'paint' && this.selectedTiles.length > 0) {
+      try {
+        for (let row = 0; row < this.selectedTiles.length; row++) {
+          for (let col = 0; col < this.selectedTiles[row].length; col++) {
+            const tileId = this.selectedTiles[row][col];
+            if (tileId === 0) continue; // Skip empty tiles
+
+            const tileset = window.mapData.tilesets.find((t: any) =>
+              t.firstgid <= tileId && tileId < t.firstgid + t.tilecount
+            );
+
+            if (!tileset) continue;
+
+            const image = window.mapData.images[window.mapData.tilesets.indexOf(tileset)];
+            if (!image || !image.complete) continue;
+
+            const localTileId = tileId - tileset.firstgid;
+            const tilesPerRow = Math.floor(tileset.imagewidth / tileset.tilewidth);
+            const srcX = (localTileId % tilesPerRow) * tileset.tilewidth;
+            const srcY = Math.floor(localTileId / tilesPerRow) * tileset.tileheight;
+
+            const worldX = (this.previewTilePos.x + col) * window.mapData.tilewidth;
+            const worldY = (this.previewTilePos.y + row) * window.mapData.tileheight;
+
+            ctx.drawImage(
+              image,
+              srcX, srcY,
+              tileset.tilewidth, tileset.tileheight,
+              worldX, worldY,
+              window.mapData.tilewidth, window.mapData.tileheight
+            );
+          }
+        }
+      } catch (e) {
+        console.error('Error drawing multi-tile preview:', e);
+      }
+      ctx.restore();
+      return;
+    }
+
+    // Handle erase mode - show red outline with background
+    if (this.currentTool === 'erase') {
+      const worldX = this.previewTilePos.x * window.mapData.tilewidth;
+      const worldY = this.previewTilePos.y * window.mapData.tileheight;
+
+      // Draw red background
+      ctx.fillStyle = 'rgba(231, 76, 60, 0.3)';
+      ctx.fillRect(
+        worldX,
+        worldY,
+        window.mapData.tilewidth,
+        window.mapData.tileheight
+      );
+
+      // Draw red outline
+      ctx.strokeStyle = 'rgba(255, 89, 71, 1.0)';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(
+        worldX,
+        worldY,
+        window.mapData.tilewidth,
+        window.mapData.tileheight
+      );
+
+      ctx.restore();
+      return;
+    }
+
+    // Handle single tile preview
     let tileToPreview: number | null = null;
     if (this.currentTool === 'paint' && this.selectedTile) {
       tileToPreview = this.selectedTile;
@@ -983,17 +1535,55 @@ class TileEditor {
       tileToPreview = this.copiedTile;
     }
 
-    // Don't show preview for tile ID 0 (empty tile)
-    if (tileToPreview === null || tileToPreview === 0) return;
+    // Show white outline when paint mode with no tile or paste mode with empty tile (ID 0)
+    if ((this.currentTool === 'paint' && !this.selectedTile) ||
+        (this.currentTool === 'paste' && this.copiedTile === 0)) {
+      const worldX = this.previewTilePos.x * window.mapData.tilewidth;
+      const worldY = this.previewTilePos.y * window.mapData.tileheight;
+
+      // Draw white background
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+      ctx.fillRect(
+        worldX,
+        worldY,
+        window.mapData.tilewidth,
+        window.mapData.tileheight
+      );
+
+      // Draw white outline
+      ctx.strokeStyle = 'rgba(255, 255, 255, 1.0)';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(
+        worldX,
+        worldY,
+        window.mapData.tilewidth,
+        window.mapData.tileheight
+      );
+
+      ctx.restore();
+      return;
+    }
+
+    // Don't show preview for tile ID 0 (empty tile) unless already handled above
+    if (tileToPreview === null || tileToPreview === 0) {
+      ctx.restore();
+      return;
+    }
 
     const tileset = window.mapData.tilesets.find((t: any) =>
       t.firstgid <= tileToPreview! && tileToPreview! < t.firstgid + t.tilecount
     );
 
-    if (!tileset) return;
+    if (!tileset) {
+      ctx.restore();
+      return;
+    }
 
     const image = window.mapData.images[window.mapData.tilesets.indexOf(tileset)];
-    if (!image || !image.complete) return;
+    if (!image || !image.complete) {
+      ctx.restore();
+      return;
+    }
 
     const localTileId = tileToPreview - tileset.firstgid;
     const tilesPerRow = Math.floor(tileset.imagewidth / tileset.tilewidth);
@@ -1002,10 +1592,6 @@ class TileEditor {
 
     const worldX = this.previewTilePos.x * window.mapData.tilewidth;
     const worldY = this.previewTilePos.y * window.mapData.tileheight;
-
-    // Draw semi-transparent preview (context is already translated in renderer)
-    ctx.save();
-    ctx.globalAlpha = 0.6;
 
     try {
       ctx.drawImage(

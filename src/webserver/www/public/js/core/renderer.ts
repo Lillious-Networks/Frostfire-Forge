@@ -190,8 +190,12 @@ function drawAllLayersWithOpacity(layer: 'lower' | 'upper', visibleChunks: any[]
         continue;
       }
 
+      // Check if tile editor wants to use layer dimming
+      const tileEditor = (window as any).tileEditor;
+      const useDimming = tileEditor?.isActive && tileEditor.dimOtherLayers;
+
       // If a collision or no-pvp layer is selected, draw all other layers at full opacity
-      // Otherwise use partial opacity for non-selected layers
+      // Otherwise use partial opacity for non-selected layers (only if dimming is enabled)
       if (isCollisionSelected || isNoPvpSelected) {
         // When collision/nopvp is selected, don't draw the collision/nopvp tiles
         // (they're shown via debug boxes instead)
@@ -199,8 +203,10 @@ function drawAllLayersWithOpacity(layer: 'lower' | 'upper', visibleChunks: any[]
           continue;
         }
         ctx.globalAlpha = 1.0;
-      } else {
+      } else if (useDimming) {
         ctx.globalAlpha = isSelected ? 1.0 : 0.5;
+      } else {
+        ctx.globalAlpha = 1.0;
       }
 
       // Draw tiles from this layer

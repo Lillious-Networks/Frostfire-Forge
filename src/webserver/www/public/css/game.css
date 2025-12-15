@@ -1368,7 +1368,7 @@ input[type=range]:disabled {
   pointer-events: none;
   z-index: 10;
 }
-/* Tile Editor Styles */
+/* Tile Editor Floating Panels */
 #tile-editor-container {
   position: fixed;
   top: 0;
@@ -1376,248 +1376,357 @@ input[type=range]:disabled {
   width: 100%;
   height: 100%;
   z-index: 1000;
-  pointer-events: none; /* Let clicks pass through to game canvas */
+  pointer-events: none;
 }
 
-#tile-editor {
-  background-color: #2a2a2a;
-  border: 3px solid #444;
-  border-radius: 8px;
-  width: 800px; /* Default initial width */
-  height: 700px; /* Default initial height */
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 0 20px rgba(0, 0, 0, 0.8);
-  position: absolute;
-  top: 10px;
-  left: 10px;
-  pointer-events: auto; /* Editor panel catches clicks */
-  cursor: default;
+.te-floating-panel {
+  position: fixed;
+  background: rgba(30, 30, 40, 0.95);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(46, 204, 113, 0.3);
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(46, 204, 113, 0.2);
+  pointer-events: auto;
+  transition: box-shadow 0.2s;
 }
 
-#tile-editor-header {
-  background-color: #1a1a1a;
-  padding: 10px 15px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  border-bottom: 2px solid #444;
-  border-top-left-radius: 5px;
-  border-top-right-radius: 5px;
+.te-floating-panel:hover {
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(46, 204, 113, 0.4);
+}
+
+.te-panel-header {
+  background: linear-gradient(135deg, rgba(46, 204, 113, 0.2), rgba(52, 235, 73, 0.1));
+  border-bottom: 1px solid rgba(46, 204, 113, 0.3);
+  padding: 10px 12px;
+  border-radius: 10px 10px 0 0;
   cursor: grab;
   user-select: none;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  position: relative;
 }
 
-#tile-editor-header h2 {
-  color: #fff;
-  margin: 0;
-  font-size: 16px;
+.te-panel-header:active {
+  cursor: grabbing;
 }
 
-#tile-editor-close {
-  background-color: #c74444;
-  color: #fff;
-  border: none;
-  padding: 5px 12px;
+.te-panel-title {
+  color: #FFF1DA;
+  font-size: 0.85em;
+  font-weight: 600;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  flex: 1;
+  text-align: center;
+}
+
+.te-panel-close {
+  background: rgba(255, 70, 70, 0.2);
+  border: 1px solid rgba(255, 70, 70, 0.4);
+  color: #ff6666;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
   cursor: pointer;
-  border-radius: 4px;
-  font-weight: bold;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-size: 16px;
+  font-weight: bold;
+  transition: all 0.2s;
+  padding: 0;
+  position: absolute;
+  right: 12px;
 }
 
-#tile-editor-close:hover {
-  background-color: #e05555;
+.te-panel-close:hover {
+  background: rgba(255, 70, 70, 0.4);
+  border-color: rgba(255, 70, 70, 0.6);
+  transform: scale(1.1);
+}
+
+.te-panel-content {
+  padding: 12px;
+}
+
+/* Toolbar Panel Styles */
+#tile-editor-toolbar-panel {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, 320px);
+  min-width: 300px;
+  cursor: grab;
+  padding: 12px;
+}
+
+#tile-editor-toolbar-panel:active {
+  cursor: grabbing;
 }
 
 #tile-editor-toolbar {
-  background-color: #222;
-  padding: 10px;
   display: flex;
-  gap: 8px;
-  border-bottom: 2px solid #444;
+  gap: 6px;
   flex-wrap: wrap;
+  justify-content: center;
 }
 
 #tile-editor-toolbar button {
-  background-color: #3a3a3a;
+  background: rgba(255, 255, 255, 0.05);
   color: #fff;
-  border: 2px solid #555;
-  padding: 5px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 8px;
   cursor: pointer;
-  border-radius: 4px;
-  font-size: 12px;
+  border-radius: 6px;
+  font-size: 16px;
   transition: all 0.2s;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 #tile-editor-toolbar button:hover {
-  background-color: #4a4a4a;
-  border-color: #777;
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(46, 204, 113, 0.5);
+  transform: translateY(-2px);
 }
 
 #tile-editor-toolbar button.active,
 #tile-editor-toolbar .te-tool.active {
-  background-color: #029656;
-  border-color: #03b569;
+  background: rgba(46, 204, 113, 0.3);
+  border-color: rgba(46, 204, 113, 0.6);
+  box-shadow: 0 0 12px rgba(46, 204, 113, 0.3);
 }
 
 #tile-editor-toolbar .te-tool.active:hover {
-  background-color: #03a760;
+  background: rgba(46, 204, 113, 0.4);
 }
 
-#tile-editor-content {
-  display: flex;
-  flex-direction: row;
-  flex: 1;
-  overflow: hidden;
+/* Layers Panel Styles */
+#tile-editor-layers-panel {
+  top: 50%;
+  left: 50%;
+  transform: translate(370px, -50%);
+  width: auto;
+  min-width: 150px;
+  max-width: 250px;
+  max-height: 500px;
+  cursor: grab;
+  padding: 12px;
 }
 
-#tile-editor-layers {
-  background-color: #1e1e1e;
-  width: 200px;
-  min-width: 180px;
-  border-right: 2px solid #444;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-#tile-editor-layers-header {
-  background-color: #2a2a2a;
-  padding: 10px;
-  color: #fff;
-  font-weight: bold;
-  border-bottom: 2px solid #444;
+#tile-editor-layers-panel:active {
+  cursor: grabbing;
 }
 
 #tile-editor-layers-list {
-  flex: 1;
+  max-height: 470px;
   overflow-y: auto;
-  padding: 5px;
+  overflow-x: hidden;
+  width: 100%;
+}
+
+#tile-editor-layers-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+#tile-editor-layers-list::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 3px;
+}
+
+#tile-editor-layers-list::-webkit-scrollbar-thumb {
+  background: rgba(46, 204, 113, 0.5);
+  border-radius: 3px;
+}
+
+#tile-editor-layers-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(46, 204, 113, 0.7);
 }
 
 .te-layer-item {
-  background-color: #2a2a2a;
+  background: rgba(255, 255, 255, 0.03);
   color: #fff;
-  padding: 8px;
-  margin: 5px 0;
+  padding: 12px 10px;
+  margin: 8px 0;
   cursor: pointer;
-  border: 2px solid transparent;
-  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 6px;
   transition: all 0.2s;
-  font-size: 11px;
-  line-height: 1.3;
+  font-size: 12px;
+  line-height: 1.5;
   word-wrap: break-word;
   overflow-wrap: break-word;
-  opacity: 0.5;
+  white-space: normal;
 }
 
 .te-layer-item:hover {
-  background-color: #3a3a3a;
-  opacity: 0.7;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(46, 204, 113, 0.3);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
 }
 
 .te-layer-item.active {
-  background-color: #029656;
-  border-color: #03b569;
-  opacity: 1;
+  background: rgba(46, 204, 113, 0.3);
+  border-color: rgba(46, 204, 113, 0.6);
+  box-shadow: 0 0 12px rgba(46, 204, 113, 0.3);
 }
 
-#tile-editor-tilesets {
-  flex: 1;
+/* Tileset Panel Styles */
+#tile-editor-tileset-panel {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 700px;
+  height: 600px;
   display: flex;
   flex-direction: column;
-  background-color: #1a1a1a;
-  min-height: 0; /* Important for flex child scrolling */
-  min-width: 0; /* Prevent overflow */
+  resize: both;
+  overflow: hidden;
+  min-width: 400px;
+  min-height: 300px;
+  max-width: 90vw;
+  max-height: 90vh;
+}
+
+#tile-editor-tileset-panel .te-panel-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 0;
 }
 
 #tile-editor-tileset-tabs {
   display: flex;
-  gap: 5px;
-  padding: 10px;
-  background-color: #222;
-  border-bottom: 2px solid #444;
+  gap: 4px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid rgba(46, 204, 113, 0.2);
   overflow-x: auto;
+  flex-shrink: 0;
+}
+
+#tile-editor-tileset-tabs::-webkit-scrollbar {
+  height: 4px;
+}
+
+#tile-editor-tileset-tabs::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 2px;
+}
+
+#tile-editor-tileset-tabs::-webkit-scrollbar-thumb {
+  background: rgba(46, 204, 113, 0.5);
+  border-radius: 2px;
+}
+
+#tile-editor-tileset-tabs::-webkit-scrollbar-thumb:hover {
+  background: rgba(46, 204, 113, 0.7);
 }
 
 .te-tileset-tab {
-  background-color: #3a3a3a;
+  background: rgba(255, 255, 255, 0.05);
   color: #fff;
-  padding: 8px 12px;
+  padding: 6px 12px;
   cursor: pointer;
-  border: 2px solid #555;
-  border-radius: 4px 4px 0 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
   transition: all 0.2s;
   white-space: nowrap;
   font-size: 11px;
   flex-shrink: 0;
-  max-width: 180px;
+  max-width: 150px;
   overflow: hidden;
   text-overflow: ellipsis;
+  user-select: none;
 }
 
 .te-tileset-tab:hover {
-  background-color: #4a4a4a;
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(46, 204, 113, 0.3);
+  transform: translateY(-2px);
 }
 
 .te-tileset-tab.active {
-  background-color: #029656;
-  border-color: #03b569;
-  border-bottom-color: #1a1a1a;
+  background: rgba(46, 204, 113, 0.3);
+  border-color: rgba(46, 204, 113, 0.6);
+  box-shadow: 0 0 12px rgba(46, 204, 113, 0.3);
 }
 
 #tile-editor-tileset-container {
   flex: 1;
-  overflow: scroll; /* Force scrollbars to always show */
-  padding: 10px;
+  overflow: auto;
+  padding: 12px;
   position: relative;
-  min-height: 0; /* Important for flex child scrolling */
-  background-color: #1a1a1a;
+  min-height: 0;
+  background: rgba(0, 0, 0, 0.2);
 }
 
 /* Tileset container scrollbar styling */
 #tile-editor-tileset-container::-webkit-scrollbar {
-  width: 12px;
-  height: 12px;
+  width: 8px;
+  height: 8px;
 }
 
 #tile-editor-tileset-container::-webkit-scrollbar-track {
-  background: #2a2a2a;
-  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
 }
 
 #tile-editor-tileset-container::-webkit-scrollbar-thumb {
-  background: #029656;
-  border-radius: 6px;
-  border: 2px solid #2a2a2a;
+  background: rgba(46, 204, 113, 0.5);
+  border-radius: 4px;
 }
 
 #tile-editor-tileset-container::-webkit-scrollbar-thumb:hover {
-  background: #03b569;
+  background: rgba(46, 204, 113, 0.7);
 }
 
 #tile-editor-tileset-container::-webkit-scrollbar-corner {
-  background: #2a2a2a;
+  background: rgba(0, 0, 0, 0.2);
 }
 
 #tile-editor-tileset-canvas {
   display: block;
   cursor: crosshair;
   image-rendering: pixelated;
-  border: 2px solid #444;
+  border: 1px solid rgba(46, 204, 113, 0.3);
+  border-radius: 4px;
+  box-shadow: 0 0 8px rgba(0, 0, 0, 0.4);
 }
 
-#tile-editor-resize-handle {
+/* Resize Handle */
+.te-resize-handle {
   position: absolute;
   bottom: 0;
   right: 0;
   width: 20px;
   height: 20px;
   cursor: nwse-resize;
-  background: linear-gradient(135deg, transparent 0%, transparent 50%, #029656 50%, #029656 100%);
-  border-bottom-right-radius: 5px;
+  background: linear-gradient(135deg, transparent 50%, rgba(46, 204, 113, 0.4) 50%);
+  border-bottom-right-radius: 10px;
+  z-index: 10;
 }
 
-#tile-editor-resize-handle:hover {
-  background: linear-gradient(135deg, transparent 0%, transparent 50%, #03b569 50%, #03b569 100%);
+.te-resize-handle:hover {
+  background: linear-gradient(135deg, transparent 50%, rgba(46, 204, 113, 0.6) 50%);
+}
+
+.te-resize-handle::after {
+  content: '';
+  position: absolute;
+  bottom: 3px;
+  right: 3px;
+  width: 3px;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: 50%;
+  box-shadow:
+    -5px 0 0 rgba(255, 255, 255, 0.5),
+    0 -5px 0 rgba(255, 255, 255, 0.5);
 }

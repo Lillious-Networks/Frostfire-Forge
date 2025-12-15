@@ -955,4 +955,16 @@ const player = {
   },
 };
 
+// Export function to clear map cache (used when maps are updated)
+export function clearMapCache(mapName?: string) {
+  if (mapName) {
+    const mapKey = mapName.replace(".json", "");
+    mapCache.delete(mapKey);
+    log.info(`Cleared map cache for: ${mapKey}`);
+  } else {
+    mapCache.clear();
+    log.info("Cleared all map caches");
+  }
+}
+
 export default player;
