@@ -11,7 +11,7 @@ const times = [] as number[];
 let lastDirection = "";
 let pendingRequest = false;
 let cameraX: number = 0, cameraY: number = 0, lastFrameTime: number = 0;
-import { canvas, ctx, fpsSlider, healthBar, staminaBar, targetHealthBar, targetStaminaBar, collisionDebugCheckbox, chunkOutlineDebugCheckbox, collisionTilesDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox } from "./ui.js";
+import { canvas, ctx, fpsSlider, healthBar, staminaBar, targetHealthBar, targetStaminaBar, collisionDebugCheckbox, chunkOutlineDebugCheckbox, collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox } from "./ui.js";
 
 canvas.style.position = 'fixed';
 
@@ -148,6 +148,103 @@ async function loadVisibleChunks() {
 
 let chunkLoadThrottle = 0;
 
+function drawAllLayersWithOpacity(layer: 'lower' | 'upper', visibleChunks: any[], offsetX: number, offsetY: number, selectedLayerName: string) {
+  if (!ctx || !window.mapData) return;
+
+  const PLAYER_Z_INDEX = 3;
+  const selectedLayerLower = selectedLayerName.toLowerCase();
+  const isCollisionSelected = selectedLayerLower.includes('collision');
+  const isNoPvpSelected = selectedLayerLower.includes('nopvp') || selectedLayerLower.includes('no-pvp');
+
+  for (const chunk of visibleChunks) {
+    const chunkKey = `${chunk.x}-${chunk.y}`;
+    const chunkData = window.mapData.loadedChunks.get(chunkKey);
+    if (!chunkData) continue;
+
+    const chunkPixelSize = window.mapData.chunkSize * window.mapData.tilewidth;
+    const chunkWorldX = chunk.x * chunkPixelSize;
+    const chunkWorldY = chunk.y * chunkPixelSize;
+
+    const screenX = chunkWorldX + offsetX;
+    const screenY = chunkWorldY + offsetY;
+
+    // Get all layers sorted by zIndex
+    const sortedLayers = [...chunkData.layers].sort((a: any, b: any) => a.zIndex - b.zIndex);
+
+    // Draw each layer
+    for (const chunkLayer of sortedLayers) {
+      // Only draw layers that belong to this canvas (lower/upper)
+      const belongsToThisCanvas = layer === 'lower'
+        ? chunkLayer.zIndex < PLAYER_Z_INDEX
+        : chunkLayer.zIndex >= PLAYER_Z_INDEX;
+
+      if (!belongsToThisCanvas) continue;
+
+      const isSelected = chunkLayer.name === selectedLayerName;
+      const layerNameLower = chunkLayer.name.toLowerCase();
+      const isCollisionLayer = layerNameLower.includes('collision');
+      const isNoPvpLayer = layerNameLower.includes('nopvp') || layerNameLower.includes('no-pvp');
+
+      // Skip collision/nopvp layers entirely if not selected (they're shown via debug visualization)
+      if ((isCollisionLayer || isNoPvpLayer) && !isSelected) {
+        continue;
+      }
+
+      // If a collision or no-pvp layer is selected, draw all other layers at full opacity
+      // Otherwise use partial opacity for non-selected layers
+      if (isCollisionSelected || isNoPvpSelected) {
+        // When collision/nopvp is selected, don't draw the collision/nopvp tiles
+        // (they're shown via debug boxes instead)
+        if (isCollisionLayer || isNoPvpLayer) {
+          continue;
+        }
+        ctx.globalAlpha = 1.0;
+      } else {
+        ctx.globalAlpha = isSelected ? 1.0 : 0.5;
+      }
+
+      // Draw tiles from this layer
+      for (let y = 0; y < chunkData.height; y++) {
+        for (let x = 0; x < chunkData.width; x++) {
+          const tileIndex = chunkLayer.data[y * chunkData.width + x];
+          if (tileIndex === 0) continue;
+
+          const tileset = window.mapData.tilesets.find(
+            (t: any) => t.firstgid <= tileIndex && tileIndex < t.firstgid + t.tilecount
+          );
+          if (!tileset) continue;
+
+          const image = window.mapData.images[window.mapData.tilesets.indexOf(tileset)];
+          if (!image || !image.complete) continue;
+
+          const localTileIndex = tileIndex - tileset.firstgid;
+          const tilesPerRow = Math.floor(tileset.imagewidth / tileset.tilewidth);
+          const tileX = (localTileIndex % tilesPerRow) * tileset.tilewidth;
+          const tileY = Math.floor(localTileIndex / tilesPerRow) * tileset.tileheight;
+
+          const drawX = screenX + x * window.mapData.tilewidth;
+          const drawY = screenY + y * window.mapData.tileheight;
+
+          try {
+            ctx.drawImage(
+              image,
+              tileX, tileY,
+              tileset.tilewidth, tileset.tileheight,
+              drawX, drawY,
+              window.mapData.tilewidth, window.mapData.tileheight
+            );
+          } catch (error) {
+            // Ignore draw errors
+          }
+        }
+      }
+    }
+
+    // Reset alpha
+    ctx.globalAlpha = 1;
+  }
+}
+
 function renderMap(layer: 'lower' | 'upper' = 'lower') {
   if (!ctx || !window.mapData) return;
 
@@ -163,24 +260,35 @@ function renderMap(layer: 'lower' | 'upper' = 'lower') {
 
   const visibleChunks = getVisibleChunks();
 
-  for (const chunk of visibleChunks) {
-    const chunkCanvas = layer === 'lower'
-      ? window.mapData.getChunkLowerCanvas(chunk.x, chunk.y)
-      : window.mapData.getChunkUpperCanvas(chunk.x, chunk.y);
-    if (!chunkCanvas) continue;
+  // Check if tile editor is active and has a selected layer
+  const tileEditor = (window as any).tileEditor;
+  const isEditorActive = tileEditor?.isActive;
+  const selectedLayer = tileEditor?.selectedLayer;
 
-    const chunkPixelSize = window.mapData.chunkSize * window.mapData.tilewidth;
-    const chunkWorldX = chunk.x * chunkPixelSize;
-    const chunkWorldY = chunk.y * chunkPixelSize;
+  // If tile editor is active, draw all layers individually with proper opacity
+  if (isEditorActive && selectedLayer) {
+    drawAllLayersWithOpacity(layer, visibleChunks, offsetX, offsetY, selectedLayer);
+  } else {
+    // Normal rendering using pre-rendered chunk canvases
+    for (const chunk of visibleChunks) {
+      const chunkCanvas = layer === 'lower'
+        ? window.mapData.getChunkLowerCanvas(chunk.x, chunk.y)
+        : window.mapData.getChunkUpperCanvas(chunk.x, chunk.y);
+      if (!chunkCanvas) continue;
 
-    // Transform chunk position to screen space
-    const screenX = chunkWorldX + offsetX;
-    const screenY = chunkWorldY + offsetY;
+      const chunkPixelSize = window.mapData.chunkSize * window.mapData.tilewidth;
+      const chunkWorldX = chunk.x * chunkPixelSize;
+      const chunkWorldY = chunk.y * chunkPixelSize;
 
-    try {
-      ctx.drawImage(chunkCanvas, screenX, screenY);
-    } catch (error) {
-      console.error(`Error rendering chunk ${chunk.x}-${chunk.y}:`, error);
+      // Transform chunk position to screen space
+      const screenX = chunkWorldX + offsetX;
+      const screenY = chunkWorldY + offsetY;
+
+      try {
+        ctx.drawImage(chunkCanvas, screenX, screenY);
+      } catch (error) {
+        console.error(`Error rendering chunk ${chunk.x}-${chunk.y}:`, error);
+      }
     }
   }
 }
@@ -213,6 +321,10 @@ function animationLoop() {
   }
 
   updateCamera(currentPlayer, deltaTime * 60);
+
+  // Update window camera values for tile editor
+  (window as any).cameraX = cameraX;
+  (window as any).cameraY = cameraY;
 
   if (getIsMoving() && getIsKeyPressed()) {
     if (document.activeElement === chatInput || document.activeElement === friendsListSearch) {
@@ -508,6 +620,49 @@ function animationLoop() {
     }
   }
 
+  // Render no-pvp zones debug (green outlines around all no-pvp tiles)
+  if (noPvpDebugCheckbox.checked && window.mapData) {
+    const visibleChunks = getVisibleChunks();
+
+    ctx.strokeStyle = 'rgba(0, 255, 0, 0.6)';
+    ctx.fillStyle = 'rgba(0, 255, 0, 0.2)';
+    ctx.lineWidth = 1;
+
+    for (const chunk of visibleChunks) {
+      const chunkKey = `${chunk.x}-${chunk.y}`;
+      const chunkData = window.mapData.loadedChunks.get(chunkKey);
+
+      if (!chunkData) continue;
+
+      const chunkPixelSize = window.mapData.chunkSize * window.mapData.tilewidth;
+      const chunkWorldX = chunk.x * chunkPixelSize;
+      const chunkWorldY = chunk.y * chunkPixelSize;
+
+      // Find no-pvp layer (layer name contains "nopvp" or "no-pvp" case-insensitive)
+      const noPvpLayer = chunkData.layers.find((layer: any) =>
+        layer.name && (layer.name.toLowerCase().includes('nopvp') || layer.name.toLowerCase().includes('no-pvp'))
+      );
+
+      if (noPvpLayer) {
+        // Draw outline for each no-pvp tile
+        for (let y = 0; y < chunkData.height; y++) {
+          for (let x = 0; x < chunkData.width; x++) {
+            const tileIndex = noPvpLayer.data[y * chunkData.width + x];
+
+            // If tile has a value (non-zero means no-pvp zone)
+            if (tileIndex !== 0) {
+              const tileWorldX = chunkWorldX + (x * window.mapData.tilewidth);
+              const tileWorldY = chunkWorldY + (y * window.mapData.tileheight);
+
+              ctx.fillRect(tileWorldX, tileWorldY, window.mapData.tilewidth, window.mapData.tileheight);
+              ctx.strokeRect(tileWorldX, tileWorldY, window.mapData.tilewidth, window.mapData.tileheight);
+            }
+          }
+        }
+      }
+    }
+  }
+
   // Render tile grid overlay
   if (showGridCheckbox.checked && window.mapData) {
     const visibleChunks = getVisibleChunks();
@@ -542,6 +697,16 @@ function animationLoop() {
 
   ctx.restore();
 
+  // Render tile editor preview if active
+  if ((window as any).tileEditor) {
+    ctx.save();
+    const offsetX = Math.round(window.innerWidth / 2 - cameraX);
+    const offsetY = Math.round(window.innerHeight / 2 - cameraY);
+    ctx.translate(offsetX, offsetY);
+    (window as any).tileEditor.renderPreview();
+    ctx.restore();
+  }
+
   if (times.length > 60) times.shift();
   times.push(now);
   requestAnimationFrame(animationLoop);
@@ -572,6 +737,10 @@ function getCameraX() {
 function getCameraY() {
   return cameraY;
 }
+
+// Export camera for other modules
+(window as any).cameraX = cameraX;
+(window as any).cameraY = cameraY;
 
 function getWeatherType() {
   return weatherType;

@@ -378,6 +378,57 @@ function extractAndCompressLayers(map: MapData) {
   if (noPvpZones.length > 0) compressLayer(noPvpZones, "nopvp");
 }
 
+export async function saveMapChunks(mapName: string, chunks: any[]): Promise<void> {
+  try {
+    const mapDir = path.join(assetPath, assetData.maps.path);
+    const file = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
+    const fullPath = path.join(mapDir, file);
+
+    if (!fs.existsSync(fullPath)) {
+      throw new Error(`Map ${file} not found`);
+    }
+
+    // Read the original map file
+    const mapData = JSON.parse(fs.readFileSync(fullPath, "utf-8"));
+    const chunkSize = 25; // Default chunk size
+
+    // Apply each chunk's changes to the map data
+    for (const chunk of chunks) {
+      const startX = chunk.chunkX * chunkSize;
+      const startY = chunk.chunkY * chunkSize;
+
+      // Update each layer in the chunk
+      for (const chunkLayer of chunk.layers) {
+        // Find the corresponding layer in the map
+        const mapLayer = mapData.layers.find((l: any) => l.name === chunkLayer.name);
+
+        if (mapLayer && mapLayer.data) {
+          // Write chunk data back to the full map layer
+          for (let y = 0; y < chunk.height; y++) {
+            for (let x = 0; x < chunk.width; x++) {
+              const chunkIndex = y * chunk.width + x;
+              const mapX = startX + x;
+              const mapY = startY + y;
+              const mapIndex = mapY * mapData.width + mapX;
+
+              if (mapIndex < mapLayer.data.length) {
+                mapLayer.data[mapIndex] = chunkLayer.data[chunkIndex];
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Write the updated map back to disk
+    fs.writeFileSync(fullPath, JSON.stringify(mapData, null, 2), "utf-8");
+    log.success(`Saved ${chunks.length} chunk(s) to ${file}`);
+  } catch (error) {
+    log.error(`Failed to save map chunks: ${mapName}: ${error}`);
+    throw error;
+  }
+}
+
 export async function reloadMap(mapName: string): Promise<MapData> {
   try {
     const mapDir = path.join(assetPath, assetData.maps.path);

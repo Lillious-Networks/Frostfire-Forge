@@ -22,6 +22,7 @@ import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 // Load settings
 import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
+import { saveMapChunks } from "../modules/assetloader";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 
 let restartScheduled: boolean;
@@ -1213,6 +1214,78 @@ export default async function packetReceiver(
         });
         break;
       }
+      case "SAVE_MAP": {
+        if (!currentPlayer) return;
+
+        // Check permissions
+        const userPermissions = await permissions.get(currentPlayer.username) as string;
+        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
+        const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
+
+        if (!hasPermission) {
+          sendPacket(ws, packetManager.notify({
+            message: 'You do not have permission to save map changes.'
+          }));
+          return;
+        }
+
+        const saveData = data as { mapName: string, chunks: any[] };
+
+        // Process map save
+        try {
+          log.info(`Map save requested by ${currentPlayer.username} for map: ${saveData.mapName}, ${saveData.chunks.length} chunks modified`);
+
+          // Find the map in the cache
+          const mapIndex = (maps as any[]).findIndex((m: any) => m.name === saveData.mapName);
+
+          if (mapIndex === -1) {
+            throw new Error(`Map ${saveData.mapName} not found`);
+          }
+
+          // Update each chunk in the map data (in-memory cache)
+          saveData.chunks.forEach((chunkData: any) => {
+            const chunkKey = `${chunkData.chunkX}-${chunkData.chunkY}`;
+
+            // Update the map's chunks
+            if (!maps[mapIndex].chunks) {
+              maps[mapIndex].chunks = {};
+            }
+
+            maps[mapIndex].chunks[chunkKey] = {
+              width: chunkData.width,
+              height: chunkData.height,
+              layers: chunkData.layers
+            };
+          });
+
+          // Update the asset cache
+          assetCache.add("maps", maps);
+
+          // Write changes to disk for persistence
+          await saveMapChunks(saveData.mapName, saveData.chunks);
+
+          sendPacket(ws, packetManager.notify({
+            message: `Map saved successfully! ${saveData.chunks.length} chunks updated.`
+          }));
+
+          // Broadcast chunk updates to all players on this map
+          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+          const chunkCoords = saveData.chunks.map((chunk: any) => ({
+            chunkX: chunk.chunkX,
+            chunkY: chunk.chunkY
+          }));
+
+          playersInMap.forEach((player) => {
+            sendPacket(player.ws, packetManager.updateChunks(chunkCoords));
+          });
+        } catch (error: any) {
+          log.error(`Error saving map: ${error.message}`);
+          sendPacket(ws, packetManager.notify({
+            message: 'Error saving map changes.'
+          }));
+        }
+        break;
+      }
       case "COMMAND": {
         if (!currentPlayer) return;
         if (currentPlayer.isGuest) {
@@ -1882,6 +1955,26 @@ export default async function packetReceiver(
                 Bun.spawn(["bun", "transpile-production"]);
               }
             }, 100);
+            break;
+          }
+          // Toggle tile editor
+          case "TE":
+          case "TILEEDITOR": {
+            // server.admin or server.*
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "server.admin" || p === "server.*"
+              )
+            ) {
+              const notifyData = {
+                message: "You don't have permission to use this command",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            // Send command to toggle editor
+            sendPacket(ws, packetManager.toggleTileEditor());
             break;
           }
           // Restart the server

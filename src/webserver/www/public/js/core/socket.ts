@@ -99,6 +99,61 @@ socket.onmessage = async (event) => {
       window.Notify(data.type, data.message);
       break;
     }
+    case "TOGGLE_TILE_EDITOR": {
+      // Import and toggle tile editor
+      import('./tileeditor.js').then((module) => {
+        module.default.toggle();
+      });
+      break;
+    }
+    case "RELOAD_CHUNKS": {
+      // Reload all visible chunks to reflect map changes
+      if (window.mapData && window.mapData.loadedChunks) {
+        const chunksToReload: Array<{x: number, y: number}> = [];
+        window.mapData.loadedChunks.forEach((chunk: any, key: string) => {
+          const [x, y] = key.split('-').map(Number);
+          chunksToReload.push({ x, y });
+        });
+
+        // Clear loaded chunks and reload them
+        window.mapData.loadedChunks.clear();
+
+        // Reload each chunk
+        chunksToReload.forEach(async (pos) => {
+          await window.mapData.requestChunk(pos.x, pos.y);
+        });
+
+        console.log('Reloaded all chunks after map changes');
+      }
+      break;
+    }
+    case "UPDATE_CHUNKS": {
+      // Clear and reload specific chunks that were modified
+      if (window.mapData && window.mapData.loadedChunks && data) {
+        const chunksToUpdate = data as Array<{chunkX: number, chunkY: number}>;
+
+        // Import clearChunkFromCache function
+        import("./map.js").then(({ clearChunkFromCache }) => {
+          chunksToUpdate.forEach((chunkCoord: {chunkX: number, chunkY: number}) => {
+            const chunkKey = `${chunkCoord.chunkX}-${chunkCoord.chunkY}`;
+
+            // Clear from localStorage cache
+            clearChunkFromCache(window.mapData.name, chunkCoord.chunkX, chunkCoord.chunkY);
+
+            // Remove the chunk from memory cache
+            if (window.mapData.loadedChunks.has(chunkKey)) {
+              window.mapData.loadedChunks.delete(chunkKey);
+
+              // Request the chunk again to reload it with updated data
+              window.mapData.requestChunk(chunkCoord.chunkX, chunkCoord.chunkY);
+            }
+          });
+
+          console.log(`Updated ${chunksToUpdate.length} chunks after map save`);
+        });
+      }
+      break;
+    }
     case "COLLISION_DEBUG": {
       if (!data || data.tileX === undefined || data.tileY === undefined) return;
       // Store collision tile for rendering

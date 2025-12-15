@@ -66,6 +66,10 @@
           <label for="collision-tiles-debug-checkbox" class="ui">Collision Tiles:</label>
           <input type="checkbox" id="collision-tiles-debug-checkbox" class="ui">
         </div>
+        <div id="nopvp-debug-toggle" class="ui">
+          <label for="nopvp-debug-checkbox" class="ui">No-PVP Zones:</label>
+          <input type="checkbox" id="nopvp-debug-checkbox" class="ui">
+        </div>
         <div id="wireframe-debug-toggle" class="ui">
           <label for="wireframe-debug-checkbox" class="ui">Wireframe Mode:</label>
           <input type="checkbox" id="wireframe-debug-checkbox" class="ui">
@@ -178,6 +182,36 @@
         </div>
       </div>
       <div id="party-container" class="ui"></div>
+      <div id="tile-editor-container" class="ui" style="display: none;">
+        <div id="tile-editor" class="ui">
+          <div id="tile-editor-header" class="ui">
+            <h2>Tile Editor</h2>
+            <button type="button" id="tile-editor-close" class="ui">X</button>
+          </div>
+          <div id="tile-editor-toolbar" class="ui">
+            <button type="button" id="te-tool-paint" class="ui te-tool active" title="Paint (P)">Paint</button>
+            <button type="button" id="te-tool-erase" class="ui te-tool" title="Erase (E)">Erase</button>
+            <button type="button" id="te-undo" class="ui" title="Undo (Ctrl+Z)">Undo</button>
+            <button type="button" id="te-redo" class="ui" title="Redo (Ctrl+Y)">Redo</button>
+            <button type="button" id="te-copy" class="ui te-tool" title="Copy (C)">Copy</button>
+            <button type="button" id="te-paste" class="ui te-tool" title="Paste (V)">Paste</button>
+            <button type="button" id="te-save" class="ui" title="Save">Save</button>
+          </div>
+          <div id="tile-editor-content" class="ui">
+            <div id="tile-editor-layers" class="ui">
+              <div id="tile-editor-layers-header" class="ui">Layers</div>
+              <div id="tile-editor-layers-list" class="ui"></div>
+            </div>
+            <div id="tile-editor-tilesets" class="ui">
+              <div id="tile-editor-tileset-tabs" class="ui"></div>
+              <div id="tile-editor-tileset-container" class="ui">
+                <canvas id="tile-editor-tileset-canvas" class="ui"></canvas>
+              </div>
+            </div>
+          </div>
+          <div id="tile-editor-resize-handle" class="ui"></div>
+        </div>
+      </div>
     </div>
     <canvas id="game"></canvas>
     <canvas id="weather"></canvas>
