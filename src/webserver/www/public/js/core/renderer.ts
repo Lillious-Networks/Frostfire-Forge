@@ -11,7 +11,7 @@ const times = [] as number[];
 let lastDirection = "";
 let pendingRequest = false;
 let cameraX: number = 0, cameraY: number = 0, lastFrameTime: number = 0;
-import { canvas, ctx, fpsSlider, healthBar, staminaBar, targetHealthBar, targetStaminaBar, collisionDebugCheckbox, chunkOutlineDebugCheckbox, collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox } from "./ui.js";
+import { canvas, ctx, fpsSlider, healthBar, staminaBar, targetHealthBar, targetStaminaBar, collisionDebugCheckbox, chunkOutlineDebugCheckbox, collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox, loadedChunksText } from "./ui.js";
 
 canvas.style.position = 'fixed';
 
@@ -82,7 +82,7 @@ function getVisibleChunks(): Array<{x: number, y: number}> {
   const cameraRight = cameraX + viewportWidth / 2;
   const cameraBottom = cameraY + viewportHeight / 2;
 
-  // Add padding to load chunks slightly off-screen
+  // Add padding to preload chunks before they become visible (1 chunk buffer)
   const padding = chunkPixelSize;
 
   // Convert to chunk coordinates
@@ -106,8 +106,8 @@ async function loadVisibleChunks() {
   const visibleChunks = getVisibleChunks();
   const visibleKeys = new Set(visibleChunks.map(c => `${c.x}-${c.y}`));
 
-  // Unload chunks that are far away
-  const unloadDistance = window.mapData.chunkSize * window.mapData.tilewidth * 3;
+  // Unload chunks that are far from viewport (2x chunk size for smooth transitions)
+  const unloadDistance = window.mapData.chunkSize * window.mapData.tilewidth * 2;
   for (const chunkKey of loadedChunksSet) {
     if (!visibleKeys.has(chunkKey)) {
       const [cx, cy] = chunkKey.split('-').map(Number);
@@ -714,6 +714,11 @@ function animationLoop() {
     ctx.translate(offsetX, offsetY);
     (window as any).tileEditor.renderPreview();
     ctx.restore();
+  }
+
+  // Update loaded chunks counter
+  if (window.mapData && window.mapData.loadedChunks) {
+    loadedChunksText.innerText = `Loaded Chunks: ${window.mapData.loadedChunks.size}`;
   }
 
   if (times.length > 60) times.shift();
