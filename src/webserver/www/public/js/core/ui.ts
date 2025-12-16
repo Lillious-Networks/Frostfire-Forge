@@ -51,6 +51,7 @@ const collisionTilesDebugCheckbox = document.getElementById("collision-tiles-deb
 const noPvpDebugCheckbox = document.getElementById("nopvp-debug-checkbox") as HTMLInputElement;
 const wireframeDebugCheckbox = document.getElementById("wireframe-debug-checkbox") as HTMLInputElement;
 const showGridCheckbox = document.getElementById("show-grid-checkbox") as HTMLInputElement;
+const loadedChunksText = document.getElementById("loaded-chunks") as HTMLDivElement;
 
 function toggleUI(element: HTMLElement, toggleFlag: boolean, hidePosition: number) {
   element.style.transition = "1s";
@@ -180,5 +181,5 @@ export {
     inventoryGrid, chatMessages, loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage,
     serverTime, ambience, weatherCanvas, weatherCtx, guildContainer, guildName, guildRank, guildMembersList,
     guildMemberCount, guildMemberInviteInput, guildMemberInviteButton, collisionDebugCheckbox, chunkOutlineDebugCheckbox,
-    collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox
+    collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox, loadedChunksText
 };

@@ -175,6 +175,7 @@ export default async function packetReceiver(
             if (!auth) {
               sendPacket(ws, packetManager.loginFailed());
               ws.close(1008, "Already logged in");
+              resolve(); // Must resolve to unblock the queue
               return;
             }
             const getUsername = (await player.getUsernameBySession(
@@ -195,6 +196,7 @@ export default async function packetReceiver(
                 if (!playerData) {
                   sendPacket(ws, packetManager.loginFailed());
                   ws.close(1008, "Player data not found");
+                  resolve(); // Must resolve to unblock the queue
                   return;
                 }
 
@@ -590,16 +592,19 @@ export default async function packetReceiver(
           } catch (e) {
             log.error(`AUTH packet processing error (chunk 3): ${e}`);
             ws.close(1011, "Internal error during authentication");
+            resolve(); // Must resolve to unblock the queue
           }
         });
         } catch (e) {
           log.error(`AUTH packet processing error (chunk 2): ${e}`);
           ws.close(1011, "Internal error during authentication");
+          resolve(); // Must resolve to unblock the queue
         }
       });
     } catch (e) {
       log.error(`AUTH packet processing error (chunk 1): ${e}`);
       ws.close(1011, "Internal error during authentication");
+      resolve(); // Must resolve to unblock the queue
     }
   });
               });
