@@ -54,6 +54,14 @@ async function createPlayer(data: any) {
     typingTimeout: null as NodeJS.Timeout | null,
     typingImage: typingImage,
     party: data.party || null,
+    damageNumbers: [] as Array<{
+      value: number;
+      x: number;
+      y: number;
+      startTime: number;
+      isHealing: boolean;
+      isCrit: boolean;
+    }>,
     showChat: function (context: CanvasRenderingContext2D) {
       // Draw typing indicator first (below in z-order)
       if (this.typing && this.typingImage) {
@@ -119,6 +127,71 @@ async function createPlayer(data: any) {
       context.shadowBlur = 0;
       context.shadowOffsetX = 0;
       context.shadowOffsetY = 0;
+    },
+    showDamageNumbers: function (context: CanvasRenderingContext2D) {
+      const now = performance.now();
+      const duration = 1000; // 1 second as requested
+
+      // Filter out expired damage numbers
+      this.damageNumbers = this.damageNumbers.filter(
+        (dmg) => now - dmg.startTime < duration
+      );
+
+      // Render each damage number
+      for (const dmg of this.damageNumbers) {
+        const elapsed = now - dmg.startTime;
+        const progress = elapsed / duration;
+
+        // Calculate position (float up)
+        const yOffset = progress * 40; // Float up 40 pixels over 1 second
+        const displayY = dmg.y - yOffset;
+
+        // Calculate opacity (fade out)
+        const opacity = 1 - progress;
+
+        // Set text style - bigger for crits
+        if (dmg.isCrit && !dmg.isHealing) {
+          context.font = "bold 28px 'Comic Relief'";
+        } else {
+          context.font = "bold 20px 'Comic Relief'";
+        }
+        context.textAlign = "center";
+
+        // Set color based on damage or healing
+        if (dmg.isHealing) {
+          context.fillStyle = `rgba(0, 255, 0, ${opacity})`;
+          context.strokeStyle = `rgba(0, 100, 0, ${opacity})`;
+        } else if (dmg.isCrit) {
+          // Bright yellow/orange for crits
+          context.fillStyle = `rgba(255, 215, 0, ${opacity})`;
+          context.strokeStyle = `rgba(255, 140, 0, ${opacity})`;
+        } else {
+          context.fillStyle = `rgba(255, 0, 0, ${opacity})`;
+          context.strokeStyle = `rgba(139, 0, 0, ${opacity})`;
+        }
+
+        // Draw text with outline - add ! for crits
+        const displayText = dmg.isCrit && !dmg.isHealing
+          ? `${dmg.value}!`
+          : `${dmg.value}`;
+
+        context.lineWidth = 3;
+        context.strokeText(
+          displayText,
+          dmg.x,
+          displayY
+        );
+        context.fillText(
+          displayText,
+          dmg.x,
+          displayY
+        );
+      }
+
+      // Reset context
+      context.fillStyle = "white";
+      context.strokeStyle = "black";
+      context.lineWidth = 1;
     },
     renderAnimation: function (context: CanvasRenderingContext2D) {
       if (!this.animation?.frames?.length) {

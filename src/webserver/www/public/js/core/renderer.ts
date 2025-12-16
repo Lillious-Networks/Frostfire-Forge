@@ -487,6 +487,9 @@ function animationLoop() {
       npc.dialogue(ctx);
     }
 
+    // Render damage numbers for all visible players
+    for (const p of visiblePlayers) p.showDamageNumbers(ctx);
+
     for (const p of visiblePlayers) p.showChat(ctx, currentPlayer);
   }
 
