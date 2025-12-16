@@ -1,12 +1,13 @@
 import { packetTypes } from "./types";
 import { packetManager } from "./packet_manager";
 import log from "../modules/logger";
-import player from "../systems/player";
+import player from "../systems/player.ts";
 import permissions from "../systems/permissions";
 import inventory from "../systems/inventory";
 import playerCache from "../services/playermanager.ts";
 import assetCache from "../services/assetCache";
 import { reloadMap } from "../modules/assetloader";
+import { clearMapCache } from "../systems/player.ts";
 import language from "../systems/language";
 import quests from "../systems/quests";
 import generate from "../modules/sprites";
@@ -22,10 +23,38 @@ import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 // Load settings
 import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
+import { saveMapChunks } from "../modules/assetloader";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 
 let restartScheduled: boolean;
 let restartTimers: ReturnType<typeof setTimeout>[];
+
+// Queue for processing AUTH packets sequentially
+const authQueue: Array<() => Promise<void>> = [];
+let isProcessingAuth = false;
+
+// Track tokens currently being authenticated to prevent duplicate logins
+const tokensInProgress = new Set<string>();
+
+async function processAuthQueue() {
+  if (isProcessingAuth) {
+    log.debug("AUTH queue processing already in progress, skipping");
+    return;
+  }
+
+  log.info(`Starting AUTH queue processing. Queue length: ${authQueue.length}`);
+  isProcessingAuth = true;
+  while (authQueue.length > 0) {
+    log.info(`Processing AUTH handler. Remaining in queue: ${authQueue.length}`);
+    const authHandler = authQueue.shift();
+    if (authHandler) {
+      await authHandler();
+      log.info(`AUTH handler completed. Remaining in queue: ${authQueue.length}`);
+    }
+  }
+  isProcessingAuth = false;
+  log.info("AUTH queue processing completed");
+}
 
 // Create sprites from the spritesheets
 const spritePromises = await Promise.all(
@@ -113,8 +142,33 @@ export default async function packetReceiver(
       case "AUTH": {
         const token = data?.toString();
 
-        // Split AUTH into multiple setImmediate chunks to avoid blocking MOVEXY packets
-        setImmediate(async () => {
+        if (!token) {
+          sendPacket(ws, packetManager.loginFailed());
+          ws.close(1008, "Invalid token");
+          break;
+        }
+
+        // Check if this token is already being authenticated
+        if (tokensInProgress.has(token)) {
+          log.warn(`Duplicate AUTH attempt for token: ${token.substring(0, 10)}... - rejecting`);
+          sendPacket(ws, packetManager.loginFailed());
+          ws.close(1008, "Authentication already in progress");
+          break;
+        }
+
+        // Mark token as in progress
+        tokensInProgress.add(token);
+
+        // Queue AUTH processing to ensure sequential execution
+        const authPromise = new Promise<void>((authResolve) => {
+          const wasEmpty = authQueue.length === 0;
+          log.info(`AUTH packet received. Token: ${token?.substring(0, 10)}... Queue was empty: ${wasEmpty}, Queue length: ${authQueue.length}`);
+          authQueue.push(async () => {
+            log.info(`AUTH handler starting for token: ${token?.substring(0, 10)}...`);
+            try {
+              // Split AUTH into multiple setImmediate chunks to avoid blocking MOVEXY packets
+              await new Promise<void>((resolve) => {
+                setImmediate(async () => {
           try {
             // Chunk 1: Validate auth token and get username
             const auth = await player.setSessionId(token, ws.data.id);
@@ -253,6 +307,7 @@ export default async function packetReceiver(
           }
         );
 
+        log.info(`Adding ${username} to playerCache`);
         playerCache.add(ws.data.id, {
           username,
           animation: null,
@@ -321,9 +376,10 @@ export default async function packetReceiver(
         }
         sendPacket(ws, packetManager.loadPlayers(playerDataForLoad));
 
-        // Broadcast player spawn to all players - split into separate ticks
-        // Tick 1: Send spawn packets
-        setImmediate(() => {
+        // Broadcast player spawn to all players - must complete before AUTH finishes
+        // to ensure sequential logins see each other
+        await new Promise<void>((spawnResolve) => {
+          setImmediate(() => {
           const spawnDataForAll = {
             id: ws.data.id,
             userid: id,
@@ -344,8 +400,13 @@ export default async function packetReceiver(
             currency: playerCurrency,
           };
 
+          // Re-fetch players on map to include any that just logged in
+          const currentPlayersOnMap = filterPlayersByMap(spawnLocation.map);
+
+          log.info(`Broadcasting spawn for ${username}. Sending to ${currentPlayersOnMap.length} players: ${currentPlayersOnMap.map(p => p.username).join(', ')}`);
+
           // Send spawn packets to all players (O(N))
-          for (const p of playersOnMap) {
+          for (const p of currentPlayersOnMap) {
             if (!p || !p.ws) continue;
             if (p.ws === ws) {
               sendPacket(p.ws, packetManager.spawnPlayer(spawnDataForAll));
@@ -369,6 +430,8 @@ export default async function packetReceiver(
               sendPacket(p.ws, packetManager.spawnPlayer(spawnForOther));
             }
           }
+          spawnResolve();
+        });
         });
 
         // Tick 2: Send new player's animation to all players
@@ -519,6 +582,9 @@ export default async function packetReceiver(
               } catch (e) {
                 log.error(`AUTH packet processing error (chunk 4): ${e}`);
                 ws.close(1011, "Internal error during authentication");
+              } finally {
+                // Resolve AFTER all chunks complete, not after chunk 1
+                resolve();
               }
             });
           } catch (e) {
@@ -536,7 +602,29 @@ export default async function packetReceiver(
       ws.close(1011, "Internal error during authentication");
     }
   });
-  break;
+              });
+            } catch (error) {
+              log.error(`AUTH queue handler error: ${error}`);
+            } finally {
+              log.info(`AUTH handler completing for token: ${token?.substring(0, 10)}...`);
+              // Remove token from in-progress set
+              tokensInProgress.delete(token);
+              authResolve();
+            }
+          });
+
+          // Only start processing if queue was empty (i.e., no AUTH is currently processing)
+          if (wasEmpty) {
+            log.info("Queue was empty, starting processAuthQueue");
+            processAuthQueue();
+          } else {
+            log.info("Queue was not empty, handler will be processed by existing loop");
+          }
+        });
+
+        // Wait for this AUTH to complete
+        await authPromise;
+        break;
       }
       // TODO:Move this to the logout packet
       case "LOGOUT": {
@@ -1073,11 +1161,29 @@ export default async function packetReceiver(
         // Generate a number for the pitch of the audio
         const pitch = Math.random() * 0.1 + 0.95;
 
-        // Random whole number between 10 and 25
-        const damage = Math.floor(Math.random() * (25 - 10 + 1) + 10);
+        // Calculate damage based on player level
+        // Base damage: 10-25 at level 1, scales with level
+        // Formula: (baseMin + level * 2) to (baseMax + level * 5)
+        const playerLevel = currentPlayer.stats.level || 1;
+        const minDamage = 10 + (playerLevel - 1) * 2;
+        const maxDamage = 25 + (playerLevel - 1) * 5;
+        const baseDamage = Math.floor(Math.random() * (maxDamage - minDamage + 1) + minDamage);
+
+        // Calculate crit
+        const critChance = currentPlayer.stats.crit_chance || 10;
+        const critDamage = currentPlayer.stats.crit_damage || 10;
+        const critRoll = Math.random() * 100;
+        const isCrit = critRoll < critChance;
+
+        // Apply crit multiplier if crit lands
+        let finalDamage = baseDamage;
+        if (isCrit) {
+          finalDamage = Math.floor(baseDamage * (1 + critDamage / 100));
+        }
+
         const stamina = 10;
 
-        target.stats.health = Math.round(target.stats.health - damage);
+        target.stats.health = Math.round(target.stats.health - finalDamage);
         currentPlayer.stats.stamina -= stamina;
 
         // Ensure stamina doesn't go below 0
@@ -1122,13 +1228,13 @@ export default async function packetReceiver(
 
           // Give the attacker xp
           const xp = 10;
-          const updatedStats = (await player.increaseXp(
-            currentPlayer.username,
-            xp
-          )) as StatsData;
-          currentPlayer.stats.xp = updatedStats.xp;
-          currentPlayer.stats.level = updatedStats.level;
-          currentPlayer.stats.max_xp = updatedStats.max_xp;
+          await player.increaseXp(currentPlayer.username, xp);
+
+          // Get the full updated stats from database after level up
+          const fullStats = await player.getStats(currentPlayer.username) as StatsData;
+
+          // Update all stats in memory
+          currentPlayer.stats = fullStats;
 
           // Send XP update to attacker
           sendPacket(
@@ -1141,6 +1247,15 @@ export default async function packetReceiver(
             })
           );
 
+          // Send full stats update to sync HP/stamina changes
+          sendPacket(
+            ws,
+            packetManager.updateStats({
+              target: currentPlayer.id,
+              stats: currentPlayer.stats,
+            })
+          );
+
           playersInMap.forEach((player) => {
             sendPacket(
               player.ws,
@@ -1150,6 +1265,7 @@ export default async function packetReceiver(
               })
             );
 
+            // Send REVIVE packet (this updates stats without showing damage numbers)
             sendPacket(
               player.ws,
               packetManager.revive({
@@ -1168,6 +1284,7 @@ export default async function packetReceiver(
                 id: ws.data.id,
                 target: target.id,
                 stats: target.stats,
+                isCrit: isCrit,
               })
             );
 
@@ -1211,6 +1328,90 @@ export default async function packetReceiver(
         playersInMap.forEach((player) => {
           sendPacket(player.ws, packetManager.stopTyping(stopTypingData));
         });
+        break;
+      }
+      case "SAVE_MAP": {
+        if (!currentPlayer) return;
+
+        // Check permissions
+        const userPermissions = await permissions.get(currentPlayer.username) as string;
+        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
+        const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
+
+        if (!hasPermission) {
+          sendPacket(ws, packetManager.notify({
+            message: 'You do not have permission to save map changes.'
+          }));
+          return;
+        }
+
+        const saveData = data as unknown as { mapName: string, chunks: any[] };
+
+        // Process map save
+        try {
+          log.info(`Map save requested by ${currentPlayer.username} for map: ${saveData.mapName}, ${saveData.chunks.length} chunks modified`);
+
+          // Find the map in the cache
+          const mapIndex = (maps as any[]).findIndex((m: any) => m.name === saveData.mapName);
+
+          if (mapIndex === -1) {
+            throw new Error(`Map ${saveData.mapName} not found`);
+          }
+
+          // Update each chunk in the map data (in-memory cache)
+          saveData.chunks.forEach((chunkData: any) => {
+            const chunkKey = `${chunkData.chunkX}-${chunkData.chunkY}`;
+
+            // Update the map's chunks
+            if (!maps[mapIndex].chunks) {
+              maps[mapIndex].chunks = {};
+            }
+
+            maps[mapIndex].chunks[chunkKey] = {
+              width: chunkData.width,
+              height: chunkData.height,
+              layers: chunkData.layers
+            };
+          });
+
+          // Update the asset cache
+          assetCache.add("maps", maps);
+
+          // Write changes to disk for persistence (this also reprocesses collision/no-pvp maps)
+          await saveMapChunks(saveData.mapName, saveData.chunks);
+
+          // Clear the map cache to force reload of collision data
+          clearMapCache(saveData.mapName);
+
+          // Reload the map to get updated collision data
+          const reloadedMap = await reloadMap(saveData.mapName);
+          if (reloadedMap) {
+            maps[mapIndex].compressed = reloadedMap.compressed;
+            maps[mapIndex].data = reloadedMap.data;
+            assetCache.add("maps", maps);
+            log.info(`Reloaded collision data for map: ${saveData.mapName}`);
+          }
+
+          sendPacket(ws, packetManager.notify({
+            message: `Map saved successfully! ${saveData.chunks.length} chunks updated.`
+          }));
+
+          // Broadcast chunk updates to all players on this map
+          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+          const chunkCoords = saveData.chunks.map((chunk: any) => ({
+            chunkX: chunk.chunkX,
+            chunkY: chunk.chunkY
+          }));
+
+          playersInMap.forEach((player) => {
+            sendPacket(player.ws, packetManager.updateChunks(chunkCoords));
+          });
+        } catch (error: any) {
+          log.error(`Error saving map: ${error.message}`);
+          sendPacket(ws, packetManager.notify({
+            message: 'Error saving map changes.'
+          }));
+        }
         break;
       }
       case "COMMAND": {
@@ -1882,6 +2083,26 @@ export default async function packetReceiver(
                 Bun.spawn(["bun", "transpile-production"]);
               }
             }, 100);
+            break;
+          }
+          // Toggle tile editor
+          case "TE":
+          case "TILEEDITOR": {
+            // server.admin or server.*
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "server.admin" || p === "server.*"
+              )
+            ) {
+              const notifyData = {
+                message: "You don't have permission to use this command",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            // Send command to toggle editor
+            sendPacket(ws, packetManager.toggleTileEditor());
             break;
           }
           // Restart the server

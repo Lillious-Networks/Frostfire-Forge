@@ -264,6 +264,8 @@ effectsSlider.addEventListener("input", () => {
 // Capture click and get coordinates from canvas
 document.addEventListener("contextmenu", (event) => {
   if (!getIsLoaded()) return;
+  // Don't process if tile editor is active
+  if ((window as any).tileEditor?.isActive) return;
   if (getContextMenuKeyTriggered()) {
     event.preventDefault();
     setContextMenuKeyTriggered(false);
@@ -322,6 +324,8 @@ document.addEventListener("contextmenu", (event) => {
 document.addEventListener("click", (event) => {
   // Check if we clicked on a player
   if (!getIsLoaded()) return;
+  // Don't process if tile editor is active
+  if ((window as any).tileEditor?.isActive) return;
   if ((event.target as HTMLElement)?.classList.contains("ui")) return;
   // If we don't click on the context menu, remove it
   const contextMenu = document.getElementById("context-menu");

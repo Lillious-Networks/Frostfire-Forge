@@ -331,13 +331,13 @@ listener.on("onServerTick", async () => {
     let updated = false;
 
     if (stats.stamina < stats.max_stamina) {
-      stats.stamina += Math.floor(stats.max_stamina * 0.01);
+      stats.stamina += Math.max(1, Math.floor(stats.max_stamina * 0.05));
       if (stats.stamina > stats.max_stamina) stats.stamina = stats.max_stamina;
       updated = true;
     }
 
     if (!playerData.pvp && stats.health < stats.max_health) {
-      stats.health += Math.floor(stats.max_health * 0.01);
+      stats.health += Math.max(1, Math.floor(stats.max_health * 0.01));
       if (stats.health > stats.max_health) stats.health = stats.max_health;
       updated = true;
     }

@@ -139,6 +139,30 @@ const routes = {
         return new Response(JSON.stringify({ message: "Map not found" }), { status: 404 });
       }
 
+      // Check if there's a saved chunk in memory first
+      const chunkKey = `${chunkX}-${chunkY}`;
+      if (map.chunks && map.chunks[chunkKey]) {
+        // Return the saved chunk directly
+        const savedChunk = map.chunks[chunkKey];
+        const response = {
+          chunkX,
+          chunkY,
+          startX: chunkX * chunkSize,
+          startY: chunkY * chunkSize,
+          width: savedChunk.width,
+          height: savedChunk.height,
+          tilewidth: map.data.tilewidth,
+          tileheight: map.data.tileheight,
+          layers: savedChunk.layers,
+        };
+
+        return new Response(JSON.stringify(response), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      // Otherwise, extract from original map data
       const mapData = map.data;
       const startX = chunkX * chunkSize;
       const startY = chunkY * chunkSize;
@@ -152,7 +176,14 @@ const routes = {
 
       // Extract chunk data for each layer
       const chunkLayers = mapData.layers
-        .filter((layer: any) => layer.type === "tilelayer" && layer.visible)
+        .filter((layer: any) => {
+          // Include visible layers and collision/no-pvp layers for debug purposes
+          if (layer.type !== "tilelayer") return false;
+          if (layer.visible) return true;
+          // Include invisible collision and no-pvp layers
+          const layerName = layer.name ? layer.name.toLowerCase() : '';
+          return layerName.includes('collision') || layerName.includes('nopvp') || layerName.includes('no-pvp');
+        })
         .map((layer: any, index: number) => {
           const chunkData: number[] = [];
           for (let y = startY; y < endY; y++) {

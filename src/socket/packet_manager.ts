@@ -332,5 +332,25 @@ export const packetManager = {
     return [
       packet.encode(JSON.stringify({ type: "COLLISION_DEBUG", data })),
     ] as any[];
+  },
+  toggleTileEditor: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "TOGGLE_TILE_EDITOR", data: null })),
+    ] as any[];
+  },
+  reloadChunks: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "RELOAD_CHUNKS", data: null })),
+    ] as any[];
+  },
+  updateChunks: (chunks: Array<{chunkX: number, chunkY: number}>) => {
+    return [
+      packet.encode(JSON.stringify({ type: "UPDATE_CHUNKS", data: chunks })),
+    ] as any[];
+  },
+  custom: (data: any) => {
+    return [
+      packet.encode(JSON.stringify(data)),
+    ] as any[];
   }
 };

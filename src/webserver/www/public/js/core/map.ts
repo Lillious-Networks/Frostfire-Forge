@@ -288,6 +288,15 @@ function saveChunkToCache(mapName: string, chunkX: number, chunkY: number, chunk
   }
 }
 
+function clearChunkFromCache(mapName: string, chunkX: number, chunkY: number): void {
+  try {
+    const cacheKey = getCacheKey(mapName, chunkX, chunkY);
+    localStorage.removeItem(cacheKey);
+  } catch (error) {
+    console.warn('Failed to clear chunk from cache:', error);
+  }
+}
+
 function loadChunkFromCache(mapName: string, chunkX: number, chunkY: number): ChunkData | null {
   try {
     const cacheKey = getCacheKey(mapName, chunkX, chunkY);
@@ -422,6 +431,12 @@ async function renderChunkToCanvas(chunkData: ChunkData): Promise<{lowerCanvas: 
 
   // Draw each layer to appropriate canvas
   for (const layer of sortedLayers) {
+    // Skip collision and no-pvp layers - they're only for debug visualization
+    const layerName = layer.name ? layer.name.toLowerCase() : '';
+    if (layerName.includes('collision') || layerName.includes('nopvp') || layerName.includes('no-pvp')) {
+      continue;
+    }
+
     const ctx = layer.zIndex < PLAYER_Z_INDEX ? lowerCtx : upperCtx;
 
     for (let y = 0; y < chunkData.height; y++) {
@@ -488,4 +503,4 @@ function getChunkUpperCanvas(chunkX: number, chunkY: number): HTMLCanvasElement 
   return chunk?.upperCanvas || null;
 }
 
-export { clearMapCache };
+export { clearMapCache, renderChunkToCanvas, clearChunkFromCache };

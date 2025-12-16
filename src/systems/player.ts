@@ -110,8 +110,8 @@ const player = {
 
     // Create stats
     await query(
-      "INSERT INTO stats (username, health, max_health, stamina, max_stamina, xp, max_xp, level) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      [username, 100, 100, 100, 100, 0, 100, 1]
+      "INSERT INTO stats (username, health, max_health, stamina, max_stamina, xp, max_xp, level, crit_chance, crit_damage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [username, 100, 100, 100, 100, 0, 100, 1, 10, 10]
     );
     // Create client config
     await query(
@@ -213,6 +213,67 @@ const player = {
       log.debug(`User ${username} is banned`);
       await player.logout(sessionId);
       return false;
+    }
+
+    // Check if there's an existing session and kick it
+    const existingSessionResult = await query(
+      "SELECT session_id FROM accounts WHERE username = ?",
+      [username]
+    ) as any[];
+
+    const existingSessionId = existingSessionResult[0]?.session_id;
+    if (existingSessionId && existingSessionId !== sessionId) {
+      // Close the existing WebSocket connection
+      log.info(`Kicking existing session for ${username}`);
+
+      // Import playerCache to get the WebSocket
+      const playerCache = (await import("../services/playermanager.ts")).default;
+      const existingPlayer = playerCache.get(existingSessionId);
+
+      if (existingPlayer && existingPlayer.ws) {
+        // Send a notification and close the connection
+        const packetManager = (await import("./packet_manager.ts")).packetManager;
+        const sendPacket = (ws: any, packet: any) => {
+          if (ws.readyState === 1) ws.send(packet);
+        };
+
+        // Notify the existing player they're being kicked
+        sendPacket(existingPlayer.ws, packetManager.notify({
+          message: "You have been logged in from another location."
+        }));
+
+        // Notify all other players to remove this player (prevent ghost)
+        const map = existingPlayer.location?.map;
+        if (map) {
+          const playersInMap = Array.from(playerCache.list()).filter(
+            (p) => p.location?.map === map && p.id !== existingPlayer.id
+          );
+
+          playersInMap.forEach((p) => {
+            sendPacket(p.ws, packetManager.disconnectPlayer({
+              id: existingPlayer.id,
+              username: existingPlayer.username
+            }));
+          });
+        }
+
+        // Close and cleanup after a delay to ensure all packets are sent
+        setTimeout(() => {
+          // Remove from playerCache
+          playerCache.remove(existingSessionId);
+
+          // Close the WebSocket
+          if (existingPlayer.ws && existingPlayer.ws.readyState === 1) {
+            existingPlayer.ws.close(1000, "Logged in from another location");
+          }
+        }, 500);
+      }
+
+      // Logout the session from database
+      await player.logout(existingSessionId);
+
+      // Wait a bit longer to ensure cleanup is complete before new session starts
+      await new Promise(resolve => setTimeout(resolve, 600));
     }
 
     await query(
@@ -464,7 +525,7 @@ const player = {
     if (!username) return;
     username = username.toLowerCase();
     const response = (await query(
-      "SELECT max_health, health, max_stamina, stamina, xp, max_xp, level FROM stats WHERE username = ?",
+      "SELECT max_health, health, max_stamina, stamina, xp, max_xp, level, crit_chance, crit_damage FROM stats WHERE username = ?",
       [username]
     )) as StatsData[];
     if (!response || response.length === 0) return [];
@@ -476,6 +537,8 @@ const player = {
       level: response[0].level,
       xp: response[0].xp,
       max_xp: response[0].max_xp,
+      crit_chance: response[0].crit_chance,
+      crit_damage: response[0].crit_damage,
     };
   },
   setStats: async (username: string, stats: StatsData) => {
@@ -506,6 +569,7 @@ const player = {
     username = username.toLowerCase();
     // Get the current xp, level and max_xp
     const stats = (await player.getStats(username)) as StatsData;
+    let leveledUp = false;
     // Loop to handle multiple level-ups
     while (xp > 0) {
       const xpToLevel = stats.max_xp - stats.xp;
@@ -513,17 +577,28 @@ const player = {
         stats.level++;
         xp -= xpToLevel;
         stats.xp = 0;
+        leveledUp = true;
         // Update the max_xp required to level up dynamically
         stats.max_xp = player.getNewMaxXp(stats.level);
+        // Calculate new max health and stamina based on level
+        stats.max_health = player.getMaxHealthForLevel(stats.level);
+        stats.max_stamina = player.getMaxStaminaForLevel(stats.level);
+        // Restore health and stamina to full on level up
+        stats.health = stats.max_health;
+        stats.stamina = stats.max_stamina;
       } else {
         stats.xp += xp;
         xp = 0;
       }
     }
-    // Update the xp and level
+    // Update the xp, level, and stats in the database
     const response = await query(
-      "UPDATE stats SET xp = ?, max_xp = ?, level = ? WHERE username = ?",
-      [stats.xp, stats.max_xp, stats.level, username]
+      leveledUp
+        ? "UPDATE stats SET xp = ?, max_xp = ?, level = ?, max_health = ?, health = ?, max_stamina = ?, stamina = ? WHERE username = ?"
+        : "UPDATE stats SET xp = ?, max_xp = ?, level = ? WHERE username = ?",
+      leveledUp
+        ? [stats.xp, stats.max_xp, stats.level, stats.max_health, stats.health, stats.max_stamina, stats.stamina, username]
+        : [stats.xp, stats.max_xp, stats.level, username]
     );
     if (!response) return [];
     return {
@@ -534,6 +609,22 @@ const player = {
   },
   getNewMaxXp: (level: number) => {
     return Math.floor(100 * Math.pow(1.1, level - 1));
+  },
+  getMaxHealthForLevel: (level: number) => {
+    // Formula: base_hp + (level^1.5 * 5)
+    // At level 1: 100 + (1^1.5 * 5) = 105
+    // At level 5: 100 + (5^1.5 * 5) = 156
+    // At level 10: 100 + (10^1.5 * 5) = 258
+    const baseHealth = 100;
+    return Math.floor(baseHealth + Math.pow(level, 1.5) * 5);
+  },
+  getMaxStaminaForLevel: (level: number) => {
+    // Formula: base_mana + (level^1.5 * 3)
+    // At level 1: 100 + (1^1.5 * 3) = 103
+    // At level 5: 100 + (5^1.5 * 3) = 134
+    // At level 10: 100 + (10^1.5 * 3) = 195
+    const baseStamina = 100;
+    return Math.floor(baseStamina + Math.pow(level, 1.5) * 3);
   },
   increaseLevel: async (username: string) => {
     if (!username) return;
@@ -880,6 +971,8 @@ const player = {
         s.xp,
         s.max_xp,
         s.level,
+        s.crit_chance,
+        s.crit_damage,
         c.copper,
         c.silver,
         c.gold,
@@ -927,7 +1020,9 @@ const player = {
         stamina: data.stamina,
         xp: data.xp,
         max_xp: data.max_xp,
-        level: data.level
+        level: data.level,
+        crit_chance: data.crit_chance,
+        crit_damage: data.crit_damage
       },
       currency: {
         copper: data.copper || 0,
@@ -954,5 +1049,17 @@ const player = {
     };
   },
 };
+
+// Export function to clear map cache (used when maps are updated)
+export function clearMapCache(mapName?: string) {
+  if (mapName) {
+    const mapKey = mapName.replace(".json", "");
+    mapCache.delete(mapKey);
+    log.info(`Cleared map cache for: ${mapKey}`);
+  } else {
+    mapCache.clear();
+    log.info("Cleared all map caches");
+  }
+}
 
 export default player;

@@ -49,8 +49,14 @@ function sendRequest(data: any) {
 }
 
 let cachedPlayerId: string | null = null;
+let sessionActive: boolean = false;
 
 socket.onopen = () => {
+  // Clear all players on new connection to prevent stale data
+  cache.players.clear();
+  sessionActive = false;
+  cachedPlayerId = null;
+
   sendRequest({
     type: "PING",
     data: null,
@@ -97,6 +103,61 @@ socket.onmessage = async (event) => {
     case "CONSOLE_MESSAGE": {
       if (!data || !data.message) return;
       window.Notify(data.type, data.message);
+      break;
+    }
+    case "TOGGLE_TILE_EDITOR": {
+      // Import and toggle tile editor
+      import('./tileeditor.js').then((module) => {
+        module.default.toggle();
+      });
+      break;
+    }
+    case "RELOAD_CHUNKS": {
+      // Reload all visible chunks to reflect map changes
+      if (window.mapData && window.mapData.loadedChunks) {
+        const chunksToReload: Array<{x: number, y: number}> = [];
+        window.mapData.loadedChunks.forEach((chunk: any, key: string) => {
+          const [x, y] = key.split('-').map(Number);
+          chunksToReload.push({ x, y });
+        });
+
+        // Clear loaded chunks and reload them
+        window.mapData.loadedChunks.clear();
+
+        // Reload each chunk
+        chunksToReload.forEach(async (pos) => {
+          await window.mapData.requestChunk(pos.x, pos.y);
+        });
+
+        console.log('Reloaded all chunks after map changes');
+      }
+      break;
+    }
+    case "UPDATE_CHUNKS": {
+      // Clear and reload specific chunks that were modified
+      if (window.mapData && window.mapData.loadedChunks && data) {
+        const chunksToUpdate = data as Array<{chunkX: number, chunkY: number}>;
+
+        // Import clearChunkFromCache function
+        import("./map.js").then(({ clearChunkFromCache }) => {
+          chunksToUpdate.forEach((chunkCoord: {chunkX: number, chunkY: number}) => {
+            const chunkKey = `${chunkCoord.chunkX}-${chunkCoord.chunkY}`;
+
+            // Clear from localStorage cache
+            clearChunkFromCache(window.mapData.name, chunkCoord.chunkX, chunkCoord.chunkY);
+
+            // Remove the chunk from memory cache
+            if (window.mapData.loadedChunks.has(chunkKey)) {
+              window.mapData.loadedChunks.delete(chunkKey);
+
+              // Request the chunk again to reload it with updated data
+              window.mapData.requestChunk(chunkCoord.chunkX, chunkCoord.chunkY);
+            }
+          });
+
+          console.log(`Updated ${chunksToUpdate.length} chunks after map save`);
+        });
+      }
       break;
     }
     case "COLLISION_DEBUG": {
@@ -230,8 +291,27 @@ socket.onmessage = async (event) => {
       break;
     } 
     case "SPAWN_PLAYER": {
+      // Reject spawn packets if session is not yet authenticated
+      if (!sessionActive || !cachedPlayerId) {
+        console.log(`[CLIENT] Rejecting SPAWN_PLAYER for ${data.username} - session not active yet`);
+        break;
+      }
+
       await isLoaded();
+
+      console.log(`[CLIENT] Received SPAWN_PLAYER for: ${data.username} (ID: ${data.id})`);
+
+      // Remove any existing player with the same username/userid (handles reconnects/refreshes)
+      const existingByUsername = Array.from(cache.players).find(
+        (p) => p.username === data.username && p.userid === data.userid
+      );
+      if (existingByUsername) {
+        console.log(`[CLIENT] Removing existing player with same username: ${existingByUsername.username} (old ID: ${existingByUsername.id}, new ID: ${data.id})`);
+        cache.players.delete(existingByUsername);
+      }
+
       createPlayer(data);
+      console.log(`[CLIENT] Player created. Total players in cache: ${cache.players.size}`);
       break;
     }
     case "RECONNECT": {
@@ -239,24 +319,32 @@ socket.onmessage = async (event) => {
       break;
     }
     case "LOAD_PLAYERS": {
+      // Reject load players if session is not yet authenticated
+      if (!sessionActive || !cachedPlayerId) {
+        console.log(`[CLIENT] Rejecting LOAD_PLAYERS - session not active yet`);
+        break;
+      }
+
       await isLoaded();
       if (!data) return;
-      // Clear existing players that are not the current player
-      cache.players.forEach((player) => {
-        if (player.id !== cachedPlayerId) {
-          cache.players.delete(player);
-        }
-      });
 
+      console.log(`[CLIENT] Processing LOAD_PLAYERS. Players to load: ${data.length}`);
+
+      // Don't clear cache - just add/update players from LOAD_PLAYERS
+      // Players may have already been added from SPAWN_PLAYER broadcasts
       data.forEach((player: any) => {
         if (player.id != cachedPlayerId) {
-          // Check if the player is already created and remove it
-          cache.players.forEach((p) => {
-            if (p.id === player.id) {
-              cache.players.delete(p);
-            }
-          });
-          createPlayer(player);
+          // Check if player already exists by username/userid (not just ID)
+          const existingByUsername = Array.from(cache.players).find(
+            (p) => p.username === player.username && p.userid === player.userid
+          );
+
+          if (existingByUsername) {
+            console.log(`[CLIENT] Player ${player.username} already exists (ID: ${existingByUsername.id}), skipping`);
+          } else {
+            createPlayer(player);
+            console.log(`[CLIENT] Loaded player from LOAD_PLAYERS: ${player.username}`);
+          }
         }
       });
       break;
@@ -333,6 +421,11 @@ socket.onmessage = async (event) => {
         ];
         sessionStorage.setItem("connectionId", connectionId); // Store client's socket ID
         cachedPlayerId = connectionId;
+        sessionActive = true; // Mark session as active
+
+        // Clear any stale players from previous session
+        cache.players.clear();
+
         const sessionToken = getCookie("token");
         if (!sessionToken) {
           window.location.href = "/game";
@@ -549,11 +642,35 @@ socket.onmessage = async (event) => {
       break;
     }
     case "UPDATESTATS": {
-      const { target, stats } = JSON.parse(packet.decode(event.data))["data"];
+      const { target, stats, isCrit } = JSON.parse(packet.decode(event.data))["data"];
       const t = Array.from(cache.players).find(
         (player) => player.id === target
       );
       if (t) {
+        // Track health change for damage numbers
+        const oldHealth = t.stats.health;
+        const newHealth = stats.health;
+        const healthDiff = newHealth - oldHealth;
+
+        // Only show damage number if health actually changed and player is alive
+        // Don't show damage/healing numbers when dead (health <= 0)
+        // Also don't show if it's a revive (going to full health from low/zero)
+        const isRevive = oldHealth <= 0 || (newHealth === stats.max_health && healthDiff > stats.max_health * 0.5);
+        if (healthDiff !== 0 && newHealth > 0 && oldHealth > 0 && !isRevive) {
+          // Add slight random offset so multiple damage numbers don't overlap
+          const randomOffsetX = (Math.random() - 0.5) * 20;
+          const randomOffsetY = (Math.random() - 0.5) * 10;
+
+          t.damageNumbers.push({
+            value: Math.abs(healthDiff),
+            x: t.position.x + randomOffsetX,
+            y: t.position.y - 30 + randomOffsetY, // Start above player's head
+            startTime: performance.now(),
+            isHealing: healthDiff > 0,
+            isCrit: isCrit || false,
+          });
+        }
+
         t.stats = stats;
       }
       break;

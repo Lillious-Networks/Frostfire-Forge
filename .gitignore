@@ -43,3 +43,5 @@ src/assets/spritesheets/*
 !src/assets/spritesheets/frostfire-player.png
 
 .vscode/
+
+.claude/

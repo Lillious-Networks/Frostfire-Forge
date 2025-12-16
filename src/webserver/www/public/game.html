@@ -58,6 +58,26 @@
           <label for="collision-debug-checkbox" class="ui">Collision Debug:</label>
           <input type="checkbox" id="collision-debug-checkbox" class="ui">
         </div>
+        <div id="chunk-outline-debug-toggle" class="ui">
+          <label for="chunk-outline-debug-checkbox" class="ui">Chunk Outlines:</label>
+          <input type="checkbox" id="chunk-outline-debug-checkbox" class="ui">
+        </div>
+        <div id="collision-tiles-debug-toggle" class="ui">
+          <label for="collision-tiles-debug-checkbox" class="ui">Collision Tiles:</label>
+          <input type="checkbox" id="collision-tiles-debug-checkbox" class="ui">
+        </div>
+        <div id="nopvp-debug-toggle" class="ui">
+          <label for="nopvp-debug-checkbox" class="ui">No-PVP Zones:</label>
+          <input type="checkbox" id="nopvp-debug-checkbox" class="ui">
+        </div>
+        <div id="wireframe-debug-toggle" class="ui">
+          <label for="wireframe-debug-checkbox" class="ui">Wireframe Mode:</label>
+          <input type="checkbox" id="wireframe-debug-checkbox" class="ui">
+        </div>
+        <div id="show-grid-toggle" class="ui">
+          <label for="show-grid-checkbox" class="ui">Show Grid:</label>
+          <input type="checkbox" id="show-grid-checkbox" class="ui">
+        </div>
       </div>
       <!-- 
       <div id="map-container" class="ui">
@@ -162,6 +182,44 @@
         </div>
       </div>
       <div id="party-container" class="ui"></div>
+      <!-- Tile Editor Floating Panels -->
+      <div id="tile-editor-container" class="ui" style="display: none;">
+        <!-- Toolbar Panel (no header, entire panel is draggable) -->
+        <div id="tile-editor-toolbar-panel" class="ui te-floating-panel te-toolbar-draggable">
+          <div id="tile-editor-toolbar" class="ui">
+            <button type="button" id="te-tool-paint" class="ui te-tool active" title="Paint (P)">🖌️</button>
+            <button type="button" id="te-tool-erase" class="ui te-tool" title="Erase (E)">🗑️</button>
+            <button type="button" id="te-undo" class="ui" title="Undo (Ctrl+Z)">↶</button>
+            <button type="button" id="te-redo" class="ui" title="Redo (Ctrl+Y)">↷</button>
+            <button type="button" id="te-copy" class="ui te-tool" title="Copy (C)">📋</button>
+            <button type="button" id="te-paste" class="ui te-tool" title="Paste (V)">📄</button>
+            <button type="button" id="te-save" class="ui" title="Save">💾</button>
+            <button type="button" id="te-reset-view" class="ui" title="Reset Panel Positions">🔄</button>
+            <button type="button" id="te-toggle-opacity" class="ui" title="Toggle Layer Opacity">👁️</button>
+            <button type="button" id="te-toggle-grid" class="ui" title="Toggle Grid">⬛</button>
+          </div>
+        </div>
+
+        <!-- Layers Panel (no header, entire panel is draggable) -->
+        <div id="tile-editor-layers-panel" class="ui te-floating-panel te-layers-draggable">
+          <div id="tile-editor-layers-list" class="ui"></div>
+        </div>
+
+        <!-- Tileset Panel -->
+        <div id="tile-editor-tileset-panel" class="ui te-floating-panel">
+          <div class="te-panel-header ui">
+            <span class="te-panel-title ui">Tile Editor</span>
+            <button type="button" class="te-panel-close ui" data-panel="tileset">×</button>
+          </div>
+          <div class="te-panel-content ui">
+            <div id="tile-editor-tileset-tabs" class="ui"></div>
+            <div id="tile-editor-tileset-container" class="ui">
+              <canvas id="tile-editor-tileset-canvas" class="ui"></canvas>
+            </div>
+          </div>
+          <div class="te-resize-handle ui"></div>
+        </div>
+      </div>
     </div>
     <canvas id="game"></canvas>
     <canvas id="weather"></canvas>

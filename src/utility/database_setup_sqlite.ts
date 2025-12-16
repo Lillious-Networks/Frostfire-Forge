@@ -196,7 +196,9 @@ const createStatsTable = async () => {
         max_stamina INTEGER NOT NULL DEFAULT 100,
         xp INTEGER NOT NULL DEFAULT 0,
         max_xp INTEGER NOT NULL DEFAULT 0,
-        level INTEGER NOT NULL DEFAULT 1
+        level INTEGER NOT NULL DEFAULT 1,
+        crit_chance INTEGER NOT NULL DEFAULT 10,
+        crit_damage INTEGER NOT NULL DEFAULT 10
     );
   `;
   await query(sql);

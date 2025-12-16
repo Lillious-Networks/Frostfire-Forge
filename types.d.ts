@@ -150,6 +150,8 @@ declare interface StatsData {
   level: number;
   xp: number;
   max_xp: number;
+  crit_damage: number;
+  crit_chance: number;
 }
 
 // Define config data

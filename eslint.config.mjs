@@ -9,6 +9,7 @@ export default defineConfig(
             "@typescript-eslint/no-explicit-any": "off",
             "@typescript-eslint/no-unused-expressions": "off",
             "no-useless-escape": "off",
+            "@typescript-eslint/no-unused-vars": "off"
         },
         files: ["**/*.ts"],
         extends: [
