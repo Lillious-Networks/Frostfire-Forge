@@ -88,7 +88,7 @@ const Server = Bun.serve<Packet, any>({
   websocket: {
     perMessageDeflate: false,
     maxPayloadLength: 1024 * 1024 * settings?.websocket?.maxPayloadMB || 1024 * 1024,
-    idleTimeout: settings?.websocket?.idleTimeout || 5,
+    idleTimeout: settings?.websocket?.idleTimeout || 120,
     async open(ws: any) {
       ws.binaryType = "arraybuffer";
 

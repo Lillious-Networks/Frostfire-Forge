@@ -118,7 +118,7 @@ const settings = {
   "websocket": {
     "maxPayloadMB": 50,
     "benchmarkenabled": false,
-    "idleTimeout": 5
+    "idleTimeout": 120
   },
   "world": "overworld",
   "default_map": "overworld",
