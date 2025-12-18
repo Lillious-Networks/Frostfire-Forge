@@ -11,7 +11,7 @@ jobs:
     runs-on: windows-latest
     name: Generate Release Number
     outputs:
-        release-number: ${{ steps.set-build-number.outputs.BUILD_NUMBER }}
+        release-number: ${{ steps.set-build-number.outputs.RELEASE_NUMBER }}
     steps:
 
       - name: Checkout

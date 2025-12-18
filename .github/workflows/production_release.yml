@@ -1,7 +1,7 @@
 name: Production > Release
 
 permissions:
-  contents: read
+  contents: write
 
 on:
   workflow_dispatch:
