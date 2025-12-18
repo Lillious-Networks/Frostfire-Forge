@@ -147,6 +147,18 @@ jobs:
             export REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"
             docker compose -f docker-compose.prod.yml up -d
 
+    verify-docker-container:
+      name: Verify Docker Container is Running
+      runs-on: self-hosted
+      environment: production
+      needs: [start-docker-container]
+      steps:
+        - name: Output Docker Logs
+          run: |
+            echo "Waiting 15 seconds for services to start..."
+            sleep 15
+            docker compose -f docker-compose.prod.yml logs --tail=50
+
     cleanup:
       name: Cleanup Old Docker Images
       runs-on: self-hosted
