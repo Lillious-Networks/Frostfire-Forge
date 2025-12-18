@@ -6,10 +6,6 @@ on:
         description: "The release number"
         value: ${{ jobs.generate-build-number.outputs.RELEASE_NUMBER }}
 
-permissions:
-    id-token: write
-    contents: write
-
 jobs:
   generate-build-number:
     runs-on: windows-latest
