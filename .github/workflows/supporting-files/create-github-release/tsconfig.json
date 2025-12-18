@@ -24,9 +24,9 @@
     // Some stricter flags (disabled by default)
     "noUnusedLocals": false,
     "noUnusedParameters": false,
-    "noPropertyAccessFromIndexSignature": false
-  },
+    "noPropertyAccessFromIndexSignature": false,
 
     // Explicitly specify types to include
     "types": ["bun"]
+  },
 }
