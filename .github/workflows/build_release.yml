@@ -22,7 +22,7 @@ concurrency:
 jobs:
   build:
     name: Build and Release v${{ github.run_number }}-production
-    runs-on: self-hosted
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     environment: production
     steps:
       - name: Checkout Repository
@@ -89,7 +89,7 @@ jobs:
 
   stop-docker-containers:
     name: Stop Existing Docker Containers
-    runs-on: self-hosted
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     environment: production
     needs: [build]
     steps:
@@ -99,7 +99,7 @@ jobs:
 
   start-docker-container:
     name: Start Docker Container
-    runs-on: self-hosted
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     environment: production
     needs: [stop-docker-containers]
     steps:
@@ -110,7 +110,7 @@ jobs:
 
   cleanup:
     name: Cleanup Old Docker Images
-    runs-on: self-hosted
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     environment: production
     needs: [start-docker-container]
     steps:
