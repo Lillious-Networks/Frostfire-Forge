@@ -4,14 +4,14 @@ on:
     outputs:
       release-number:
         description: "The release number"
-        value: ${{ jobs.generate-build-number.outputs.RELEASE_NUMBER }}
+        value: ${{ jobs.generate-build-number.outputs.release-number }}
 
 jobs:
   generate-build-number:
     runs-on: windows-latest
     name: Generate Release Number
     outputs:
-        RELEASE_NUMBER: ${{ steps.set-build-number.outputs.BUILD_NUMBER }}
+        release-number: ${{ steps.set-build-number.outputs.BUILD_NUMBER }}
     steps:
 
       - name: Checkout
