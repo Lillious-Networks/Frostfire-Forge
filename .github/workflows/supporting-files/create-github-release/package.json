@@ -1,0 +1,13 @@
+{
+  "name": "create-github-release",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/eslint__js": "^9.14.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}

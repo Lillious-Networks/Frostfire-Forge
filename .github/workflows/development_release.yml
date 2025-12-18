@@ -1,4 +1,4 @@
-name: Build and Release (Development)
+name: Development > Release
 
 permissions:
   contents: read
@@ -9,19 +9,18 @@ on:
       - 'src/**'
       - 'docker-compose.dev.yml'
       - 'Dockerfile.dev'
-      - '.github/workflows/**'
     branches:
       - development
 
   workflow_dispatch:
 
 concurrency:
-  group: 'build-release-development'
+  group: 'development-release'
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Build and Release - v${{ github.run_number }}-development
+    name: Build v${{ github.run_number }}
     runs-on: self-hosted
     environment: development
     steps:
