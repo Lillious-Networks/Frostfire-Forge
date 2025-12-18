@@ -21,4 +21,4 @@ jobs:
 
             - name: Create GitHub Pre-Release
               run: |
-                bun run ./supporting-files/create-github-release/index.ts --repository ${{ github.repository }} --github-token ${{ secrets.GITHUB_TOKEN }} --release-number ${{ inputs.release-number }}
+                bun run .github/workflows/supporting-files/create-github-release/index.ts --repository ${{ github.repository }} --github-token ${{ secrets.GITHUB_TOKEN }} --release-number ${{ inputs.release-number }}

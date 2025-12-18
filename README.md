@@ -10,11 +10,12 @@
 
 <p align="center">
 Frostfire Forge is an upcoming 2D MMO engine platform designed to empower developers and hobbyists alike to bring their dream games and worlds to life. Built with cutting-edge technology, it offers a highly secure and optimized foundation for MMO development. With a focus on simplicity and performance, Frostfire Forge makes creating your own multiplayer universe easier than ever.
-</p>
-
 <p align="center">
-  <img src="https://img.shields.io/github/actions/workflow/status/Lillious-Networks/Frostfire-Forge/build_release.yml" alt="Build Status">
-  <img src="https://img.shields.io/badge/status-WIP-yellow" alt="Status">
+  <img src="https://img.shields.io/github/actions/workflow/status/Lillious-Networks/Frostfire-Forge/production_release.yml?branch=main&label=Production&style=flat-square" alt="Production Build Status">
+  <img src="https://img.shields.io/github/actions/workflow/status/Lillious-Networks/Frostfire-Forge/development_release.yml?branch=development&label=Development&style=flat-square" alt="Development Build Status">
+  <img src="https://img.shields.io/badge/status-WIP-yellow?style=flat-square&label=Status" alt="Work in Progress">
+  <img src="https://img.shields.io/github/license/Lillious-Networks/Frostfire-Forge?style=flat-square&label=License" alt="License">
+  <img src="https://img.shields.io/github/stars/Lillious-Networks/Frostfire-Forge?style=flat-square&label=Stars" alt="GitHub Stars">
 </p>
 
 ---
