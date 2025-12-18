@@ -29,11 +29,23 @@ const github = new GitHubAPI({
     }
 });
 
-await github.releases.create({
-    tag_name: release_number,
-    body: `Automated release for ${release_number}`,
-    name: `Release ${release_number}`,
-    prerelease: false,
-    make_latest: true,
-    draft: false,
-});
+try {
+    const result = await github.releases.create({
+        tag_name: release_number,
+        body: `Automated release for ${release_number}`,
+        name: `Release ${release_number}`,
+        prerelease: false,
+        make_latest: true,
+        draft: false,
+    });
+
+    if (!result || result.status !== 201) {
+        console.error(`Failed to create release. Status: ${result?.status || 'unknown'}`);
+        process.exit(1);
+    }
+
+    console.log(`Successfully created release ${release_number}`);
+} catch (error) {
+    console.error('Error creating release:', error);
+    process.exit(1);
+}
