@@ -11,14 +11,17 @@ jobs:
     create-github-prerelease:
         name: Create GitHub Pre-Release
         runs-on: ubuntu-latest
+        permissions:
+            contents: write
         steps:
             - name: Checkout
               uses: actions/checkout@v4.1.7
               with:
-                    submodules: 'recursive'
+                submodules: 'recursive'
+                fetch-depth: 0
 
             - uses: oven-sh/setup-bun@v2
 
             - name: Create GitHub Pre-Release
               run: |
-                bun run ./supporting-files/create-github-release/index.ts --repository ${{ github.repository }} --github-token ${{ secrets.GITHUB_TOKEN }} --release-number ${{ inputs.release-number }}
+                bun run .github/workflows/supporting-files/create-github-release/index.ts --repository ${{ github.repository }} --github-token ${{ secrets.GITHUB_TOKEN }} --release-number ${{ inputs.release-number }}

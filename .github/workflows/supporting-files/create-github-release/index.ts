@@ -18,22 +18,35 @@ if (repository_index === -1) {
     throw new Error('Repository not provided');
 }
 const repository = args[repository_index + 1];
+if (!repository) {
+    throw new Error('Repository is empty');
+}
+
+const repository_name = repository?.split('/')[1] || repository;
 
 const github = new GitHubAPI({
     version: "2022-11-28",
     token: github_token,
     url: "https://api.github.com",
     repository: {
-        name: repository,
+        name: repository_name,
         owner: 'Lillious-Networks',
     }
 });
 
-await github.releases.create({
+const result = await github.releases.create({
     tag_name: release_number,
-    body: `Automated release for ${release_number}`,
-    name: `Release ${release_number}`,
+    body: `Automated release.`,
+    name: `🧊🔥 Frostfire Forge 🔥🧊 - ${release_number}`,
     prerelease: false,
-    make_latest: true,
+    make_latest: 'true',
     draft: false,
 });
+
+if ((result as any).error) {
+    console.error(`Failed to create release for tag ${release_number}`);
+    console.error(`Error: ${JSON.stringify((result as any).error)}`);
+    process.exit(1);
+}
+
+console.log(`Successfully created release ${release_number}`);

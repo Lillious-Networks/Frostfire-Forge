@@ -1,7 +1,7 @@
 name: Production > Release
 
 permissions:
-  contents: read
+  contents: write
 
 on:
   workflow_dispatch:
@@ -91,8 +91,6 @@ jobs:
             export REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"
             docker compose -f docker-compose.prod.yml build
 
-
-
     create_release_tag:
         name: Create Release Tag
         runs-on: ubuntu-latest
@@ -148,6 +146,18 @@ jobs:
           run: |
             export REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"
             docker compose -f docker-compose.prod.yml up -d
+
+    verify-docker-container:
+      name: Verify Docker Container is Running
+      runs-on: self-hosted
+      environment: production
+      needs: [start-docker-container]
+      steps:
+        - name: Output Docker Logs
+          run: |
+            echo "Waiting 15 seconds for services to start..."
+            sleep 15
+            docker compose -f docker-compose.prod.yml logs --tail=50
 
     cleanup:
       name: Cleanup Old Docker Images
