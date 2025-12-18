@@ -18,7 +18,11 @@ if (repository_index === -1) {
     throw new Error('Repository not provided');
 }
 const repository = args[repository_index + 1];
-const repository_name = repository.split('/')[1] || repository;
+if (!repository) {
+    throw new Error('Repository is empty');
+}
+
+const repository_name = repository?.split('/')[1] || repository;
 
 const github = new GitHubAPI({
     version: "2022-11-28",
