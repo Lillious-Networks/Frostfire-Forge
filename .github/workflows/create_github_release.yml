@@ -11,11 +11,14 @@ jobs:
     create-github-prerelease:
         name: Create GitHub Pre-Release
         runs-on: ubuntu-latest
+        permissions:
+            contents: write
         steps:
             - name: Checkout
               uses: actions/checkout@v4.1.7
               with:
                 submodules: 'recursive'
+                fetch-depth: 0
 
             - uses: oven-sh/setup-bun@v2
 
