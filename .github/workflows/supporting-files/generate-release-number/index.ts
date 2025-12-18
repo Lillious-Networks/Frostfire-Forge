@@ -90,11 +90,10 @@ async function getLatestTag (tags: any) {
   const tagNames = tags.map((tag: any) => tag.name);
   const sortedTags = [] as any[];
   tagNames.forEach(
-  (tag: string) => {
-    const version = tag.split(`-`)[1] as any;
-    const major = parseInt(version.split('.')[0]);
-    const minor = parseInt(version.split('.')[1]);
-    const patch = parseInt(version.split('.')[2]);
+  (tag: any) => {
+    const major = parseInt(tag.split('.')[0]);
+    const minor = parseInt(tag.split('.')[1]);
+    const patch = parseInt(tag.split('.')[2]);
 
     sortedTags.push({ tag: tag, major: major, minor: minor, patch: patch });
   }
