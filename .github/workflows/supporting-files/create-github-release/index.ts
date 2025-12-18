@@ -36,7 +36,7 @@ try {
         body: `Automated release for ${release_number}`,
         name: `Release ${release_number}`,
         prerelease: false,
-        make_latest: true,
+        make_latest: 'true',
         draft: false,
     });
 
