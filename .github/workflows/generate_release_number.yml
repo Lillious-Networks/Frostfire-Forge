@@ -16,6 +16,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4.1.7
+        with:
+          submodules: 'recursive'
 
       - uses: oven-sh/setup-bun@v2
 
