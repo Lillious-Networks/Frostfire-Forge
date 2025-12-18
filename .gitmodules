@@ -1,3 +1,6 @@
 [submodule "Frostfire-Forge-Client"]
 	path = Frostfire-Forge-Client
 	url = https://github.com/Lillious-Networks/Frostfire-Forge-Client
+[submodule "github-api-extended"]
+	path = github-api-extended
+	url = https://github.com/tyler-technologies-oss/github-api-extended
