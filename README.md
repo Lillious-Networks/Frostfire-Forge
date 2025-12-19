@@ -516,7 +516,7 @@ Listener.on("onServerTick", (data) => {
 ## 📖 System API Reference
 
 > [!NOTE]
-> **Complete system API documentation is available at `/docs`**
+> **Complete system API documentation is available on port `5000`**
 >
 > The documentation includes detailed information about all system modules:
 > - **Player Management** - Authentication, stats, inventory, and more
@@ -526,13 +526,6 @@ Listener.on("onServerTick", (data) => {
 > - **Economy** - Currency and item management
 > - **Quest System** - Quests and quest logs
 > - **Effects** - Particles, audio, and visual effects
->
-> **Generate latest documentation:**
-> ```bash
-> bun run docs
-> ```
->
-> This will regenerate the API documentation with the latest system changes.
 
 ---
 

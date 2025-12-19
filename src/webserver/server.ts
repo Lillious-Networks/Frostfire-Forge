@@ -10,7 +10,6 @@ import query from "../controllers/sqldatabase";
 import * as settings from "../config/settings.json";
 import path from "path";
 import fs from "fs";
-import docs_html from "./www/public/docs.html";
 import editor_html from "./www/public/editor.html";
 import benchmark_html from "./www/public/benchmark.html";
 import connectiontest_html from "./www/public/connection-test.html";
@@ -67,7 +66,6 @@ const routes = {
       });
     }
   },
-  "/docs": docs_html,
   "/benchmark": benchmark_html,
   "/connection-test": connectiontest_html,
   "/": login_html,
@@ -238,7 +236,6 @@ Bun.serve({
     port: _https ? (process.env.WEBSRV_PORTSSL || 443) : (process.env.WEBSRV_PORT || 80),
     routes: {
       "/swaggerui": routes["/swaggerui"],
-      "/docs": routes["/docs"],
       "/benchmark": routes["/benchmark"],
       "/connection-test": routes["/connection-test"],
       "/": routes["/"],
