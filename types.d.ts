@@ -81,12 +81,15 @@ declare interface Player {
   stats?: StatsData;
   isStealth?: boolean;
   isAdmin?: boolean;
+  isGuest?: boolean;
   isNoclip?: boolean;
   pvp?: boolean;
   last_attack?: number;
   animation?: string;
   friends?: string[];
   invitiations?: string[];
+  mounted: boolean;
+  mount_type?: string | null;
 }
 
 declare interface QuestLogData {

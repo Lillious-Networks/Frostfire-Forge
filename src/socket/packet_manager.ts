@@ -160,6 +160,7 @@ export const packetManager = {
             isStealth: data.isStealth,
             stats: data.stats,
             sprite: data.sprite,
+            mounted: data.mounted,
             ...(data.friends ? { friends: data.friends } : {}),
             ...(data.party ? { party: data.party } : {}),
             ...(data.currency ? { currency: data.currency } : { copper: 0, silver: 0, gold: 0 })
@@ -352,5 +353,10 @@ export const packetManager = {
     return [
       packet.encode(JSON.stringify(data)),
     ] as any[];
-  }
+  },
+  mount: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "MOUNT", data })),
+    ] as any[];
+  },
 };

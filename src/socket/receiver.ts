@@ -343,6 +343,8 @@ export default async function packetReceiver(
           isGuest,
           created: performance.now(),
           lastUpdated: performance.now(),
+          mounted: false,
+          mount_type: null,
         });
 
         const mapData = [
@@ -374,6 +376,7 @@ export default async function packetReceiver(
             isStealth: p.isStealth,
             stats: p.stats,
             animation: null,
+            mounted: p.mounted,
           });
         }
         sendPacket(ws, packetManager.loadPlayers(playerDataForLoad));
@@ -428,6 +431,7 @@ export default async function packetReceiver(
                 isStealth,
                 stats,
                 animation: null,
+                mounted: false,
               };
               sendPacket(p.ws, packetManager.spawnPlayer(spawnForOther));
             }
@@ -442,7 +446,7 @@ export default async function packetReceiver(
             // Send animation to self
             sendAnimationTo(
               ws,
-              getAnimationNameForDirection(position.direction, false),
+              getAnimationNameForDirection(position.direction, false, false),
               ws.data.id
             );
             // Send animation to all other players
@@ -450,7 +454,7 @@ export default async function packetReceiver(
               if (other.id !== ws.data.id && other.ws) {
                 sendAnimationTo(
                   other.ws,
-                  getAnimationNameForDirection(position.direction, false),
+                  getAnimationNameForDirection(position.direction, false, false),
                   ws.data.id
                 );
               }
@@ -466,7 +470,12 @@ export default async function packetReceiver(
                 const pcache = playerCache.get(pl.id);
                 sendAnimationTo(
                   ws,
-                  getAnimationNameForDirection(pl.location.direction, !!pcache?.moving),
+                  getAnimationNameForDirection(
+                    pl.location.direction,
+                    !!pcache?.moving,
+                    !!pcache?.mounted,
+                    pcache?.mount_type
+                  ),
                   pl.id
                 );
               }
@@ -655,7 +664,9 @@ export default async function packetReceiver(
       case "MOVEXY": {
         if (!currentPlayer) return;
 
-        const speed = 2;
+        const baseSpeed = 2;
+        const mountSpeedMultiplier = 1.35;
+        const speed = currentPlayer.mounted ? baseSpeed * mountSpeedMultiplier : baseSpeed;
         const targetFPS = 60;
         const frameTime = 1000 / targetFPS;
         const lastDirection =
@@ -681,7 +692,13 @@ export default async function packetReceiver(
             currentPlayer.movementInterval = null;
             currentPlayer.moving = false;
             playerCache.set(currentPlayer.id, currentPlayer);
-            sendPositionAnimation(ws, lastDirection, false);
+            sendPositionAnimation(
+              ws,
+              lastDirection,
+              false,
+              currentPlayer.mounted,
+              currentPlayer.mount_type || "horse"
+            );
           }
           return;
         }
@@ -689,7 +706,13 @@ export default async function packetReceiver(
         if (!directions.includes(direction)) return;
 
         currentPlayer.location.position.direction = direction || "down";
-        sendPositionAnimation(ws, direction, true);
+        sendPositionAnimation(
+          ws,
+          direction,
+          true,
+          currentPlayer.mounted,
+          currentPlayer.mount_type || "horse"
+        );
 
         if (currentPlayer.movementInterval) {
           clearInterval(currentPlayer.movementInterval);
@@ -762,7 +785,13 @@ export default async function packetReceiver(
           if (isColliding && !currentPlayer.isNoclip) {
             clearInterval(currentPlayer.movementInterval);
             currentPlayer.movementInterval = null;
-            sendPositionAnimation(ws, direction, false);
+            sendPositionAnimation(
+              ws,
+              direction,
+              false,
+              currentPlayer.mounted,
+              currentPlayer.mount_type || "horse"
+            );
 
             const reason = collision.reason;
 
@@ -1089,7 +1118,9 @@ export default async function packetReceiver(
               sendPositionAnimation(
                 ws,
                 currentPlayer.location.position?.direction,
-                false
+                false,
+                currentPlayer.mounted,
+                currentPlayer.mount_type || "horse"
               );
               sendPacket(player.ws, packetManager.moveXY(moveXYData));
             }
@@ -3374,7 +3405,6 @@ export default async function packetReceiver(
         }
         break;
       }
-      // Not working when freidn is onlien
       case "REMOVE_FRIEND": {
         const id = (data as any).id;
         const username = (data as any).username;
@@ -3436,7 +3466,51 @@ export default async function packetReceiver(
         );
         break;
       }
-      // Unknown packet type
+      case "MOUNT": {
+        if (!currentPlayer) return;
+        const canMount = player.canMount(currentPlayer);
+        if (!canMount) {
+          sendPacket(
+            ws,
+            packetManager.notify({
+              message: "Mount feature is currently locked.",
+            })
+          );
+          break;
+        }
+
+        currentPlayer.mounted = !currentPlayer.mounted;
+        playerCache.set(currentPlayer.id, currentPlayer);
+
+        // Send mount animation for the current player's direction
+        const direction = currentPlayer.location.position?.direction || "down";
+        const walking = currentPlayer.moving || false;
+        const mounted = currentPlayer.mounted;
+        const mount_type = currentPlayer.mount_type || "horse";
+
+        // Send the mount animation to all players (sendAnimation broadcasts automatically)
+        sendPositionAnimation(
+          ws,
+          direction,
+          walking,
+          mounted,
+          mount_type,
+          currentPlayer.id
+        );
+
+        // If player is currently moving, restart the movement with new speed
+        if (currentPlayer.movementInterval) {
+          clearInterval(currentPlayer.movementInterval);
+          currentPlayer.movementInterval = null;
+
+          // Trigger a new MOVEXY to restart movement with the correct speed
+          const moveDirection = currentPlayer.location.position?.direction || "down";
+          // Send MOVEXY packet internally to restart movement
+          await packetReceiver(server, ws, JSON.stringify({ type: "MOVEXY", data: moveDirection }));
+        }
+        break;
+      }
+      // Unknown command
       default: {
         break;
       }
@@ -3528,20 +3602,29 @@ function getAnimation(name: string) {
 
 function getAnimationNameForDirection(
   direction: string,
-  walking: boolean
+  walking: boolean,
+  mounted: boolean = false,
+  mount_type?: string
 ): string {
   const normalized = normalizeDirection(direction);
   const action = walking ? "walk" : "idle";
+  if (mounted) {
+    mount_type = mount_type || "horse";
+    return `mount_${mount_type}_${action}_${normalized}.png`;
+  }
   return `player_${action}_${normalized}.png`;
 }
 
 function sendPositionAnimation(
   ws: WebSocket,
   direction: string,
-  walking: boolean
+  walking: boolean,
+  mounted: boolean = false,
+  mount_type: string = "",
+  playerId?: string
 ) {
-  const animation = getAnimationNameForDirection(direction, walking);
-  sendAnimation(ws, animation);
+  const animation = getAnimationNameForDirection(direction, walking, mounted, mount_type);
+  sendAnimation(ws, animation, playerId);
 }
 
 function normalizeDirection(direction: string): string {

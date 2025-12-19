@@ -55,6 +55,7 @@ export const keyHandlers = {
   KeyC: () => handleStatsUI(),
   KeyX: () => sendRequest({ type: "STEALTH", data: null }),
   KeyZ: () => sendRequest({ type: "NOCLIP", data: null }),
+  ShiftLeft: () => sendRequest({ type: "MOUNT", data: null }),
   Enter: async () => handleEnterKey(),
   Space: () => handleSpaceKey(),
   KeyG: () => {
@@ -77,7 +78,6 @@ const blacklistedKeys = new Set([
   'AltRight',
   'ControlLeft',
   'ControlRight',
-  'ShiftLeft',
   'ShiftRight',
   'F1',
   'F3',

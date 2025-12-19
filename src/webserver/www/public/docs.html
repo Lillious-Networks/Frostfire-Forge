@@ -360,6 +360,415 @@
         </div>
     
         <div class="system-section">
+            <h2 class="system-title" id="system-guilds">guilds</h2>
+            <div class="functions-container">
+                
+                    <div class="function-item clickable"
+                         id="func-guilds-add"
+                         data-search="guilds.add"
+                         data-implementation="{
+        if (!username) return [];
+        try {
+            // Check if the user is already in a guild
+            const existingGuild = await this.exists(username);
+            if (existingGuild) return [];
+
+            // Get guild members
+            const members = await this.getGuildMembers(guildId) as string[];
+            if (!members || members?.length === 0) return [];
+
+            // Check if guild members exceed the limit of 500
+            if (members.length &gt;= 500) return [];
+
+            // Prevent adding the same user multiple times
+            if (members.includes(username)) return [];
+
+            // Add the user to the guild
+            await query(&quot;UPDATE accounts SET guild_id = ? WHERE username = ?&quot;, [guildId, username]);
+            const updatedMembers = [...members, username].join(&quot;, &quot;);
+            await query(&quot;UPDATE guilds SET members = ? WHERE id = ?&quot;, [updatedMembers, guildId]);
+            return updatedMembers.split(&quot;, &quot;).map((member: string) =&gt; member.trim());
+        } catch (error) {
+            log.error(`Error adding user to guild: ${error}`);
+            return [];
+        }
+    }"
+                         data-function="guilds.add"
+                         data-async="true"
+                         data-params="username: string, guildId: number"
+                         data-return="string[]">
+                        <div class="function-signature">
+                            <span class="async-badge">async</span>
+                            <span class="function-name">guilds.<span class="method-name">add</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">username</span>: <span style="color: #4ec9b0">string</span>, <span style="color: #9cdcfe">guildId</span>: <span style="color: #4ec9b0">number</span>)</span>
+                            <span class="return-type">: string[]</span>
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
+                         id="func-guilds-create"
+                         data-search="guilds.create"
+                         data-implementation="{
+        if (!username || !name) return false;
+        try {
+            const existingGuild = await this.exists(name);
+            if (existingGuild) return false; // Guild name already exists
+
+            // Check if the user is already in a guild
+            const inGuild = await this.isInGuild(username);
+            if (inGuild) return false;
+
+            const members = username;;
+            const result = await query(&quot;INSERT INTO guilds (leader, name, members) VALUES (?, ?, ?)&quot;, [username, name, members]) as any;
+            const guildId = result.lastInsertRowid;
+            // Update the accounts table to set the guild_id for the user
+            await query(&quot;UPDATE accounts SET guild_id = ? WHERE username = ?&quot;, [guildId, username]);
+            return members.split(&quot;, &quot;).map((member: string) =&gt; member.trim());
+        } catch (error) {
+            log.error(`Error creating guild: ${error}`);
+            return false;
+        }
+    }"
+                         data-function="guilds.create"
+                         data-async="true"
+                         data-params="username: string, name: string"
+                         data-return="string[] | boolean">
+                        <div class="function-signature">
+                            <span class="async-badge">async</span>
+                            <span class="function-name">guilds.<span class="method-name">create</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">username</span>: <span style="color: #4ec9b0">string</span>, <span style="color: #9cdcfe">name</span>: <span style="color: #4ec9b0">string</span>)</span>
+                            <span class="return-type">: string[] | boolean</span>
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
+                         id="func-guilds-delete"
+                         data-search="guilds.delete"
+                         data-implementation="{
+        if (!guildId) return false;
+        try {
+            await query(&quot;DELETE FROM guilds WHERE id = ?&quot;, [guildId]);
+            // Remove guild_id from all members in the accounts table
+            await query(&quot;UPDATE accounts SET guild_id = NULL WHERE guild_id = ?&quot;, [guildId]);
+            log.info(`Guild with ID ${guildId} deleted successfully.`);
+            return true;
+        } catch (error) {
+            log.error(`Error deleting guild: ${error}`);
+            return false;
+        }
+    }"
+                         data-function="guilds.delete"
+                         data-async="true"
+                         data-params="guildId: number"
+                         data-return="boolean">
+                        <div class="function-signature">
+                            <span class="async-badge">async</span>
+                            <span class="function-name">guilds.<span class="method-name">delete</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">guildId</span>: <span style="color: #4ec9b0">number</span>)</span>
+                            <span class="return-type">: boolean</span>
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
+                         id="func-guilds-disband"
+                         data-search="guilds.disband"
+                         data-implementation="{
+        if (!username) return false;
+        try {
+            const guildId = await this.getGuildId(username);
+            if (!guildId) return false; // User is not in a guild
+
+            const isLeader = await this.isGuildLeader(username);
+            if (!isLeader) return false; // User is not the leader and cannot disband
+
+            const members = await this.getGuildMembers(guildId);
+            if (members.length === 0) return false; // No members to disband
+
+            // Remove all members from the guild
+            await query(&quot;UPDATE accounts SET guild_id = NULL WHERE guild_id = ?&quot;, [guildId]);
+            // Delete the guild
+            return await this.delete(guildId);
+        } catch (error) {
+            log.error(`Error disbanding guild: ${error}`);
+            return false;
+        }
+    }"
+                         data-function="guilds.disband"
+                         data-async="true"
+                         data-params="username: string"
+                         data-return="boolean">
+                        <div class="function-signature">
+                            <span class="async-badge">async</span>
+                            <span class="function-name">guilds.<span class="method-name">disband</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">username</span>: <span style="color: #4ec9b0">string</span>)</span>
+                            <span class="return-type">: boolean</span>
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
+                         id="func-guilds-exists"
+                         data-search="guilds.exists"
+                         data-implementation="{
+        if (!name) return false;
+        try {
+            const result = await query(&quot;SELECT id FROM guilds WHERE name = ?&quot;, [name]) as any[];
+            return result.length &gt; 0;
+        } catch (error) {
+            log.error(`Error checking if guild exists: ${error}`);
+            return false;
+        }
+    }"
+                         data-function="guilds.exists"
+                         data-async="true"
+                         data-params="name: string"
+                         data-return="boolean">
+                        <div class="function-signature">
+                            <span class="async-badge">async</span>
+                            <span class="function-name">guilds.<span class="method-name">exists</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">name</span>: <span style="color: #4ec9b0">string</span>)</span>
+                            <span class="return-type">: boolean</span>
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
+                         id="func-guilds-getGuildId"
+                         data-search="guilds.getGuildId"
+                         data-implementation="{
+        if (!username) return null;
+        try {
+            const result = await query(&quot;SELECT guild_id FROM accounts WHERE username = ?&quot;, [username]) as any[];
+            if (result.length === 0 || !result[0].guild_id) return null;
+            return result[0].guild_id;
+        } catch (error) {
+            log.error(`Error getting guild ID for user: ${error}`);
+            return null;
+        }
+    }"
+                         data-function="guilds.getGuildId"
+                         data-async="true"
+                         data-params="username: string"
+                         data-return="number | null">
+                        <div class="function-signature">
+                            <span class="async-badge">async</span>
+                            <span class="function-name">guilds.<span class="method-name">getGuildId</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">username</span>: <span style="color: #4ec9b0">string</span>)</span>
+                            <span class="return-type">: number | null</span>
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
+                         id="func-guilds-getGuildLeader"
+                         data-search="guilds.getGuildLeader"
+                         data-implementation="{
+        if (!guildId) return null;
+        try {
+            const result = await query(&quot;SELECT leader FROM guilds WHERE id = ?&quot;, [guildId]) as any[];
+            if (result.length === 0 || !result[0].leader) return null; // Guild not found or no leader
+            return result[0].leader;
+        } catch (error) {
+            log.error(`Error getting guild leader: ${error}`);
+            return null;
+        }
+    }"
+                         data-function="guilds.getGuildLeader"
+                         data-async="true"
+                         data-params="guildId: number"
+                         data-return="string | null">
+                        <div class="function-signature">
+                            <span class="async-badge">async</span>
+                            <span class="function-name">guilds.<span class="method-name">getGuildLeader</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">guildId</span>: <span style="color: #4ec9b0">number</span>)</span>
+                            <span class="return-type">: string | null</span>
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
+                         id="func-guilds-getGuildMembers"
+                         data-search="guilds.getGuildMembers"
+                         data-implementation="{
+        if (!guildId) return [];
+        try {
+            const result = await query(&quot;SELECT members FROM guilds WHERE id = ?&quot;, [guildId]) as any[];
+            if (result.length === 0 || !result[0].members) return []; // Guild not found or no members
+            const members = result[0].members.split(&quot;,&quot;).map((member: any) =&gt; member.trim());
+            return members.filter((member: any) =&gt; member);
+        } catch (error) {
+            log.error(`Error getting guild members: ${error}`);
+            return [];
+        }
+    }"
+                         data-function="guilds.getGuildMembers"
+                         data-async="true"
+                         data-params="guildId: number"
+                         data-return="string[]">
+                        <div class="function-signature">
+                            <span class="async-badge">async</span>
+                            <span class="function-name">guilds.<span class="method-name">getGuildMembers</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">guildId</span>: <span style="color: #4ec9b0">number</span>)</span>
+                            <span class="return-type">: string[]</span>
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
+                         id="func-guilds-getGuildName"
+                         data-search="guilds.getGuildName"
+                         data-implementation="{
+        if (!guildId) return null;
+        try {
+            const result = await query(&quot;SELECT name FROM guilds WHERE id = ?&quot;, [guildId]) as any[];
+            if (result.length === 0 || !result[0].name) return null; // Guild not found or no name
+            return result[0].name;
+        } catch (error) {
+            log.error(`Error getting guild name: ${error}`);
+            return null;
+        }
+    }"
+                         data-function="guilds.getGuildName"
+                         data-async="true"
+                         data-params="guildId: number"
+                         data-return="string | null">
+                        <div class="function-signature">
+                            <span class="async-badge">async</span>
+                            <span class="function-name">guilds.<span class="method-name">getGuildName</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">guildId</span>: <span style="color: #4ec9b0">number</span>)</span>
+                            <span class="return-type">: string | null</span>
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
+                         id="func-guilds-isGuildLeader"
+                         data-search="guilds.isGuildLeader"
+                         data-implementation="{
+        if (!username) return false;
+        try {
+            const result = await query(&quot;SELECT id FROM guilds WHERE leader = ?&quot;, [username]) as any[];
+            return result.length &gt; 0;
+        } catch (error) {
+            log.error(`Error checking if user is guild leader: ${error}`);
+            return false;
+        }
+    }"
+                         data-function="guilds.isGuildLeader"
+                         data-async="true"
+                         data-params="username: string"
+                         data-return="boolean">
+                        <div class="function-signature">
+                            <span class="async-badge">async</span>
+                            <span class="function-name">guilds.<span class="method-name">isGuildLeader</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">username</span>: <span style="color: #4ec9b0">string</span>)</span>
+                            <span class="return-type">: boolean</span>
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
+                         id="func-guilds-isInGuild"
+                         data-search="guilds.isInGuild"
+                         data-implementation="{
+        if (!username) return false;
+        try {
+            const result = await query(&quot;SELECT guild_id FROM accounts WHERE username = ?&quot;, [username]) as any[];
+            if (result.length === 0) return false; // User not found
+            return result.length &gt; 0;
+        } catch (error) {
+            log.error(`Error checking if user is in guild: ${error}`);
+            return false;
+        }
+    }"
+                         data-function="guilds.isInGuild"
+                         data-async="true"
+                         data-params="username: string"
+                         data-return="boolean">
+                        <div class="function-signature">
+                            <span class="async-badge">async</span>
+                            <span class="function-name">guilds.<span class="method-name">isInGuild</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">username</span>: <span style="color: #4ec9b0">string</span>)</span>
+                            <span class="return-type">: boolean</span>
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
+                         id="func-guilds-leave"
+                         data-search="guilds.leave"
+                         data-implementation="{
+        if (!username) return false;
+        try {
+            const guildId = await this.getGuildId(username);
+            if (!guildId) return false; // User is not in a guild
+
+            const isLeader = await this.isGuildLeader(username);
+            if (isLeader) {
+                return false; // Guild leaders cannot leave the guild
+            }
+            return await this.remove(username);
+        } catch (error) {
+            log.error(`Error leaving guild: ${error}`);
+            return false;
+        }
+    }"
+                         data-function="guilds.leave"
+                         data-async="true"
+                         data-params="username: string"
+                         data-return="boolean | string[]">
+                        <div class="function-signature">
+                            <span class="async-badge">async</span>
+                            <span class="function-name">guilds.<span class="method-name">leave</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">username</span>: <span style="color: #4ec9b0">string</span>)</span>
+                            <span class="return-type">: boolean | string[]</span>
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
+                         id="func-guilds-remove"
+                         data-search="guilds.remove"
+                         data-implementation="{
+        if (!username) return [];
+        try {
+            const guildId = await this.getGuildId(username);
+            if (!guildId) return []; // User is not in a guild
+
+            await query(&quot;UPDATE accounts SET guild_id = NULL WHERE username = ?&quot;, [username]);
+
+            const members = await this.getGuildMembers(guildId);
+
+            // Remove the user from the members list
+            const updatedMembers = members.filter((member: string) =&gt; member !== username).join(&quot;, &quot;);
+            await query(&quot;UPDATE guilds SET members = ? WHERE id = ?&quot;, [updatedMembers, guildId]);
+            const memberArray = updatedMembers.split(&quot;,&quot;).map((member: string) =&gt; member.trim());
+            return memberArray.map((member: string) =&gt; member.trim());
+        } catch (error) {
+            log.error(`Error removing user from guild: ${error}`);
+            return [];
+        }
+    }"
+                         data-function="guilds.remove"
+                         data-async="true"
+                         data-params="username: string"
+                         data-return="string[] | boolean">
+                        <div class="function-signature">
+                            <span class="async-badge">async</span>
+                            <span class="function-name">guilds.<span class="method-name">remove</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">username</span>: <span style="color: #4ec9b0">string</span>)</span>
+                            <span class="return-type">: string[] | boolean</span>
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+            </div>
+        </div>
+    
+        <div class="system-section">
             <h2 class="system-title" id="system-inventory">inventory</h2>
             <div class="functions-container">
                 
@@ -1810,14 +2219,140 @@
                          data-search="player.canAttack"
                          data-implementation="{ value: boolean; reason?: string }"
                          data-function="player.canAttack"
-                         data-async="false"
+                         data-async="true"
                          data-params="self: Player, target: Player, playerProperties: PlayerProperties"
-                         data-return="">
+                         data-return="{ value: boolean; reason?: string }">
                         <div class="function-signature">
-                            
+                            <span class="async-badge">async</span>
                             <span class="function-name">player.<span class="method-name">canAttack</span></span>
                             <span class="params">(<span style="color: #9cdcfe">self</span>: <span style="color: #4ec9b0">Player</span>, <span style="color: #9cdcfe">target</span>: <span style="color: #4ec9b0">Player</span>, <span style="color: #9cdcfe">playerProperties</span>: <span style="color: #4ec9b0">PlayerProperties</span>)</span>
+                            <span class="return-type">: { value: boolean; reason?: string }</span>
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
+                         id="func-player-canMount"
+                         data-search="player.canMount"
+                         data-implementation="{
+    // Don&#039;t allow guest players to mount
+    if (player.isGuest) return false;
+    if (!player || !player.stats) return false;
+    // Optional level requirement to mount
+    // if (player.stats.level &lt; 5) return false;
+    return true;
+  },
+  GetPlayerLoginData: async (username: string) =&gt; {
+    if (!username) return null;
+    username = username.toLowerCase();
+
+    // Single optimized query to get all player data using JOINs
+    const mainQuery = `
+      SELECT
+        a.id,
+        a.username,
+        a.map,
+        a.position,
+        a.direction,
+        a.role,
+        a.guest_mode,
+        a.stealth,
+        a.noclip,
+        a.party_id,
+        p.permissions,
+        s.max_health,
+        s.health,
+        s.max_stamina,
+        s.stamina,
+        s.xp,
+        s.max_xp,
+        s.level,
+        s.crit_chance,
+        s.crit_damage,
+        c.copper,
+        c.silver,
+        c.gold,
+        f.friends,
+        cc.fps,
+        cc.music_volume,
+        cc.effects_volume,
+        cc.muted,
+        ql.completed_quests,
+        ql.incomplete_quests
+      FROM accounts a
+      LEFT JOIN permissions p ON a.username = p.username
+      LEFT JOIN stats s ON a.username = s.username
+      LEFT JOIN currency c ON a.username = c.username
+      LEFT JOIN friendslist f ON a.username = f.username
+      LEFT JOIN clientconfig cc ON a.username = cc.username
+      LEFT JOIN quest_log ql ON a.username = ql.username
+      WHERE a.username = ?
+    `;
+
+    const result = await query(mainQuery, [username]) as any[];
+    if (!result || result.length === 0) return null;
+
+    const data = result[0];
+
+    // Get inventory separately since it&#039;s an array of items
+    const inventoryRaw = await query(&quot;SELECT * FROM inventory WHERE username = ?&quot;, [username]) as any[];
+
+    return {
+      id: data.id,
+      username: data.username,
+      location: {
+        map: data.map,
+        position: {
+          x: Number(data.position?.split(&quot;,&quot;)[0] || 0),
+          y: Number(data.position?.split(&quot;,&quot;)[1] || 0),
+          direction: data.direction || &quot;down&quot;
+        }
+      },
+      permissions: data.permissions || [],
+      stats: {
+        max_health: data.max_health,
+        health: data.health,
+        max_stamina: data.max_stamina,
+        stamina: data.stamina,
+        xp: data.xp,
+        max_xp: data.max_xp,
+        level: data.level,
+        crit_chance: data.crit_chance,
+        crit_damage: data.crit_damage
+      },
+      currency: {
+        copper: data.copper || 0,
+        silver: data.silver || 0,
+        gold: data.gold || 0
+      },
+      friends: data.friends ? data.friends.split(&quot;,&quot;).map((f: string) =&gt; f.trim()).filter((f: string) =&gt; f !== &quot;&quot;) : [],
+      party_id: data.party_id,
+      config: data.fps ? [{
+        fps: data.fps,
+        music_volume: data.music_volume,
+        effects_volume: data.effects_volume,
+        muted: data.muted
+      }] : [],
+      questlog: {
+        completed: data.completed_quests ? data.completed_quests.split(&quot;,&quot;) : [],
+        incomplete: data.incomplete_quests ? data.incomplete_quests.split(&quot;,&quot;) : []
+      },
+      isAdmin: data.role === 1,
+      isGuest: data.guest_mode === 1,
+      isStealth: data.stealth === 1,
+      isNoclip: data.noclip === 1,
+      inventoryRaw: inventoryRaw
+    };
+  }"
+                         data-function="player.canMount"
+                         data-async="false"
+                         data-params="player: Player"
+                         data-return="boolean">
+                        <div class="function-signature">
                             
+                            <span class="function-name">player.<span class="method-name">canMount</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">player</span>: <span style="color: #4ec9b0">Player</span>)</span>
+                            <span class="return-type">: boolean</span>
                             <span class="view-code-hint">👁️ Click to view code</span>
                         </div>
                     </div>
@@ -1848,25 +2383,16 @@
         return { value: true, reason: &quot;redis_error&quot; };
       }
 
-      // Decode RLE once
-      const data = collisionData.slice(2);
-      const grid = new Uint8Array(mapData.width * mapData.height);
-      let currentIndex = 0;
-      for (let i = 0; i &lt; data.length; i += 2) {
-        const value = data[i];
-        const count = data[i + 1];
-        for (let j = 0; j &lt; count; j++) grid[currentIndex++] = value;
-      }
-
+      // Store RLE data directly, no decompression
       mapDataCached = {
         warps: Array.isArray(mapData.warps)
           ? Object.fromEntries(
               (mapData.warps as WarpObject[]).map((warp, idx) =&gt; [warp.name ?? String(idx), warp])
             )
           : (mapData.warps || {}),
-        grid,
-        width: mapData.width,
-        height: mapData.height,
+        collisionRLE: collisionData, // Store RLE data directly
+        width: collisionData[0], // Width from RLE header
+        height: collisionData[1], // Height from RLE header
         tileWidth: mapData.tileWidth,
         tileHeight: mapData.tileHeight,
       };
@@ -1874,11 +2400,7 @@
       mapCache.set(mapKey, mapDataCached);
     }
 
-    const { warps, grid, width, height, tileWidth, tileHeight } = mapDataCached;
-
-    // Add offsets to align player coordinates with the collision grid
-    const gridOffsetWidth = Math.floor(width / 2);
-    const gridOffsetHeight = Math.floor(height / 2);
+    const { warps, collisionRLE, width, height, tileWidth, tileHeight } = mapDataCached;
 
     // Warp collision
     for (const key in warps) {
@@ -1897,22 +2419,30 @@
       }
     }
 
-    // Tile collision
+    // Tile collision - Convert world coordinates to tile coordinates
+    // position.x and position.y are the CENTER of the player sprite
+    // Player sprite: 24px wide, 40px tall
+    // Collision box should be centered on sprite with pixel-perfect accuracy
     const margin = 0.1;
-    const left = Math.floor(((position.x + margin) / tileWidth) + 0.6);
-    const right = Math.floor(((position.x + playerWidth - margin) / tileWidth) + 0.6);
-    const top = Math.floor(((position.y + margin) / tileHeight) + 1.5);
-    const bottom = Math.floor((position.y + playerHeight - margin) / tileHeight + 0.7);
 
-    for (let y = top; y &lt;= bottom; y++) {
-      for (let x = left; x &lt;= right; x++) {
-        const tileX = x + gridOffsetWidth;
-        const tileY = y + gridOffsetHeight;
+    // Horizontal collision: center ± half width
+    const left = Math.floor((position.x - playerWidth / 2 + margin) / tileWidth);
+    const right = Math.floor((position.x + playerWidth / 2 - margin) / tileWidth);
 
+    // Vertical collision: top half can overlap (start from middle), bottom at feet
+    const top = Math.floor((position.y - playerHeight / 2 + playerHeight / 2 + margin) / tileHeight); // Start from vertical center
+    const bottom = Math.floor((position.y + playerHeight / 2 - margin) / tileHeight); // End at bottom
+
+    for (let tileY = top; tileY &lt;= bottom; tileY++) {
+      for (let tileX = left; tileX &lt;= right; tileX++) {
+        // Validate tile is within map bounds
         if (tileX &lt; 0 || tileY &lt; 0 || tileX &gt;= width || tileY &gt;= height) continue;
 
-        const tileValue = grid[tileY * width + tileX];
-        if (tileValue !== 0) return { value: true, reason: &quot;tile_collision&quot;, tile: { x, y } };
+        // Query RLE data directly without decompressing entire grid
+        const tileIndex = tileY * width + tileX;
+        const tileValue = collisionRLE ? queryRLE(collisionRLE, tileIndex) : 0;
+
+        if (tileValue !== 0) return { value: true, reason: &quot;tile_collision&quot;, tile: { x: tileX, y: tileY } };
       }
     }
 
@@ -1965,6 +2495,32 @@
                             <span class="async-badge">async</span>
                             <span class="function-name">player.<span class="method-name">clear</span></span>
                             <span class="params">()</span>
+                            
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
+                         id="func-player-clearMapCache"
+                         data-search="player.clearMapCache"
+                         data-implementation="{
+  if (mapName) {
+    const mapKey = mapName.replace(&quot;.json&quot;, &quot;&quot;);
+    mapCache.delete(mapKey);
+    log.info(`Cleared map cache for: ${mapKey}`);
+  } else {
+    mapCache.clear();
+    log.info(&quot;Cleared all map caches&quot;);
+  }
+}"
+                         data-function="player.clearMapCache"
+                         data-async="false"
+                         data-params="mapName?: string"
+                         data-return="">
+                        <div class="function-signature">
+                            
+                            <span class="function-name">player.<span class="method-name">clearMapCache</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">mapName?</span>: <span style="color: #4ec9b0">string</span>)</span>
                             
                             <span class="view-code-hint">👁️ Click to view code</span>
                         </div>
@@ -2220,6 +2776,54 @@
                     </div>
                 
                     <div class="function-item clickable"
+                         id="func-player-getMaxHealthForLevel"
+                         data-search="player.getMaxHealthForLevel"
+                         data-implementation="{
+    // Formula: base_hp + (level^1.5 * 5)
+    // At level 1: 100 + (1^1.5 * 5) = 105
+    // At level 5: 100 + (5^1.5 * 5) = 156
+    // At level 10: 100 + (10^1.5 * 5) = 258
+    const baseHealth = 100;
+    return Math.floor(baseHealth + Math.pow(level, 1.5) * 5);
+  }"
+                         data-function="player.getMaxHealthForLevel"
+                         data-async="false"
+                         data-params="level: number"
+                         data-return="">
+                        <div class="function-signature">
+                            
+                            <span class="function-name">player.<span class="method-name">getMaxHealthForLevel</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">level</span>: <span style="color: #4ec9b0">number</span>)</span>
+                            
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
+                         id="func-player-getMaxStaminaForLevel"
+                         data-search="player.getMaxStaminaForLevel"
+                         data-implementation="{
+    // Formula: base_mana + (level^1.5 * 3)
+    // At level 1: 100 + (1^1.5 * 3) = 103
+    // At level 5: 100 + (5^1.5 * 3) = 134
+    // At level 10: 100 + (10^1.5 * 3) = 195
+    const baseStamina = 100;
+    return Math.floor(baseStamina + Math.pow(level, 1.5) * 3);
+  }"
+                         data-function="player.getMaxStaminaForLevel"
+                         data-async="false"
+                         data-params="level: number"
+                         data-return="">
+                        <div class="function-signature">
+                            
+                            <span class="function-name">player.<span class="method-name">getMaxStaminaForLevel</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">level</span>: <span style="color: #4ec9b0">number</span>)</span>
+                            
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
                          id="func-player-getNewMaxXp"
                          data-search="player.getNewMaxXp"
                          data-implementation="{
@@ -2291,6 +2895,8 @@
         s.xp,
         s.max_xp,
         s.level,
+        s.crit_chance,
+        s.crit_damage,
         c.copper,
         c.silver,
         c.gold,
@@ -2338,7 +2944,9 @@
         stamina: data.stamina,
         xp: data.xp,
         max_xp: data.max_xp,
-        level: data.level
+        level: data.level,
+        crit_chance: data.crit_chance,
+        crit_damage: data.crit_damage
       },
       currency: {
         copper: data.copper || 0,
@@ -2365,6 +2973,18 @@
     };
   },
 };
+
+// Export function to clear map cache (used when maps are updated)
+export function clearMapCache(mapName?: string) {
+  if (mapName) {
+    const mapKey = mapName.replace(&quot;.json&quot;, &quot;&quot;);
+    mapCache.delete(mapKey);
+    log.info(`Cleared map cache for: ${mapKey}`);
+  } else {
+    mapCache.clear();
+    log.info(&quot;Cleared all map caches&quot;);
+  }
+}
 
 export default player;
 "
@@ -2486,7 +3106,7 @@ export default player;
     if (!username) return;
     username = username.toLowerCase();
     const response = (await query(
-      &quot;SELECT max_health, health, max_stamina, stamina, xp, max_xp, level FROM stats WHERE username = ?&quot;,
+      &quot;SELECT max_health, health, max_stamina, stamina, xp, max_xp, level, crit_chance, crit_damage FROM stats WHERE username = ?&quot;,
       [username]
     )) as StatsData[];
     if (!response || response.length === 0) return [];
@@ -2498,6 +3118,8 @@ export default player;
       level: response[0].level,
       xp: response[0].xp,
       max_xp: response[0].max_xp,
+      crit_chance: response[0].crit_chance,
+      crit_damage: response[0].crit_damage,
     };
   }"
                          data-function="player.getStats"
@@ -2594,6 +3216,7 @@ export default player;
     username = username.toLowerCase();
     // Get the current xp, level and max_xp
     const stats = (await player.getStats(username)) as StatsData;
+    let leveledUp = false;
     // Loop to handle multiple level-ups
     while (xp &gt; 0) {
       const xpToLevel = stats.max_xp - stats.xp;
@@ -2601,17 +3224,28 @@ export default player;
         stats.level++;
         xp -= xpToLevel;
         stats.xp = 0;
+        leveledUp = true;
         // Update the max_xp required to level up dynamically
         stats.max_xp = player.getNewMaxXp(stats.level);
+        // Calculate new max health and stamina based on level
+        stats.max_health = player.getMaxHealthForLevel(stats.level);
+        stats.max_stamina = player.getMaxStaminaForLevel(stats.level);
+        // Restore health and stamina to full on level up
+        stats.health = stats.max_health;
+        stats.stamina = stats.max_stamina;
       } else {
         stats.xp += xp;
         xp = 0;
       }
     }
-    // Update the xp and level
+    // Update the xp, level, and stats in the database
     const response = await query(
-      &quot;UPDATE stats SET xp = ?, max_xp = ?, level = ? WHERE username = ?&quot;,
-      [stats.xp, stats.max_xp, stats.level, username]
+      leveledUp
+        ? &quot;UPDATE stats SET xp = ?, max_xp = ?, level = ?, max_health = ?, health = ?, max_stamina = ?, stamina = ? WHERE username = ?&quot;
+        : &quot;UPDATE stats SET xp = ?, max_xp = ?, level = ? WHERE username = ?&quot;,
+      leveledUp
+        ? [stats.xp, stats.max_xp, stats.level, stats.max_health, stats.health, stats.max_stamina, stats.stamina, username]
+        : [stats.xp, stats.max_xp, stats.level, username]
     );
     if (!response) return [];
     return {
@@ -2719,49 +3353,40 @@ export default player;
 
     // Fetch PvP tile data from Redis hash
     const pvpData = await assetCache.getNested(mapKey, &quot;nopvp&quot;);
-    if (!pvpData || !Array.isArray(pvpData) || pvpData.length &lt; 3) return false;
+    // If no nopvp data exists, PVP is allowed by default
+    if (!pvpData || !Array.isArray(pvpData) || pvpData.length &lt; 3) return true;
 
     // Fetch map properties (can be stored as a hash or a string)
     const mapPropertiesRaw = await assetCache.get(&quot;mapProperties&quot;) as MapProperties[];
-    if (!mapPropertiesRaw) return false;
+    if (!mapPropertiesRaw) return true; // Allow PVP if map properties not found
 
     const mapData = mapPropertiesRaw.find(m =&gt; m.name.replace(&quot;.json&quot;, &quot;&quot;) === mapKey);
-    if (!mapData) return false;
-
-    const tileData = pvpData.slice(2);
+    if (!mapData) return true; // Allow PVP if specific map data not found
     const tileWidth = mapData.tileWidth;
     const tileHeight = mapData.tileHeight;
-    const gridOffsetWidth = Math.floor(mapData.width / 2);
-    const gridOffsetHeight = Math.floor(mapData.height / 2);
 
+    // Convert world coordinates to tile coordinates
+    // position.x and position.y are the CENTER of the player sprite
+    // Player sprite: 24px wide, 40px tall
     const margin = 0.1;
-    const adjustedX = position.x + tileWidth / 2;
-    const adjustedY = position.y + tileHeight / 2;
 
-    const left = Math.floor((adjustedX + margin) / tileWidth);
-    const right = Math.floor((adjustedX + playerWidth - margin) / tileWidth);
-    const top = Math.floor((adjustedY + margin) / tileHeight);
-    const bottom = Math.floor((adjustedY + playerHeight - margin) / tileHeight);
+    // Horizontal collision: center ± half width
+    const left = Math.floor((position.x - playerWidth / 2 + margin) / tileWidth);
+    const right = Math.floor((position.x + playerWidth / 2 - margin) / tileWidth);
 
-    for (let y = top; y &lt;= bottom; y++) {
-      for (let x = left; x &lt;= right; x++) {
-        const indexX = x + gridOffsetWidth;
-        const indexY = y + gridOffsetHeight;
-        const targetIndex = indexY * mapData.width + indexX;
+    // Vertical collision: top half can overlap (start from middle), bottom at feet
+    const top = Math.floor((position.y - playerHeight / 2 + playerHeight / 2 + margin) / tileHeight); // Start from vertical center
+    const bottom = Math.floor((position.y + playerHeight / 2 - margin) / tileHeight); // End at bottom
 
-        let currentIndex = 0;
-        let tileValue = 0;
+    for (let tileY = top; tileY &lt;= bottom; tileY++) {
+      for (let tileX = left; tileX &lt;= right; tileX++) {
+        // Validate tile is within map bounds
+        if (tileX &lt; 0 || tileY &lt; 0 || tileX &gt;= mapData.width || tileY &gt;= mapData.height) continue;
 
-        for (let i = 0; i &lt; tileData.length; i += 2) {
-          const value = tileData[i];
-          const count = tileData[i + 1];
+        const targetIndex = tileY * mapData.width + tileX;
 
-          if (currentIndex + count &gt; targetIndex) {
-            tileValue = value;
-            break;
-          }
-          currentIndex += count;
-        }
+        // Query RLE data directly without decompressing
+        const tileValue = queryRLE(pvpData, targetIndex);
 
         if (tileValue !== 0) {
           return false; // No-PvP tile → cannot attack here
@@ -2962,6 +3587,42 @@ export default player;
                     </div>
                 
                     <div class="function-item clickable"
+                         id="func-player-queryRLE"
+                         data-search="player.queryRLE"
+                         data-implementation="{
+  if (!rleData || rleData.length &lt; 2) return 0;
+
+  let currentIndex = 0;
+
+  // Skip width and height, start at index 2
+  for (let i = 2; i &lt; rleData.length; i += 2) {
+    const value = rleData[i];
+    const count = rleData[i + 1];
+
+    // Check if target index falls within this RLE segment
+    if (currentIndex + count &gt; targetIndex) {
+      return value;
+    }
+
+    currentIndex += count;
+  }
+
+  return 0; // Out of bounds or not found
+}"
+                         data-function="player.queryRLE"
+                         data-async="false"
+                         data-params="rleData: number[], targetIndex: number"
+                         data-return="number">
+                        <div class="function-signature">
+                            
+                            <span class="function-name">player.<span class="method-name">queryRLE</span></span>
+                            <span class="params">(<span style="color: #9cdcfe">rleData</span>: <span style="color: #4ec9b0">number[]</span>, <span style="color: #9cdcfe">targetIndex</span>: <span style="color: #4ec9b0">number</span>)</span>
+                            <span class="return-type">: number</span>
+                            <span class="view-code-hint">👁️ Click to view code</span>
+                        </div>
+                    </div>
+                
+                    <div class="function-item clickable"
                          id="func-player-register"
                          data-search="player.register"
                          data-implementation="{
@@ -3004,8 +3665,8 @@ export default player;
 
     // Create stats
     await query(
-      &quot;INSERT INTO stats (username, health, max_health, stamina, max_stamina, xp, max_xp, level) VALUES (?, ?, ?, ?, ?, ?, ?, ?)&quot;,
-      [username, 100, 100, 100, 100, 0, 100, 1]
+      &quot;INSERT INTO stats (username, health, max_health, stamina, max_stamina, xp, max_xp, level, crit_chance, crit_damage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)&quot;,
+      [username, 100, 100, 100, 100, 0, 100, 1, 10, 10]
     );
     // Create client config
     await query(
@@ -3143,13 +3804,56 @@ export default player;
       return false;
     }
 
-    await query(
-      &quot;UPDATE accounts SET session_id = ?, online = ? WHERE token = ?&quot;,
-      [sessionId, 1, token]
-    );
+    // Check if there&#039;s an existing session and kick it
+    const existingSessionResult = await query(
+      &quot;SELECT session_id FROM accounts WHERE username = ?&quot;,
+      [username]
+    ) as any[];
 
-    return true;
-  }"
+    const existingSessionId = existingSessionResult[0]?.session_id;
+    if (existingSessionId &amp;&amp; existingSessionId !== sessionId) {
+      // Close the existing WebSocket connection
+      log.info(`Kicking existing session for ${username}`);
+
+      // Import playerCache to get the WebSocket
+      const playerCache = (await import(&quot;../services/playermanager.ts&quot;)).default;
+      const existingPlayer = playerCache.get(existingSessionId);
+
+      if (existingPlayer &amp;&amp; existingPlayer.ws) {
+        // Send a notification and close the connection
+        const packetManager = (await import(&quot;../socket/packet_manager.ts&quot;)).packetManager;
+        const sendPacket = (ws: any, packet: any) =&gt; {
+          if (ws.readyState === 1) ws.send(packet);
+        };
+
+        // Notify the existing player they&#039;re being kicked
+        sendPacket(existingPlayer.ws, packetManager.notify({
+          message: &quot;You have been logged in from another location.&quot;
+        }));
+
+        // Notify all other players to remove this player (prevent ghost)
+        const map = existingPlayer.location?.map;
+        if (map) {
+          const playersInMap = Object.values(playerCache.list()).filter(
+            (p) =&gt; p.location?.map === map &amp;&amp; p.id !== existingPlayer.id
+          );
+
+          playersInMap.forEach((p) =&gt; {
+            sendPacket(p.ws, packetManager.disconnect(existingPlayer.id));
+          });
+        }
+
+        // Close and cleanup after a delay to ensure all packets are sent
+        setTimeout(() =&gt; {
+          // Remove from playerCache
+          playerCache.remove(existingSessionId);
+
+          // Close the WebSocket
+          if (existingPlayer.ws &amp;&amp; existingPlayer.ws.readyState === 1) {
+            existingPlayer.ws.close(1000, &quot;Logged in from another location&quot;);
+          }
+        }, 500);
+      }"
                          data-function="player.setSessionId"
                          data-async="true"
                          data-params="token: string, sessionId: string"
@@ -4080,8 +4784,8 @@ export default player;
         </div>
     
         <div class="stats">
-            <p>Total Systems: 17 | Total Functions: 128</p>
-            <p>Generated on 10/30/2025, 7:37:43 PM</p>
+            <p>Total Systems: 18 | Total Functions: 146</p>
+            <p>Generated on 12/19/2025, 12:20:28 AM</p>
         </div>
     </div>
 
@@ -4101,7 +4805,7 @@ export default player;
 
     <script>
         // Search index
-        const searchIndex = [{"system":"audio","function":"get","fullName":"audio.get","params":"name: string","async":true,"returnType":""},{"system":"audio","function":"list","fullName":"audio.list","params":"","async":true,"returnType":""},{"system":"currency","function":"add","fullName":"currency.add","params":"username: string, amount: Currency","async":true,"returnType":"Currency"},{"system":"currency","function":"get","fullName":"currency.get","params":"username: string","async":true,"returnType":"Currency"},{"system":"currency","function":"remove","fullName":"currency.remove","params":"username: string, amount: Currency","async":true,"returnType":"Currency"},{"system":"currency","function":"set","fullName":"currency.set","params":"username: string, currencyData: Currency","async":true,"returnType":""},{"system":"friends","function":"add","fullName":"friends.add","params":"username: string, friend_username: string","async":true,"returnType":""},{"system":"friends","function":"list","fullName":"friends.list","params":"username: string","async":true,"returnType":""},{"system":"friends","function":"remove","fullName":"friends.remove","params":"username: string, friend_username: string","async":true,"returnType":""},{"system":"inventory","function":"add","fullName":"inventory.add","params":"name: string, item: InventoryItem","async":true,"returnType":""},{"system":"inventory","function":"delete","fullName":"inventory.delete","params":"name: string, item: InventoryItem","async":true,"returnType":""},{"system":"inventory","function":"find","fullName":"inventory.find","params":"name: string, item: InventoryItem","async":true,"returnType":""},{"system":"inventory","function":"get","fullName":"inventory.get","params":"name: string","async":true,"returnType":""},{"system":"inventory","function":"remove","fullName":"inventory.remove","params":"name: string, item: InventoryItem","async":true,"returnType":""},{"system":"items","function":"add","fullName":"items.add","params":"item: Item","async":true,"returnType":""},{"system":"items","function":"find","fullName":"items.find","params":"item: Item","async":true,"returnType":""},{"system":"items","function":"list","fullName":"items.list","params":"","async":true,"returnType":""},{"system":"items","function":"remove","fullName":"items.remove","params":"item: Item","async":true,"returnType":""},{"system":"items","function":"update","fullName":"items.update","params":"item: Item","async":true,"returnType":""},{"system":"language","function":"translate","fullName":"language.translate","params":"text: string, lang: string","async":true,"returnType":""},{"system":"language","function":"translate_google","fullName":"language.translate_google","params":"data: any","async":true,"returnType":""},{"system":"language","function":"translate_openai","fullName":"language.translate_openai","params":"data: any","async":true,"returnType":""},{"system":"npcs","function":"add","fullName":"npcs.add","params":"npc: Npc","async":true,"returnType":""},{"system":"npcs","function":"find","fullName":"npcs.find","params":"npc: Npc","async":true,"returnType":""},{"system":"npcs","function":"list","fullName":"npcs.list","params":"","async":true,"returnType":""},{"system":"npcs","function":"move","fullName":"npcs.move","params":"npc: Npc","async":true,"returnType":""},{"system":"npcs","function":"remove","fullName":"npcs.remove","params":"npc: Npc","async":true,"returnType":""},{"system":"npcs","function":"update","fullName":"npcs.update","params":"npc: Npc","async":true,"returnType":""},{"system":"particles","function":"add","fullName":"particles.add","params":"particle: Particle","async":true,"returnType":""},{"system":"particles","function":"find","fullName":"particles.find","params":"particle: Particle","async":true,"returnType":""},{"system":"particles","function":"list","fullName":"particles.list","params":"","async":true,"returnType":""},{"system":"particles","function":"remove","fullName":"particles.remove","params":"particle: Particle","async":true,"returnType":""},{"system":"particles","function":"update","fullName":"particles.update","params":"particle: Particle","async":true,"returnType":""},{"system":"parties","function":"add","fullName":"parties.add","params":"username: string, partyId: number","async":true,"returnType":"string[]"},{"system":"parties","function":"create","fullName":"parties.create","params":"leader: string, username: string","async":true,"returnType":"string[] | boolean"},{"system":"parties","function":"delete","fullName":"parties.delete","params":"partyId: number","async":true,"returnType":"boolean"},{"system":"parties","function":"disband","fullName":"parties.disband","params":"username: string","async":true,"returnType":"boolean"},{"system":"parties","function":"exists","fullName":"parties.exists","params":"username: string","async":true,"returnType":"boolean"},{"system":"parties","function":"getPartyId","fullName":"parties.getPartyId","params":"username: string","async":true,"returnType":"number | null"},{"system":"parties","function":"getPartyLeader","fullName":"parties.getPartyLeader","params":"partyId: number","async":true,"returnType":"string | null"},{"system":"parties","function":"getPartyMembers","fullName":"parties.getPartyMembers","params":"partyId: number","async":true,"returnType":"string[]"},{"system":"parties","function":"isInParty","fullName":"parties.isInParty","params":"username: string","async":true,"returnType":"boolean"},{"system":"parties","function":"isPartyLeader","fullName":"parties.isPartyLeader","params":"username: string","async":true,"returnType":"boolean"},{"system":"parties","function":"leave","fullName":"parties.leave","params":"username: string","async":true,"returnType":"boolean | string[]"},{"system":"parties","function":"remove","fullName":"parties.remove","params":"username: string","async":true,"returnType":"string[] | boolean"},{"system":"permissions","function":"add","fullName":"permissions.add","params":"username: string, permission: string","async":true,"returnType":""},{"system":"permissions","function":"clear","fullName":"permissions.clear","params":"username: string","async":true,"returnType":""},{"system":"permissions","function":"get","fullName":"permissions.get","params":"username: string","async":true,"returnType":""},{"system":"permissions","function":"remove","fullName":"permissions.remove","params":"username: string, permission: string","async":true,"returnType":""},{"system":"permissions","function":"set","fullName":"permissions.set","params":"username: string, permissions: string | string[]","async":true,"returnType":""},{"system":"player","function":"ban","fullName":"player.ban","params":"username: string, ws: WebSocket","async":true,"returnType":""},{"system":"player","function":"canAttack","fullName":"player.canAttack","params":"self: Player, target: Player, playerProperties: PlayerProperties","async":false,"returnType":""},{"system":"player","function":"checkIfWouldCollide","fullName":"player.checkIfWouldCollide","params":"map: string, position: PositionData, playerProperties: PlayerProperties, mapPropertiesCache?: any","async":true,"returnType":""},{"system":"player","function":"clear","fullName":"player.clear","params":"","async":true,"returnType":""},{"system":"player","function":"clearSessionId","fullName":"player.clearSessionId","params":"session_id: string","async":true,"returnType":""},{"system":"player","function":"findByEmail","fullName":"player.findByEmail","params":"email: string","async":true,"returnType":""},{"system":"player","function":"findByUsername","fullName":"player.findByUsername","params":"username: string","async":true,"returnType":""},{"system":"player","function":"findClosestPlayer","fullName":"player.findClosestPlayer","params":"self: Player, players: Player[], range: number","async":false,"returnType":"NullablePlayer"},{"system":"player","function":"findPlayerInDatabase","fullName":"player.findPlayerInDatabase","params":"username?: string, id?: string","async":true,"returnType":""},{"system":"player","function":"getConfig","fullName":"player.getConfig","params":"username: string","async":true,"returnType":""},{"system":"player","function":"getEmail","fullName":"player.getEmail","params":"username: string","async":true,"returnType":""},{"system":"player","function":"getLocation","fullName":"player.getLocation","params":"player: Player","async":true,"returnType":""},{"system":"player","function":"getMap","fullName":"player.getMap","params":"session_id: string","async":true,"returnType":""},{"system":"player","function":"getNewMaxXp","fullName":"player.getNewMaxXp","params":"level: number","async":false,"returnType":""},{"system":"player","function":"getPartyIdByUsername","fullName":"player.getPartyIdByUsername","params":"username: string","async":true,"returnType":""},{"system":"player","function":"GetPlayerLoginData","fullName":"player.GetPlayerLoginData","params":"username: string","async":true,"returnType":""},{"system":"player","function":"getPlayers","fullName":"player.getPlayers","params":"map: string","async":true,"returnType":""},{"system":"player","function":"getSession","fullName":"player.getSession","params":"username: string","async":true,"returnType":""},{"system":"player","function":"getSessionId","fullName":"player.getSessionId","params":"token: string","async":true,"returnType":""},{"system":"player","function":"getSessionIdByUsername","fullName":"player.getSessionIdByUsername","params":"username: string","async":true,"returnType":""},{"system":"player","function":"getStats","fullName":"player.getStats","params":"username: string","async":true,"returnType":""},{"system":"player","function":"getUsernameBySession","fullName":"player.getUsernameBySession","params":"session_id: string","async":true,"returnType":""},{"system":"player","function":"getUsernameByToken","fullName":"player.getUsernameByToken","params":"token: string","async":true,"returnType":""},{"system":"player","function":"increaseLevel","fullName":"player.increaseLevel","params":"username: string","async":true,"returnType":""},{"system":"player","function":"increaseXp","fullName":"player.increaseXp","params":"username: string, xp: number","async":true,"returnType":""},{"system":"player","function":"isAdmin","fullName":"player.isAdmin","params":"username: string","async":true,"returnType":""},{"system":"player","function":"isBanned","fullName":"player.isBanned","params":"username: string","async":true,"returnType":""},{"system":"player","function":"isGuest","fullName":"player.isGuest","params":"username: string","async":true,"returnType":""},{"system":"player","function":"isInPvPZone","fullName":"player.isInPvPZone","params":"map: string, position: PositionData, playerProperties: PlayerProperties","async":true,"returnType":""},{"system":"player","function":"isNoclip","fullName":"player.isNoclip","params":"username: string","async":true,"returnType":""},{"system":"player","function":"isOnline","fullName":"player.isOnline","params":"username: string","async":true,"returnType":""},{"system":"player","function":"isStealth","fullName":"player.isStealth","params":"username: string","async":true,"returnType":""},{"system":"player","function":"kick","fullName":"player.kick","params":"username: string, ws: WebSocket","async":true,"returnType":""},{"system":"player","function":"login","fullName":"player.login","params":"username: string, password: string","async":true,"returnType":""},{"system":"player","function":"logout","fullName":"player.logout","params":"session_id: string","async":true,"returnType":""},{"system":"player","function":"register","fullName":"player.register","params":"username: string, password_hash: string, email: string, req: any, guest: boolean","async":true,"returnType":""},{"system":"player","function":"returnHome","fullName":"player.returnHome","params":"session_id: string","async":true,"returnType":""},{"system":"player","function":"setConfig","fullName":"player.setConfig","params":"session_id: string, data: any","async":true,"returnType":""},{"system":"player","function":"setLocation","fullName":"player.setLocation","params":"session_id: string, map: string, position: PositionData","async":true,"returnType":""},{"system":"player","function":"setSessionId","fullName":"player.setSessionId","params":"token: string, sessionId: string","async":true,"returnType":"boolean | string"},{"system":"player","function":"setStats","fullName":"player.setStats","params":"username: string, stats: StatsData","async":true,"returnType":""},{"system":"player","function":"setToken","fullName":"player.setToken","params":"username: string","async":true,"returnType":""},{"system":"player","function":"toggleAdmin","fullName":"player.toggleAdmin","params":"username: string","async":true,"returnType":""},{"system":"player","function":"toggleNoclip","fullName":"player.toggleNoclip","params":"username: string","async":true,"returnType":""},{"system":"player","function":"toggleStealth","fullName":"player.toggleStealth","params":"username: string","async":true,"returnType":""},{"system":"player","function":"unban","fullName":"player.unban","params":"username: string","async":true,"returnType":""},{"system":"player","function":"verify","fullName":"player.verify","params":"session_id: string","async":true,"returnType":""},{"system":"questlog","function":"completeQuest","fullName":"questlog.completeQuest","params":"username: string, id: number","async":true,"returnType":""},{"system":"questlog","function":"get","fullName":"questlog.get","params":"username: string","async":true,"returnType":""},{"system":"questlog","function":"startQuest","fullName":"questlog.startQuest","params":"username: string, id: number","async":true,"returnType":""},{"system":"questlog","function":"updateQuestLog","fullName":"questlog.updateQuestLog","params":"username: string, questLog: any","async":true,"returnType":""},{"system":"quests","function":"add","fullName":"quests.add","params":"quest: Quest","async":true,"returnType":""},{"system":"quests","function":"find","fullName":"quests.find","params":"id: number","async":true,"returnType":""},{"system":"quests","function":"list","fullName":"quests.list","params":"","async":true,"returnType":""},{"system":"quests","function":"remove","fullName":"quests.remove","params":"id: number","async":true,"returnType":""},{"system":"quests","function":"update","fullName":"quests.update","params":"quest: Quest","async":true,"returnType":""},{"system":"spells","function":"add","fullName":"spells.add","params":"spell: SpellData","async":true,"returnType":""},{"system":"spells","function":"find","fullName":"spells.find","params":"spell: SpellData","async":true,"returnType":""},{"system":"spells","function":"list","fullName":"spells.list","params":"","async":true,"returnType":""},{"system":"spells","function":"remove","fullName":"spells.remove","params":"spell: SpellData","async":true,"returnType":""},{"system":"spells","function":"update","fullName":"spells.update","params":"spell: SpellData","async":true,"returnType":""},{"system":"weapons","function":"add","fullName":"weapons.add","params":"weapon: WeaponData","async":true,"returnType":""},{"system":"weapons","function":"find","fullName":"weapons.find","params":"weapon: WeaponData","async":true,"returnType":""},{"system":"weapons","function":"list","fullName":"weapons.list","params":"","async":true,"returnType":""},{"system":"weapons","function":"remove","fullName":"weapons.remove","params":"weapon: WeaponData","async":true,"returnType":""},{"system":"weapons","function":"update","fullName":"weapons.update","params":"weapon: WeaponData","async":true,"returnType":""},{"system":"weather","function":"add","fullName":"weather.add","params":"weather: WeatherData","async":true,"returnType":""},{"system":"weather","function":"find","fullName":"weather.find","params":"weather: WeatherData","async":true,"returnType":""},{"system":"weather","function":"list","fullName":"weather.list","params":"","async":true,"returnType":""},{"system":"weather","function":"remove","fullName":"weather.remove","params":"weather: WeatherData","async":true,"returnType":""},{"system":"weather","function":"update","fullName":"weather.update","params":"weather: WeatherData","async":true,"returnType":""},{"system":"worlds","function":"add","fullName":"worlds.add","params":"world: WorldData","async":true,"returnType":""},{"system":"worlds","function":"get","fullName":"worlds.get","params":"world: string","async":true,"returnType":""},{"system":"worlds","function":"getCurrentWeather","fullName":"worlds.getCurrentWeather","params":"world: string","async":true,"returnType":""},{"system":"worlds","function":"getMaxPlayers","fullName":"worlds.getMaxPlayers","params":"world: string","async":true,"returnType":""},{"system":"worlds","function":"list","fullName":"worlds.list","params":"","async":true,"returnType":""},{"system":"worlds","function":"remove","fullName":"worlds.remove","params":"world: WorldData","async":true,"returnType":""},{"system":"worlds","function":"update","fullName":"worlds.update","params":"world: WorldData","async":true,"returnType":""}];
+        const searchIndex = [{"system":"audio","function":"get","fullName":"audio.get","params":"name: string","async":true,"returnType":""},{"system":"audio","function":"list","fullName":"audio.list","params":"","async":true,"returnType":""},{"system":"currency","function":"add","fullName":"currency.add","params":"username: string, amount: Currency","async":true,"returnType":"Currency"},{"system":"currency","function":"get","fullName":"currency.get","params":"username: string","async":true,"returnType":"Currency"},{"system":"currency","function":"remove","fullName":"currency.remove","params":"username: string, amount: Currency","async":true,"returnType":"Currency"},{"system":"currency","function":"set","fullName":"currency.set","params":"username: string, currencyData: Currency","async":true,"returnType":""},{"system":"friends","function":"add","fullName":"friends.add","params":"username: string, friend_username: string","async":true,"returnType":""},{"system":"friends","function":"list","fullName":"friends.list","params":"username: string","async":true,"returnType":""},{"system":"friends","function":"remove","fullName":"friends.remove","params":"username: string, friend_username: string","async":true,"returnType":""},{"system":"guilds","function":"add","fullName":"guilds.add","params":"username: string, guildId: number","async":true,"returnType":"string[]"},{"system":"guilds","function":"create","fullName":"guilds.create","params":"username: string, name: string","async":true,"returnType":"string[] | boolean"},{"system":"guilds","function":"delete","fullName":"guilds.delete","params":"guildId: number","async":true,"returnType":"boolean"},{"system":"guilds","function":"disband","fullName":"guilds.disband","params":"username: string","async":true,"returnType":"boolean"},{"system":"guilds","function":"exists","fullName":"guilds.exists","params":"name: string","async":true,"returnType":"boolean"},{"system":"guilds","function":"getGuildId","fullName":"guilds.getGuildId","params":"username: string","async":true,"returnType":"number | null"},{"system":"guilds","function":"getGuildLeader","fullName":"guilds.getGuildLeader","params":"guildId: number","async":true,"returnType":"string | null"},{"system":"guilds","function":"getGuildMembers","fullName":"guilds.getGuildMembers","params":"guildId: number","async":true,"returnType":"string[]"},{"system":"guilds","function":"getGuildName","fullName":"guilds.getGuildName","params":"guildId: number","async":true,"returnType":"string | null"},{"system":"guilds","function":"isGuildLeader","fullName":"guilds.isGuildLeader","params":"username: string","async":true,"returnType":"boolean"},{"system":"guilds","function":"isInGuild","fullName":"guilds.isInGuild","params":"username: string","async":true,"returnType":"boolean"},{"system":"guilds","function":"leave","fullName":"guilds.leave","params":"username: string","async":true,"returnType":"boolean | string[]"},{"system":"guilds","function":"remove","fullName":"guilds.remove","params":"username: string","async":true,"returnType":"string[] | boolean"},{"system":"inventory","function":"add","fullName":"inventory.add","params":"name: string, item: InventoryItem","async":true,"returnType":""},{"system":"inventory","function":"delete","fullName":"inventory.delete","params":"name: string, item: InventoryItem","async":true,"returnType":""},{"system":"inventory","function":"find","fullName":"inventory.find","params":"name: string, item: InventoryItem","async":true,"returnType":""},{"system":"inventory","function":"get","fullName":"inventory.get","params":"name: string","async":true,"returnType":""},{"system":"inventory","function":"remove","fullName":"inventory.remove","params":"name: string, item: InventoryItem","async":true,"returnType":""},{"system":"items","function":"add","fullName":"items.add","params":"item: Item","async":true,"returnType":""},{"system":"items","function":"find","fullName":"items.find","params":"item: Item","async":true,"returnType":""},{"system":"items","function":"list","fullName":"items.list","params":"","async":true,"returnType":""},{"system":"items","function":"remove","fullName":"items.remove","params":"item: Item","async":true,"returnType":""},{"system":"items","function":"update","fullName":"items.update","params":"item: Item","async":true,"returnType":""},{"system":"language","function":"translate","fullName":"language.translate","params":"text: string, lang: string","async":true,"returnType":""},{"system":"language","function":"translate_google","fullName":"language.translate_google","params":"data: any","async":true,"returnType":""},{"system":"language","function":"translate_openai","fullName":"language.translate_openai","params":"data: any","async":true,"returnType":""},{"system":"npcs","function":"add","fullName":"npcs.add","params":"npc: Npc","async":true,"returnType":""},{"system":"npcs","function":"find","fullName":"npcs.find","params":"npc: Npc","async":true,"returnType":""},{"system":"npcs","function":"list","fullName":"npcs.list","params":"","async":true,"returnType":""},{"system":"npcs","function":"move","fullName":"npcs.move","params":"npc: Npc","async":true,"returnType":""},{"system":"npcs","function":"remove","fullName":"npcs.remove","params":"npc: Npc","async":true,"returnType":""},{"system":"npcs","function":"update","fullName":"npcs.update","params":"npc: Npc","async":true,"returnType":""},{"system":"particles","function":"add","fullName":"particles.add","params":"particle: Particle","async":true,"returnType":""},{"system":"particles","function":"find","fullName":"particles.find","params":"particle: Particle","async":true,"returnType":""},{"system":"particles","function":"list","fullName":"particles.list","params":"","async":true,"returnType":""},{"system":"particles","function":"remove","fullName":"particles.remove","params":"particle: Particle","async":true,"returnType":""},{"system":"particles","function":"update","fullName":"particles.update","params":"particle: Particle","async":true,"returnType":""},{"system":"parties","function":"add","fullName":"parties.add","params":"username: string, partyId: number","async":true,"returnType":"string[]"},{"system":"parties","function":"create","fullName":"parties.create","params":"leader: string, username: string","async":true,"returnType":"string[] | boolean"},{"system":"parties","function":"delete","fullName":"parties.delete","params":"partyId: number","async":true,"returnType":"boolean"},{"system":"parties","function":"disband","fullName":"parties.disband","params":"username: string","async":true,"returnType":"boolean"},{"system":"parties","function":"exists","fullName":"parties.exists","params":"username: string","async":true,"returnType":"boolean"},{"system":"parties","function":"getPartyId","fullName":"parties.getPartyId","params":"username: string","async":true,"returnType":"number | null"},{"system":"parties","function":"getPartyLeader","fullName":"parties.getPartyLeader","params":"partyId: number","async":true,"returnType":"string | null"},{"system":"parties","function":"getPartyMembers","fullName":"parties.getPartyMembers","params":"partyId: number","async":true,"returnType":"string[]"},{"system":"parties","function":"isInParty","fullName":"parties.isInParty","params":"username: string","async":true,"returnType":"boolean"},{"system":"parties","function":"isPartyLeader","fullName":"parties.isPartyLeader","params":"username: string","async":true,"returnType":"boolean"},{"system":"parties","function":"leave","fullName":"parties.leave","params":"username: string","async":true,"returnType":"boolean | string[]"},{"system":"parties","function":"remove","fullName":"parties.remove","params":"username: string","async":true,"returnType":"string[] | boolean"},{"system":"permissions","function":"add","fullName":"permissions.add","params":"username: string, permission: string","async":true,"returnType":""},{"system":"permissions","function":"clear","fullName":"permissions.clear","params":"username: string","async":true,"returnType":""},{"system":"permissions","function":"get","fullName":"permissions.get","params":"username: string","async":true,"returnType":""},{"system":"permissions","function":"remove","fullName":"permissions.remove","params":"username: string, permission: string","async":true,"returnType":""},{"system":"permissions","function":"set","fullName":"permissions.set","params":"username: string, permissions: string | string[]","async":true,"returnType":""},{"system":"player","function":"ban","fullName":"player.ban","params":"username: string, ws: WebSocket","async":true,"returnType":""},{"system":"player","function":"canAttack","fullName":"player.canAttack","params":"self: Player, target: Player, playerProperties: PlayerProperties","async":true,"returnType":"{ value: boolean; reason?: string }"},{"system":"player","function":"canMount","fullName":"player.canMount","params":"player: Player","async":false,"returnType":"boolean"},{"system":"player","function":"checkIfWouldCollide","fullName":"player.checkIfWouldCollide","params":"map: string, position: PositionData, playerProperties: PlayerProperties, mapPropertiesCache?: any","async":true,"returnType":""},{"system":"player","function":"clear","fullName":"player.clear","params":"","async":true,"returnType":""},{"system":"player","function":"clearMapCache","fullName":"player.clearMapCache","params":"mapName?: string","async":false,"returnType":""},{"system":"player","function":"clearSessionId","fullName":"player.clearSessionId","params":"session_id: string","async":true,"returnType":""},{"system":"player","function":"findByEmail","fullName":"player.findByEmail","params":"email: string","async":true,"returnType":""},{"system":"player","function":"findByUsername","fullName":"player.findByUsername","params":"username: string","async":true,"returnType":""},{"system":"player","function":"findClosestPlayer","fullName":"player.findClosestPlayer","params":"self: Player, players: Player[], range: number","async":false,"returnType":"NullablePlayer"},{"system":"player","function":"findPlayerInDatabase","fullName":"player.findPlayerInDatabase","params":"username?: string, id?: string","async":true,"returnType":""},{"system":"player","function":"getConfig","fullName":"player.getConfig","params":"username: string","async":true,"returnType":""},{"system":"player","function":"getEmail","fullName":"player.getEmail","params":"username: string","async":true,"returnType":""},{"system":"player","function":"getLocation","fullName":"player.getLocation","params":"player: Player","async":true,"returnType":""},{"system":"player","function":"getMap","fullName":"player.getMap","params":"session_id: string","async":true,"returnType":""},{"system":"player","function":"getMaxHealthForLevel","fullName":"player.getMaxHealthForLevel","params":"level: number","async":false,"returnType":""},{"system":"player","function":"getMaxStaminaForLevel","fullName":"player.getMaxStaminaForLevel","params":"level: number","async":false,"returnType":""},{"system":"player","function":"getNewMaxXp","fullName":"player.getNewMaxXp","params":"level: number","async":false,"returnType":""},{"system":"player","function":"getPartyIdByUsername","fullName":"player.getPartyIdByUsername","params":"username: string","async":true,"returnType":""},{"system":"player","function":"GetPlayerLoginData","fullName":"player.GetPlayerLoginData","params":"username: string","async":true,"returnType":""},{"system":"player","function":"getPlayers","fullName":"player.getPlayers","params":"map: string","async":true,"returnType":""},{"system":"player","function":"getSession","fullName":"player.getSession","params":"username: string","async":true,"returnType":""},{"system":"player","function":"getSessionId","fullName":"player.getSessionId","params":"token: string","async":true,"returnType":""},{"system":"player","function":"getSessionIdByUsername","fullName":"player.getSessionIdByUsername","params":"username: string","async":true,"returnType":""},{"system":"player","function":"getStats","fullName":"player.getStats","params":"username: string","async":true,"returnType":""},{"system":"player","function":"getUsernameBySession","fullName":"player.getUsernameBySession","params":"session_id: string","async":true,"returnType":""},{"system":"player","function":"getUsernameByToken","fullName":"player.getUsernameByToken","params":"token: string","async":true,"returnType":""},{"system":"player","function":"increaseLevel","fullName":"player.increaseLevel","params":"username: string","async":true,"returnType":""},{"system":"player","function":"increaseXp","fullName":"player.increaseXp","params":"username: string, xp: number","async":true,"returnType":""},{"system":"player","function":"isAdmin","fullName":"player.isAdmin","params":"username: string","async":true,"returnType":""},{"system":"player","function":"isBanned","fullName":"player.isBanned","params":"username: string","async":true,"returnType":""},{"system":"player","function":"isGuest","fullName":"player.isGuest","params":"username: string","async":true,"returnType":""},{"system":"player","function":"isInPvPZone","fullName":"player.isInPvPZone","params":"map: string, position: PositionData, playerProperties: PlayerProperties","async":true,"returnType":""},{"system":"player","function":"isNoclip","fullName":"player.isNoclip","params":"username: string","async":true,"returnType":""},{"system":"player","function":"isOnline","fullName":"player.isOnline","params":"username: string","async":true,"returnType":""},{"system":"player","function":"isStealth","fullName":"player.isStealth","params":"username: string","async":true,"returnType":""},{"system":"player","function":"kick","fullName":"player.kick","params":"username: string, ws: WebSocket","async":true,"returnType":""},{"system":"player","function":"login","fullName":"player.login","params":"username: string, password: string","async":true,"returnType":""},{"system":"player","function":"logout","fullName":"player.logout","params":"session_id: string","async":true,"returnType":""},{"system":"player","function":"queryRLE","fullName":"player.queryRLE","params":"rleData: number[], targetIndex: number","async":false,"returnType":"number"},{"system":"player","function":"register","fullName":"player.register","params":"username: string, password_hash: string, email: string, req: any, guest: boolean","async":true,"returnType":""},{"system":"player","function":"returnHome","fullName":"player.returnHome","params":"session_id: string","async":true,"returnType":""},{"system":"player","function":"setConfig","fullName":"player.setConfig","params":"session_id: string, data: any","async":true,"returnType":""},{"system":"player","function":"setLocation","fullName":"player.setLocation","params":"session_id: string, map: string, position: PositionData","async":true,"returnType":""},{"system":"player","function":"setSessionId","fullName":"player.setSessionId","params":"token: string, sessionId: string","async":true,"returnType":"boolean | string"},{"system":"player","function":"setStats","fullName":"player.setStats","params":"username: string, stats: StatsData","async":true,"returnType":""},{"system":"player","function":"setToken","fullName":"player.setToken","params":"username: string","async":true,"returnType":""},{"system":"player","function":"toggleAdmin","fullName":"player.toggleAdmin","params":"username: string","async":true,"returnType":""},{"system":"player","function":"toggleNoclip","fullName":"player.toggleNoclip","params":"username: string","async":true,"returnType":""},{"system":"player","function":"toggleStealth","fullName":"player.toggleStealth","params":"username: string","async":true,"returnType":""},{"system":"player","function":"unban","fullName":"player.unban","params":"username: string","async":true,"returnType":""},{"system":"player","function":"verify","fullName":"player.verify","params":"session_id: string","async":true,"returnType":""},{"system":"questlog","function":"completeQuest","fullName":"questlog.completeQuest","params":"username: string, id: number","async":true,"returnType":""},{"system":"questlog","function":"get","fullName":"questlog.get","params":"username: string","async":true,"returnType":""},{"system":"questlog","function":"startQuest","fullName":"questlog.startQuest","params":"username: string, id: number","async":true,"returnType":""},{"system":"questlog","function":"updateQuestLog","fullName":"questlog.updateQuestLog","params":"username: string, questLog: any","async":true,"returnType":""},{"system":"quests","function":"add","fullName":"quests.add","params":"quest: Quest","async":true,"returnType":""},{"system":"quests","function":"find","fullName":"quests.find","params":"id: number","async":true,"returnType":""},{"system":"quests","function":"list","fullName":"quests.list","params":"","async":true,"returnType":""},{"system":"quests","function":"remove","fullName":"quests.remove","params":"id: number","async":true,"returnType":""},{"system":"quests","function":"update","fullName":"quests.update","params":"quest: Quest","async":true,"returnType":""},{"system":"spells","function":"add","fullName":"spells.add","params":"spell: SpellData","async":true,"returnType":""},{"system":"spells","function":"find","fullName":"spells.find","params":"spell: SpellData","async":true,"returnType":""},{"system":"spells","function":"list","fullName":"spells.list","params":"","async":true,"returnType":""},{"system":"spells","function":"remove","fullName":"spells.remove","params":"spell: SpellData","async":true,"returnType":""},{"system":"spells","function":"update","fullName":"spells.update","params":"spell: SpellData","async":true,"returnType":""},{"system":"weapons","function":"add","fullName":"weapons.add","params":"weapon: WeaponData","async":true,"returnType":""},{"system":"weapons","function":"find","fullName":"weapons.find","params":"weapon: WeaponData","async":true,"returnType":""},{"system":"weapons","function":"list","fullName":"weapons.list","params":"","async":true,"returnType":""},{"system":"weapons","function":"remove","fullName":"weapons.remove","params":"weapon: WeaponData","async":true,"returnType":""},{"system":"weapons","function":"update","fullName":"weapons.update","params":"weapon: WeaponData","async":true,"returnType":""},{"system":"weather","function":"add","fullName":"weather.add","params":"weather: WeatherData","async":true,"returnType":""},{"system":"weather","function":"find","fullName":"weather.find","params":"weather: WeatherData","async":true,"returnType":""},{"system":"weather","function":"list","fullName":"weather.list","params":"","async":true,"returnType":""},{"system":"weather","function":"remove","fullName":"weather.remove","params":"weather: WeatherData","async":true,"returnType":""},{"system":"weather","function":"update","fullName":"weather.update","params":"weather: WeatherData","async":true,"returnType":""},{"system":"worlds","function":"add","fullName":"worlds.add","params":"world: WorldData","async":true,"returnType":""},{"system":"worlds","function":"get","fullName":"worlds.get","params":"world: string","async":true,"returnType":""},{"system":"worlds","function":"getCurrentWeather","fullName":"worlds.getCurrentWeather","params":"world: string","async":true,"returnType":""},{"system":"worlds","function":"getMaxPlayers","fullName":"worlds.getMaxPlayers","params":"world: string","async":true,"returnType":""},{"system":"worlds","function":"list","fullName":"worlds.list","params":"","async":true,"returnType":""},{"system":"worlds","function":"remove","fullName":"worlds.remove","params":"world: WorldData","async":true,"returnType":""},{"system":"worlds","function":"update","fullName":"worlds.update","params":"world: WorldData","async":true,"returnType":""}];
 
         // Modal Elements and Functions (defined first so they're available to other handlers)
         const modal = document.getElementById('codeModal');
