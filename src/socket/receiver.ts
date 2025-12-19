@@ -759,8 +759,8 @@ export default async function packetReceiver(
             return;
           }
 
-          tempPosition.x += offset.dx;
-          tempPosition.y += offset.dy;
+          tempPosition.x = Math.round(tempPosition.x + offset.dx);
+          tempPosition.y = Math.round(tempPosition.y + offset.dy);
 
           const collision = await player.checkIfWouldCollide(
             currentPlayer.location.map,
@@ -876,15 +876,16 @@ export default async function packetReceiver(
         if (!currentPlayer?.isAdmin) return;
         currentPlayer.location.position = data;
         currentPlayer.location.position.direction = "down";
+        // Round position values to prevent floating point numbers
+        currentPlayer.location.position.x = Math.round(
+          Number(currentPlayer.location.position.x)
+        );
+        currentPlayer.location.position.y = Math.round(
+          Number(currentPlayer.location.position.y)
+        );
         if (currentPlayer.isStealth) {
           const playersInMap = filterPlayersByMap(currentPlayer.location.map);
           const playersInMapAdmin = playersInMap.filter((p) => p.isAdmin);
-          currentPlayer.location.position.x = Math.floor(
-            Number(currentPlayer.location.position.x)
-          );
-          currentPlayer.location.position.y = Math.floor(
-            Number(currentPlayer.location.position.y)
-          );
           playersInMapAdmin.forEach((player) => {
             const movementData = {
               id: ws.data.id,
