@@ -136,19 +136,25 @@ export default async function loadMap(data: any): Promise<boolean> {
       }
     }
 
-    // Load chunks sequentially and update progress
+    // Load chunks in parallel and update progress
     const totalChunks = chunksToLoad.length;
     let loadedCount = 0;
 
-    for (const chunk of chunksToLoad) {
-      const chunkData = await requestChunk(chunk.x, chunk.y);
-      if (chunkData && chunkData.canvas) {
-        loadedCount++;
-      }
-      // Progress from 40% to 90% as chunks load
-      const chunkProgress = 40 + (loadedCount / totalChunks) * 50;
-      progressBar.style.width = `${chunkProgress}%`;
-    }
+    // Load all chunks in parallel for much faster loading
+    const chunkPromises = chunksToLoad.map(chunk =>
+      requestChunk(chunk.x, chunk.y).then(chunkData => {
+        if (chunkData && chunkData.canvas) {
+          loadedCount++;
+          // Update progress as each chunk completes
+          const chunkProgress = 40 + (loadedCount / totalChunks) * 50;
+          progressBar.style.width = `${chunkProgress}%`;
+        }
+        return chunkData;
+      })
+    );
+
+    // Wait for all chunks to complete
+    await Promise.all(chunkPromises);
 
     // Verify all chunks are actually loaded
     const allChunksLoaded = chunksToLoad.every(chunk => {
@@ -430,7 +436,9 @@ async function renderChunkToCanvas(chunkData: ChunkData): Promise<{lowerCanvas: 
   const PLAYER_Z_INDEX = 3;
 
   // Draw each layer to appropriate canvas
-  for (const layer of sortedLayers) {
+  for (let layerIdx = 0; layerIdx < sortedLayers.length; layerIdx++) {
+    const layer = sortedLayers[layerIdx];
+
     // Skip collision and no-pvp layers - they're only for debug visualization
     const layerName = layer.name ? layer.name.toLowerCase() : '';
     if (layerName.includes('collision') || layerName.includes('nopvp') || layerName.includes('no-pvp')) {
@@ -438,6 +446,10 @@ async function renderChunkToCanvas(chunkData: ChunkData): Promise<{lowerCanvas: 
     }
 
     const ctx = layer.zIndex < PLAYER_Z_INDEX ? lowerCtx : upperCtx;
+
+    // Process tiles in batches to avoid blocking
+    const BATCH_SIZE = 100;
+    let tileCount = 0;
 
     for (let y = 0; y < chunkData.height; y++) {
       for (let x = 0; x < chunkData.width; x++) {
@@ -468,6 +480,12 @@ async function renderChunkToCanvas(chunkData: ChunkData): Promise<{lowerCanvas: 
           );
         } catch (drawError) {
           console.error("Error drawing tile:", drawError);
+        }
+
+        tileCount++;
+        // Yield to browser every BATCH_SIZE tiles to prevent lag
+        if (tileCount % BATCH_SIZE === 0) {
+          await new Promise(resolve => setTimeout(resolve, 0));
         }
       }
     }

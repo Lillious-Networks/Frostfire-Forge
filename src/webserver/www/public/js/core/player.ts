@@ -54,6 +54,7 @@ async function createPlayer(data: any) {
     typingTimeout: null as NodeJS.Timeout | null,
     typingImage: typingImage,
     party: data.party || null,
+    mounted: data.mounted || false,
     damageNumbers: [] as Array<{
       value: number;
       x: number;
@@ -212,8 +213,8 @@ async function createPlayer(data: any) {
           context.globalAlpha = 0.5;
           context.drawImage(
             frame.imageElement,
-            this.position.x - frame.width/2,
-            this.position.y - frame.height/2,
+            Math.round(this.position.x - frame.width/2),
+            Math.round(this.position.y - frame.height/2),
             frame.width,
             frame.height
           );
@@ -221,8 +222,8 @@ async function createPlayer(data: any) {
         } else {
           context.drawImage(
             frame.imageElement,
-            this.position.x - frame.width/2,
-            this.position.y - frame.height/2,
+            Math.round(this.position.x - frame.width/2),
+            Math.round(this.position.y - frame.height/2),
             frame.width,
             frame.height
           );
@@ -230,6 +231,9 @@ async function createPlayer(data: any) {
       }
     },
     show: function (context: CanvasRenderingContext2D, currentPlayer?: any) {
+      // UI offset for all players
+      const uiOffset = 10;
+
       let shadow: { width: number; height: number; fillStyle: string; borderColor: string } = { width: 0, height: 0, fillStyle: "black", borderColor: "black" };
       if (this.targeted) {
         shadow = {
@@ -353,19 +357,19 @@ async function createPlayer(data: any) {
       context.strokeText(
         data.username,
         this.position.x,
-        this.position.y + 40
+        this.position.y + 40 + uiOffset
       );
       context.fillText(
         data.username,
         this.position.x,
-        this.position.y + 40
+        this.position.y + 40 + uiOffset
       );
 
       // Draw the player's health bar below the player's name with a width of 100px, centered below the player name
       if (!this.isStealth) {
         if (data.id === cachedPlayerId || this.targeted) {
           context.fillStyle = "rgba(0, 0, 0, 0.8)";
-          context.fillRect(this.position.x - 50, this.position.y + 46, 100, 3);
+          context.fillRect(this.position.x - 50, this.position.y + 46 + uiOffset, 100, 3);
 
           // Update the shadowblur to 2
           context.shadowBlur = 2;
@@ -384,7 +388,7 @@ async function createPlayer(data: any) {
 
           context.fillRect(
             this.position.x - 50,
-            this.position.y + 46,
+            this.position.y + 46 + uiOffset,
             healthPercent * 100,
             3
           );
@@ -394,11 +398,11 @@ async function createPlayer(data: any) {
         // Check if current player is the same as the player we are drawing
         if (data.id === cachedPlayerId || this.targeted) {
         context.fillStyle = "rgba(0, 0, 0, 0.8)";
-        context.fillRect(this.position.x - 50, this.position.y + 51, 100, 3);
+        context.fillRect(this.position.x - 50, this.position.y + 51 + uiOffset, 100, 3);
         context.fillStyle = "#469CD9";
         context.fillRect(
           this.position.x - 50,
-            this.position.y + 51,
+            this.position.y + 51 + uiOffset,
             (this.stats.stamina / this.stats.max_stamina) * 100,
             3
           );
@@ -412,7 +416,7 @@ async function createPlayer(data: any) {
           // Text shadow for better visibility
           context.shadowColor = "black";
           context.shadowBlur = 2;
-          context.fillText(`${this.stats.level}`, this.position.x - 66, this.position.y + 56);
+          context.fillText(`${this.stats.level}`, this.position.x - 66, this.position.y + 56 + uiOffset);
         }
       }
 

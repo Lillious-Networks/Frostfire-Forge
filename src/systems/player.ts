@@ -232,7 +232,7 @@ const player = {
 
       if (existingPlayer && existingPlayer.ws) {
         // Send a notification and close the connection
-        const packetManager = (await import("./packet_manager.ts")).packetManager;
+        const packetManager = (await import("../socket/packet_manager.ts")).packetManager;
         const sendPacket = (ws: any, packet: any) => {
           if (ws.readyState === 1) ws.send(packet);
         };
@@ -245,15 +245,12 @@ const player = {
         // Notify all other players to remove this player (prevent ghost)
         const map = existingPlayer.location?.map;
         if (map) {
-          const playersInMap = Array.from(playerCache.list()).filter(
+          const playersInMap = Object.values(playerCache.list()).filter(
             (p) => p.location?.map === map && p.id !== existingPlayer.id
           );
 
           playersInMap.forEach((p) => {
-            sendPacket(p.ws, packetManager.disconnectPlayer({
-              id: existingPlayer.id,
-              username: existingPlayer.username
-            }));
+            sendPacket(p.ws, packetManager.disconnect(existingPlayer.id));
           });
         }
 
@@ -945,6 +942,14 @@ const player = {
       }
     }
     return closestPlayer;
+  },
+  canMount: (player: Player): boolean => {
+    // Don't allow guest players to mount
+    if (player.isGuest) return false;
+    if (!player || !player.stats) return false;
+    // Optional level requirement to mount
+    // if (player.stats.level < 5) return false;
+    return true;
   },
   GetPlayerLoginData: async (username: string) => {
     if (!username) return null;

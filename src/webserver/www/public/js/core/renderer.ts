@@ -108,41 +108,64 @@ async function loadVisibleChunks() {
 
   // Unload chunks that are far from viewport (2x chunk size for smooth transitions)
   const unloadDistance = window.mapData.chunkSize * window.mapData.tilewidth * 2;
+  const chunkPixelSize = window.mapData.chunkSize * window.mapData.tilewidth;
+
+  // Cache commonly used values
+  const chunksToUnload: string[] = [];
+
   for (const chunkKey of loadedChunksSet) {
     if (!visibleKeys.has(chunkKey)) {
-      const [cx, cy] = chunkKey.split('-').map(Number);
-      const chunkPixelSize = window.mapData.chunkSize * window.mapData.tilewidth;
-      const chunkCenterX = (cx + 0.5) * chunkPixelSize;
-      const chunkCenterY = (cy + 0.5) * chunkPixelSize;
-      const distance = Math.hypot(chunkCenterX - cameraX, chunkCenterY - cameraY);
+      // Parse chunk coordinates only once and cache the lookup
+      const chunkData = window.mapData.loadedChunks.get(chunkKey);
+      if (chunkData) {
+        const chunkCenterX = (chunkData.chunkX + 0.5) * chunkPixelSize;
+        const chunkCenterY = (chunkData.chunkY + 0.5) * chunkPixelSize;
+        const distance = Math.hypot(chunkCenterX - cameraX, chunkCenterY - cameraY);
 
-      if (distance > unloadDistance) {
-        window.mapData.loadedChunks.delete(chunkKey);
-        loadedChunksSet.delete(chunkKey);
+        if (distance > unloadDistance) {
+          chunksToUnload.push(chunkKey);
+        }
       }
     }
   }
 
-  // Load new visible chunks
+  // Unload chunks after iteration to avoid modifying set during iteration
+  for (const chunkKey of chunksToUnload) {
+    window.mapData.loadedChunks.delete(chunkKey);
+    loadedChunksSet.delete(chunkKey);
+  }
+
+  // Load new visible chunks in parallel batches
+  const chunksToLoad: Array<{x: number, y: number, key: string}> = [];
+
   for (const chunk of visibleChunks) {
     const chunkKey = `${chunk.x}-${chunk.y}`;
 
     if (!loadedChunksSet.has(chunkKey) && !pendingChunks.has(chunkKey)) {
+      chunksToLoad.push({ x: chunk.x, y: chunk.y, key: chunkKey });
       pendingChunks.add(chunkKey);
+    }
+  }
 
+  // Load all missing chunks in parallel for better performance
+  if (chunksToLoad.length > 0) {
+    const loadPromises = chunksToLoad.map(chunk =>
       window.mapData.requestChunk(chunk.x, chunk.y)
         .then((chunkData: any) => {
           if (chunkData) {
-            loadedChunksSet.add(chunkKey);
+            loadedChunksSet.add(chunk.key);
           }
         })
         .catch((error: any) => {
-          console.error(`Failed to load chunk ${chunkKey}:`, error);
+          console.error(`Failed to load chunk ${chunk.key}:`, error);
         })
         .finally(() => {
-          pendingChunks.delete(chunkKey);
-        });
-    }
+          pendingChunks.delete(chunk.key);
+        })
+    );
+
+    // Don't await here - let them load in the background
+    Promise.all(loadPromises).catch(() => {});
   }
 }
 
@@ -360,9 +383,9 @@ function animationLoop() {
     lastDirection = "";
   }
 
-  // Load visible chunks periodically
+  // Load visible chunks more frequently to reduce lag
   chunkLoadThrottle++;
-  if (chunkLoadThrottle >= 10) {
+  if (chunkLoadThrottle >= 5) {
     loadVisibleChunks();
     chunkLoadThrottle = 0;
   }

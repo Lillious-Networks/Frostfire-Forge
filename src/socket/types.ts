@@ -69,4 +69,5 @@ export const packetTypes: PacketType = {
   RELOAD_CHUNK: "RELOAD_CHUNK",
   RELOAD_CHUNKS: "RELOAD_CHUNKS",
   UPDATE_CHUNKS: "UPDATE_CHUNKS",
+  MOUNT: "MOUNT",
 };
