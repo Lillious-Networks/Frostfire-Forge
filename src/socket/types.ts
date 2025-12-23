@@ -70,4 +70,5 @@ export const packetTypes: PacketType = {
   RELOAD_CHUNKS: "RELOAD_CHUNKS",
   UPDATE_CHUNKS: "UPDATE_CHUNKS",
   MOUNT: "MOUNT",
+  COLLECTABLES: "COLLECTABLES",
 };

@@ -29,6 +29,7 @@ async function createPlayer(data: any) {
     Guest: ${data.isGuest ? "Yes" : "No"}
     Party: ${data.party ? data.party.join(", ") : "None"}
     Stats: ${JSON.stringify(data.stats, null, 2)}
+    Collectables: ${data.collectables ? JSON.stringify(data.collectables) : "None"}
   `);
 
   const animationPromise = initializeAnimationWithWorker(data.animation);

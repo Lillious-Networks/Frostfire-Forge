@@ -1,7 +1,7 @@
 import { sendRequest, getIsLoaded } from "./socket.js";
 import Cache from "./cache.js";
 const cache = Cache.getInstance();
-import { toggleUI, toggleDebugContainer, handleStatsUI } from "./ui.js";
+import { toggleUI, toggleDebugContainer, handleStatsUI, collectablesUI } from "./ui.js";
 import { handleCommand, handleChatMessage } from "./chat.js";
 import { setDirection, setPendingRequest } from "./renderer.js";
 import { chatInput } from "./chat.js";
@@ -13,6 +13,7 @@ let lastSentDirection = "";
 let toggleInventory = false;
 let toggleSpellBook = false;
 let toggleFriendsList = false;
+let toggleCollectables = false;
 let toggleGuild = false;
 let controllerConnected: boolean = false;
 let contextMenuKeyTriggered = false;
@@ -39,6 +40,10 @@ export const keyHandlers = {
       toggleGuild = toggleUI(guildContainer, toggleGuild, -450);
     }
 
+    if (toggleCollectables) {
+      toggleCollectables = toggleUI(collectablesUI, toggleCollectables, -400);
+    }
+
     toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -425);
   },
   KeyO: () => {
@@ -50,14 +55,26 @@ export const keyHandlers = {
       toggleGuild = toggleUI(guildContainer, toggleGuild, -450);
     }
 
+    if (toggleCollectables) {
+      toggleCollectables = toggleUI(collectablesUI, toggleCollectables, -400);
+    }
+
     toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -425);
   },
   KeyC: () => handleStatsUI(),
   KeyX: () => sendRequest({ type: "STEALTH", data: null }),
   KeyZ: () => sendRequest({ type: "NOCLIP", data: null }),
-  ShiftLeft: () => sendRequest({ type: "MOUNT", data: null }),
-  Enter: async () => handleEnterKey(),
-  Space: () => handleSpaceKey(),
+  KeyK: () => {
+    if (toggleFriendsList) {
+      toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -425);
+    }
+
+    if (toggleSpellBook) {
+      toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -425);
+    }
+
+    toggleCollectables = toggleUI(collectablesUI, toggleCollectables, -400);
+  },
   KeyG: () => {
     if (toggleFriendsList) {
       toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -425);
@@ -67,8 +84,17 @@ export const keyHandlers = {
       toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -425);
     }
 
+    if (toggleCollectables) {
+      toggleCollectables = toggleUI(collectablesUI, toggleCollectables, -400);
+    }
+
     toggleGuild = toggleUI(guildContainer, toggleGuild, -450);
-  }
+  },
+  ShiftLeft: () => {
+    sendRequest({ type: "MOUNT", data: { mount: cache.mount || "horse" } })
+  },
+  Enter: async () => handleEnterKey(),
+  Space: () => handleSpaceKey()
 } as const;
 
 // Movement keys configuration

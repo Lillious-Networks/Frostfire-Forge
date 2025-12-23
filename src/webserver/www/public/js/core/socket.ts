@@ -31,6 +31,7 @@ import {
   manaLabel,
   notificationContainer,
   notificationMessage,
+  collectablesUI,
 } from "./ui.ts";
 import { playAudio, playMusic } from "./audio.ts";
 import { updateXp } from "./xp.ts";
@@ -546,6 +547,73 @@ socket.onmessage = async (event) => {
         window.location.href = "/";
       }
       break;
+    case "COLLECTABLES":
+      {
+        const data = JSON.parse(packet.decode(event.data))["data"];
+        const slots = JSON.parse(packet.decode(event.data))["slots"];
+
+        const grid = collectablesUI.querySelector("#grid");
+        if (!grid) return;
+
+        // Clear existing slots
+        grid.querySelectorAll(".slot").forEach((slot) => {
+          grid.removeChild(slot);
+        });
+
+        if (data.length > 0) {
+          // Assign each collectable to a slot
+          for (let i = 0; i < data.length; i++) {
+            console.log(`Creating collectable slot for:`, data[i]);
+            // Create a new slot
+            const slot = document.createElement("div");
+            slot.classList.add("slot");
+            slot.classList.add("ui");
+            slot.classList.add("epic");
+            // Add icon if available
+            if (data[i].icon) {
+              // @ts-expect-error - pako is loaded in index.html
+              const inflatedData = pako.inflate(
+                new Uint8Array(data[i].icon.data),
+                { to: "string" }
+              );
+              const iconImage = new Image();
+              iconImage.src = `data:image/png;base64,${inflatedData}`;
+              // Scale to 32x32
+              iconImage.width = 32;
+              iconImage.height = 32;
+              iconImage.draggable = false;
+              iconImage.onload = () => {
+                slot.appendChild(iconImage);
+              };
+              // Add event listener to summon mount on click
+              slot.addEventListener("click", () => {
+                // Mounts
+                if (data[i].type === "mount") {
+                  cache.mount = data[i].item;
+                  sendRequest({
+                    type: "MOUNT",
+                    data: { mount: data[i].item},
+                  });
+                }
+              });
+              grid.appendChild(slot);
+            } else {
+              slot.innerHTML = `${data[i].item}`;
+              grid.appendChild(slot);
+            }
+          }
+        }
+
+        // Create empty slots for remaining space
+        for (let i = 0; i < slots - data.length; i++) {
+          const slot = document.createElement("div");
+          slot.classList.add("slot");
+          slot.classList.add("empty");
+          slot.classList.add("ui");
+          grid.appendChild(slot);
+        }
+        break;
+      }
     case "INVENTORY":
       {
         const data = JSON.parse(packet.decode(event.data))["data"];
@@ -568,6 +636,10 @@ socket.onmessage = async (event) => {
               );
               const iconImage = new Image();
               iconImage.src = `data:image/png;base64,${inflatedData}`;
+              iconImage.draggable = false;
+              // Scale to 32x32
+              iconImage.width = 32;
+              iconImage.height = 32;
               iconImage.onload = () => {
                 slot.appendChild(iconImage);
               };

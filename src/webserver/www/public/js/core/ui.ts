@@ -5,6 +5,7 @@ const positionText = document.getElementById("position") as HTMLDivElement;
 const friendsListUI = document.getElementById("friends-list-container") as HTMLDivElement;
 const inventoryUI = document.getElementById("inventory") as HTMLDivElement;
 const spellBookUI = document.getElementById("spell-book-container") as HTMLDivElement;
+const collectablesUI = document.getElementById("collectables-container") as HTMLDivElement;
 const pauseMenu = document.getElementById("pause-menu-container") as HTMLDivElement;
 const menuElements = ["options-menu-container"];
 const chatInput = document.getElementById("chat-input") as HTMLInputElement;
@@ -181,5 +182,5 @@ export {
     inventoryGrid, chatMessages, loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage,
     serverTime, ambience, weatherCanvas, weatherCtx, guildContainer, guildName, guildRank, guildMembersList,
     guildMemberCount, guildMemberInviteInput, guildMemberInviteButton, collisionDebugCheckbox, chunkOutlineDebugCheckbox,
-    collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox, loadedChunksText
+    collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox, loadedChunksText, collectablesUI
 };

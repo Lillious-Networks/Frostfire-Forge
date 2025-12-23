@@ -468,6 +468,49 @@ const createGuildsTable = async () => {
   await query(sql);
 }
 
+const createMountsTable = async () => {
+  log.info("Creating mounts table...");
+  const sql = `
+    CREATE TABLE IF NOT EXISTS mounts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
+      name TEXT NOT NULL UNIQUE,
+      description TEXT DEFAULT NULL,
+      particles TEXT DEFAULT NULL,
+      icon TEXT DEFAULT NULL
+    );
+  `;
+  await query(sql);
+}
+
+const insertDefaultMount = async () => {
+  log.info("Inserting default mount...");
+  const sql = `
+    INSERT OR IGNORE INTO mounts (name, description, particles) VALUES ('horse', 'A sturdy horse for traveling.', NULL);
+  `;
+  await query(sql);
+}
+
+const createCollectablesTable = async () => {
+  log.info("Creating collectables table...");
+  const sql = `
+    CREATE TABLE IF NOT EXISTS collectables (
+      id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
+      type TEXT NOT NULL,
+      item TEXT NOT NULL,
+      username TEXT NOT NULL
+    );
+  `;
+  await query(sql);
+}
+
+const insertDemoMount = async () => {
+  log.info("Inserting demo mount collectable...");
+  const sql = `
+    INSERT OR IGNORE INTO collectables (type, item, username) VALUES ('mount', 'horse', 'demo_user');
+  `;
+  await query(sql);
+}
+
 // Run the database setup
 const setupDatabase = async () => {
   await createAccountsTable();
@@ -496,6 +539,9 @@ const setupDatabase = async () => {
   await createPartiesTable();
   await createCurrencyTable();
   await createGuildsTable();
+  await createMountsTable();
+  await insertDefaultMount();
+  await createCollectablesTable();
 };
 
 try {
@@ -507,6 +553,7 @@ try {
   await insertDemoStats();
   await insertDemoClientConfig();
   await insertDemoQuestLog();
+  await insertDemoMount();
   log.success("Database setup complete!");
   process.exit(0);
 } catch (error) {

@@ -392,49 +392,103 @@ const createGuildsTable = async () => {
   await query(sql);
 };
 
+const createMountsTable = async () => {
+  log.info("Creating mounts table...");
+  const sql = `
+    CREATE TABLE IF NOT EXISTS mounts (
+      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+      name VARCHAR(255) NOT NULL UNIQUE,
+      description VARCHAR(500) NOT NULL,
+      particles VARCHAR(500) DEFAULT NULL,
+      icon VARCHAR(5000) DEFAULT NULL
+    )
+  `;
+  await query(sql);
+};
+
+// Insert horse mount as default mount
+const insertDefaultMount = async () => {
+  log.info("Inserting default mount...");
+  const sql = `
+    INSERT IGNORE INTO mounts (name, description, particles, icon) VALUES ('horse', 'A sturdy horse for traveling.', NULL, 'mount_horse');
+  `;
+  await query(sql);
+};
+
+const createCollectablesTable = async () => {
+  log.info("Creating collectables table...");
+  const sql = `
+    CREATE TABLE IF NOT EXISTS collectables (
+      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+      type VARCHAR(255) NOT NULL,
+      item VARCHAR(255) NOT NULL,
+      username VARCHAR(255) NOT NULL
+    )
+  `;
+  await query(sql);
+}
+
 // Create indexes for performance optimization
 const createIndexes = async () => {
   log.info("Creating performance indexes...");
 
   const indexes = [
     // Accounts table indexes (most critical for auth queries)
-    "CREATE INDEX idx_accounts_token ON accounts(token)",
-    "CREATE INDEX idx_accounts_session_id ON accounts(session_id)",
-    "CREATE INDEX idx_accounts_username ON accounts(username)",
-    "CREATE INDEX idx_accounts_party_id ON accounts(party_id)",
-    "CREATE INDEX idx_accounts_guild_id ON accounts(guild_id)",
+    { name: "idx_accounts_token", sql: "CREATE INDEX idx_accounts_token ON accounts(token)" },
+    { name: "idx_accounts_session_id", sql: "CREATE INDEX idx_accounts_session_id ON accounts(session_id)" },
+    { name: "idx_accounts_username", sql: "CREATE INDEX idx_accounts_username ON accounts(username)" },
+    { name: "idx_accounts_party_id", sql: "CREATE INDEX idx_accounts_party_id ON accounts(party_id)" },
+    { name: "idx_accounts_guild_id", sql: "CREATE INDEX idx_accounts_guild_id ON accounts(guild_id)" },
 
     // Indexes for JOIN queries in GetPlayerLoginData
-    "CREATE INDEX idx_permissions_username ON permissions(username)",
-    "CREATE INDEX idx_stats_username ON stats(username)",
-    "CREATE INDEX idx_currency_username ON currency(username)",
-    "CREATE INDEX idx_friendslist_username ON friendslist(username)",
-    "CREATE INDEX idx_clientconfig_username ON clientconfig(username)",
-    "CREATE INDEX idx_quest_log_username ON quest_log(username)",
+    { name: "idx_permissions_username", sql: "CREATE INDEX idx_permissions_username ON permissions(username)" },
+    { name: "idx_stats_username", sql: "CREATE INDEX idx_stats_username ON stats(username)" },
+    { name: "idx_currency_username", sql: "CREATE INDEX idx_currency_username ON currency(username)" },
+    { name: "idx_friendslist_username", sql: "CREATE INDEX idx_friendslist_username ON friendslist(username)" },
+    { name: "idx_clientconfig_username", sql: "CREATE INDEX idx_clientconfig_username ON clientconfig(username)" },
+    { name: "idx_quest_log_username", sql: "CREATE INDEX idx_quest_log_username ON quest_log(username)" },
 
     // Inventory query optimization
-    "CREATE INDEX idx_inventory_username ON inventory(username)",
-    "CREATE INDEX idx_inventory_item ON inventory(item)",
+    { name: "idx_inventory_username", sql: "CREATE INDEX idx_inventory_username ON inventory(username)" },
+    { name: "idx_inventory_item", sql: "CREATE INDEX idx_inventory_item ON inventory(item)" },
 
     // Party query optimization
-    "CREATE INDEX idx_parties_id ON parties(id)",
-    "CREATE INDEX idx_parties_leader ON parties(leader)",
-    "CREATE INDEX idx_guilds_id ON guilds(id)",
-    "CREATE INDEX idx_guilds_name ON guilds(name)",
-    "CREATE INDEX idx_guilds_leader ON guilds(leader)",
+    { name: "idx_parties_id", sql: "CREATE INDEX idx_parties_id ON parties(id)" },
+    { name: "idx_parties_leader", sql: "CREATE INDEX idx_parties_leader ON parties(leader)" },
+
+    // Guild query optimization
+    { name: "idx_guilds_id", sql: "CREATE INDEX idx_guilds_id ON guilds(id)" },
+    { name: "idx_guilds_name", sql: "CREATE INDEX idx_guilds_name ON guilds(name)" },
+    { name: "idx_guilds_leader", sql: "CREATE INDEX idx_guilds_leader ON guilds(leader)" },
+
+    // Mounts table index
+    { name: "idx_mounts_name", sql: "CREATE INDEX idx_mounts_name ON mounts(name)" },
+
+    // Collectables table index
+    { name: "idx_collectables_username", sql: "CREATE INDEX idx_collectables_username ON collectables(username)" }
   ];
 
-  for (const indexSql of indexes) {
+  for (const index of indexes) {
     try {
-      await query(indexSql);
-      log.info(`✓ ${indexSql.match(/idx_\w+/)?.[0] || 'Index'} created`);
-    } catch (error: any) {
-      // Index already exists or other error - skip and continue
-      if (error.message?.includes("Duplicate key name")) {
-        log.debug(`Index already exists: ${indexSql.match(/idx_\w+/)?.[0]}`);
+      // Check if index exists
+      const checkIndexSql = `
+        SELECT COUNT(*) as count
+        FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE table_schema = DATABASE()
+        AND index_name = '${index.name}'
+      `;
+
+      const result = await query(checkIndexSql) as Array<{ count: number }>;
+      const indexExists = result[0]?.count > 0;
+
+      if (!indexExists) {
+        await query(index.sql);
+        log.info(`✓ ${index.name} created`);
       } else {
-        log.warn(`Could not create index: ${error.message}`);
+        log.debug(`Index ${index.name} already exists - skipping`);
       }
+    } catch (error: any) {
+      log.warn(`Could not create index ${index.name}: ${error.message}`);
     }
   }
 
@@ -470,6 +524,9 @@ const setupDatabase = async () => {
   await createPartiesTable();
   await createCurrencyTable();
   await createGuildsTable();
+  await createMountsTable();
+  await insertDefaultMount();
+  await createCollectablesTable();
   await createIndexes(); // Add indexes after all tables are created
 };
 

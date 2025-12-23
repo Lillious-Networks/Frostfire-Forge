@@ -206,6 +206,7 @@ authWorker.on("message", async (result: any) => {
       lastUpdated: performance.now(),
       mounted: false,
       mount_type: null,
+      collectables: playerData.collectables || [],
     });
 
     const mapData = [
@@ -241,6 +242,7 @@ authWorker.on("message", async (result: any) => {
         friends: playerData.friends || [],
         party: playerData.party_id ? Number(playerData.party_id) : null,
         currency: playerData.currency || { copper: 0, silver: 0, gold: 0 },
+        collectables: playerData.collectables || [],
       };
 
       const playerDataForLoad: any[] = [];
@@ -413,6 +415,7 @@ authWorker.on("message", async (result: any) => {
     });
 
     sendPacket(ws, packetManager.inventory(playerData.inventory));
+    sendPacket(ws, packetManager.collectables(playerData.collectables || []));
     sendPacket(ws, packetManager.questlog(completedQuest, incompleteQuest));
     sendPacket(ws, packetManager.clientConfig(playerData.config || []));
   }
@@ -3338,6 +3341,15 @@ export default async function packetReceiver(
       case "MOUNT": {
         if (!currentPlayer) return;
         const canMount = player.canMount(currentPlayer);
+        const mount = (data as any).mount;
+        if (!mount) {
+          sendPacket(
+            ws,
+            packetManager.notify({ message: "No mount type specified." })
+          );
+          break;
+        }
+
         if (!canMount) {
           sendPacket(
             ws,
@@ -3348,13 +3360,34 @@ export default async function packetReceiver(
           break;
         }
 
+
+        // Don't validate if unmounting
+        if (!currentPlayer.mounted) {
+        // Check if the player has the specified mount in their collection
+        // Search currentPlayer.collectables for type mount where item matches the requested mount
+          const hasMount = currentPlayer.collectables.some((c: any) => c.type === "mount" && c.item === mount);
+          if (!hasMount) {
+            sendPacket( 
+              ws,
+              packetManager.notify({ message: "You do not have the specified mount." })
+            );
+            break;
+          }
+        }
+
         currentPlayer.mounted = !currentPlayer.mounted;
+
+        if (currentPlayer.mounted) {
+          currentPlayer.mount_type = mount;
+        } else {
+          currentPlayer.mount_type = null;
+        }
+
         playerCache.set(currentPlayer.id, currentPlayer);
 
         const direction = currentPlayer.location.position?.direction || "down";
         const walking = currentPlayer.moving || false;
         const mounted = currentPlayer.mounted;
-        const mount_type = currentPlayer.mount_type || "horse";
 
         globalStateRevision++;
 
@@ -3363,7 +3396,7 @@ export default async function packetReceiver(
           direction,
           walking,
           mounted,
-          mount_type,
+          currentPlayer.mount_type,
           currentPlayer.id,
           globalStateRevision
         );

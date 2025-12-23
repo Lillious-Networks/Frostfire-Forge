@@ -16,6 +16,7 @@ import * as settings from "../config/settings.json";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 
 import assetConfig from "../services/assetConfig";
+import mounts from "../systems/mounts";
 const assetPath = assetConfig.getAssetConfig() as string;
 const assetData = assetConfig.getAssetData() as any;
 
@@ -128,6 +129,32 @@ await Promise.all(itemList.map(async (item: any) => {
 const items = await assetCache.get("items") as Item[];
 
 log.success(`Loaded ${items.length} item(s) from the database in ${(performance.now() - itemnow).toFixed(2)}ms`);
+
+// Load mount data
+const mountNow = performance.now();
+const unfilteredMounts = await mounts.list();
+// Filter out mounts that have no animation file
+const filteredMounts = unfilteredMounts.filter((m) => {{
+  const animations = fs.readdirSync(path.join(assetPath, assetData.animations.path));
+  const prefix = `mount_${m.name.toLowerCase()}_`;
+  const result = animations.some((a) => a.startsWith(prefix));
+  if (!result) {
+    log.warn(`Mount ${m.name} has no corresponding animation files and will be skipped`);
+  }
+  return result;
+}});
+
+await Promise.all(filteredMounts.map(async (mount: any) => {
+  if (mount.icon) {
+    const iconData = await assetCache.get(mount.icon);
+    mount.icon = iconData || null; // Replace the icon with the compressed data if it exists
+  }
+}));
+
+await assetCache.add("mounts", filteredMounts);
+const mountList = await assetCache.get("mounts") as Mount[];
+log.success(`Loaded ${mountList.length} mount(s) from the database in ${(performance.now() - mountNow).toFixed(2)}ms`);
+console.log(`Mounts loaded: ${mountList.map((m) => m.name).join(", ")}`);
 
 // Load spell data
 const spellnow = performance.now();

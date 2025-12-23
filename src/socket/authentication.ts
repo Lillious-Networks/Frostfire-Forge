@@ -3,9 +3,11 @@ import player from "../systems/player.ts";
 import query from "../controllers/sqldatabase.ts";
 import log from "../modules/logger.ts";
 import parties from "../systems/parties.ts";
+import collectables from "../systems/collectables.ts";
 
 // Assets are passed once via workerData when worker is created
 const items = workerData?.assets?.items ? JSON.parse(workerData.assets.items) : [];
+const mounts = workerData?.assets?.mounts ? JSON.parse(workerData.assets.mounts) : [];
 
 const authentication = {
     async process(token: string, id: string): Promise<Authentication> {
@@ -27,6 +29,22 @@ const authentication = {
             const username = getUsername[0]?.username as string;
             const playerData = await player.GetPlayerLoginData(username) as PlayerData;
             const inventoryData = await query("SELECT item, quantity FROM inventory WHERE username = ?", [username]) as any[];
+            const collectablesData = await collectables.list(username) as unknown as Collectable[];
+            // Fetch all types of collectables that are mounts and validate against mounts cache to see if they exist
+            collectablesData.filter((c) => c.type === "mount" && !mounts.some((m: Mount) => m.name === c.item)).forEach((invalidMount) => {
+                collectablesData.splice(collectablesData.indexOf(invalidMount), 1);
+            });
+
+            // Add icon property to each collectable from mounts cache
+            collectablesData.forEach((c) => {
+                if (c.type === "mount") {
+                    const mountDetails = (mounts as any).find((m: Mount) => m.name === c.item);
+                    c.icon = mountDetails ? mountDetails.icon : null;
+                }
+            });
+
+            // Attach collectables to player data and map the item and type
+            playerData.collectables = collectablesData.map((c) => ({ type: c.type, item: c.item, icon: c.icon }));
 
             // Fetch and process details for each item
             const playerInventoryData = await Promise.all(
