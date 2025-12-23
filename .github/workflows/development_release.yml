@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build v${{ github.run_number }}
+    name: Build Development
     runs-on: self-hosted
     environment: development
     steps:
