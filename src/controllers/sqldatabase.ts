@@ -18,9 +18,9 @@ async function createSQLController(): Promise<any> {
             port: parseInt(process.env.DATABASE_PORT || "3306"),
             tls: getSqlCert(),
             max: 50,
-            idleTimeout: 10,
+            idleTimeout: 60000,
             maxLifetime: 0,
-            connectionTimeout: 10
+            connectionTimeout: 30000
         });
 
         return db;

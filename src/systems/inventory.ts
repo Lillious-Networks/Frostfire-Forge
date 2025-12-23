@@ -1,7 +1,11 @@
 import query from "../controllers/sqldatabase";
 import assetCache from "../services/assetCache";
-const items = await assetCache.get("items") as Item[] || [];
 import log from "../modules/logger";
+
+// Helper function to get items from cache dynamically
+async function getItems(): Promise<Item[]> {
+  return await assetCache.get("items") as Item[] || [];
+}
 
 const inventory = {
   async find(name: string, item: InventoryItem) {
@@ -14,6 +18,7 @@ const inventory = {
   async add(name: string, item: InventoryItem) {
     if (!name || !item?.quantity || !item?.name) return;
     if (Number(item.quantity) <= 0) return;
+    const items = await getItems();
     if (items.find((i) => i.name === item.name) === undefined)
       return;
     const response = (await inventory.find(name, item)) as InventoryItem[];
@@ -35,6 +40,7 @@ const inventory = {
   async remove(name: string, item: InventoryItem) {
     if (!name || !item?.quantity || !item?.name) return;
     if (Number(item.quantity) <= 0) return;
+    const items = await getItems();
     if (items.find((i) => i.name === item.name) === undefined)
       return;
     const response = (await inventory.find(name, item)) as InventoryItem[];
@@ -62,18 +68,13 @@ const inventory = {
   },
   async get(name: string) {
     if (!name) return [];
-    
+
     // Fetch items for the user
-    const _items = await query("SELECT * FROM inventory WHERE username = ?", [name]) as any[];
-    
+    const _items = await query("SELECT item, quantity FROM inventory WHERE username = ?", [name]) as any[];
+
     if (!_items || _items.length === 0) return []; // Return if no items found
-  
-    // Sanitize items by removing the username and id
-    _items.filter((item: any) => {
-      delete item.username;
-      delete item.id;
-    });
-  
+
+    const items = await getItems();
     // Fetch and process details for each item
     const details = await Promise.all(
       _items.map(async (item: any) => {

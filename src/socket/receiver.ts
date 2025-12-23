@@ -3,7 +3,11 @@ import { packetManager } from "./packet_manager";
 import log from "../modules/logger";
 import player from "../systems/player.ts";
 import permissions from "../systems/permissions";
-import inventory from "../systems/inventory";
+import { getAuthWorker } from "./authentication_pool.ts";
+const authentication_queue = new Set<string>();
+const authentication_session_queue = new Set<string>();
+// Track pending authentications with their websocket, token, and language
+const pendingAuthentications = new Map<string, { ws: any; token: string; language: string }>();
 import playerCache from "../services/playermanager.ts";
 import assetCache from "../services/assetCache";
 import { reloadMap } from "../modules/assetloader";
@@ -29,32 +33,7 @@ const defaultMap = settings.default_map?.replace(".json", "") || "main";
 let restartScheduled: boolean;
 let restartTimers: ReturnType<typeof setTimeout>[];
 
-// Queue for processing AUTH packets sequentially
-const authQueue: Array<() => Promise<void>> = [];
-let isProcessingAuth = false;
-
-// Track tokens currently being authenticated to prevent duplicate logins
-const tokensInProgress = new Set<string>();
-
-async function processAuthQueue() {
-  if (isProcessingAuth) {
-    log.debug("AUTH queue processing already in progress, skipping");
-    return;
-  }
-
-  log.info(`Starting AUTH queue processing. Queue length: ${authQueue.length}`);
-  isProcessingAuth = true;
-  while (authQueue.length > 0) {
-    log.info(`Processing AUTH handler. Remaining in queue: ${authQueue.length}`);
-    const authHandler = authQueue.shift();
-    if (authHandler) {
-      await authHandler();
-      log.info(`AUTH handler completed. Remaining in queue: ${authQueue.length}`);
-    }
-  }
-  isProcessingAuth = false;
-  log.info("AUTH queue processing completed");
-}
+let globalStateRevision: number = 0;
 
 // Create sprites from the spritesheets
 const spritePromises = await Promise.all(
@@ -79,6 +58,366 @@ assetCache.add("sprites", sprites);
 const npcs = await assetCache.get("npcs");
 const particles = await assetCache.get("particles");
 
+// Set up worker message listener ONCE at module level
+const authWorker = getAuthWorker();
+authWorker.on("message", async (result: any) => {
+  const status = result as Authentication;
+  const sessionId = result.id;
+
+  // Look up the pending authentication
+  const pending = pendingAuthentications.get(sessionId);
+  if (!pending) return; // No matching session found
+
+  const { ws, token, language } = pending;
+
+  // Clean up
+  pendingAuthentications.delete(sessionId);
+  authentication_queue.delete(token);
+  authentication_session_queue.delete(sessionId);
+
+  // An error occurred during authentication
+  if (status.error && !status.authenticated) {
+    sendPacket(ws, packetManager.loginFailed());
+    ws.close(1008, status.error);
+    log.error(`Authentication error for token ${token}: ${status.error}`);
+    return;
+  }
+
+  if (status.authenticated && status.completed && status.error) {
+    sendPacket(ws, packetManager.loginFailed());
+    ws.close(1008, status.error);
+    log.error(`Authentication error for token ${token}: ${status.error}`);
+    return;
+  }
+
+  const playerData = status.data as PlayerData;
+  if (status.authenticated && status.completed && playerData) {
+    // Reset noclip/stealth in background (fire and forget - don't block login)
+    if (!playerData.isAdmin && playerData.isNoclip) {
+      player.toggleNoclip(playerData.username).catch(err =>
+        log.error(`Failed to toggle noclip: ${err}`)
+      );
+    }
+    if (!playerData.isAdmin && playerData.isStealth) {
+      player.toggleStealth(playerData.username).catch(err =>
+        log.error(`Failed to toggle stealth: ${err}`)
+      );
+    }
+
+    const default_map_properties = mapPropertiesCache.find((m: any) => m.name === `${defaultMap}.json`);
+    const default_map_spawnpoint_x = default_map_properties ? (default_map_properties.width * default_map_properties.tileWidth) / 2 : 0;
+    const default_map_spawnpoint_y = default_map_properties ? (default_map_properties.height * default_map_properties.tileHeight) / 2 : 0;
+    const default_map_spawnpoint = { map: `${defaultMap}.json`, x: default_map_spawnpoint_x, y: default_map_spawnpoint_y, direction: "down" };
+    const player_map_properties = mapPropertiesCache.find((m: any) => m.name === `${playerData.location?.map}.json`) || default_map_properties;
+
+    const position = playerData.location?.position as PositionData;
+    let spawnLocation = default_map_spawnpoint;
+
+    if (playerData.location && position) {
+      spawnLocation = {
+        map: `${playerData.location.map}.json`,
+        x: position.x || (player_map_properties ? (player_map_properties.width * player_map_properties.tileWidth) / 2 : 0),
+        y: position.y || (player_map_properties ? (player_map_properties.height * player_map_properties.tileHeight) / 2 : 0),
+        direction: position.direction || "down",
+      };
+    }
+
+    const map =
+      maps.find((m: MapData) => m.name === spawnLocation.map) ||
+      maps.find((m: MapData) => m.name === `${defaultMap}.json`);
+    if (!map) return;
+
+    spawnLocation.map = map.name;
+
+    const incompleteQuest = (playerData.questlog?.incomplete as unknown as Quest[]) || [];
+    const completedQuest = (playerData.questlog?.completed as unknown as Quest[]) || [];
+
+    // Fetch fresh worlds from Redis with fallback to cache
+    const worldsResult = await assetCache.get("worlds").catch(err => {
+      log.error(`[WorldsFetchError] Failed to fetch worlds: ${err}`);
+      return worldsCache;
+    });
+
+    // Parse worlds data
+    const worldData: WorldData[] = Array.isArray(worldsResult)
+      ? worldsResult
+      : JSON.parse(worldsResult);
+
+    const world = worldData.find(
+      (w) => w.name === spawnLocation.map.replace(".json", "")
+    );
+
+    const playerCount = (world?.players || 0) + 1;
+    const maxPlayers = world?.max_players || 100;
+    if (world && maxPlayers && playerCount > maxPlayers) {
+      ws.close(1008, "World is full");
+      return;
+    }
+
+    if (world) {
+      world.players = (world.players || 0) + 1;
+      // Don't await - let Redis write happen in background
+      // Use JSON.stringify for consistency with onDisconnect handler
+      assetCache.set("worlds", JSON.stringify(worldData)).catch(err =>
+        log.error(`Failed to update world player count: ${err}`)
+      );
+    }
+    log.info(`World: ${spawnLocation.map.replace(".json", "")} now has ${world?.players || 0 } players.`);
+
+    // Send weather data - use already-fetched world instead of redundant lookup
+    const weather = world?.weather || "clear";
+    if (weather) {
+      sendPacket(ws, packetManager.weather({ weather }));
+    }
+
+    // Add player to cache
+    playerCache.add(ws.data.id, {
+      username: playerData.username,
+      animation: null,
+      isAdmin: playerData.isAdmin,
+      isStealth: playerData.isStealth,
+      isNoclip: playerData.isNoclip,
+      id: ws.data.id,
+      userid: playerData.id,
+      location: {
+        map: spawnLocation.map.replace(".json", ""),
+        position: {
+          x: spawnLocation.x || 0,
+          y: spawnLocation.y || 0,
+          direction: spawnLocation.direction || "down",
+          moving: false,
+        },
+      },
+      language: language || "en",
+      ws,
+      stats: playerData.stats || {},
+      friends: playerData.friends || [],
+      attackDelay: 0,
+      lastMovementPacket: null,
+      permissions: typeof playerData.permissions === "string" ? (playerData.permissions as string).split(",") : playerData.permissions || [],
+      movementInterval: null,
+      pvp: false,
+      last_attack: null,
+      invitations: [],
+      party: playerData.party_id ? Number(playerData.party_id) : null,
+      currency: playerData.currency || { copper: 0, silver: 0, gold: 0 },
+      isGuest: playerData.isGuest,
+      created: performance.now(),
+      lastUpdated: performance.now(),
+      mounted: false,
+      mount_type: null,
+    });
+
+    const mapData = [
+      map?.compressed,
+      spawnLocation?.map,
+      position?.x || 0,
+      position?.y || 0,
+      position?.direction || "down",
+    ];
+
+    sendPacket(ws, packetManager.loadMap(mapData));
+
+    setImmediate(() => {
+      const snapshotRevision = globalStateRevision;
+
+      const currentPlayersOnMap = filterPlayersByMap(spawnLocation.map);
+
+      const spawnDataForAll = {
+        id: ws.data.id,
+        userid: playerData.id,
+        location: {
+          map: spawnLocation.map,
+          x: spawnLocation.x || 0,
+          y: spawnLocation.y || 0,
+          direction: spawnLocation.direction,
+        },
+        username: playerData.username,
+        isAdmin: playerData.isAdmin,
+        isGuest: playerData.isGuest,
+        isStealth: playerData.isStealth,
+        stats: playerData.stats || {},
+        animation: null,
+        friends: playerData.friends || [],
+        party: playerData.party_id ? Number(playerData.party_id) : null,
+        currency: playerData.currency || { copper: 0, silver: 0, gold: 0 },
+      };
+
+      const playerDataForLoad: any[] = [];
+      // Send spawn packets to all players (O(N))
+      for (const p of currentPlayersOnMap) {
+        if (!p || !p.ws) continue;
+        if (p.ws === ws) {
+          sendPacket(p.ws, packetManager.spawnPlayer(spawnDataForAll));
+        } else {
+          const spawnForOther = {
+            id: ws.data.id,
+            userid: playerData.id,
+            location: {
+              map: spawnLocation.map,
+              x: spawnLocation.x || 0,
+              y: spawnLocation.y || 0,
+              direction: spawnLocation.direction,
+            },
+            username: playerData.username,
+            isAdmin: playerData.isAdmin,
+            isGuest: playerData.isGuest,
+            isStealth: playerData.isStealth,
+            stats: playerData.stats || {},
+            animation: null,
+          };
+          sendPacket(p.ws, packetManager.spawnPlayer(spawnForOther));
+        }
+
+        const loadPlayerData = {
+          id: p.id,
+          userid: p.userid,
+          location: {
+            map: p.location.map,
+            x: p.location.position.x || 0,
+            y: p.location.position.y || 0,
+            direction: p.location.position?.direction || "down",
+            moving: p.moving || false,
+          },
+          username: p.username,
+          isAdmin: p.isAdmin,
+          isGuest: p.isGuest,
+          isStealth: p.isStealth,
+          stats: p.stats,
+          animation: null,
+          mounted: p.mounted,
+        }
+        playerDataForLoad.push(loadPlayerData);
+      }
+
+      const loadPlayersData = {
+        players: playerDataForLoad,
+        snapshotRevision: snapshotRevision
+      };
+
+      sendPacket(ws, packetManager.loadPlayers(loadPlayersData));
+
+      if (playerDataForLoad.length > 0) {
+        playerDataForLoad.forEach((pl) => {
+          if (pl.id !== ws.data.id && pl.location.direction) {
+            const pcache = playerCache.get(pl.id);
+            sendAnimationTo(
+              ws,
+              getAnimationNameForDirection(pl.location.direction, !!pcache?.moving),
+              pl.id,
+              snapshotRevision
+            );
+          }
+        });
+      }
+
+      if (position?.direction) {
+        sendAnimationTo(
+          ws,
+          getAnimationNameForDirection(position.direction, false),
+          ws.data.id
+        );
+        for (const other of currentPlayersOnMap) {
+          if (other.id !== ws.data.id && other.ws) {
+            sendAnimationTo(
+              other.ws,
+              getAnimationNameForDirection(position.direction, false),
+              ws.data.id
+            );
+          }
+        }
+      }
+    });
+    setImmediate(() => {
+      // Get fresh player data at send time
+      const currentPlayerData = playerCache.get(ws.data.id);
+      if (!currentPlayerData) return;
+
+      // Only iterate through the new player's friends list instead of all players
+      const newPlayerFriends = currentPlayerData.friends || [];
+      const allPlayers = playerCache.list();
+
+      for (const friendUsername of newPlayerFriends) {
+        // Find if this friend is online
+        const onlineFriend = Object.values(allPlayers).find(
+          (p: any) => p.username === friendUsername && p.ws
+        );
+
+        if (onlineFriend) {
+          // Notify the friend that the new player is online
+          sendPacket(
+            onlineFriend.ws,
+            packetManager.updateOnlineStatus({
+              online: true,
+              username: currentPlayerData.username,
+            })
+          );
+
+          // Notify the new player that this friend is online
+          sendPacket(
+            currentPlayerData.ws,
+            packetManager.updateOnlineStatus({
+              online: true,
+              username: onlineFriend.username,
+            })
+          );
+        }
+      }
+    });
+
+    setImmediate(async () => {
+      const npcsData = await npcs;
+      const npcsInMap = npcsData.filter(
+        (npc: Npc) => npc.map === spawnLocation.map.replace(".json", "")
+      );
+      const npcPackets = await npcsInMap.reduce(
+        async (packetsPromise: Promise<any[]>, npc: Npc) => {
+          const packets = await packetsPromise;
+          const particleArray =
+            typeof npc.particles === "string"
+              ? (
+                await Promise.all(
+                  (npc.particles as string)
+                    .split(",")
+                    .map(async (name) =>
+                      (
+                        await particles
+                      ).find((p: Particle) => p.name === name.trim())
+                    )
+                )
+              ).filter(Boolean)
+              : [];
+          const npcData = {
+            id: npc.id,
+            last_updated: npc.last_updated,
+            location: {
+              x: npc.position.x,
+              y: npc.position.y,
+              direction: "down",
+            },
+            script: npc.script,
+            hidden: npc.hidden,
+            dialog: npc.dialog,
+            particles: particleArray,
+            quest: npc.quest,
+            map: npc.map,
+            position: npc.position,
+          };
+          return [...packets, ...packetManager.createNpc(npcData)];
+        },
+        Promise.resolve([] as any[])
+      );
+      if (npcPackets.length) {
+        sendPacket(ws, npcPackets);
+      }
+    });
+
+    sendPacket(ws, packetManager.inventory(playerData.inventory));
+    sendPacket(ws, packetManager.questlog(completedQuest, incompleteQuest));
+    sendPacket(ws, packetManager.clientConfig(playerData.config || []));
+  }
+});
+
 export default async function packetReceiver(
   server: any,
   ws: any,
@@ -91,7 +430,7 @@ export default async function packetReceiver(
     const parsedMessage: Packet = tryParsePacket(message) as Packet;
     if (
       message.length >
-        (1024 * 1024 * settings?.websocket?.maxPayloadMB || 1024 * 1024) &&
+      (1024 * 1024 * settings?.websocket?.maxPayloadMB || 1024 * 1024) &&
       parsedMessage.type !== "BENCHMARK" &&
       !settings?.websocket?.benchmarkenabled
     )
@@ -138,527 +477,60 @@ export default async function packetReceiver(
         currentPlayer.lastUpdated = performance.now();
         break;
       }
-      // TODO:Move this to the auth packet
       case "AUTH": {
-        const token = data?.toString();
+        const token = data?.toString() as string;
 
+        // No token provided
         if (!token) {
           sendPacket(ws, packetManager.loginFailed());
           ws.close(1008, "Invalid token");
           break;
         }
 
-        // Check if this token is already being authenticated
-        if (tokensInProgress.has(token)) {
-          log.warn(`Duplicate AUTH attempt for token: ${token.substring(0, 10)}... - rejecting`);
+        if (authentication_queue.has(token)) {
           sendPacket(ws, packetManager.loginFailed());
           ws.close(1008, "Authentication already in progress");
           break;
         }
 
-        // Mark token as in progress
-        tokensInProgress.add(token);
-
-        // Queue AUTH processing to ensure sequential execution
-        const authPromise = new Promise<void>((authResolve) => {
-          const wasEmpty = authQueue.length === 0;
-          log.info(`AUTH packet received. Token: ${token?.substring(0, 10)}... Queue was empty: ${wasEmpty}, Queue length: ${authQueue.length}`);
-          authQueue.push(async () => {
-            log.info(`AUTH handler starting for token: ${token?.substring(0, 10)}...`);
-            try {
-              // Split AUTH into multiple setImmediate chunks to avoid blocking MOVEXY packets
-              await new Promise<void>((resolve) => {
-                setImmediate(async () => {
-          try {
-            // Chunk 1: Validate auth token and get username
-            const auth = await player.setSessionId(token, ws.data.id);
-            if (!auth) {
-              sendPacket(ws, packetManager.loginFailed());
-              ws.close(1008, "Already logged in");
-              resolve(); // Must resolve to unblock the queue
-              return;
-            }
-            const getUsername = (await player.getUsernameBySession(
-              ws.data.id
-            )) as any[];
-            const username = getUsername[0]?.username as string;
-            ws.data.username = username;
-            const id = getUsername[0]?.id as string;
-
-            // Chunk 2: Get player data (deferred to allow MOVEXY processing)
-            setImmediate(async () => {
-              try {
-                const [playerData, itemsRaw] = await Promise.all([
-                  player.GetPlayerLoginData(username),
-                  inventory.get(username),
-                ]);
-
-                if (!playerData) {
-                  sendPacket(ws, packetManager.loginFailed());
-                  ws.close(1008, "Player data not found");
-                  resolve(); // Must resolve to unblock the queue
-                  return;
-                }
-
-                // Chunk 3: Process player data (deferred to allow MOVEXY processing)
-                setImmediate(async () => {
-                  try {
-                    const access = playerData.permissions;
-                    const stats = playerData.stats;
-                    const playerCurrency = playerData.currency;
-                    const friendsList = playerData.friends;
-                    const partyId = playerData.party_id;
-                    const clientConfig = playerData.config;
-                    const location = playerData.location;
-                    const isAdmin = playerData.isAdmin;
-                    const isGuest = playerData.isGuest;
-                    let isStealth = playerData.isStealth;
-                    let isNoclip = playerData.isNoclip;
-
-                    const items = (itemsRaw || []).slice(0, 30);
-                    const incompleteQuest = playerData.questlog?.incomplete || [];
-                    const completedQuest = playerData.questlog?.completed || [];
-
-                    if (!isAdmin && isStealth) {
-                      await player.toggleStealth(username);
-                      isStealth = false;
-                    }
-                    if (!isAdmin && isNoclip) {
-                      await player.toggleNoclip(username);
-                      isNoclip = false;
-                    }
-
-                    let partyMembers: string[] = [];
-                    if (partyId) {
-                      partyMembers = await parties.getPartyMembers(partyId);
-                    }
-
-                    // Chunk 4: Send packets and setup (deferred to allow MOVEXY processing)
-                    setImmediate(async () => {
-                      try {
-                        sendPacket(ws, packetManager.inventory(items));
-                        sendPacket(ws, packetManager.questlog(completedQuest, incompleteQuest));
-                        sendPacket(ws, packetManager.clientConfig(clientConfig));
-            const position = location?.position as PositionData;
-        let spawnLocation;
-        // Check if player needs initial spawn (no location, invalid position, or at default 0,0)
-        if (
-          !location ||
-          (!position?.x && position.x !== 0) ||
-          (!position?.y && position.y !== 0) ||
-          (position.x === 0 && position.y === 0)
-        ) {
-          // Calculate center of default map for initial spawn
-          const defaultMapProps = mapPropertiesCache.find((m: any) => m.name === `${defaultMap}.json`);
-          const centerX = defaultMapProps
-            ? (defaultMapProps.width * defaultMapProps.tileWidth) / 2
-            : 0;
-          const centerY = defaultMapProps
-            ? (defaultMapProps.height * defaultMapProps.tileHeight) / 2
-            : 0;
-          spawnLocation = { map: `${defaultMap}.json`, x: centerX, y: centerY };
-        } else {
-          spawnLocation = {
-            map: `${location.map}.json`,
-            x: position.x || 0,
-            y: position.y || 0,
-            direction: position?.direction || "down",
-          };
-        }
-        const map =
-          maps.find((m: MapData) => m.name === spawnLocation.map) ||
-          maps.find((m: MapData) => m.name === `${defaultMap}.json`);
-        if (!map) return;
-        spawnLocation.map = map.name;
-
-        // Fetch fresh worlds from Redis in a non-blocking way for accurate player counts
-        let _worlds: WorldData[] = worldsCache; // Start with cache as fallback
-        try {
-          const cachedWorlds = await assetCache.get("worlds");
-          if (cachedWorlds) {
-            _worlds = Array.isArray(cachedWorlds)
-              ? cachedWorlds
-              : JSON.parse(cachedWorlds);
-          }
-        } catch (err) {
-          log.error(`[WorldsFetchError] Failed to fetch worlds: ${err}`);
+        // Check if this session is already authenticating
+        if (authentication_session_queue.has(ws.data.id)) {
+          sendPacket(ws, packetManager.loginFailed());
+          ws.close(1008, "Session authentication already in progress");
+          break;
         }
 
-        const thisWorld = _worlds.find(
-          (w) => w.name === spawnLocation.map.replace(".json", "")
-        );
-        const playerCount = (thisWorld?.players || 0) + 1;
-        const maxPlayers = thisWorld?.max_players || 100;
-        if (thisWorld && maxPlayers && playerCount > maxPlayers) {
-          ws.close(1008, "World is full");
-          return;
-        }
-        // Send weather data - use already-fetched thisWorld instead of redundant lookup
-        const weather = thisWorld?.weather || "clear";
-        if (weather) {
-          sendPacket(ws, packetManager.weather({ weather }));
-        }
+        // Add token and session to the authentication queues
+        authentication_queue.add(token);
+        authentication_session_queue.add(ws.data.id);
 
-        await player.setLocation(
-          ws.data.id,
-          spawnLocation.map.replace(".json", ""),
-          {
-            x: spawnLocation.x,
-            y: spawnLocation.y,
-            direction: spawnLocation.direction || "down",
-          }
-        );
+        // Register this pending authentication
+        pendingAuthentications.set(ws.data.id, { ws, token, language: parsedMessage?.language || "en" });
 
-        log.info(`Adding ${username} to playerCache`);
-        playerCache.add(ws.data.id, {
-          username,
-          animation: null,
-          isAdmin,
-          isStealth,
-          isNoclip,
-          id: ws.data.id,
-          userid: id,
-          location: {
-            map: spawnLocation.map.replace(".json", ""),
-            position: {
-              x: spawnLocation.x || 0,
-              y: spawnLocation.y || 0,
-              direction: spawnLocation.direction || "down",
-              moving: false,
-            },
-          },
-          language: parsedMessage?.language || "en",
-          ws,
-          stats,
-          friends: friendsList || [],
-          attackDelay: 0,
-          lastMovementPacket: null,
-          permissions: typeof access === "string" ? access.split(",") : [],
-          movementInterval: null,
-          pvp: false,
-          last_attack: null,
-          invitations: [],
-          party: partyMembers,
-          currency: playerCurrency,
-          isGuest,
-          created: performance.now(),
-          lastUpdated: performance.now(),
-          mounted: false,
-          mount_type: null,
-        });
+        // Send authentication request to worker (handler is set up at module level)
+        authWorker.postMessage({ token, id: ws.data.id });
 
-        const mapData = [
-          map?.compressed,
-          spawnLocation?.map,
-          position?.x || 0,
-          position?.y || 0,
-          position?.direction || "down",
-        ];
-        sendPacket(ws, packetManager.loadMap(mapData));
-
-        const allPlayers = playerCache.list() as Record<string, any>;
-        const currentPlayerData = allPlayers[ws.data.id];
-        const playersOnMap = filterPlayersByMap(spawnLocation.map);
-        const playerDataForLoad: any[] = [];
-        for (const p of playersOnMap) {
-          playerDataForLoad.push({
-            id: p.id,
-            userid: p.userid,
-            location: {
-              map: p.location.map,
-              x: p.location.position.x || 0,
-              y: p.location.position.y || 0,
-              direction: p.location.position?.direction || "down",
-            },
-            username: p.username,
-            isAdmin: p.isAdmin,
-            isGuest: p.isGuest,
-            isStealth: p.isStealth,
-            stats: p.stats,
-            animation: null,
-            mounted: p.mounted,
-          });
-        }
-        sendPacket(ws, packetManager.loadPlayers(playerDataForLoad));
-
-        // Broadcast player spawn to all players - must complete before AUTH finishes
-        // to ensure sequential logins see each other
-        await new Promise<void>((spawnResolve) => {
-          setImmediate(() => {
-          const spawnDataForAll = {
-            id: ws.data.id,
-            userid: id,
-            location: {
-              map: spawnLocation.map,
-              x: spawnLocation.x || 0,
-              y: spawnLocation.y || 0,
-              direction: spawnLocation.direction,
-            },
-            username,
-            isAdmin,
-            isGuest,
-            isStealth,
-            stats,
-            animation: null,
-            friends: friendsList,
-            party: partyMembers,
-            currency: playerCurrency,
-          };
-
-          // Re-fetch players on map to include any that just logged in
-          const currentPlayersOnMap = filterPlayersByMap(spawnLocation.map);
-
-          log.info(`Broadcasting spawn for ${username}. Sending to ${currentPlayersOnMap.length} players: ${currentPlayersOnMap.map(p => p.username).join(', ')}`);
-
-          // Send spawn packets to all players (O(N))
-          for (const p of currentPlayersOnMap) {
-            if (!p || !p.ws) continue;
-            if (p.ws === ws) {
-              sendPacket(p.ws, packetManager.spawnPlayer(spawnDataForAll));
-            } else {
-              const spawnForOther = {
-                id: ws.data.id,
-                userid: id,
-                location: {
-                  map: spawnLocation.map,
-                  x: spawnLocation.x || 0,
-                  y: spawnLocation.y || 0,
-                  direction: spawnLocation.direction,
-                },
-                username,
-                isAdmin,
-                isGuest,
-                isStealth,
-                stats,
-                animation: null,
-                mounted: false,
-              };
-              sendPacket(p.ws, packetManager.spawnPlayer(spawnForOther));
-            }
-          }
-          spawnResolve();
-        });
-        });
-
-        // Tick 2: Send new player's animation to all players
-        setImmediate(() => {
-          if (position?.direction) {
-            // Send animation to self
-            sendAnimationTo(
-              ws,
-              getAnimationNameForDirection(position.direction, false, false),
-              ws.data.id
-            );
-            // Send animation to all other players
-            for (const other of playersOnMap) {
-              if (other.id !== ws.data.id && other.ws) {
-                sendAnimationTo(
-                  other.ws,
-                  getAnimationNameForDirection(position.direction, false, false),
-                  ws.data.id
-                );
-              }
-            }
-          }
-        });
-
-        // Tick 3: Send existing players' animations to new player
-        setImmediate(() => {
-          if (playerDataForLoad.length > 0) {
-            playerDataForLoad.forEach((pl) => {
-              if (pl.id !== ws.data.id && pl.location.direction) {
-                const pcache = playerCache.get(pl.id);
-                sendAnimationTo(
-                  ws,
-                  getAnimationNameForDirection(
-                    pl.location.direction,
-                    !!pcache?.moving,
-                    !!pcache?.mounted,
-                    pcache?.mount_type
-                  ),
-                  pl.id
-                );
-              }
-            });
-          }
-        });
-        setImmediate(() => {
-          // Only iterate through the new player's friends list instead of all players
-          const newPlayerFriends = currentPlayerData.friends || [];
-          for (const friendUsername of newPlayerFriends) {
-            // Find if this friend is online
-            const onlineFriend = Object.values(allPlayers).find(
-              (p: any) => p.username === friendUsername && p.ws
-            );
-
-            if (onlineFriend) {
-              // Notify the friend that the new player is online
-              sendPacket(
-                onlineFriend.ws,
-                packetManager.updateOnlineStatus({
-                  online: true,
-                  username: currentPlayerData.username,
-                })
-              );
-
-              // Notify the new player that this friend is online
-              sendPacket(
-                currentPlayerData.ws,
-                packetManager.updateOnlineStatus({
-                  online: true,
-                  username: onlineFriend.username,
-                })
-              );
-            }
-          }
-        });
-        setImmediate(async () => {
-          const npcsData = await npcs;
-          const npcsInMap = npcsData.filter(
-            (npc: Npc) => npc.map === spawnLocation.map.replace(".json", "")
-          );
-          const npcPackets = await npcsInMap.reduce(
-            async (packetsPromise: Promise<any[]>, npc: Npc) => {
-              const packets = await packetsPromise;
-              const particleArray =
-                typeof npc.particles === "string"
-                  ? (
-                      await Promise.all(
-                        (npc.particles as string)
-                          .split(",")
-                          .map(async (name) =>
-                            (
-                              await particles
-                            ).find((p: Particle) => p.name === name.trim())
-                          )
-                      )
-                    ).filter(Boolean)
-                  : [];
-              const npcData = {
-                id: npc.id,
-                last_updated: npc.last_updated,
-                location: {
-                  x: npc.position.x,
-                  y: npc.position.y,
-                  direction: "down",
-                },
-                script: npc.script,
-                hidden: npc.hidden,
-                dialog: npc.dialog,
-                particles: particleArray,
-                quest: npc.quest,
-                map: npc.map,
-                position: npc.position,
-              };
-              return [...packets, ...packetManager.createNpc(npcData)];
-            },
-            Promise.resolve([] as any[])
-          );
-          if (npcPackets.length) {
-            sendPacket(ws, npcPackets);
-          }
-        });
-        setImmediate(() => {
-          const musicData = {
-            name: "music_entry",
-            data: audioCache.find((a: SoundData) => a.name === "music_entry"),
-          };
-          if (!musicData.data) {
-            sendPacket(
-              ws,
-              packetManager.consoleMessage({
-                type: "error",
-                message: `Music file not found: ${musicData.name}`,
-              })
-            );
-          } else {
-            sendPacket(ws, packetManager.music(musicData));
-          }
-        });
-
-        // Increase player count in the world (non-blocking)
-        if (thisWorld) {
-          thisWorld.players = (thisWorld.players || 0) + 1;
-          // Don't await - let Redis write happen in background
-          // Use JSON.stringify for consistency with onDisconnect handler
-          assetCache.set("worlds", JSON.stringify(_worlds)).catch(err =>
-            log.error(`Failed to update world player count: ${err}`)
-          );
-        }
-        console.log(
-          `World: ${spawnLocation.map.replace(".json", "")} now has ${
-            thisWorld?.players || 0
-          } players.`
-        );
-              } catch (e) {
-                log.error(`AUTH packet processing error (chunk 4): ${e}`);
-                ws.close(1011, "Internal error during authentication");
-              } finally {
-                // Resolve AFTER all chunks complete, not after chunk 1
-                resolve();
-              }
-            });
-          } catch (e) {
-            log.error(`AUTH packet processing error (chunk 3): ${e}`);
-            ws.close(1011, "Internal error during authentication");
-            resolve(); // Must resolve to unblock the queue
-          }
-        });
-        } catch (e) {
-          log.error(`AUTH packet processing error (chunk 2): ${e}`);
-          ws.close(1011, "Internal error during authentication");
-          resolve(); // Must resolve to unblock the queue
-        }
-      });
-    } catch (e) {
-      log.error(`AUTH packet processing error (chunk 1): ${e}`);
-      ws.close(1011, "Internal error during authentication");
-      resolve(); // Must resolve to unblock the queue
-    }
-  });
-              });
-            } catch (error) {
-              log.error(`AUTH queue handler error: ${error}`);
-            } finally {
-              log.info(`AUTH handler completing for token: ${token?.substring(0, 10)}...`);
-              // Remove token from in-progress set
-              tokensInProgress.delete(token);
-              authResolve();
-            }
-          });
-
-          // Only start processing if queue was empty (i.e., no AUTH is currently processing)
-          if (wasEmpty) {
-            log.info("Queue was empty, starting processAuthQueue");
-            processAuthQueue();
-          } else {
-            log.info("Queue was not empty, handler will be processed by existing loop");
-          }
-        });
-
-        // Wait for this AUTH to complete
-        await authPromise;
         break;
       }
       // TODO:Move this to the logout packet
       case "LOGOUT": {
         if (!currentPlayer) return;
-        await player.setLocation(
+        player.setLocation(
           currentPlayer.id,
           currentPlayer.location.map,
           currentPlayer.location.position
         );
-        await player.logout(currentPlayer.id);
+        player.logout(currentPlayer.id);
         break;
       }
       case "DISCONNECT": {
         if (!currentPlayer) return;
-        await player.setLocation(
+        player.setLocation(
           currentPlayer.id,
           currentPlayer.location.map,
           currentPlayer.location.position
         );
-        await player.clearSessionId(currentPlayer.id);
+        player.clearSessionId(currentPlayer.id);
         break;
       }
       case "MOVEXY": {
@@ -671,7 +543,6 @@ export default async function packetReceiver(
         const frameTime = 1000 / targetFPS;
         const lastDirection =
           currentPlayer.location.position?.direction || "down";
-        currentPlayer.moving = true;
 
         const direction = data.toString().toLowerCase();
 
@@ -692,12 +563,16 @@ export default async function packetReceiver(
             currentPlayer.movementInterval = null;
             currentPlayer.moving = false;
             playerCache.set(currentPlayer.id, currentPlayer);
+
+            globalStateRevision++;
             sendPositionAnimation(
               ws,
               lastDirection,
               false,
               currentPlayer.mounted,
-              currentPlayer.mount_type || "horse"
+              currentPlayer.mount_type || "horse",
+              undefined,
+              globalStateRevision
             );
           }
           return;
@@ -706,12 +581,18 @@ export default async function packetReceiver(
         if (!directions.includes(direction)) return;
 
         currentPlayer.location.position.direction = direction || "down";
+        currentPlayer.moving = true;
+        playerCache.set(currentPlayer.id, currentPlayer);
+
+        globalStateRevision++;
         sendPositionAnimation(
           ws,
           direction,
           true,
           currentPlayer.mounted,
-          currentPlayer.mount_type || "horse"
+          currentPlayer.mount_type || "horse",
+          undefined,
+          globalStateRevision
         );
 
         if (currentPlayer.movementInterval) {
@@ -724,7 +605,6 @@ export default async function packetReceiver(
         const movePlayer = async () => {
           if (running) return;
           running = true;
-          currentPlayer.moving = true;
 
           const currentTime = performance.now();
           const deltaTime = currentTime - lastTime;
@@ -785,12 +665,18 @@ export default async function packetReceiver(
           if (isColliding && !currentPlayer.isNoclip) {
             clearInterval(currentPlayer.movementInterval);
             currentPlayer.movementInterval = null;
+            currentPlayer.moving = false;
+            playerCache.set(currentPlayer.id, currentPlayer);
+
+            globalStateRevision++;
             sendPositionAnimation(
               ws,
               direction,
               false,
               currentPlayer.mounted,
-              currentPlayer.mount_type || "horse"
+              currentPlayer.mount_type || "horse",
+              undefined,
+              globalStateRevision
             );
 
             const reason = collision.reason;
@@ -837,9 +723,11 @@ export default async function packetReceiver(
                 if (currentMap !== warp.map) {
                   sendPacket(ws, packetManager.reconnect());
                 } else {
+                  globalStateRevision++;
                   const movementData = {
                     id: ws.data.id,
                     _data: currentPlayer.location.position,
+                    revision: globalStateRevision
                   };
                   sendPacket(ws, packetManager.moveXY(movementData));
                 }
@@ -855,9 +743,12 @@ export default async function packetReceiver(
             ? playersInMap.filter((p) => p.isAdmin)
             : playersInMap;
 
+          globalStateRevision++;
+
           const movementData = {
             id: ws.data.id,
             _data: currentPlayer.location.position,
+            revision: globalStateRevision
           };
 
           targetPlayers.forEach((player) => {
@@ -876,13 +767,15 @@ export default async function packetReceiver(
         if (!currentPlayer?.isAdmin) return;
         currentPlayer.location.position = data;
         currentPlayer.location.position.direction = "down";
-        // Round position values to prevent floating point numbers
+        // Round position values to nearest tenth
         currentPlayer.location.position.x = Math.round(
-          Number(currentPlayer.location.position.x)
-        );
+          Number(currentPlayer.location.position.x) * 10
+        ) / 10;
         currentPlayer.location.position.y = Math.round(
-          Number(currentPlayer.location.position.y)
-        );
+          Number(currentPlayer.location.position.y) * 10
+        ) / 10;
+        globalStateRevision++;
+
         if (currentPlayer.isStealth) {
           const playersInMap = filterPlayersByMap(currentPlayer.location.map);
           const playersInMapAdmin = playersInMap.filter((p) => p.isAdmin);
@@ -890,6 +783,7 @@ export default async function packetReceiver(
             const movementData = {
               id: ws.data.id,
               _data: currentPlayer.location.position,
+              revision: globalStateRevision
             };
             sendPacket(player.ws, packetManager.moveXY(movementData));
           });
@@ -899,6 +793,7 @@ export default async function packetReceiver(
             const movementData = {
               id: ws.data.id,
               _data: currentPlayer.location.position,
+              revision: globalStateRevision
             };
             sendPacket(player.ws, packetManager.moveXY(movementData));
           });
@@ -1025,9 +920,9 @@ export default async function packetReceiver(
         const selectedPlayer = players.find(
           (p) =>
             Math.abs(p.location.position.x - Math.floor(Number(location.x))) <
-              25 &&
+            25 &&
             Math.abs(p.location.position.y - Math.floor(Number(location.y))) <
-              25
+            25
         );
 
         if (!selectedPlayer) break;
@@ -1107,12 +1002,13 @@ export default async function packetReceiver(
           };
           sendPacket(player.ws, packetManager.stealth(stealthData));
         });
-        // Send the player's new position and current animation to all players when unstealthing
         if (!isStealth) {
+          globalStateRevision++;
           playersInMap.forEach((player) => {
             const moveXYData = {
               id: ws.data.id,
               _data: currentPlayer.location.position,
+              revision: globalStateRevision
             };
 
             if (currentPlayer.location.position?.direction) {
@@ -1121,7 +1017,9 @@ export default async function packetReceiver(
                 currentPlayer.location.position?.direction,
                 false,
                 currentPlayer.mounted,
-                currentPlayer.mount_type || "horse"
+                currentPlayer.mount_type || "horse",
+                undefined,
+                globalStateRevision
               );
               sendPacket(player.ws, packetManager.moveXY(moveXYData));
             }
@@ -1293,12 +1191,14 @@ export default async function packetReceiver(
             })
           );
 
+          globalStateRevision++;
           playersInMap.forEach((player) => {
             sendPacket(
               player.ws,
               packetManager.moveXY({
                 id: target.id,
                 _data: target.location.position,
+                revision: globalStateRevision
               })
             );
 
@@ -1585,10 +1485,9 @@ export default async function packetReceiver(
                 id: ws.data.id,
                 message: args.slice(1).join(" "),
                 // Uppercase the first letter of the username
-                username: `<- ${
-                  currentPlayer.username.charAt(0).toUpperCase() +
+                username: `<- ${currentPlayer.username.charAt(0).toUpperCase() +
                   currentPlayer.username.slice(1)
-                }`,
+                  }`,
               })
             );
 
@@ -1597,10 +1496,9 @@ export default async function packetReceiver(
               packetManager.whisper({
                 id: targetPlayer.id,
                 message: args.slice(1).join(" "),
-                username: `-> ${
-                  targetPlayer.username.charAt(0).toUpperCase() +
+                username: `-> ${targetPlayer.username.charAt(0).toUpperCase() +
                   targetPlayer.username.slice(1)
-                }`,
+                  }`,
               })
             );
 
@@ -1688,13 +1586,14 @@ export default async function packetReceiver(
             // Update the target player's position in the cache
             playerCache.set(targetPlayer.id, targetPlayer);
 
-            // Broadcast the movement to all players in the map
             const playersInMap = filterPlayersByMap(currentPlayer.location.map);
 
+            globalStateRevision++;
             playersInMap.forEach((player) => {
               const moveXYData = {
                 id: targetPlayer.id,
                 _data: targetPlayer.location.position,
+                revision: globalStateRevision
               };
               sendPacket(player.ws, packetManager.moveXY(moveXYData));
             });
@@ -1711,10 +1610,9 @@ export default async function packetReceiver(
             sendPacket(
               ws,
               packetManager.notify({
-                message: `Summoned ${
-                  targetPlayer.username.charAt(0).toUpperCase() +
+                message: `Summoned ${targetPlayer.username.charAt(0).toUpperCase() +
                   targetPlayer.username.slice(1)
-                }`,
+                  }`,
               })
             );
             break;
@@ -1784,10 +1682,9 @@ export default async function packetReceiver(
 
             player.kick(targetPlayer.username, targetPlayer.ws);
             const notifyData = {
-              message: `Disconnected ${
-                targetPlayer.username.charAt(0).toUpperCase() +
+              message: `Disconnected ${targetPlayer.username.charAt(0).toUpperCase() +
                 targetPlayer.username.slice(1)
-              } from the server`,
+                } from the server`,
             };
             sendPacket(ws, packetManager.notify(notifyData));
             break;
@@ -1935,10 +1832,9 @@ export default async function packetReceiver(
             // Check if the player is already banned
             if (targetPlayer.banned) {
               const notifyData = {
-                message: `${
-                  targetPlayer.username.charAt(0).toUpperCase() +
+                message: `${targetPlayer.username.charAt(0).toUpperCase() +
                   targetPlayer.username.slice(1)
-                } is already banned`,
+                  } is already banned`,
               };
               sendPacket(ws, packetManager.notify(notifyData));
               break;
@@ -1947,10 +1843,9 @@ export default async function packetReceiver(
             // Ban the player
             await player.ban(targetPlayer.username, targetPlayer.ws);
             const notifyData = {
-              message: `Banned ${
-                targetPlayer.username.charAt(0).toUpperCase() +
+              message: `Banned ${targetPlayer.username.charAt(0).toUpperCase() +
                 targetPlayer.username.slice(1)
-              } from the server`,
+                } from the server`,
             };
             sendPacket(ws, packetManager.notify(notifyData));
             break;
@@ -2067,10 +1962,9 @@ export default async function packetReceiver(
               playerCache.set(targetPlayer.id, targetPlayer);
             }
             const notifyData = {
-              message: `${
-                targetPlayer.username.charAt(0).toUpperCase() +
+              message: `${targetPlayer.username.charAt(0).toUpperCase() +
                 targetPlayer.username.slice(1)
-              } is now ${admin ? "an admin" : "not an admin"}`,
+                } is now ${admin ? "an admin" : "not an admin"}`,
             };
             // Reconnect the player if they are in the cache
             if (targetPlayer?.ws) {
@@ -2197,9 +2091,8 @@ export default async function packetReceiver(
                   const players = Object.values(playerCache.list());
                   players.forEach((player) => {
                     const notifyData = {
-                      message: `⚠️ Server restarting in ${minutes} minute${
-                        minutes === 1 ? "" : "s"
-                      } ⚠️`,
+                      message: `⚠️ Server restarting in ${minutes} minute${minutes === 1 ? "" : "s"
+                        } ⚠️`,
                     };
                     sendPacket(player.ws, packetManager.notify(notifyData));
                   });
@@ -2214,9 +2107,8 @@ export default async function packetReceiver(
                   const players = Object.values(playerCache.list());
                   players.forEach((player) => {
                     const notifyData = {
-                      message: `⚠️ Server restarting in ${seconds} second${
-                        seconds === 1 ? "" : "s"
-                      } ⚠️`,
+                      message: `⚠️ Server restarting in ${seconds} second${seconds === 1 ? "" : "s"
+                        } ⚠️`,
                     };
                     sendPacket(player.ws, packetManager.notify(notifyData));
                   });
@@ -2327,20 +2219,21 @@ export default async function packetReceiver(
               const playersInMap = filterPlayersByMap(
                 targetPlayer.location.map
               );
+              globalStateRevision++;
               playersInMap.forEach((player) => {
                 const moveData = {
                   id: targetPlayer.id,
                   _data: targetPlayer.location.position,
+                  revision: globalStateRevision
                 };
                 sendPacket(player.ws, packetManager.moveXY(moveData));
               });
             }
 
             const notifyData = {
-              message: `Respawned ${
-                targetPlayer.username.charAt(0).toUpperCase() +
+              message: `Respawned ${targetPlayer.username.charAt(0).toUpperCase() +
                 targetPlayer.username.slice(1)
-              }`,
+                }`,
             };
             sendPacket(ws, packetManager.notify(notifyData));
             break;
@@ -2472,10 +2365,9 @@ export default async function packetReceiver(
                 const notifyData = {
                   message: `Permissions \`${permissionsArray.join(
                     ", "
-                  )}\` added to ${
-                    targetPlayer.username.charAt(0).toUpperCase() +
-                    targetPlayer.username.slice(1)
-                  }`,
+                  )}\` added to ${targetPlayer.username.charAt(0).toUpperCase() +
+                  targetPlayer.username.slice(1)
+                    }`,
                 };
                 sendPacket(ws, packetManager.notify(notifyData));
                 break;
@@ -2511,10 +2403,9 @@ export default async function packetReceiver(
                   playerCache.set(targetPlayer.id, targetPlayer);
                 }
                 const notifyData = {
-                  message: `Permissions removed from ${
-                    targetPlayer.username.charAt(0).toUpperCase() +
+                  message: `Permissions removed from ${targetPlayer.username.charAt(0).toUpperCase() +
                     targetPlayer.username.slice(1)
-                  }`,
+                    }`,
                 };
                 sendPacket(ws, packetManager.notify(notifyData));
                 break;
@@ -2547,10 +2438,9 @@ export default async function packetReceiver(
                   playerCache.set(targetPlayer.id, targetPlayer);
                 }
                 const notifyData = {
-                  message: `Permissions set for ${
-                    targetPlayer.username.charAt(0).toUpperCase() +
+                  message: `Permissions set for ${targetPlayer.username.charAt(0).toUpperCase() +
                     targetPlayer.username.slice(1)
-                  }`,
+                    }`,
                 };
                 sendPacket(ws, packetManager.notify(notifyData));
                 break;
@@ -2584,10 +2474,9 @@ export default async function packetReceiver(
                   playerCache.set(targetPlayer.id, targetPlayer);
                 }
                 const notifyData = {
-                  message: `Permissions cleared for ${
-                    targetPlayer.username.charAt(0).toUpperCase() +
+                  message: `Permissions cleared for ${targetPlayer.username.charAt(0).toUpperCase() +
                     targetPlayer.username.slice(1)
-                  }`,
+                    }`,
                 };
                 sendPacket(ws, packetManager.notify(notifyData));
                 break;
@@ -2609,10 +2498,9 @@ export default async function packetReceiver(
                   ((await permissions.get(targetPlayer.username)) as string) ||
                   "No permissions found";
                 const notifyData = {
-                  message: `Permissions for ${
-                    targetPlayer.username.charAt(0).toUpperCase() +
+                  message: `Permissions for ${targetPlayer.username.charAt(0).toUpperCase() +
                     targetPlayer.username.slice(1)
-                  }: ${response.replaceAll(",", ", ")}`,
+                    }: ${response.replaceAll(",", ", ")}`,
                 };
                 sendPacket(ws, packetManager.notify(notifyData));
                 break;
@@ -2656,7 +2544,6 @@ export default async function packetReceiver(
 
             const result = (await reloadMap(mapName)) as MapData | null;
             if (result) {
-              console.log(`Map ${mapName} reloaded successfully`);
               const notifyData = {
                 message: `Map ${mapName} reloaded successfully`,
               };
@@ -2836,9 +2723,8 @@ export default async function packetReceiver(
           sendPacket(
             ws,
             packetManager.notify({
-              message: `${
-                member.charAt(0).toUpperCase() + member.slice(1)
-              } is not in your party`,
+              message: `${member.charAt(0).toUpperCase() + member.slice(1)
+                } is not in your party`,
             })
           );
           return;
@@ -2851,9 +2737,8 @@ export default async function packetReceiver(
           sendPacket(
             ws,
             packetManager.notify({
-              message: `Failed to kick ${
-                member.charAt(0).toUpperCase() + member.slice(1)
-              } from the party`,
+              message: `Failed to kick ${member.charAt(0).toUpperCase() + member.slice(1)
+                } from the party`,
             })
           );
           return;
@@ -2883,9 +2768,8 @@ export default async function packetReceiver(
           sendPacket(
             ws,
             packetManager.notify({
-              message: `${
-                member.charAt(0).toUpperCase() + member.slice(1)
-              } has been kicked from the party`,
+              message: `${member.charAt(0).toUpperCase() + member.slice(1)
+                } has been kicked from the party`,
             })
           );
           currentPlayer.party = [];
@@ -2905,12 +2789,10 @@ export default async function packetReceiver(
                 sendPacket(
                   p.ws,
                   packetManager.notify({
-                    message: `${
-                      currentPlayer.username.charAt(0).toUpperCase() +
+                    message: `${currentPlayer.username.charAt(0).toUpperCase() +
                       currentPlayer.username.slice(1)
-                    } has kicked ${
-                      member.charAt(0).toUpperCase() + member.slice(1)
-                    } from the party`,
+                      } has kicked ${member.charAt(0).toUpperCase() + member.slice(1)
+                      } from the party`,
                   })
                 );
                 p.party = result;
@@ -3001,10 +2883,9 @@ export default async function packetReceiver(
               sendPacket(
                 p.ws,
                 packetManager.notify({
-                  message: `${
-                    currentPlayer.username.charAt(0).toUpperCase() +
+                  message: `${currentPlayer.username.charAt(0).toUpperCase() +
                     currentPlayer.username.slice(1)
-                  } has left the party`,
+                    } has left the party`,
                 })
               );
               p.party = result;
@@ -3034,10 +2915,9 @@ export default async function packetReceiver(
           sendPacket(
             ws,
             packetManager.notify({
-              message: `${
-                invitedUserUsername.charAt(0).toUpperCase() +
+              message: `${invitedUserUsername.charAt(0).toUpperCase() +
                 invitedUserUsername.slice(1)
-              } is a guest and cannot be invited to a party.`,
+                } is a guest and cannot be invited to a party.`,
             })
           );
           return;
@@ -3066,10 +2946,9 @@ export default async function packetReceiver(
           sendPacket(
             ws,
             packetManager.notify({
-              message: `${
-                invitedUserUsername.charAt(0).toUpperCase() +
+              message: `${invitedUserUsername.charAt(0).toUpperCase() +
                 invitedUserUsername.slice(1)
-              } is already in a party`,
+                } is already in a party`,
             })
           );
           return;
@@ -3083,10 +2962,9 @@ export default async function packetReceiver(
           sendPacket(
             ws,
             packetManager.notify({
-              message: `${
-                invitedUserUsername.charAt(0).toUpperCase() +
+              message: `${invitedUserUsername.charAt(0).toUpperCase() +
                 invitedUserUsername.slice(1)
-              } is already in a party`,
+                } is already in a party`,
             })
           );
           return;
@@ -3107,10 +2985,9 @@ export default async function packetReceiver(
           sendPacket(
             ws,
             packetManager.notify({
-              message: `${
-                invitedUserUsername.charAt(0).toUpperCase() +
+              message: `${invitedUserUsername.charAt(0).toUpperCase() +
                 invitedUserUsername.slice(1)
-              } is not online`,
+                } is not online`,
             })
           );
           return;
@@ -3128,10 +3005,9 @@ export default async function packetReceiver(
         sendPacket(
           ws,
           packetManager.notify({
-            message: `Invitation sent to ${
-              invitedUserUsername.charAt(0).toUpperCase() +
+            message: `Invitation sent to ${invitedUserUsername.charAt(0).toUpperCase() +
               invitedUserUsername.slice(1)
-            }`,
+              }`,
           })
         );
         break;
@@ -3164,10 +3040,9 @@ export default async function packetReceiver(
           sendPacket(
             ws,
             packetManager.notify({
-              message: `${
-                get_friend.username.charAt(0).toUpperCase() +
+              message: `${get_friend.username.charAt(0).toUpperCase() +
                 get_friend.username.slice(1)
-              } is a guest and cannot be added as a friend.`,
+                } is a guest and cannot be added as a friend.`,
             })
           );
           return;
@@ -3259,10 +3134,9 @@ export default async function packetReceiver(
               sendPacket(
                 ws,
                 packetManager.notify({
-                  message: `You are now friends with ${
-                    inviter.username.charAt(0).toUpperCase() +
+                  message: `You are now friends with ${inviter.username.charAt(0).toUpperCase() +
                     inviter.username.slice(1)
-                  }`,
+                    }`,
                 })
               );
               sendPacket(
@@ -3275,10 +3149,9 @@ export default async function packetReceiver(
               sendPacket(
                 inviter.ws,
                 packetManager.notify({
-                  message: `You are now friends with ${
-                    currentPlayer.username.charAt(0).toUpperCase() +
+                  message: `You are now friends with ${currentPlayer.username.charAt(0).toUpperCase() +
                     currentPlayer.username.slice(1)
-                  }`,
+                    }`,
                 })
               );
 
@@ -3310,19 +3183,17 @@ export default async function packetReceiver(
                 sendPacket(
                   ws,
                   packetManager.notify({
-                    message: `You have joined ${
-                      inviter.username.charAt(0).toUpperCase() +
+                    message: `You have joined ${inviter.username.charAt(0).toUpperCase() +
                       inviter.username.slice(1)
-                    }'s party`,
+                      }'s party`,
                   })
                 );
                 sendPacket(
                   inviter.ws,
                   packetManager.notify({
-                    message: `${
-                      currentPlayer.username.charAt(0).toUpperCase() +
+                    message: `${currentPlayer.username.charAt(0).toUpperCase() +
                       currentPlayer.username.slice(1)
-                    } has joined your party`,
+                      } has joined your party`,
                   })
                 );
                 // Send the updated party members to all party members
@@ -3358,19 +3229,17 @@ export default async function packetReceiver(
                 sendPacket(
                   ws,
                   packetManager.notify({
-                    message: `You have joined ${
-                      inviter.username.charAt(0).toUpperCase() +
+                    message: `You have joined ${inviter.username.charAt(0).toUpperCase() +
                       inviter.username.slice(1)
-                    }'s party`,
+                      }'s party`,
                   })
                 );
                 sendPacket(
                   inviter.ws,
                   packetManager.notify({
-                    message: `${
-                      currentPlayer.username.charAt(0).toUpperCase() +
+                    message: `${currentPlayer.username.charAt(0).toUpperCase() +
                       currentPlayer.username.slice(1)
-                    } has joined your party`,
+                      } has joined your party`,
                   })
                 );
                 sendPacket(
@@ -3459,10 +3328,9 @@ export default async function packetReceiver(
         sendPacket(
           ws,
           packetManager.notify({
-            message: `You have removed ${
-              get_friend.username.charAt(0).toUpperCase() +
+            message: `You have removed ${get_friend.username.charAt(0).toUpperCase() +
               get_friend.username.slice(1)
-            } from your friends list`,
+              } from your friends list`,
           })
         );
         break;
@@ -3483,20 +3351,21 @@ export default async function packetReceiver(
         currentPlayer.mounted = !currentPlayer.mounted;
         playerCache.set(currentPlayer.id, currentPlayer);
 
-        // Send mount animation for the current player's direction
         const direction = currentPlayer.location.position?.direction || "down";
         const walking = currentPlayer.moving || false;
         const mounted = currentPlayer.mounted;
         const mount_type = currentPlayer.mount_type || "horse";
 
-        // Send the mount animation to all players (sendAnimation broadcasts automatically)
+        globalStateRevision++;
+
         sendPositionAnimation(
           ws,
           direction,
           walking,
           mounted,
           mount_type,
-          currentPlayer.id
+          currentPlayer.id,
+          globalStateRevision
         );
 
         // If player is currently moving, restart the movement with new speed
@@ -3557,7 +3426,7 @@ function sendPacket(ws: any, packets: any[]) {
   });
 }
 
-function sendAnimation(ws: any, name: string, playerId?: string) {
+function sendAnimation(ws: any, name: string, playerId?: string, revision?: number) {
   const currentPlayer = playerCache.get(playerId || ws.data.id);
   if (!currentPlayer) return;
 
@@ -3574,6 +3443,7 @@ function sendAnimation(ws: any, name: string, playerId?: string) {
     id: currentPlayer?.id,
     name: name,
     data: animationData?.data,
+    revision: revision,
   };
 
   playerCache.set(currentPlayer.id, currentPlayer);
@@ -3622,10 +3492,11 @@ function sendPositionAnimation(
   walking: boolean,
   mounted: boolean = false,
   mount_type: string = "",
-  playerId?: string
+  playerId?: string,
+  revision?: number
 ) {
   const animation = getAnimationNameForDirection(direction, walking, mounted, mount_type);
-  sendAnimation(ws, animation, playerId);
+  sendAnimation(ws, animation, playerId, revision);
 }
 
 function normalizeDirection(direction: string): string {
@@ -3647,7 +3518,7 @@ function normalizeDirection(direction: string): string {
   }
 }
 
-function sendAnimationTo(targetWs: any, name: string, playerId?: string) {
+function sendAnimationTo(targetWs: any, name: string, playerId?: string, revision?: number) {
   const targetPlayer = playerCache.get(playerId || targetWs.data.id);
   if (!targetPlayer) return;
 
@@ -3658,8 +3529,8 @@ function sendAnimationTo(targetWs: any, name: string, playerId?: string) {
     id: targetPlayer.id,
     name,
     data: animationData.data,
+    revision: revision,
   };
 
-  // send only to this client
   sendPacket(targetWs, packetManager.animation(animationPacketData));
 }

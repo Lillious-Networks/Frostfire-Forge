@@ -1003,9 +1003,6 @@ const player = {
 
     const data = result[0];
 
-    // Get inventory separately since it's an array of items
-    const inventoryRaw = await query("SELECT * FROM inventory WHERE username = ?", [username]) as any[];
-
     return {
       id: data.id,
       username: data.username,
@@ -1050,7 +1047,6 @@ const player = {
       isGuest: data.guest_mode === 1,
       isStealth: data.stealth === 1,
       isNoclip: data.noclip === 1,
-      inventoryRaw: inventoryRaw
     };
   },
 };

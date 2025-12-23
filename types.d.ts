@@ -316,3 +316,59 @@ declare interface Currency {
   silver: number;
   gold: number;
 }
+
+declare interface Authentication {
+  authenticated: boolean;
+  completed: boolean;
+  error?: string;
+  data?: PlayerData;
+}
+
+declare interface PlayerData {
+  id: string;
+  username: string;
+  location: {
+    map: string;
+    position: {
+      x: number;
+      y: number;
+      direction: string;
+    };
+  };
+  permissions: string[];
+  stats: {
+    max_health: number;
+    health: number;
+    max_stamina: number;
+    stamina: number;
+    xp: number;
+    max_xp: number;
+    level: number;
+    crit_chance: number;
+    crit_damage: number;
+  };
+  currency: {
+    copper: number;
+    silver: number;
+    gold: number;
+  };
+  friends: string[];
+  party_id: string;
+  config: Array<{
+    fps: number;
+    music_volume: number;
+    effects_volume: number;
+    muted: boolean;
+  }>;
+  questlog: {
+    completed: string[];
+    incomplete: string[];
+  };
+  isAdmin: boolean;
+  isGuest: boolean;
+  isStealth: boolean;
+  isNoclip: boolean;
+  inventory: any;
+  party_members: string[];
+  friends: string[];
+}

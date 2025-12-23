@@ -119,12 +119,12 @@ const itemnow = performance.now();
 await assetCache.add("items", await item.list());
 // For each item, find the icon data and add the compressed data to the item object
 const itemList = await assetCache.get("items");
-itemList.forEach(async (item: any) => {
+await Promise.all(itemList.map(async (item: any) => {
   if (item.icon) {
     const iconData = await assetCache.get(item.icon);
     item.icon = iconData || null; // Replace the icon with the compressed data if it exists
   }
-});
+}));
 const items = await assetCache.get("items") as Item[];
 
 log.success(`Loaded ${items.length} item(s) from the database in ${(performance.now() - itemnow).toFixed(2)}ms`);

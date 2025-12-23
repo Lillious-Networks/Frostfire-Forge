@@ -1,0 +1,89 @@
+import { parentPort, workerData } from "worker_threads";
+import player from "../systems/player.ts";
+import query from "../controllers/sqldatabase.ts";
+import log from "../modules/logger.ts";
+import parties from "../systems/parties.ts";
+
+// Assets are passed once via workerData when worker is created
+const items = workerData?.assets?.items ? JSON.parse(workerData.assets.items) : [];
+
+const authentication = {
+    async process(token: string, id: string): Promise<Authentication> {
+        try {
+            // Set the session ID for the player
+            const session = await player.setSessionId(token, id);
+
+            // Check if session is valid
+            // If not, return an error
+            if (!session) {
+                return {
+                    authenticated: false,
+                    completed: true,
+                    error: "Invalid session"
+                } as Authentication;
+            }
+
+            const getUsername = (await player.getUsernameBySession(id)) as any[];
+            const username = getUsername[0]?.username as string;
+            const playerData = await player.GetPlayerLoginData(username) as PlayerData;
+            const inventoryData = await query("SELECT item, quantity FROM inventory WHERE username = ?", [username]) as any[];
+
+            // Fetch and process details for each item
+            const playerInventoryData = await Promise.all(
+                inventoryData.map(async (item: any) => {
+                    // Fetch item details from cache
+                    const itemDetails = (items as any).find((i: any) => i.name === item.item);
+
+                    if (itemDetails) {
+                    return {
+                        ...item, // Inventory item details
+                        ...itemDetails, // Item details from cache
+                    };
+                    } else {
+                    // If item details are not found, return the item with blank details
+                    log.error(`Item details not found for: ${item.item}`);
+                    return {
+                        ...item,
+                        name: item.item,
+                        quality: "unknown",
+                        description: "unknown",
+                        icon: null,
+                    };
+                    }
+                })
+            );
+
+            const partyMembers = playerData.party_id ? await parties.getPartyMembers(Number(playerData.party_id)) : null;
+
+            playerData.inventory = playerInventoryData;
+            playerData.party_members = partyMembers || [];
+
+            if (!playerData) {
+                return {
+                    authenticated: true,
+                    completed: true,
+                    error: "Player data not found"
+                } as Authentication;
+            }
+
+            return {
+                authenticated: true,
+                completed: true,
+                data: playerData
+            }
+
+        } catch (err) {
+            return {
+                authenticated: false,
+                completed: true,
+                error: err instanceof Error ? err.message : String(err)
+            } as Authentication;
+        }
+    }
+}
+
+// Listen for authentication requests
+parentPort?.on("message", async (data: { token: string, id: string }) => {
+    const result = await authentication.process(data.token, data.id);
+    parentPort?.postMessage({ ...result, token: data.token, id: data.id });
+});
