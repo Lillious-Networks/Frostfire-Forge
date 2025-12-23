@@ -304,8 +304,8 @@ authWorker.on("message", async (result: any) => {
             sendAnimationTo(
               ws,
               getAnimationNameForDirection(pl.location.direction, !!pcache?.moving),
-              pl.id,
-              snapshotRevision
+              pl.id
+              // Don't pass snapshotRevision - animations should be applied immediately, not buffered
             );
           }
         });
