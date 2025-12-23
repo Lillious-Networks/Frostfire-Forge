@@ -317,6 +317,13 @@ declare interface Currency {
   gold: number;
 }
 
+declare interface Mount {
+  name: string;
+  description: string;
+  particles: string | null;
+  icon: string | null |Buffer<any>;
+}
+
 declare interface Authentication {
   authenticated: boolean;
   completed: boolean;
@@ -371,4 +378,12 @@ declare interface PlayerData {
   inventory: any;
   party_members: string[];
   friends: string[];
+  collectables: object[Collectable];
+}
+
+declare interface Collectable {
+  type: string;
+  item: string;
+  username: string;
+  icon?: string | null | Buffer<any>;
 }

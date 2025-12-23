@@ -68,7 +68,18 @@ export const packetManager = {
           type: "INVENTORY",
           data,
           slots: 30,
-        })
+        }),
+      )
+    ] as any[];
+  },
+  collectables: (data: Collectable[]) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "COLLECTABLES",
+          data,
+          slots: 20,
+        }),
       )
     ] as any[];
   },
@@ -163,7 +174,7 @@ export const packetManager = {
             mounted: data.mounted,
             ...(data.friends ? { friends: data.friends } : {}),
             ...(data.party ? { party: data.party } : {}),
-            ...(data.currency ? { currency: data.currency } : { copper: 0, silver: 0, gold: 0 })
+            ...(data.currency ? { currency: data.currency } : { copper: 0, silver: 0, gold: 0 }),
           },
         })
       )

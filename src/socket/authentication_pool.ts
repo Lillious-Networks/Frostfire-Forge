@@ -5,10 +5,12 @@ import assetCache from "../services/assetCache";
 const prepareAssets = async () => {
     const items = await assetCache.get("items");
     const maps = await assetCache.get("maps");
+    const mounts = await assetCache.get("mounts");
 
     return {
         items: items ? JSON.stringify(items) : null,
-        maps: maps ? JSON.stringify(maps) : null
+        maps: maps ? JSON.stringify(maps) : null,
+        mounts: mounts ? JSON.stringify(mounts) : null,
     };
 };
 

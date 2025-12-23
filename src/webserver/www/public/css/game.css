@@ -108,7 +108,7 @@ body {
 
 #guild-container {
   position: fixed;
-  top: 50;
+  top: 75;
   right: -425;
   z-index: 100;
   background: url("../img/ui/ui-guild-container.png");
@@ -167,7 +167,7 @@ body {
 
 #friends-list-container {
   position: fixed;
-  top: 50;
+  top: 75;
   right: -425;
   z-index: 100;
   background: url("../img/ui/ui-friendslist.png");
@@ -261,9 +261,9 @@ body {
   color: #ff0000;
 }
 
-#spell-book-container {
+#spell-book-container, #collectables-container {
   position: fixed;
-  top: 50;
+  top: 75;
   right: -425;
   z-index: 100;
   background: url("../img/ui/ui-spellbook.png");
@@ -274,7 +274,7 @@ body {
   will-change: right;
 }
 
-#spell-book-container #grid {
+#spell-book-container #grid, #collectables-container #grid {
   display: grid;
   grid-template-rows: repeat(5, 40px);   /* 5 rows, each 50px tall */
   grid-auto-flow: column;                /* Fill down, then next column */
@@ -290,7 +290,7 @@ body {
   box-sizing: border-box;
 }
 
-#spell-book-container #grid .slot {
+#spell-book-container #grid .slot, #collectables-container #grid .slot {
   width: 40px;
   height: 40px;
   box-sizing: border-box;
@@ -308,6 +308,7 @@ body {
   background-repeat: no-repeat;
   background-size: 100% 100%;
   user-select: none;
+  cursor: pointer;
 }
 
 #hotbar #grid {
@@ -336,6 +337,7 @@ body {
   background-repeat: no-repeat;
   background-size: 100% 100%;
   user-select: none;
+  cursor: pointer;
 }
 
 .empty {

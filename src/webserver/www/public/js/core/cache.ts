@@ -5,6 +5,7 @@ class Cache {
   npcs: any[] = [];
   audio: any[] = [];
   animations: Map<string, any> = new Map();
+  mount: string | null = null;
 
   private constructor() {}
 
