@@ -74,7 +74,7 @@ const authentication = {
             const partyMembers = playerData.party_id ? await parties.getPartyMembers(Number(playerData.party_id)) : null;
 
             playerData.inventory = playerInventoryData;
-            playerData.party_members = partyMembers || [];
+            playerData.party = partyMembers || [];
 
             if (!playerData) {
                 return {

@@ -376,7 +376,7 @@ declare interface PlayerData {
   isStealth: boolean;
   isNoclip: boolean;
   inventory: any;
-  party_members: string[];
+  party: string[];
   friends: string[];
   collectables: object[Collectable];
 }

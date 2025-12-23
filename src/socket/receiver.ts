@@ -199,7 +199,8 @@ authWorker.on("message", async (result: any) => {
       pvp: false,
       last_attack: null,
       invitations: [],
-      party: playerData.party_id ? Number(playerData.party_id) : null,
+      party_id: playerData.party_id ? Number(playerData.party_id) : null,
+      party: playerData.party || null,
       currency: playerData.currency || { copper: 0, silver: 0, gold: 0 },
       isGuest: playerData.isGuest,
       created: performance.now(),
@@ -240,7 +241,8 @@ authWorker.on("message", async (result: any) => {
         stats: playerData.stats || {},
         animation: null,
         friends: playerData.friends || [],
-        party: playerData.party_id ? Number(playerData.party_id) : null,
+        party_id: playerData.party_id ? Number(playerData.party_id) : null,
+        party: playerData.party || [],
         currency: playerData.currency || { copper: 0, silver: 0, gold: 0 },
         collectables: playerData.collectables || [],
       };
@@ -1056,8 +1058,10 @@ export default async function packetReceiver(
           return;
         }
 
+        const isInParty = currentPlayer?.party?.includes(target?.username) || null;
+
         // Check if in the same party
-        if (currentPlayer.party.includes(target.username)) {
+        if (isInParty) {
           sendPacket(
             ws,
             packetManager.notify({
