@@ -9,3 +9,4 @@ src/webserver/www/game/*.html linguist-vendored
 src/webserver/www/public/*.html linguist-vendored
 src/webserver/www/public/css/** linguist-vendored
 src/utility/daemon.js linguist-vendored
+frostfiredocs/** linguist-vendored
