@@ -13,6 +13,7 @@ interface CacheService {
   removeNested(key: string, nestedKey: string): Promise<void>;
   set(key: string, value: any): Promise<void>;
   setNested(key: string, nestedKey: string, value: RedisValue): Promise<void>;
+  getAll(): Promise<Record<string, RedisValue>>;
   close(): void;
 }
 
@@ -103,6 +104,10 @@ class MemoryCacheService implements CacheService {
 
   async setNested(key: string, nestedKey: string, value: RedisValue): Promise<void> {
     await this.addNested(key, nestedKey, value);
+  }
+
+  async getAll(): Promise<Record<string, RedisValue>> {
+    return await this.list();
   }
 
   close(): void {
@@ -233,6 +238,10 @@ class RedisCacheService implements CacheService {
     if (typeof (this.client as any).close === "function") {
       (this.client as any).close();
     }
+  }
+
+  async getAll(): Promise<Record<string, RedisValue>> {
+    return await this.list();
   }
 }
 

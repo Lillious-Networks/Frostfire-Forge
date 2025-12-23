@@ -51,11 +51,20 @@ function sendRequest(data: any) {
 let cachedPlayerId: string | null = null;
 let sessionActive: boolean = false;
 
+let snapshotRevision: number | null = null;
+let snapshotApplied: boolean = false;
+let movementUpdateBuffer: Array<{id: string, data: any, revision: number}> = [];
+let animationUpdateBuffer: Array<{id: string, name: string, data: any, revision: number}> = [];
+
 socket.onopen = () => {
-  // Clear all players on new connection to prevent stale data
   cache.players.clear();
   sessionActive = false;
   cachedPlayerId = null;
+
+  snapshotRevision = null;
+  snapshotApplied = false;
+  movementUpdateBuffer = [];
+  animationUpdateBuffer = [];
 
   sendRequest({
     type: "PING",
@@ -128,8 +137,6 @@ socket.onmessage = async (event) => {
         chunksToReload.forEach(async (pos) => {
           await window.mapData.requestChunk(pos.x, pos.y);
         });
-
-        console.log('Reloaded all chunks after map changes');
       }
       break;
     }
@@ -154,8 +161,6 @@ socket.onmessage = async (event) => {
               window.mapData.requestChunk(chunkCoord.chunkX, chunkCoord.chunkY);
             }
           });
-
-          console.log(`Updated ${chunksToUpdate.length} chunks after map save`);
         });
       }
       break;
@@ -205,6 +210,16 @@ socket.onmessage = async (event) => {
     case "ANIMATION": {
       try {
         if (!data?.name || !data?.data) return;
+
+        if (!snapshotApplied && data.revision !== undefined) {
+          animationUpdateBuffer.push({
+            id: data.id,
+            name: data.name,
+            data: data.data,
+            revision: data.revision
+          });
+          break;
+        }
 
         let apng: any;
         const cachedData = cache.animations.get(data.name);
@@ -293,25 +308,20 @@ socket.onmessage = async (event) => {
     case "SPAWN_PLAYER": {
       // Reject spawn packets if session is not yet authenticated
       if (!sessionActive || !cachedPlayerId) {
-        console.log(`[CLIENT] Rejecting SPAWN_PLAYER for ${data.username} - session not active yet`);
         break;
       }
 
       await isLoaded();
-
-      console.log(`[CLIENT] Received SPAWN_PLAYER for: ${data.username} (ID: ${data.id})`);
 
       // Remove any existing player with the same username/userid (handles reconnects/refreshes)
       const existingByUsername = Array.from(cache.players).find(
         (p) => p.username === data.username && p.userid === data.userid
       );
       if (existingByUsername) {
-        console.log(`[CLIENT] Removing existing player with same username: ${existingByUsername.username} (old ID: ${existingByUsername.id}, new ID: ${data.id})`);
         cache.players.delete(existingByUsername);
       }
 
       createPlayer(data);
-      console.log(`[CLIENT] Player created. Total players in cache: ${cache.players.size}`);
       break;
     }
     case "RECONNECT": {
@@ -321,32 +331,108 @@ socket.onmessage = async (event) => {
     case "LOAD_PLAYERS": {
       // Reject load players if session is not yet authenticated
       if (!sessionActive || !cachedPlayerId) {
-        console.log(`[CLIENT] Rejecting LOAD_PLAYERS - session not active yet`);
         break;
       }
 
       await isLoaded();
       if (!data) return;
 
-      console.log(`[CLIENT] Processing LOAD_PLAYERS. Players to load: ${data.length}`);
-
-      // Don't clear cache - just add/update players from LOAD_PLAYERS
-      // Players may have already been added from SPAWN_PLAYER broadcasts
-      data.forEach((player: any) => {
+      const players = data.players || data;
+      snapshotRevision = data.snapshotRevision ?? null;
+      (Array.isArray(players) ? players : []).forEach((player: any) => {
         if (player.id != cachedPlayerId) {
           // Check if player already exists by username/userid (not just ID)
           const existingByUsername = Array.from(cache.players).find(
             (p) => p.username === player.username && p.userid === player.userid
           );
 
-          if (existingByUsername) {
-            console.log(`[CLIENT] Player ${player.username} already exists (ID: ${existingByUsername.id}), skipping`);
-          } else {
+          if (!existingByUsername) {
             createPlayer(player);
-            console.log(`[CLIENT] Loaded player from LOAD_PLAYERS: ${player.username}`);
           }
         }
       });
+
+      snapshotApplied = true;
+
+      const bufferedUpdates = movementUpdateBuffer
+        .filter(update => snapshotRevision === null || update.revision > snapshotRevision)
+        .sort((a, b) => a.revision - b.revision);
+
+      bufferedUpdates.forEach(update => {
+        const player = Array.from(cache.players).find(p => p.id === update.id);
+        if (player) {
+          player.position.x = update.data.x;
+          player.position.y = update.data.y;
+          player.typing = false;
+        }
+      });
+
+      movementUpdateBuffer = [];
+
+      const bufferedAnimations = animationUpdateBuffer
+        .filter(update => snapshotRevision === null || update.revision > snapshotRevision)
+        .sort((a, b) => a.revision - b.revision);
+
+      for (const update of bufferedAnimations) {
+        const player = Array.from(cache.players).find(p => p.id === update.id);
+        if (player) {
+          try {
+            let apng: any;
+            const cachedData = cache.animations.get(update.name);
+
+            if (cachedData instanceof Uint8Array) {
+              apng = parseAPNG(cachedData);
+            } else {
+              // Check IndexedDB
+              const dbData = await getAnimationFromDB(update.name);
+              if (dbData) {
+                cache.animations.set(update.name, dbData);
+                apng = parseAPNG(dbData);
+              } else {
+                // @ts-expect-error - pako is loaded globally
+                const inflated = pako.inflate(new Uint8Array(update.data.data));
+                if (inflated) {
+                  cache.animations.set(update.name, inflated);
+                  await saveAnimationToDB(update.name, inflated);
+                  apng = parseAPNG(inflated);
+                }
+              }
+            }
+
+            if (!(apng instanceof Error)) {
+              // Preload all images
+              if (apng.frames && apng.frames.length > 0) {
+                apng.frames.forEach((frame: any) => frame.createImage());
+                await Promise.all(
+                  apng.frames.map((frame: any) => {
+                    return new Promise<void>((resolve) => {
+                      if (frame.imageElement?.complete) {
+                        resolve();
+                      } else if (frame.imageElement) {
+                        frame.imageElement.onload = () => resolve();
+                        frame.imageElement.onerror = () => resolve();
+                      } else {
+                        resolve();
+                      }
+                    });
+                  })
+                );
+              }
+
+              player.animation = {
+                frames: apng.frames,
+                currentFrame: 0,
+                lastFrameTime: performance.now(),
+              };
+            }
+          } catch (error) {
+            console.error("Failed to process buffered animation:", error);
+          }
+        }
+      }
+
+      animationUpdateBuffer = [];
+
       break;
     }
     case "DISCONNECT_MALIFORMED": {
@@ -381,19 +467,26 @@ socket.onmessage = async (event) => {
       break;
     }
     case "MOVEXY": {
+      if (data._data === "abort") {
+        break;
+      }
+
+      if (!snapshotApplied && data.revision !== undefined) {
+        movementUpdateBuffer.push({
+          id: data.id,
+          data: data._data,
+          revision: data.revision
+        });
+        break;
+      }
+
       const player = Array.from(cache.players).find(
         (player) => player.id === data.id
       );
       if (!player) return;
 
-      // Handle movement abort
-      if (data._data === "abort") {
-        break;
-      }
-
       player.typing = false;
 
-      // Update player position (data from server is in world coordinates)
       player.position.x = data._data.x;
       player.position.y = data._data.y;
 
@@ -419,12 +512,16 @@ socket.onmessage = async (event) => {
         const chatDecryptionKey = JSON.parse(packet.decode(event.data))[
           "chatDecryptionKey"
         ];
-        sessionStorage.setItem("connectionId", connectionId); // Store client's socket ID
+        sessionStorage.setItem("connectionId", connectionId);
         cachedPlayerId = connectionId;
-        sessionActive = true; // Mark session as active
+        sessionActive = true;
 
-        // Clear any stale players from previous session
         cache.players.clear();
+
+        snapshotRevision = null;
+        snapshotApplied = false;
+        movementUpdateBuffer = [];
+        animationUpdateBuffer = [];
 
         const sessionToken = getCookie("token");
         if (!sessionToken) {

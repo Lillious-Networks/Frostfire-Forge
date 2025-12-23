@@ -55,6 +55,7 @@ async function createPlayer(data: any) {
     typingImage: typingImage,
     party: data.party || null,
     mounted: data.mounted || false,
+    moving: data.location.moving || false,
     damageNumbers: [] as Array<{
       value: number;
       x: number;
