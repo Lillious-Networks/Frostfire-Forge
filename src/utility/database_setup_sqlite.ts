@@ -502,6 +502,15 @@ const createCollectablesTable = async () => {
   `;
   await query(sql);
 }
+
+const insertDemoMount = async () => {
+  log.info("Inserting demo mount collectable...");
+  const sql = `
+    INSERT OR IGNORE INTO collectables (type, item, username) VALUES ('mount', 'horse', 'demo_user');
+  `;
+  await query(sql);
+}
+
 // Run the database setup
 const setupDatabase = async () => {
   await createAccountsTable();
@@ -544,6 +553,7 @@ try {
   await insertDemoStats();
   await insertDemoClientConfig();
   await insertDemoQuestLog();
+  await insertDemoMount();
   log.success("Database setup complete!");
   process.exit(0);
 } catch (error) {
