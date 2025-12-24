@@ -32,6 +32,7 @@ import {
   notificationContainer,
   notificationMessage,
   collectablesUI,
+  castSpell,
 } from "./ui.ts";
 import { playAudio, playMusic } from "./audio.ts";
 import { updateXp } from "./xp.ts";
@@ -103,6 +104,11 @@ socket.onmessage = async (event) => {
       sendRequest({ type: "TIME_SYNC" });
       if (!data) return;
       updateTime(data);
+      break;
+    }
+    case "CAST_SPELL": {
+      if (!data || !data.spell || (!data.time && data.time !== 0) || !data.id) return;
+      castSpell(data.id, data.spell, data.time);
       break;
     }
     case "WEATHER": {

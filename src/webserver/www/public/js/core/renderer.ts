@@ -513,6 +513,13 @@ function animationLoop() {
     // Render damage numbers for all visible players
     for (const p of visiblePlayers) p.showDamageNumbers(ctx);
 
+    // Render castbars for all visible players (excluding current player)
+    for (const p of visiblePlayers) {
+      if (p.id !== cachedPlayerId) {
+        p.showCastbar(ctx);
+      }
+    }
+
     for (const p of visiblePlayers) p.showChat(ctx, currentPlayer);
   }
 

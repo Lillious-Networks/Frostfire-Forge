@@ -1,7 +1,7 @@
 import { sendRequest, getIsLoaded } from "./socket.js";
 import Cache from "./cache.js";
 const cache = Cache.getInstance();
-import { toggleUI, toggleDebugContainer, handleStatsUI, collectablesUI } from "./ui.js";
+import { toggleUI, toggleDebugContainer, handleStatsUI, collectablesUI, hotbarSlots } from "./ui.js";
 import { handleCommand, handleChatMessage } from "./chat.js";
 import { setDirection, setPendingRequest } from "./renderer.js";
 import { chatInput } from "./chat.js";
@@ -24,6 +24,7 @@ const movementKeys = new Set(["KeyW", "KeyA", "KeyS", "KeyD"]);
 let lastTypingPacket = 0;
 const cooldowns: { [key: string]: number } = {};
 const COOLDOWN_DURATION = 100; // milliseconds
+const KEY_COOLDOWN_DURATION = 500; // milliseconds
 
 export const keyHandlers = {
   F2: () => toggleDebugContainer(),
@@ -62,8 +63,16 @@ export const keyHandlers = {
     toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -425);
   },
   KeyC: () => handleStatsUI(),
-  KeyX: () => sendRequest({ type: "STEALTH", data: null }),
-  KeyZ: () => sendRequest({ type: "NOCLIP", data: null }),
+  KeyX: () => {
+    if (isKeyOnCooldown("KeyX")) return;
+    putKeyOnCooldown("KeyX");
+    sendRequest({ type: "STEALTH", data: null });
+  },
+  KeyZ: () => {
+    if (isKeyOnCooldown("KeyZ")) return;
+    putKeyOnCooldown("KeyZ");
+    sendRequest({ type: "NOCLIP", data: null });
+  },
   KeyK: () => {
     if (toggleFriendsList) {
       toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -425);
@@ -91,10 +100,50 @@ export const keyHandlers = {
     toggleGuild = toggleUI(guildContainer, toggleGuild, -450);
   },
   ShiftLeft: () => {
+    if (isKeyOnCooldown("ShiftLeft")) return;
+    putKeyOnCooldown("ShiftLeft");
     sendRequest({ type: "MOUNT", data: { mount: cache.mount || "horse" } })
   },
-  Enter: async () => handleEnterKey(),
-  Space: () => handleSpaceKey()
+  Digit1: async () => {
+    cast(0);
+  },
+  Digit2: async () => {
+    cast(1);
+  },
+  Digit3: async () => {
+    cast(2);
+  },
+  Digit4: async () => {
+    cast(3);
+  },
+  Digit5: async () => {
+    cast(4);
+  },
+  Digit6: async () => {
+    cast(5);
+  },
+  Digit7: async () => {
+    cast(6);
+  },
+  Digit8: async () => {
+    cast(7);
+  },
+  Digit9: async () => {
+    cast(8);
+  },
+  Digit0: async () => {
+    cast(9);
+  },
+  Enter: () => {
+    if (isKeyOnCooldown("Enter")) return;
+    putKeyOnCooldown("Enter");
+    handleEnterKey();
+  },
+  Space: () => {
+    if (isKeyOnCooldown("Space")) return;
+    putKeyOnCooldown("Space");
+    handleSpaceKey();
+  }
 } as const;
 
 // Movement keys configuration
@@ -116,6 +165,39 @@ const blacklistedKeys = new Set([
   'F10',
   'Tab',
 ]);
+
+function cast(hotbar_index: number) {
+    if (isKeyOnCooldown(`Digit${hotbar_index + 1}`)) return;
+    selectHotbarSlot(hotbar_index);
+    putKeyOnCooldown(`Digit${hotbar_index + 1}`);
+    // Send movement abort packet
+    stopMovement();
+    const target = Array.from(cache?.players).find(p => p?.targeted) || null;
+    sendRequest({ type: "HOTBAR", data: { spell: hotbar_index + 1, target } });
+}
+
+function selectHotbarSlot(index: number) {
+  const slot = hotbarSlots[index];
+  slot.style.border = "2px solid rgba(255, 255, 255, 0.7)";
+  setTimeout(() => {
+    slot.style.border = "2px solid transparent";
+  }, 100);
+}
+
+function putKeyOnCooldown(key: string) {
+  cooldowns[key] = Date.now() + KEY_COOLDOWN_DURATION;
+  setTimeout(() => {
+    clearKeyCooldown(key);
+  }, KEY_COOLDOWN_DURATION);
+}
+
+function isKeyOnCooldown(key: string): boolean {
+  return !!(cooldowns[key] && Date.now() < cooldowns[key]);
+}
+
+function clearKeyCooldown(key: string) {
+  delete cooldowns[key];
+}
 
 function handleEscapeKey() {
   stopMovement();

@@ -370,4 +370,9 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "MOUNT", data })),
     ] as any[];
   },
+  castSpell: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CAST_SPELL", data })),
+    ] as any[];
+  }
 };

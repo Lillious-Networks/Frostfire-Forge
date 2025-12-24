@@ -197,6 +197,7 @@ declare interface SpriteData {
 
 // Define Spell data
 declare interface SpellData {
+  id?: number;
   name: string;
   damage: number;
   mana: number;
@@ -204,6 +205,7 @@ declare interface SpellData {
   type: string;
   cast_time: number;
   description: string;
+  cooldown: number;
 }
 
 type NPCScript = {

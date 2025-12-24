@@ -71,4 +71,6 @@ export const packetTypes: PacketType = {
   UPDATE_CHUNKS: "UPDATE_CHUNKS",
   MOUNT: "MOUNT",
   COLLECTABLES: "COLLECTABLES",
+  HOTBAR: "HOTBAR",
+  CAST_SPELL: "CAST_SPELL",
 };

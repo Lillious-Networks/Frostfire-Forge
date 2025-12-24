@@ -247,6 +247,7 @@ const createSpellsTable = async () => {
         \`range\` INTEGER NOT NULL,
         type TEXT NOT NULL,
         cast_time INTEGER NOT NULL,
+        cooldown INTEGER NOT NULL,
         description TEXT DEFAULT NULL
     );
   `;

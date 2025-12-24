@@ -340,6 +340,79 @@ body {
   cursor: pointer;
 }
 
+#hotbar #grid .slot:focus,
+#hotbar #grid .slot.focused {
+  transition: border ease-in-out 0.2s;
+  border: 2px solid rgba(255, 255, 255, 0.7);
+}
+
+#castbar {
+  position: fixed;
+  bottom: 100px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 320px;
+  height: 32px;
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(20, 20, 30, 0.95), rgba(10, 10, 20, 0.98));
+  border: 2px solid rgba(255, 255, 255, 0.12);
+  display: none;
+  box-shadow:
+    0 6px 20px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 -1px 2px rgba(0, 0, 0, 0.5);
+  z-index: 100;
+  overflow: hidden;
+}
+
+#castbar-progress {
+  background: linear-gradient(180deg, #a78bfa 0%, #8b5cf6 50%, #7c3aed 100%);
+  box-sizing: border-box;
+  border-radius: 6px;
+  height: 100%;
+  will-change: transform;
+  transform: scaleX(var(--xscale, 1));
+  transform-origin: left;
+  box-shadow:
+    0 0 20px rgba(139, 92, 246, 0.5),
+    inset 0 2px 4px rgba(255, 255, 255, 0.25),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.3);
+  position: relative;
+}
+
+#castbar-progress::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 45%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.2), transparent);
+  border-radius: 6px 6px 0 0;
+  pointer-events: none;
+}
+
+#castbar-text {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-shadow:
+    0 2px 4px rgba(0,0,0,0.9),
+    0 0 10px rgba(0,0,0,0.6),
+    0 1px 0 rgba(0,0,0,0.8);
+  pointer-events: none;
+  z-index: 2;
+}
+
 .empty {
   background: rgba(255, 255, 255, 0.3);
   border: 2px solid transparent;
