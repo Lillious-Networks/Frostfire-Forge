@@ -126,12 +126,22 @@ socket.onmessage = async (event) => {
 
       if (!sourcePlayer || !targetPlayer) break;
 
-      // Decompress and cache icon if provided and not already cached
+      // Decompress and cache icon if provided and not already cached (same as mount icons)
       if (icon && spell && !cache.projectileIcons.has(spell)) {
+        // Check if icon has the correct structure
+        if (!icon.data || !Array.isArray(icon.data)) {
+          console.error(`Invalid icon structure for ${spell}:`, icon);
+          break;
+        }
+
         try {
           // @ts-expect-error - pako is loaded in index.html
-          const inflatedData = pako.inflate(new Uint8Array(icon.data), { to: "string" });
+          const inflatedData = pako.inflate(
+            new Uint8Array(icon.data),
+            { to: "string" }
+          );
           const iconImage = new Image();
+          iconImage.src = `data:image/png;base64,${inflatedData}`;
 
           // Wait for image to load before caching
           iconImage.onload = () => {
@@ -141,8 +151,6 @@ socket.onmessage = async (event) => {
           iconImage.onerror = (error) => {
             console.error(`Failed to load projectile icon for ${spell}:`, error);
           };
-
-          iconImage.src = `data:image/png;base64,${inflatedData}`;
         } catch (error) {
           console.error(`Failed to decompress projectile icon for ${spell}:`, error);
         }
