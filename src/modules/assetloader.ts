@@ -163,6 +163,9 @@ const spellList = await assetCache.get("spells") as SpellData[];
 await Promise.all(spellList.map(async (spell: any) => {
   if (spell.icon) {
     const iconData = await assetCache.get(spell.icon);
+    if (!iconData) {
+      log.warn(`Failed to load icon data for spell: ${spell.name}, icon name: ${spell.icon}`);
+    }
     spell.icon = iconData || null; // Replace the icon with the compressed data if it exists
   }
 }));
