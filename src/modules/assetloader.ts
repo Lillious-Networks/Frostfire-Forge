@@ -79,7 +79,7 @@ function loadIcons() {
 
     log.debug(`Loaded icon: ${name}`);
 
-    const compressedData = zlib.gzipSync(base64Data);
+    const compressedData = zlib.deflateSync(base64Data);
 
     icons.push({ name, data: compressedData });
     assetCache.add(name, compressedData);
