@@ -549,7 +549,7 @@ function animationLoop() {
         // Try to get cached icon for this spell
         const icon = cache.projectileIcons.get(projectile.spell);
 
-        if (icon && icon.complete) {
+        if (icon && icon.complete && icon.naturalWidth > 0) {
           // Calculate rotation angle based on direction of travel
           const dx = endX - projectile.currentX;
           const dy = endY - projectile.currentY;
