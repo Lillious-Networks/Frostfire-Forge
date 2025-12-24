@@ -225,17 +225,23 @@ function castSpell(id: string, spell: string, time: number) {
   // Current player casting (DOM-based castbar at bottom of screen)
   let currentProgress = 0;
   if (activeCastbarClone && (spell == 'interrupted' || spell == 'failed')) {
-    const cloneProgress = activeCastbarClone.querySelector("#castbar-progress") as HTMLDivElement;
-    if (cloneProgress) {
-      const animations = cloneProgress.getAnimations();
-      for (const anim of animations) {
-        if (anim.effect && (anim.effect as KeyframeEffect).getKeyframes().some((kf: any) => kf.transform)) {
-          const currentTime = anim.currentTime as number;
-          const duration = (anim.effect as AnimationEffect).getTiming().duration as number;
-          if (currentTime && duration) {
-            currentProgress = currentTime / duration;
+    if (spell == 'failed') {
+      // Failed always shows at 100%
+      currentProgress = 1.0;
+    } else {
+      // Interrupted shows at current progress
+      const cloneProgress = activeCastbarClone.querySelector("#castbar-progress") as HTMLDivElement;
+      if (cloneProgress) {
+        const animations = cloneProgress.getAnimations();
+        for (const anim of animations) {
+          if (anim.effect && (anim.effect as KeyframeEffect).getKeyframes().some((kf: any) => kf.transform)) {
+            const currentTime = anim.currentTime as number;
+            const duration = (anim.effect as AnimationEffect).getTiming().duration as number;
+            if (currentTime && duration) {
+              currentProgress = currentTime / duration;
+            }
+            break;
           }
-          break;
         }
       }
     }
