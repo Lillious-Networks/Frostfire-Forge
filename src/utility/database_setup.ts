@@ -173,8 +173,19 @@ const createSpellsTable = async () => {
       \`range\` INT NULL DEFAULT 0,
       type VARCHAR(255) NULL DEFAULT 'cast',
       cast_time INT NULL DEFAULT 0,
-      description VARCHAR(255) NULL
+      cooldown INT NULL DEFAULT 0,
+      description VARCHAR(255) NULL,
+      icon VARCHAR(255) NULL DEFAULT NULL
     )
+  `;
+  await query(sql);
+};
+
+const insertDefaultSpell = async () => {
+  log.info("Inserting default spell...");
+  const sql = `
+    INSERT IGNORE INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon) VALUES
+    ('frost_bolt', 10, 10, 1000, 'spell', 2, 1, 'A frosty projectile that deals damage to a single target.', 'frost_bolt');
   `;
   await query(sql);
 };
@@ -465,7 +476,10 @@ const createIndexes = async () => {
     { name: "idx_mounts_name", sql: "CREATE INDEX idx_mounts_name ON mounts(name)" },
 
     // Collectables table index
-    { name: "idx_collectables_username", sql: "CREATE INDEX idx_collectables_username ON collectables(username)" }
+    { name: "idx_collectables_username", sql: "CREATE INDEX idx_collectables_username ON collectables(username)" },
+
+    // Spells table index
+    { name: "idx_spells_name", sql: "CREATE INDEX idx_spells_name ON spells(name)" }
   ];
 
   for (const index of indexes) {
@@ -509,6 +523,7 @@ const setupDatabase = async () => {
   await createClientConfig();
   await createWeaponsTable();
   await createSpellsTable();
+  await insertDefaultSpell();
   await createPermissionsTable();
   await createPermissionTypesTable();
   await createNpcTable();

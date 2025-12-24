@@ -40,6 +40,103 @@ function queryRLE(rleData: number[], targetIndex: number): number {
   return 0; // Out of bounds or not found
 }
 
+// Bresenham's line algorithm to check for direct line-of-sight between two points
+// This checks if there are any collision tiles directly blocking the straight line path
+async function hasLineOfSight(
+  startX: number,
+  startY: number,
+  endX: number,
+  endY: number,
+  map: string,
+  maxDistance: number = 200 // Max search distance in pixels
+): Promise<boolean> {
+  const mapKey = map.replace(".json", "");
+
+  // Check if distance exceeds max
+  const distance = Math.sqrt(Math.pow(endX - startX, 2) + Math.pow(endY - startY, 2));
+  if (distance > maxDistance) return false;
+
+  // Load map from cache
+  let mapDataCached = mapCache.get(mapKey);
+  if (!mapDataCached) {
+    const mapProperties = (await assetCache.get("mapProperties")) as MapProperties[];
+    const mapData = mapProperties?.find((m: any) => m.name.replace(".json", "") === mapKey);
+    if (!mapData) return false; // No map data, can't determine path
+
+    const collisionData = await assetCache.getNested(mapKey, "collision");
+    if (!collisionData || !Array.isArray(collisionData)) return false;
+
+    mapDataCached = {
+      warps: Array.isArray(mapData.warps)
+        ? Object.fromEntries(
+            (mapData.warps as WarpObject[]).map((warp, idx) => [warp.name ?? String(idx), warp])
+          )
+        : (mapData.warps || {}),
+      collisionRLE: collisionData,
+      width: collisionData[0],
+      height: collisionData[1],
+      tileWidth: mapData.tileWidth,
+      tileHeight: mapData.tileHeight,
+    };
+
+    mapCache.set(mapKey, mapDataCached);
+  }
+
+  const { collisionRLE, width, height, tileWidth, tileHeight } = mapDataCached;
+
+  if (!collisionRLE) return false;
+
+  // Convert world coordinates to tile coordinates
+  const startTileX = Math.floor(startX / tileWidth);
+  const startTileY = Math.floor(startY / tileHeight);
+  const endTileX = Math.floor(endX / tileWidth);
+  const endTileY = Math.floor(endY / tileHeight);
+
+  // Check if start or end tiles are out of bounds
+  if (startTileX < 0 || startTileY < 0 || startTileX >= width || startTileY >= height) return false;
+  if (endTileX < 0 || endTileY < 0 || endTileX >= width || endTileY >= height) return false;
+
+  // Bresenham's line algorithm to check all tiles along the straight line
+  const dx = Math.abs(endTileX - startTileX);
+  const dy = Math.abs(endTileY - startTileY);
+  const sx = startTileX < endTileX ? 1 : -1;
+  const sy = startTileY < endTileY ? 1 : -1;
+  let err = dx - dy;
+
+  let currentX = startTileX;
+  let currentY = startTileY;
+
+  while (true) {
+    // Check if current tile has collision
+    if (currentX >= 0 && currentX < width && currentY >= 0 && currentY < height) {
+      const tileIndex = currentY * width + currentX;
+      const tileValue = queryRLE(collisionRLE, tileIndex);
+
+      // If we hit a collision tile (non-zero), line of sight is blocked
+      if (tileValue !== 0) {
+        return false;
+      }
+    }
+
+    // Check if we reached the end
+    if (currentX === endTileX && currentY === endTileY) {
+      break;
+    }
+
+    const e2 = 2 * err;
+    if (e2 > -dy) {
+      err -= dy;
+      currentX += sx;
+    }
+    if (e2 < dx) {
+      err += dx;
+      currentY += sy;
+    }
+  }
+
+  return true; // No collisions found along the line
+}
+
 const player = {
   clear: async () => {
     // Clear all session_ids, set online to 0, and clear all tokens
@@ -852,7 +949,8 @@ const player = {
   canAttack: async (
     self: Player,
     target: Player,
-    playerProperties: PlayerProperties
+    playerProperties: PlayerProperties,
+    maxPathfindingDistance: number = 300
   ): Promise<{ value: boolean; reason?: string }> => {
     // No self or target or no range
     if (!self || !target) return { value: false, reason: "invalid" };
@@ -913,6 +1011,20 @@ const player = {
       playerProperties
     );
     if (!isPvpAllowedSelf) return { value: false, reason: "nopvp" };
+
+    // Check if there's a clear path (no collision blocking) between players using A* pathfinding
+    const hasPath = await hasLineOfSight(
+      selfPosition.x,
+      selfPosition.y,
+      targetPosition.x,
+      targetPosition.y,
+      self.location.map,
+      maxPathfindingDistance
+    );
+
+    if (!hasPath) {
+      return { value: false, reason: "path_blocked" };
+    }
 
     return { value: true, reason: "pvp" };
   },

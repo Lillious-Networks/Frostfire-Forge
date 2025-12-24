@@ -1,4 +1,5 @@
 import { sendRequest, cachedPlayerId } from "./socket.js";
+import Cache from "./cache.js";
 const debugContainer = document.getElementById("debug-container") as HTMLDivElement;
 const statUI = document.getElementById("stat-screen") as HTMLDivElement;
 const positionText = document.getElementById("position") as HTMLDivElement;
@@ -53,6 +54,13 @@ const noPvpDebugCheckbox = document.getElementById("nopvp-debug-checkbox") as HT
 const wireframeDebugCheckbox = document.getElementById("wireframe-debug-checkbox") as HTMLInputElement;
 const showGridCheckbox = document.getElementById("show-grid-checkbox") as HTMLInputElement;
 const loadedChunksText = document.getElementById("loaded-chunks") as HTMLDivElement;
+const hotbar = document.getElementById("hotbar") as HTMLDivElement;
+const hotbarGrid = hotbar.querySelector("#grid") as HTMLDivElement;
+const hotbarSlots = hotbarGrid.querySelectorAll(".slot") as NodeListOf<HTMLDivElement>;
+const castbar = document.getElementById("castbar") as HTMLDivElement;
+
+// Track active castbar clone
+let activeCastbarClone: HTMLDivElement | null = null;
 
 function toggleUI(element: HTMLElement, toggleFlag: boolean, hidePosition: number) {
   element.style.transition = "1s";
@@ -174,13 +182,190 @@ function updateStaminaBar(bar: HTMLDivElement, staminaPercent: number) {
   });
 }
 
+function castSpell(id: string, spell: string, time: number) {
+  spell = spell.toLowerCase();
+  // Handle other players' casting (show castbar above their head)
+  if (id !== cachedPlayerId) {
+    const cache = Cache.getInstance();
+    const player = Array.from(cache.players).find(p => p.id === id);
+
+    if (player) {
+      if (spell === 'interrupted' || spell === 'failed') {
+        // Calculate current progress before interrupting
+        if (player.castingSpell && !player.castingInterrupted) {
+          const elapsed = performance.now() - player.castingStartTime;
+          player.castingInterruptedProgress = Math.min(elapsed / player.castingDuration, 1);
+        } else {
+          player.castingInterruptedProgress = 0;
+        }
+
+        // Update spell name to show what failed/interrupted
+        player.castingSpell = spell.charAt(0).toUpperCase() + spell.slice(1);
+        player.castingInterrupted = true;
+        player.castingStartTime = performance.now();
+        player.castingDuration = 1500; // Show interrupted/failed for 1.5 seconds
+      } else {
+        // Format spell name (capitalize and remove underscores)
+        const formattedSpell = spell.split('_').map(word =>
+          word.charAt(0).toUpperCase() + word.slice(1)
+        ).join(' ');
+
+        player.castingSpell = formattedSpell;
+        player.castingStartTime = performance.now();
+        player.castingDuration = time * 1000;
+        player.castingInterrupted = false;
+        player.castingInterruptedProgress = undefined;
+      }
+    }
+    return;
+  }
+
+  // Current player casting (DOM-based castbar at bottom of screen)
+  let currentProgress = 0;
+  if (activeCastbarClone && (spell == 'interrupted' || spell == 'failed')) {
+    if (spell == 'failed') {
+      // Failed always shows at 100%
+      currentProgress = 1.0;
+    } else {
+      // Interrupted shows at current progress
+      const cloneProgress = activeCastbarClone.querySelector("#castbar-progress") as HTMLDivElement;
+      if (cloneProgress) {
+        const animations = cloneProgress.getAnimations();
+        for (const anim of animations) {
+          if (anim.effect && (anim.effect as KeyframeEffect).getKeyframes().some((kf: any) => kf.transform)) {
+            const currentTime = anim.currentTime as number;
+            const duration = (anim.effect as AnimationEffect).getTiming().duration as number;
+            if (currentTime && duration) {
+              currentProgress = currentTime / duration;
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // Remove any existing active clone
+  if (activeCastbarClone) {
+    activeCastbarClone.remove();
+    activeCastbarClone = null;
+  }
+
+  if (spell == 'interrupted' || spell == 'failed') {
+    // Create interrupt clone
+    const interruptClone = castbar.cloneNode(true) as HTMLDivElement;
+    interruptClone.id = "castbar-active-clone";
+
+    // Set display and positioning for the interrupt clone
+    interruptClone.style.display = "block";
+    interruptClone.style.position = "fixed";
+    interruptClone.style.bottom = "100px";
+    interruptClone.style.left = "50%";
+    interruptClone.style.transform = "translateX(-50%)";
+    interruptClone.style.width = "300px";
+    interruptClone.style.height = "25px";
+    interruptClone.style.zIndex = "100";
+
+    // Get children directly (first child is progress, second is text based on HTML)
+    const children = interruptClone.children;
+    const clonedProgress = children[0] as HTMLDivElement;
+    const clonedText = children[1] as HTMLDivElement;
+
+    if (clonedProgress && clonedText) {
+      // Set to current progress and color based on type
+      clonedProgress.style.transform = `scaleX(${currentProgress})`;
+      clonedProgress.style.transformOrigin = 'left';
+      // Professional colors: red gradient for failed, grey gradient for interrupted
+      if (spell === 'failed') {
+        clonedProgress.style.background = 'linear-gradient(180deg, #ef4444 0%, #dc2626 50%, #b91c1c 100%)';
+        clonedProgress.style.boxShadow = '0 0 20px rgba(239, 68, 68, 0.6), inset 0 2px 4px rgba(255, 255, 255, 0.2), inset 0 -2px 4px rgba(0, 0, 0, 0.3)';
+      } else {
+        clonedProgress.style.background = 'linear-gradient(180deg, #9ca3af 0%, #6b7280 50%, #4b5563 100%)';
+        clonedProgress.style.boxShadow = '0 0 15px rgba(107, 114, 128, 0.4), inset 0 2px 4px rgba(255, 255, 255, 0.15), inset 0 -2px 4px rgba(0, 0, 0, 0.3)';
+      }
+      clonedText.innerText = spell;
+
+      // Clear any animations
+      clonedProgress.getAnimations().forEach(anim => anim.cancel());
+    }
+
+    // Insert the interrupt clone
+    castbar.parentNode?.insertBefore(interruptClone, castbar.nextSibling);
+    activeCastbarClone = interruptClone;
+
+    // Remove after delay
+    setTimeout(() => {
+      if (activeCastbarClone === interruptClone) {
+        interruptClone.remove();
+        activeCastbarClone = null;
+      }
+    }, 1500);
+
+    return;
+  }
+
+  // Normal spell cast - create a new clone for this cast
+  const castClone = castbar.cloneNode(true) as HTMLDivElement;
+  castClone.id = "castbar-active-clone";
+
+  // Get children directly (first child is progress, second is text based on HTML)
+  const children = castClone.children;
+  const clonedProgress = children[0] as HTMLDivElement;
+  const clonedText = children[1] as HTMLDivElement;
+
+
+  if (clonedProgress && clonedText) {
+    // Set display to block and copy essential positioning styles
+    castClone.style.display = "block";
+    castClone.style.position = "fixed";
+    castClone.style.bottom = "100px";
+    castClone.style.left = "50%";
+    castClone.style.transform = "translateX(-50%)";
+    castClone.style.width = "300px";
+    castClone.style.height = "25px";
+    castClone.style.zIndex = "100";
+
+    // Reset progress to 0 and ensure gradient is used
+    clonedProgress.style.transform = 'scaleX(0)';
+    clonedProgress.style.transformOrigin = 'left';
+    clonedProgress.style.background = '';
+
+    // Format spell name
+    const formattedSpell = spell.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+    clonedText.innerText = formattedSpell;
+
+    const timeMs = time * 1000;
+
+    // Animate the clone
+    clonedProgress.animate([
+      { transform: 'scaleX(0)' },
+      { transform: 'scaleX(1)' }
+    ], {
+      duration: timeMs,
+      fill: 'forwards'
+    });
+
+    castbar.parentNode?.insertBefore(castClone, castbar.nextSibling);
+    activeCastbarClone = castClone;
+
+    // Remove after cast completes
+    setTimeout(() => {
+      if (activeCastbarClone === castClone) {
+        castClone.remove();
+        activeCastbarClone = null;
+      }
+    }, timeMs + 100);
+  }
+}
+
 export {
-    toggleUI, toggleDebugContainer, handleStatsUI, createPartyUI, updateHealthBar, updateStaminaBar, positionText,
+    toggleUI, toggleDebugContainer, handleStatsUI, createPartyUI, updateHealthBar, updateStaminaBar, castSpell, positionText,
     friendsListUI, inventoryUI, spellBookUI, pauseMenu, menuElements, chatInput, canvas, ctx, fpsSlider, healthBar,
     staminaBar, targetHealthBar, targetStaminaBar, xpBar, musicSlider, effectsSlider, mutedCheckbox, statUI, overlay,
     packetsSentReceived, optionsMenu, friendsList, friendsListSearch, onlinecount, progressBar, progressBarContainer,
     inventoryGrid, chatMessages, loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage,
     serverTime, ambience, weatherCanvas, weatherCtx, guildContainer, guildName, guildRank, guildMembersList,
     guildMemberCount, guildMemberInviteInput, guildMemberInviteButton, collisionDebugCheckbox, chunkOutlineDebugCheckbox,
-    collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox, loadedChunksText, collectablesUI
+    collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox, loadedChunksText, collectablesUI,
+    hotbarSlots,
 };

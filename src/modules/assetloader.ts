@@ -159,7 +159,15 @@ console.log(`Mounts loaded: ${mountList.map((m) => m.name).join(", ")}`);
 // Load spell data
 const spellnow = performance.now();
 await assetCache.add("spells", await spell.list());
+const spellList = await assetCache.get("spells") as SpellData[];
+await Promise.all(spellList.map(async (spell: any) => {
+  if (spell.icon) {
+    const iconData = await assetCache.get(spell.icon);
+    spell.icon = iconData || null; // Replace the icon with the compressed data if it exists
+  }
+}));
 const spells = await assetCache.get("spells") as SpellData[];
+
 log.success(`Loaded ${spells.length} spell(s) from the database in ${(performance.now() - spellnow).toFixed(2)}ms`);
 
 // Load weapon data

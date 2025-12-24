@@ -65,6 +65,11 @@ async function createPlayer(data: any) {
       isHealing: boolean;
       isCrit: boolean;
     }>,
+    castingSpell: null as string | null,
+    castingStartTime: 0,
+    castingDuration: 0,
+    castingInterrupted: false,
+    castingInterruptedProgress: undefined as number | undefined,
     showChat: function (context: CanvasRenderingContext2D) {
       // Draw typing indicator first (below in z-order)
       if (this.typing && this.typingImage) {
@@ -195,6 +200,130 @@ async function createPlayer(data: any) {
       context.fillStyle = "white";
       context.strokeStyle = "black";
       context.lineWidth = 1;
+    },
+    showCastbar: function (context: CanvasRenderingContext2D) {
+      if (!this.castingSpell) return;
+
+      const now = performance.now();
+      const elapsed = now - this.castingStartTime;
+
+      // If interrupted/failed, freeze progress at the point of interruption
+      let progress;
+      if (this.castingInterrupted) {
+        if (this.castingSpell === "Failed") {
+          // Failed always shows at 100%
+          progress = 1.0;
+        } else {
+          // Interrupted shows at current progress with minimum 15% visibility
+          progress = Math.max(this.castingInterruptedProgress || 0, 0.15);
+        }
+      } else {
+        progress = Math.min(elapsed / this.castingDuration, 1);
+      }
+
+      // Castbar dimensions - larger and more professional
+      const barWidth = 120;
+      const barHeight = 12;
+      const barX = this.position.x - barWidth / 2;
+      const barY = this.position.y - 45; // Above the player
+
+      // Outer shadow for depth
+      context.shadowColor = "rgba(0, 0, 0, 0.7)";
+      context.shadowBlur = 8;
+      context.shadowOffsetY = 3;
+
+      // Background with border
+      context.fillStyle = "rgba(15, 15, 25, 0.95)";
+      context.fillRect(barX, barY, barWidth, barHeight);
+
+      // Reset shadow for border
+      context.shadowColor = "transparent";
+      context.shadowBlur = 0;
+      context.shadowOffsetY = 0;
+
+      // Inner background (darker inset)
+      context.fillStyle = "rgba(10, 10, 15, 0.8)";
+      context.fillRect(barX + 1, barY + 1, barWidth - 2, barHeight - 2);
+
+      // Progress bar with gradients
+      if (this.castingInterrupted) {
+        if (this.castingSpell === "Failed") {
+          // Red gradient for failed
+          const gradient = context.createLinearGradient(barX, barY, barX, barY + barHeight);
+          gradient.addColorStop(0, "#ef4444");
+          gradient.addColorStop(0.5, "#dc2626");
+          gradient.addColorStop(1, "#b91c1c");
+          context.fillStyle = gradient;
+
+          // Failed glow
+          context.shadowColor = "rgba(239, 68, 68, 0.8)";
+          context.shadowBlur = 10;
+        } else {
+          // Grey gradient for interrupted
+          const gradient = context.createLinearGradient(barX, barY, barX, barY + barHeight);
+          gradient.addColorStop(0, "#9ca3af");
+          gradient.addColorStop(0.5, "#6b7280");
+          gradient.addColorStop(1, "#4b5563");
+          context.fillStyle = gradient;
+
+          // Subtle interrupted glow
+          context.shadowColor = "rgba(107, 114, 128, 0.5)";
+          context.shadowBlur = 6;
+        }
+      } else {
+        // Purple gradient for casting
+        const gradient = context.createLinearGradient(barX, barY, barX, barY + barHeight);
+        gradient.addColorStop(0, "#a78bfa");
+        gradient.addColorStop(0.5, "#8b5cf6");
+        gradient.addColorStop(1, "#7c3aed");
+        context.fillStyle = gradient;
+
+        // Casting glow
+        context.shadowColor = "rgba(139, 92, 246, 0.7)";
+        context.shadowBlur = 12;
+      }
+
+      context.fillRect(barX + 2, barY + 2, (barWidth - 4) * progress, barHeight - 4);
+
+      // Reset shadow
+      context.shadowColor = "transparent";
+      context.shadowBlur = 0;
+
+      // Highlight overlay (top shine)
+      const highlightGradient = context.createLinearGradient(barX, barY, barX, barY + barHeight / 2);
+      highlightGradient.addColorStop(0, "rgba(255, 255, 255, 0.25)");
+      highlightGradient.addColorStop(1, "rgba(255, 255, 255, 0)");
+      context.fillStyle = highlightGradient;
+      context.fillRect(barX + 2, barY + 2, (barWidth - 4) * progress, (barHeight - 4) / 2);
+
+      // Border
+      context.strokeStyle = "rgba(255, 255, 255, 0.15)";
+      context.lineWidth = 1.5;
+      context.strokeRect(barX + 0.5, barY + 0.5, barWidth - 1, barHeight - 1);
+
+      // Spell name
+      context.font = "bold 11px 'Comic Relief'";
+      context.fillStyle = "white";
+      context.textAlign = "center";
+      context.shadowColor = "rgba(0, 0, 0, 0.9)";
+      context.shadowBlur = 4;
+      context.shadowOffsetY = 1;
+      const spellText = this.castingInterrupted ? this.castingSpell : this.castingSpell;
+      context.fillText(spellText, this.position.x, barY - 5);
+
+      // Reset all shadow settings
+      context.shadowColor = "transparent";
+      context.shadowBlur = 0;
+      context.shadowOffsetY = 0;
+
+      // Auto-remove after cast completes or interrupt finishes
+      if (this.castingInterrupted && elapsed >= 1500) {
+        this.castingSpell = null;
+        this.castingInterrupted = false;
+        this.castingInterruptedProgress = undefined;
+      } else if (!this.castingInterrupted && progress >= 1) {
+        this.castingSpell = null;
+      }
     },
     renderAnimation: function (context: CanvasRenderingContext2D) {
       if (!this.animation?.frames?.length) {

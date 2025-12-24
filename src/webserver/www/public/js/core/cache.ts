@@ -6,6 +6,17 @@ class Cache {
   audio: any[] = [];
   animations: Map<string, any> = new Map();
   mount: string | null = null;
+  projectileIcons: Map<string, HTMLImageElement> = new Map();
+  projectiles: Array<{
+    startX: number;
+    startY: number;
+    targetPlayerId: string;
+    currentX: number;
+    currentY: number;
+    startTime: number;
+    duration: number;
+    spell: string;
+  }> = [];
 
   private constructor() {}
 

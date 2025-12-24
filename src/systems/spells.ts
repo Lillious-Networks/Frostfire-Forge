@@ -13,10 +13,13 @@ const spells = {
     if (!spell?.name) return;
     return await query("DELETE FROM spells WHERE name = ?", [spell.name]);
   },
-  async find(spell: SpellData) {
-    if (!spell?.name) return;
+  async find(identifier: number | string) {
     const spells = await assetCache.get("spells") as SpellData[];
-    return spells.find((s) => s.name === spell.name);
+    if (typeof identifier === "number") {
+      return spells.find((spell) => spell.id === identifier);
+    } else {
+      return spells.find((spell) => spell.name === identifier);
+    }
   },
   async update(spell: SpellData) {
     if (!spell?.name) return;

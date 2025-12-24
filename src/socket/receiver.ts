@@ -17,12 +17,12 @@ import quests from "../systems/quests";
 import generate from "../modules/sprites";
 import friends from "../systems/friends";
 import parties from "../systems/parties.ts";
+import spells from "../systems/spells";
 const maps = await assetCache.get("maps");
 const spritesheets = await assetCache.get("spritesheets");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const animationsCache = await assetCache.get("animations");
 const mapPropertiesCache = await assetCache.get("mapProperties");
-const audioCache = await assetCache.get("audio");
 import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 // Load settings
 import * as settings from "../config/settings.json";
@@ -208,6 +208,9 @@ authWorker.on("message", async (result: any) => {
       mounted: false,
       mount_type: null,
       collectables: playerData.collectables || [],
+      spellCooldowns: {},
+      casting: false,
+      lastInterruptTime: 0
     });
 
     const mapData = [
@@ -581,6 +584,21 @@ export default async function packetReceiver(
             );
           }
           return;
+        }
+
+        if (currentPlayer.casting) {
+          currentPlayer.casting = false;
+          currentPlayer.lastInterruptTime = performance.now();
+          playerCache.set(currentPlayer.id, currentPlayer);
+          // Send interrupt casting packet
+          log.debug(`Casting interrupted for user: ${currentPlayer.username}`);
+          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+          playersInMap.forEach((player) => {
+            sendPacket(
+              player.ws,
+              packetManager.castSpell({ id: currentPlayer.id, spell: 'interrupted', time: 1 })
+            );
+          });
         }
 
         if (!directions.includes(direction)) return;
@@ -1032,7 +1050,7 @@ export default async function packetReceiver(
         }
         break;
       }
-      case "ATTACK": {
+      case "HOTBAR": {
         if (!currentPlayer) return;
         if (currentPlayer.isGuest) {
           sendPacket(
@@ -1043,12 +1061,40 @@ export default async function packetReceiver(
           );
           return;
         }
-        if (currentPlayer.attackDelay > performance.now()) return;
-        if (currentPlayer.stats.stamina < 10) return;
 
-        const _data = data as any;
-        const target = playerCache.get(_data.id);
-        if (!target) return;
+        // Check if we're currently in an interrupt grace period (1.5 seconds)
+        const timeSinceInterrupt = performance.now() - (currentPlayer.lastInterruptTime || 0);
+        if (timeSinceInterrupt < 1500) {
+          // Still showing interrupt, ignore this cast attempt
+          return;
+        }
+
+        // Check if the player is casting already - reject the new cast attempt
+        const casting = playerCache.get(currentPlayer.id)?.casting;
+        if (casting) {
+          // Don't interrupt, just reject the new cast
+          return;
+        }
+
+        const spell_identifier = (data as any).spell;
+        const target = playerCache.get((data as any).target?.id) || currentPlayer;
+
+        if (!target?.id) {
+          sendPacket(
+            ws,
+            packetManager.notify({ message: "Target player not found." })
+          );
+          return;
+        }
+
+        // Check if spell identifier is provided
+        if (!spell_identifier) {
+          sendPacket(
+            ws,
+            packetManager.notify({ message: "No spell selected." })
+          );
+          break;
+        }
 
         if (target.isGuest) {
           sendPacket(
@@ -1058,10 +1104,36 @@ export default async function packetReceiver(
           return;
         }
 
+        const spell = await spells.find(spell_identifier);
+        const spell_id = spell?.id;
+        if (!spell || !spell_id) {
+          sendPacket(
+            ws,
+            packetManager.notify({ message: "Invalid spell selected." })
+          );
+          break;
+        }
+
+        // Check if spell is on cooldown
+        currentPlayer.spellCooldowns = currentPlayer.spellCooldowns || {};
+        const spellCooldownEnd = currentPlayer.spellCooldowns[spell_id] || 0;
+        if (spellCooldownEnd >  performance?.now()) return;
+
+        const spell_range = spell.range || 100;
+        const spell_damage = spell?.damage;
+        const spell_mana = spell?.mana || 0;
+
+        // If not enough mana, return
+        if ((currentPlayer.stats.stamina || 0) < spell_mana) return;
+
+        // Return if no damage is set
+        if (!spell_damage) return;
+
         const isInParty = currentPlayer?.party?.includes(target?.username) || null;
 
-        // Check if in the same party
-        if (isInParty) {
+        // Check if in the same party and spell does damage
+        // We can heal party members, but not damage them
+        if (isInParty && spell_damage > 0) {
           sendPacket(
             ws,
             packetManager.notify({
@@ -1071,45 +1143,130 @@ export default async function packetReceiver(
           return;
         }
 
+        // If damage is negative, only allow on self or party members (healing)
+        if (spell_damage < 0 && target.id !== currentPlayer.id && !isInParty)  return;
+
         const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-        const playersNearBy = filterPlayersByDistance(
-          ws,
-          700,
-          currentPlayer.location.map
-        );
+
         const playersInAttackRange = filterPlayersByDistance(
           ws,
-          60,
+          spell_range,
           currentPlayer.location.map
         );
-        const playersInMapAdminNearBy = playersNearBy.filter((p) => p.isAdmin);
 
-        const canAttack = await player.canAttack(currentPlayer, target, {
+        const canAttack = await player.canAttack(currentPlayer, target,
+          {
           width: 24,
           height: 40,
-        });
+          },
+          spell_range
+        );
 
-        // Check if target is in range and can be attacked
-        if (!playersInAttackRange.includes(target) || !canAttack?.value) {
+        // Don't check range if targetting self and it's a healing spell
+        if (target.id === currentPlayer.id && spell_damage < 0) {
+          playersInAttackRange.push(target);
+        } else if (!playersInAttackRange.includes(target) || !canAttack?.value) {
+          // Check if target is in range and can be attacked
           if (canAttack?.reason == "nopvp") {
             sendPacket(
               ws,
               packetManager.notify({ message: "You are not in a PvP area" })
             );
           }
+          if (canAttack?.reason == "path_blocked") {
+            sendPacket(
+              ws,
+              packetManager.notify({ message: "Target is not in line of sight" })
+            );
+          }
           return;
         }
 
-        // Generate a number for the pitch of the audio
-        const pitch = Math.random() * 0.1 + 0.95;
+        // Distance between players
+        const distance = Math.sqrt(
+          Math.pow(currentPlayer.location.position.x - target.location.position.x, 2) +
+          Math.pow(currentPlayer.location.position.y - target.location.position.y, 2)
+        );
 
-        // Calculate damage based on player level
-        // Base damage: 10-25 at level 1, scales with level
-        // Formula: (baseMin + level * 2) to (baseMax + level * 5)
+        // No travel time if targeting self
+        let delay = 0;
+        if (target.id !== currentPlayer.id) {
+          const maxTravelTime = 500; // Maximum travel time in ms
+          const speedMultiplier = 1000; // Adjust this to control base travel speed
+          // Calculate dynamic travel time based on distance
+          // Formula: (distance / speedMultiplier) * 1000 for milliseconds
+          const calculatedDelay = (distance / speedMultiplier) * 1000;
+
+          // Apply maximum travel time cap, no minimum
+          delay = Math.min(calculatedDelay, maxTravelTime);
+        }
+
+        log.debug(`User: ${currentPlayer.username} is casting the spell: ${spell.name} on ${target.username}`);
+        log.debug(`User: ${currentPlayer.username} spell travel time delay: ${delay}ms at distance: ${Math.round(distance)}px`);
+
+        // Set an async timeout to simulate spell casting time
+        currentPlayer.casting = true;
+        playerCache.set(currentPlayer.id, currentPlayer);
+        playersInMap.forEach((player) => {
+          sendPacket(
+            player.ws,
+            packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: spell.cast_time })
+          );
+        });
+        await new Promise((resolve) => setTimeout(resolve, spell.cast_time * 1000));
+        if (!playerCache.get(currentPlayer.id)?.casting) return; // If casting was interrupted, exit
+        currentPlayer.casting = false;
+        playerCache.set(currentPlayer.id, currentPlayer);
+
+        const canAttack2 = await player.canAttack(currentPlayer, target,
+          {
+          width: 24,
+          height: 40,
+          },
+          spell_range
+        );
+
+        // Re-validate attack conditions after casting because players may have moved behind cover
+        if (canAttack2?.reason == "nopvp") {
+          playersInMap.forEach((player) => {
+            sendPacket(
+              player.ws,
+              packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
+            );
+          });
+          return;
+        }
+
+        if (canAttack2?.reason == "path_blocked") {
+          playersInMap.forEach((player) => {
+            sendPacket(
+              player.ws,
+              packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
+            );
+          });
+          return;
+        }
+
+        // Set another timeout to simulate spell travel time on the server
+        // If target is self, no travel time
+        if (target.id !== currentPlayer.id) {
+          playersInMap.forEach((player) => {
+            sendPacket(
+              player.ws,
+              packetManager.projectile({ id: currentPlayer.id, time: delay / 1000, target_id: target.id, spell: spell.name, icon: spell.icon })
+            );
+          });
+        }
+        await new Promise((resolve) => setTimeout(resolve, delay));
+
         const playerLevel = currentPlayer.stats.level || 1;
-        const minDamage = 10 + (playerLevel - 1) * 2;
-        const maxDamage = 25 + (playerLevel - 1) * 5;
-        const baseDamage = Math.floor(Math.random() * (maxDamage - minDamage + 1) + minDamage);
+        const minDamage = spell_damage < 0 ?
+          spell_damage - (playerLevel - 1) * 2 :
+          spell_damage + (playerLevel - 1) * 2;
+        const maxDamage = spell_damage < 0 ?
+          spell_damage - (playerLevel - 1) * 5 :
+          spell_damage + (playerLevel - 1) * 5;
+        const baseDamage = Math.floor(Math.random() * (Math.abs(maxDamage - minDamage) + 1)) + Math.min(minDamage, maxDamage);
 
         // Calculate crit
         const critChance = currentPlayer.stats.crit_chance || 10;
@@ -1120,35 +1277,26 @@ export default async function packetReceiver(
         // Apply crit multiplier if crit lands
         let finalDamage = baseDamage;
         if (isCrit) {
-          finalDamage = Math.floor(baseDamage * (1 + critDamage / 100));
+          // For healing (negative damage), crit reduces the healing amount (makes it more negative)
+          // For damage (positive), crit increases the damage amount
+          if (baseDamage < 0) {
+            finalDamage = Math.floor(baseDamage * (1 + critDamage / 100));
+          } else {
+            finalDamage = Math.floor(baseDamage * (1 + critDamage / 100));
+          }
         }
 
-        const stamina = 10;
-
         target.stats.health = Math.round(target.stats.health - finalDamage);
-        currentPlayer.stats.stamina -= stamina;
+        currentPlayer.stats.stamina -= spell_mana;
 
         // Ensure stamina doesn't go below 0
         if (currentPlayer.stats.stamina < 0) {
           currentPlayer.stats.stamina = 0;
         }
 
-        const audioData = {
-          name: "attack_sword",
-          data: audioCache.find((a: SoundData) => a.name === "attack_sword"),
-          pitch: pitch,
-          timestamp: performance.now(),
-        };
-
-        // Audio packet rules (stealth vs normal)
-        if (currentPlayer.isStealth) {
-          playersInMapAdminNearBy.forEach((player) => {
-            sendPacket(player.ws, packetManager.audio(audioData));
-          });
-        } else {
-          playersNearBy.forEach((player) => {
-            sendPacket(player.ws, packetManager.audio(audioData));
-          });
+        // Handle overhealing
+        if (target.stats.health > target.stats.max_health) {
+          target.stats.health = target.stats.max_health;
         }
 
         // Handle death
@@ -1244,13 +1392,20 @@ export default async function packetReceiver(
         }
 
         // PVP flags + cooldown
-        currentPlayer.pvp = true;
-        target.pvp = true;
+        // If healing a party member, don't set pvp flags
+        if (!isInParty) {
+          currentPlayer.pvp = true;
+          target.pvp = true;
+        }
+
+        // Update last attack time
         currentPlayer.last_attack = performance.now();
         target.last_attack = performance.now();
 
-        // Simple cooldown (no await/setTimeout, no reset to 0)
-        currentPlayer.attackDelay = performance.now() + 1000;
+        // Set spell on cooldown
+        currentPlayer.spellCooldowns = currentPlayer.spellCooldowns || {};
+        currentPlayer.spellCooldowns[spell_id] =  performance?.now() + spell.cooldown * 1000;
+        playerCache.set(currentPlayer.id, currentPlayer);
 
         break;
       }
@@ -3417,8 +3572,9 @@ export default async function packetReceiver(
         }
         break;
       }
-      // Unknown command
+      // Unknown packet type
       default: {
+        log.error(`Unknown packet type: ${type}`);
         break;
       }
     }
