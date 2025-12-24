@@ -132,8 +132,17 @@ socket.onmessage = async (event) => {
           // @ts-expect-error - pako is loaded in index.html
           const inflatedData = pako.inflate(new Uint8Array(icon.data), { to: "string" });
           const iconImage = new Image();
+
+          // Wait for image to load before caching
+          iconImage.onload = () => {
+            cache.projectileIcons.set(spell, iconImage);
+          };
+
+          iconImage.onerror = (error) => {
+            console.error(`Failed to load projectile icon for ${spell}:`, error);
+          };
+
           iconImage.src = `data:image/png;base64,${inflatedData}`;
-          cache.projectileIcons.set(spell, iconImage);
         } catch (error) {
           console.error(`Failed to decompress projectile icon for ${spell}:`, error);
         }
