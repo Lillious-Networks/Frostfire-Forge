@@ -166,7 +166,12 @@ class RedisCacheService implements CacheService {
     const data = await this.client.get(this.prefixed(key));
     if (!data) return null;
     try {
-      return JSON.parse(data);
+      const parsed = JSON.parse(data);
+      // Reconstruct Buffer if it was serialized
+      if (parsed && typeof parsed === 'object' && parsed.type === 'Buffer' && Array.isArray(parsed.data)) {
+        return Buffer.from(parsed.data);
+      }
+      return parsed;
     } catch {
       return data;
     }
@@ -203,8 +208,17 @@ class RedisCacheService implements CacheService {
     const values = (await this.safeSend<(string | null)[]>("MGET", stringKeys)) ?? [];
     for (let i = 0; i < stringKeys.length; i++) {
       const shortKey = stringKeys[i].slice(this.prefix.length);
-      out[shortKey] =
-        values[i] === null ? undefined : JSON.parse(values[i] as string);
+      if (values[i] === null) {
+        out[shortKey] = undefined;
+      } else {
+        const parsed = JSON.parse(values[i] as string);
+        // Reconstruct Buffer if it was serialized
+        if (parsed && typeof parsed === 'object' && parsed.type === 'Buffer' && Array.isArray(parsed.data)) {
+          out[shortKey] = Buffer.from(parsed.data);
+        } else {
+          out[shortKey] = parsed;
+        }
+      }
     }
     return out;
   }
@@ -218,7 +232,13 @@ class RedisCacheService implements CacheService {
   async getNested(key: string, nestedKey: string): Promise<RedisValue> {
     await this.ensureHashKey(key);
     const raw = await this.safeSend<string | null>("HGET", [this.prefixed(key), nestedKey]);
-    return raw === null ? undefined : JSON.parse(raw);
+    if (raw === null) return undefined;
+    const parsed = JSON.parse(raw);
+    // Reconstruct Buffer if it was serialized
+    if (parsed && typeof parsed === 'object' && parsed.type === 'Buffer' && Array.isArray(parsed.data)) {
+      return Buffer.from(parsed.data);
+    }
+    return parsed;
   }
 
   async removeNested(key: string, nestedKey: string): Promise<void> {
