@@ -1248,6 +1248,15 @@ export default async function packetReceiver(
         }
 
         // Set another timeout to simulate spell travel time on the server
+        // If target is self, no travel time
+        if (target.id !== currentPlayer.id) {
+          playersInMap.forEach((player) => {
+            sendPacket(
+              player.ws,
+              packetManager.projectile({ id: currentPlayer.id, time: delay / 1000, target_id: target.id, spell: spell.name, icon: spell.icon })
+            );
+          });
+        }
         await new Promise((resolve) => setTimeout(resolve, delay));
 
         const playerLevel = currentPlayer.stats.level || 1;
@@ -1276,7 +1285,6 @@ export default async function packetReceiver(
             finalDamage = Math.floor(baseDamage * (1 + critDamage / 100));
           }
         }
-
 
         target.stats.health = Math.round(target.stats.health - finalDamage);
         currentPlayer.stats.stamina -= spell_mana;

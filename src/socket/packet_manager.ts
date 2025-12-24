@@ -374,5 +374,12 @@ export const packetManager = {
     return [
       packet.encode(JSON.stringify({ type: "CAST_SPELL", data })),
     ] as any[];
+  },
+  projectile: (data: any) => {
+    // Don't send projectile packet if no icon is set because it won't render
+    if (!data?.icon) return [];
+    return [
+      packet.encode(JSON.stringify({ type: "PROJECTILE", data })),
+    ] as any[];
   }
 };

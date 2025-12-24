@@ -520,6 +520,75 @@ function animationLoop() {
       }
     }
 
+    // Render projectiles
+    const now = performance.now();
+    for (let i = cache.projectiles.length - 1; i >= 0; i--) {
+      const projectile = cache.projectiles[i];
+      const elapsed = now - projectile.startTime;
+      const progress = Math.min(elapsed / projectile.duration, 1);
+
+      // Find target player to get current position
+      const targetPlayer = playersArray.find(p => p.id === projectile.targetPlayerId);
+
+      if (!targetPlayer) {
+        // Target player no longer exists, remove projectile
+        cache.projectiles.splice(i, 1);
+        continue;
+      }
+
+      // Update current position toward target's CURRENT position (follows moving target)
+      const endX = targetPlayer.position.x;
+      const endY = targetPlayer.position.y;
+      projectile.currentX = projectile.startX + (endX - projectile.startX) * progress;
+      projectile.currentY = projectile.startY + (endY - projectile.startY) * progress;
+
+      // Check if in view
+      if (isInView(projectile.currentX, projectile.currentY)) {
+        ctx.save();
+
+        // Try to get cached icon for this spell
+        const icon = cache.projectileIcons.get(projectile.spell);
+
+        if (icon && icon.complete) {
+          // Calculate rotation angle based on direction of travel
+          const dx = endX - projectile.currentX;
+          const dy = endY - projectile.currentY;
+          const angle = Math.atan2(dy, dx) + Math.PI / 2; // +90 degrees to face up by default
+
+          // Draw the icon centered at projectile position with rotation
+          const iconSize = 24;
+          ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+          ctx.shadowBlur = 8;
+
+          // Translate to projectile position, rotate, then draw centered
+          ctx.translate(projectile.currentX, projectile.currentY);
+          ctx.rotate(angle);
+          ctx.drawImage(
+            icon,
+            -iconSize / 2,
+            -iconSize / 2,
+            iconSize,
+            iconSize
+          );
+        } else {
+          // Fallback: Draw white circle placeholder if icon not loaded
+          ctx.fillStyle = 'white';
+          ctx.shadowColor = 'rgba(255, 255, 255, 0.8)';
+          ctx.shadowBlur = 10;
+          ctx.beginPath();
+          ctx.arc(projectile.currentX, projectile.currentY, 5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.restore();
+      }
+
+      // Remove projectile if finished
+      if (progress >= 1) {
+        cache.projectiles.splice(i, 1);
+      }
+    }
+
     for (const p of visiblePlayers) p.showChat(ctx, currentPlayer);
   }
 

@@ -248,11 +248,21 @@ const createSpellsTable = async () => {
         type TEXT NOT NULL,
         cast_time INTEGER NOT NULL,
         cooldown INTEGER NOT NULL,
-        description TEXT DEFAULT NULL
+        description TEXT DEFAULT NULL,
+        icon TEXT DEFAULT NULL
     );
   `;
   await query(sql);
 }
+
+const insertDefaultSpell = async () => {
+  log.info("Inserting default spell...");
+  const sql = `
+    INSERT OR IGNORE INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon) VALUES
+    ('frost_bolt', 10, 10, 1000, 'spell', 2, 1, 'A frosty projectile that deals damage to a single target.', 'frost_bolt');
+  `;
+  await query(sql);
+};
 
 const createPermissionsTable = async () => {
   log.info("Creating permissions table...");
@@ -555,6 +565,7 @@ try {
   await insertDemoClientConfig();
   await insertDemoQuestLog();
   await insertDemoMount();
+  await insertDefaultSpell();
   log.success("Database setup complete!");
   process.exit(0);
 } catch (error) {

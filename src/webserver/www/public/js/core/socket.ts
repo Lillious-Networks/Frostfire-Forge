@@ -111,6 +111,48 @@ socket.onmessage = async (event) => {
       castSpell(data.id, data.spell, data.time);
       break;
     }
+    case "PROJECTILE": {
+      const player_id = data?.id;
+      const target_player_id = data?.target_id;
+      const time_to_travel = data?.time;
+      const spell = data?.spell;
+      const icon = data?.icon;
+
+      if (!player_id || !target_player_id || !time_to_travel) break;
+
+      // Find source and target players
+      const sourcePlayer = Array.from(cache.players).find(p => p.id === player_id);
+      const targetPlayer = Array.from(cache.players).find(p => p.id === target_player_id);
+
+      if (!sourcePlayer || !targetPlayer) break;
+
+      // Decompress and cache icon if provided and not already cached
+      if (icon && spell && !cache.projectileIcons.has(spell)) {
+        try {
+          // @ts-expect-error - pako is loaded in index.html
+          const inflatedData = pako.inflate(new Uint8Array(icon.data), { to: "string" });
+          const iconImage = new Image();
+          iconImage.src = `data:image/png;base64,${inflatedData}`;
+          cache.projectileIcons.set(spell, iconImage);
+        } catch (error) {
+          console.error(`Failed to decompress projectile icon for ${spell}:`, error);
+        }
+      }
+
+      // Create projectile that follows the target player
+      cache.projectiles.push({
+        startX: sourcePlayer.position.x,
+        startY: sourcePlayer.position.y,
+        targetPlayerId: target_player_id,
+        currentX: sourcePlayer.position.x,
+        currentY: sourcePlayer.position.y,
+        startTime: performance.now(),
+        duration: time_to_travel * 1000, // Convert to milliseconds
+        spell: spell || 'unknown'
+      });
+
+      break;
+    }
     case "WEATHER": {
       if (!data || !data.weather) return;
       setWeatherType(data.weather);

@@ -206,6 +206,7 @@ declare interface SpellData {
   cast_time: number;
   description: string;
   cooldown: number;
+  icon: Nullable<string>;
 }
 
 type NPCScript = {

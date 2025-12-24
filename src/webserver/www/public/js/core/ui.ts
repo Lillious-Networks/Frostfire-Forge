@@ -58,8 +58,6 @@ const hotbar = document.getElementById("hotbar") as HTMLDivElement;
 const hotbarGrid = hotbar.querySelector("#grid") as HTMLDivElement;
 const hotbarSlots = hotbarGrid.querySelectorAll(".slot") as NodeListOf<HTMLDivElement>;
 const castbar = document.getElementById("castbar") as HTMLDivElement;
-const castbarProgress = document.getElementById("castbar-progress") as HTMLDivElement;
-const castbarText = document.getElementById("castbar-text") as HTMLDivElement;
 
 // Track active castbar clone
 let activeCastbarClone: HTMLDivElement | null = null;
