@@ -154,7 +154,7 @@ await Promise.all(filteredMounts.map(async (mount: any) => {
 await assetCache.add("mounts", filteredMounts);
 const mountList = await assetCache.get("mounts") as Mount[];
 log.success(`Loaded ${mountList.length} mount(s) from the database in ${(performance.now() - mountNow).toFixed(2)}ms`);
-console.log(`Mounts loaded: ${mountList.map((m) => m.name).join(", ")}`);
+log.info(`Mounts loaded: ${mountList.map((m) => m.name).join(", ")}`);
 
 // Load spell data
 const spellnow = performance.now();
@@ -172,6 +172,7 @@ await Promise.all(spellList.map(async (spell: any) => {
 const spells = await assetCache.get("spells") as SpellData[];
 
 log.success(`Loaded ${spells.length} spell(s) from the database in ${(performance.now() - spellnow).toFixed(2)}ms`);
+log.info(`Spells loaded: ${spells.map((s) => s.name).join(", ")}`);
 
 // Load weapon data
 const weaponnow = performance.now();
