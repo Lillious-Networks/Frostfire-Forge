@@ -1250,10 +1250,17 @@ export default async function packetReceiver(
         // Set another timeout to simulate spell travel time on the server
         // If target is self, no travel time
         if (target.id !== currentPlayer.id) {
+          // Ensure icon is a Buffer before sending, otherwise don't send projectile
+          const iconData = spell.icon && Buffer.isBuffer(spell.icon) ? spell.icon : null;
+
+          if (!iconData) {
+            log.warn(`Spell ${spell.name} has no icon data or icon is not a Buffer. Icon type:`, typeof spell.icon);
+          }
+
           playersInMap.forEach((player) => {
             sendPacket(
               player.ws,
-              packetManager.projectile({ id: currentPlayer.id, time: delay / 1000, target_id: target.id, spell: spell.name, icon: spell.icon })
+              packetManager.projectile({ id: currentPlayer.id, time: delay / 1000, target_id: target.id, spell: spell.name, icon: iconData })
             );
           });
         }
