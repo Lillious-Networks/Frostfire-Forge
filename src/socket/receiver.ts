@@ -428,6 +428,15 @@ authWorker.on("message", async (result: any) => {
     }
 
     sendPacket(ws, packetManager.inventory(playerData.inventory));
+
+    // Debug collectable icons
+    if (playerData.collectables && playerData.collectables.length > 0) {
+      const firstCollectable = playerData.collectables[0];
+      if (firstCollectable.icon) {
+        log.debug(`[COLLECTABLES] First collectable icon type: ${typeof firstCollectable.icon}, has .data: ${!!firstCollectable.icon?.data}, isBuffer: ${Buffer.isBuffer(firstCollectable.icon)}`);
+      }
+    }
+
     sendPacket(ws, packetManager.collectables(playerData.collectables || []));
     sendPacket(ws, packetManager.questlog(completedQuest, incompleteQuest));
     sendPacket(ws, packetManager.clientConfig(playerData.config || []));
