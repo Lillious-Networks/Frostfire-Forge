@@ -30,9 +30,9 @@ function reconstructBuffers(obj: any, depth: number = 0): any {
 }
 
 // Assets are passed once via workerData when worker is created
-// Reconstruct Buffers that were serialized via JSON.stringify
+// Only reconstruct items - mounts were already working without reconstruction
 const items = workerData?.assets?.items ? reconstructBuffers(JSON.parse(workerData.assets.items)) : [];
-const mounts = workerData?.assets?.mounts ? reconstructBuffers(JSON.parse(workerData.assets.mounts)) : [];
+const mounts = workerData?.assets?.mounts ? JSON.parse(workerData.assets.mounts) : [];
 
 const authentication = {
     async process(token: string, id: string): Promise<Authentication> {
