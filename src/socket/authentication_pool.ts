@@ -7,6 +7,13 @@ const prepareAssets = async () => {
     const maps = await assetCache.get("maps");
     const mounts = await assetCache.get("mounts");
 
+    // Debug what we got from cache
+    console.log(`[AUTH POOL] From cache - mounts: ${mounts?.length || 0}`);
+    if (mounts && mounts.length > 0) {
+        const firstMount = mounts[0];
+        console.log(`[AUTH POOL] First mount from cache: name=${firstMount.name}, has icon=${!!firstMount.icon}, icon type=${typeof firstMount.icon}, isBuffer=${Buffer.isBuffer(firstMount.icon)}`);
+    }
+
     // When JSON.stringify encounters a Buffer, it converts it to {type: 'Buffer', data: [...]}
     // This is exactly what we want for the worker and client
     const serialized = {
@@ -14,14 +21,6 @@ const prepareAssets = async () => {
         maps: maps ? JSON.stringify(maps) : null,
         mounts: mounts ? JSON.stringify(mounts) : null,
     };
-
-    // Verify serialization worked correctly
-    if (mounts && mounts.length > 0) {
-        const parsed = JSON.parse(serialized.mounts || '[]');
-        if (parsed[0]?.icon) {
-            console.log(`[AUTH POOL] Mount icon after stringify/parse: has .data=${!!parsed[0].icon.data}, type=${parsed[0].icon.type}`);
-        }
-    }
 
     return serialized;
 };
