@@ -117,15 +117,15 @@ if (!world.find((w) => w.name === worldName)) {
 
 // Load item data
 const itemnow = performance.now();
-await assetCache.add("items", await item.list());
+const itemList = await item.list();
 // For each item, find the icon data and add the compressed data to the item object
-const itemList = await assetCache.get("items");
 await Promise.all(itemList.map(async (item: any) => {
   if (item.icon) {
     const iconData = await assetCache.get(item.icon);
     item.icon = iconData || null; // Replace the icon with the compressed data if it exists
   }
 }));
+await assetCache.add("items", itemList);
 const items = await assetCache.get("items") as Item[];
 
 log.success(`Loaded ${items.length} item(s) from the database in ${(performance.now() - itemnow).toFixed(2)}ms`);
@@ -158,17 +158,14 @@ log.info(`Mounts loaded: ${mountList.map((m) => m.name).join(", ")}`);
 
 // Load spell data
 const spellnow = performance.now();
-await assetCache.add("spells", await spell.list());
-const spellList = await assetCache.get("spells") as SpellData[];
+const spellList = await spell.list();
 await Promise.all(spellList.map(async (spell: any) => {
   if (spell.icon) {
     const iconData = await assetCache.get(spell.icon);
-    if (!iconData) {
-      log.warn(`Failed to load icon data for spell: ${spell.name}, icon name: ${spell.icon}`);
-    }
     spell.icon = iconData || null; // Replace the icon with the compressed data if it exists
   }
 }));
+await assetCache.add("spells", spellList);
 const spells = await assetCache.get("spells") as SpellData[];
 
 log.success(`Loaded ${spells.length} spell(s) from the database in ${(performance.now() - spellnow).toFixed(2)}ms`);
