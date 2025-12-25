@@ -12,7 +12,13 @@ const prepareAssets = async () => {
     console.log(`  - Maps: ${maps?.length || 0}`);
     console.log(`  - Mounts: ${mounts?.length || 0}`);
     if (mounts && mounts.length > 0) {
-        console.log(`  - First mount icon type: ${typeof mounts[0]?.icon}, has .data: ${!!mounts[0]?.icon?.data}, isBuffer: ${Buffer.isBuffer(mounts[0]?.icon)}`);
+        const icon = mounts[0]?.icon;
+        console.log(`  - First mount icon type: ${typeof icon}, has .data: ${!!icon?.data}, isBuffer: ${Buffer.isBuffer(icon)}`);
+        if (icon && typeof icon === 'object') {
+            console.log(`  - Icon keys: ${Object.keys(icon).slice(0, 10).join(', ')}`);
+            console.log(`  - Icon constructor: ${icon.constructor?.name}`);
+            console.log(`  - Icon sample: ${JSON.stringify(icon).slice(0, 200)}`);
+        }
     }
 
     return {
