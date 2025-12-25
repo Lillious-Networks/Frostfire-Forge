@@ -7,25 +7,23 @@ const prepareAssets = async () => {
     const maps = await assetCache.get("maps");
     const mounts = await assetCache.get("mounts");
 
-    console.log(`[AUTH POOL] Preparing assets for worker:`);
-    console.log(`  - Items: ${items?.length || 0}`);
-    console.log(`  - Maps: ${maps?.length || 0}`);
-    console.log(`  - Mounts: ${mounts?.length || 0}`);
-    if (mounts && mounts.length > 0) {
-        const icon = mounts[0]?.icon;
-        console.log(`  - First mount icon type: ${typeof icon}, has .data: ${!!icon?.data}, isBuffer: ${Buffer.isBuffer(icon)}`);
-        if (icon && typeof icon === 'object') {
-            console.log(`  - Icon keys: ${Object.keys(icon).slice(0, 10).join(', ')}`);
-            console.log(`  - Icon constructor: ${icon.constructor?.name}`);
-            console.log(`  - Icon sample: ${JSON.stringify(icon).slice(0, 200)}`);
-        }
-    }
-
-    return {
+    // When JSON.stringify encounters a Buffer, it converts it to {type: 'Buffer', data: [...]}
+    // This is exactly what we want for the worker and client
+    const serialized = {
         items: items ? JSON.stringify(items) : null,
         maps: maps ? JSON.stringify(maps) : null,
         mounts: mounts ? JSON.stringify(mounts) : null,
     };
+
+    // Verify serialization worked correctly
+    if (mounts && mounts.length > 0) {
+        const parsed = JSON.parse(serialized.mounts || '[]');
+        if (parsed[0]?.icon) {
+            console.log(`[AUTH POOL] Mount icon after stringify/parse: has .data=${!!parsed[0].icon.data}, type=${parsed[0].icon.type}`);
+        }
+    }
+
+    return serialized;
 };
 
 // DO NOT cache assets at module scope - fetch fresh each time worker is created
