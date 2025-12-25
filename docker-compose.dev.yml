@@ -25,9 +25,12 @@ services:
     environment:
       - REDIS_PASSWORD=development
     volumes:
-      - redis-data:/data
+      - redis-data-dev:/data
     networks:
       - frostfire-network-dev
+
+volumes:
+  redis-data-dev:
 
 networks:
   frostfire-network-dev:
