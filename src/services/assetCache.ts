@@ -129,24 +129,27 @@ class RedisCacheService implements CacheService {
   }
 
   /** Recursively reconstruct all Buffer objects in parsed JSON */
-  private reconstructBuffers(obj: any): any {
+  private reconstructBuffers(obj: any, depth: number = 0): any {
     if (!obj || typeof obj !== 'object') return obj;
 
     // Check if this object is a serialized Buffer
     if (obj.type === 'Buffer' && Array.isArray(obj.data)) {
-      return Buffer.from(obj.data);
+      const buffer = Buffer.from(obj.data);
+      console.log(`[Redis] Reconstructed Buffer at depth ${depth}, size: ${buffer.length} bytes`);
+      return buffer;
     }
 
     // Recursively process arrays
     if (Array.isArray(obj)) {
-      return obj.map(item => this.reconstructBuffers(item));
+      console.log(`[Redis] Processing array at depth ${depth}, length: ${obj.length}`);
+      return obj.map(item => this.reconstructBuffers(item, depth + 1));
     }
 
     // Recursively process object properties
     const result: any = {};
     for (const key in obj) {
       if (Object.prototype.hasOwnProperty.call(obj, key)) {
-        result[key] = this.reconstructBuffers(obj[key]);
+        result[key] = this.reconstructBuffers(obj[key], depth + 1);
       }
     }
     return result;
