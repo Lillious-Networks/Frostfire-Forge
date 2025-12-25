@@ -10,6 +10,12 @@ import collectables from "../systems/collectables.ts";
 const items = workerData?.assets?.items ? JSON.parse(workerData.assets.items) : [];
 const mounts = workerData?.assets?.mounts ? JSON.parse(workerData.assets.mounts) : [];
 
+// Debug what was loaded into worker
+log.debug(`[WORKER INIT] Loaded ${items.length} items, ${mounts.length} mounts`);
+if (mounts.length > 0) {
+    log.debug(`[WORKER INIT] First mount: name=${mounts[0]?.name}, has icon=${!!mounts[0]?.icon}`);
+}
+
 const authentication = {
     async process(token: string, id: string): Promise<Authentication> {
         try {
@@ -39,7 +45,9 @@ const authentication = {
             // Add icon property to each collectable from mounts cache
             collectablesData.forEach((c) => {
                 if (c.type === "mount") {
+                    log.debug(`[WORKER] Looking for mount: ${c.item}, available mounts: ${mounts.map((m: any) => m.name).join(', ')}`);
                     const mountDetails = (mounts as any).find((m: Mount) => m.name === c.item);
+                    log.debug(`[WORKER] Found mount details: ${!!mountDetails}, has icon: ${!!mountDetails?.icon}`);
                     c.icon = mountDetails ? mountDetails.icon : null;
                 }
             });
