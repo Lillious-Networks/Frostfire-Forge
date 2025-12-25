@@ -83,6 +83,10 @@ export const keyHandlers = {
       toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -450);
     }
 
+    if (toggleGuild) {
+      toggleGuild = toggleUI(guildContainer, toggleGuild, -450);
+    }
+
     toggleCollectables = toggleUI(collectablesUI, toggleCollectables, -450);
   },
   KeyG: () => {

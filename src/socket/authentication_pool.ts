@@ -1,5 +1,6 @@
 import { Worker } from "worker_threads";
 import assetCache from "../services/assetCache";
+import log from "../modules/logger";
 
 // Prepare serializable asset data for worker threads
 const prepareAssets = async () => {
@@ -32,7 +33,7 @@ async function createPersistentWorker(): Promise<Worker> {
     });
 
     worker.on("error", (error) => {
-        console.error("[AUTH POOL] Worker error:", error);
+        log.error(`[AUTH POOL] Worker error: ${error.message}`);
         // Recreate worker on error
         persistentWorker = null;
         serializedAssets = null;
@@ -40,7 +41,7 @@ async function createPersistentWorker(): Promise<Worker> {
 
     worker.on("exit", (code) => {
         if (code !== 0) {
-            console.error(`[AUTH POOL] Worker exited with code ${code}`);
+            log.error(`[AUTH POOL] Worker exited with code ${code}`);
         }
         persistentWorker = null;
         serializedAssets = null;

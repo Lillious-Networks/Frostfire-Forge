@@ -628,7 +628,6 @@ socket.onmessage = async (event) => {
         if (data.length > 0) {
           // Assign each collectable to a slot
           for (let i = 0; i < data.length; i++) {
-            console.log(`Creating collectable slot for:`, data[i]);
             // Create a new slot
             const slot = document.createElement("div");
             slot.classList.add("slot");

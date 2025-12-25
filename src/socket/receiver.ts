@@ -2729,7 +2729,7 @@ export default async function packetReceiver(
                 sendPacket(player.ws, packetManager.loadMap(mapData));
               });
             } else {
-              console.error(`Failed to reload map ${mapName}`);
+              log.error(`Failed to reload map ${mapName}`);
               const notifyData = {
                 message: `Failed to reload map ${mapName}`,
               };
