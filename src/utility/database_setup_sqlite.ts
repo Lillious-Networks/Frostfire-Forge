@@ -184,6 +184,16 @@ const createItemsTable = async () => {
   await query(sql);
 };
 
+// Insert default item
+const insertDefaultItem = async () => {
+  log.info("Inserting default item...");
+  const sql = `
+    INSERT OR IGNORE INTO items (name, quality, description, icon) VALUES
+    ('Red Apple', 'common', 'A fresh red apple that restores a small amount of health when consumed.', 'red_apple');
+  `;
+  await query(sql);
+};
+
 // Insert red apple
 const insertDefaultInventoryItem = async () => {
   log.info("Inserting default inventory item...");
@@ -539,6 +549,7 @@ const setupDatabase = async () => {
   await insertLocalhost();
   await createInventoryTable();
   await createItemsTable();
+  await insertDefaultItem();
   await createStatsTable();
   await createClientConfig();
   await createWeaponsTable();

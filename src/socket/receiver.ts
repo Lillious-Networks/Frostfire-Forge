@@ -59,7 +59,7 @@ const npcs = await assetCache.get("npcs");
 const particles = await assetCache.get("particles");
 
 // Set up worker message listener ONCE at module level
-const authWorker = getAuthWorker();
+const authWorker = await getAuthWorker();
 authWorker.on("message", async (result: any) => {
   const status = result as Authentication;
   const sessionId = result.id;
