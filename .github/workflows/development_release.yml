@@ -9,6 +9,7 @@ on:
       - 'src/**'
       - 'docker-compose.dev.yml'
       - 'Dockerfile.dev'
+      - '.github/workflows/development_release.yml'
     branches:
       - development
 
@@ -49,7 +50,9 @@ jobs:
           echo 'WEB_SOCKET_PORT=3001' >> .env.development
           echo 'DOMAIN="http://forge.lillious.com:8080"' >> .env.development
           echo 'GAME_NAME="Frostfire Forge Beta"' >> .env.development
-          echo 'CACHE="memory"' >> .env.development
+          echo 'CACHE="redis"' >> .env.development
+          echo 'REDIS_URL="redis://default:development@redis-dev:6380"' >> .env.development
+          echo 'REDIS_PASSWORD="development"' >> .env.development
           echo 'VERSION="${{ github.run_number }}-development"' >> .env.development
 
       - name: Build Docker Image

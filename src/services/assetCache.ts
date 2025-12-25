@@ -128,6 +128,30 @@ class RedisCacheService implements CacheService {
     return `${this.prefix}${key}`;
   }
 
+  /** Recursively reconstruct all Buffer objects in parsed JSON */
+  private reconstructBuffers(obj: any): any {
+    if (!obj || typeof obj !== 'object') return obj;
+
+    // Check if this object is a serialized Buffer
+    if (obj.type === 'Buffer' && Array.isArray(obj.data)) {
+      return Buffer.from(obj.data);
+    }
+
+    // Recursively process arrays
+    if (Array.isArray(obj)) {
+      return obj.map(item => this.reconstructBuffers(item));
+    }
+
+    // Recursively process object properties
+    const result: any = {};
+    for (const key in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        result[key] = this.reconstructBuffers(obj[key]);
+      }
+    }
+    return result;
+  }
+
   /** Helper to send commands with debug info */
   private async safeSend<T = any>(cmd: string, args: string[]): Promise<T> {
     const key = args[0];
@@ -167,11 +191,8 @@ class RedisCacheService implements CacheService {
     if (!data) return null;
     try {
       const parsed = JSON.parse(data);
-      // Reconstruct Buffer if it was serialized
-      if (parsed && typeof parsed === 'object' && parsed.type === 'Buffer' && Array.isArray(parsed.data)) {
-        return Buffer.from(parsed.data);
-      }
-      return parsed;
+      // Recursively reconstruct all Buffers
+      return this.reconstructBuffers(parsed);
     } catch {
       return data;
     }
@@ -212,12 +233,8 @@ class RedisCacheService implements CacheService {
         out[shortKey] = undefined;
       } else {
         const parsed = JSON.parse(values[i] as string);
-        // Reconstruct Buffer if it was serialized
-        if (parsed && typeof parsed === 'object' && parsed.type === 'Buffer' && Array.isArray(parsed.data)) {
-          out[shortKey] = Buffer.from(parsed.data);
-        } else {
-          out[shortKey] = parsed;
-        }
+        // Recursively reconstruct all Buffers
+        out[shortKey] = this.reconstructBuffers(parsed);
       }
     }
     return out;
@@ -234,11 +251,8 @@ class RedisCacheService implements CacheService {
     const raw = await this.safeSend<string | null>("HGET", [this.prefixed(key), nestedKey]);
     if (raw === null) return undefined;
     const parsed = JSON.parse(raw);
-    // Reconstruct Buffer if it was serialized
-    if (parsed && typeof parsed === 'object' && parsed.type === 'Buffer' && Array.isArray(parsed.data)) {
-      return Buffer.from(parsed.data);
-    }
-    return parsed;
+    // Recursively reconstruct all Buffers
+    return this.reconstructBuffers(parsed);
   }
 
   async removeNested(key: string, nestedKey: string): Promise<void> {
