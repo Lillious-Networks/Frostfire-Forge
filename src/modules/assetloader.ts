@@ -145,10 +145,10 @@ const filteredMounts = unfilteredMounts.filter((m) => {{
 }});
 
 await Promise.all(filteredMounts.map(async (mount: any) => {
-  // If no icon field is set, default to mount name as icon identifier
-  const iconName = mount.icon || mount.name;
-  const iconData = await assetCache.get(iconName);
-  mount.icon = iconData || null; // Replace the icon with the compressed data if it exists
+  if (mount.icon) {
+    const iconData = await assetCache.get(mount.icon);
+    mount.icon = iconData || null; // Replace the icon with the compressed data if it exists
+  }
 }));
 
 await assetCache.add("mounts", filteredMounts);
