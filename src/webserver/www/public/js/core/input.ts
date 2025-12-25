@@ -32,9 +32,10 @@ export const keyHandlers = {
   KeyB: () => {
     toggleInventory = toggleUI(inventoryUI, toggleInventory, -350);
   },
+  // Spellbook key
   KeyP: () => {
     if (toggleFriendsList) {
-      toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -425);
+      toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -450);
     }
 
     if (toggleGuild) {
@@ -42,14 +43,14 @@ export const keyHandlers = {
     }
 
     if (toggleCollectables) {
-      toggleCollectables = toggleUI(collectablesUI, toggleCollectables, -400);
+      toggleCollectables = toggleUI(collectablesUI, toggleCollectables, -450);
     }
 
-    toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -425);
+    toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -450);
   },
   KeyO: () => {
     if (toggleSpellBook) {
-      toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -425);
+      toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -450);
     }
 
     if (toggleGuild) {
@@ -60,7 +61,7 @@ export const keyHandlers = {
       toggleCollectables = toggleUI(collectablesUI, toggleCollectables, -400);
     }
 
-    toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -425);
+    toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -450);
   },
   KeyC: () => handleStatsUI(),
   KeyX: () => {
@@ -75,26 +76,26 @@ export const keyHandlers = {
   },
   KeyK: () => {
     if (toggleFriendsList) {
-      toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -425);
+      toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -450);
     }
 
     if (toggleSpellBook) {
-      toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -425);
+      toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -450);
     }
 
-    toggleCollectables = toggleUI(collectablesUI, toggleCollectables, -400);
+    toggleCollectables = toggleUI(collectablesUI, toggleCollectables, -450);
   },
   KeyG: () => {
     if (toggleFriendsList) {
-      toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -425);
+      toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -450);
     }
 
     if (toggleSpellBook) {
-      toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -425);
+      toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -450);
     }
 
     if (toggleCollectables) {
-      toggleCollectables = toggleUI(collectablesUI, toggleCollectables, -400);
+      toggleCollectables = toggleUI(collectablesUI, toggleCollectables, -450);
     }
 
     toggleGuild = toggleUI(guildContainer, toggleGuild, -450);

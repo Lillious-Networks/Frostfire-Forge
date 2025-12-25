@@ -496,7 +496,7 @@ const createMountsTable = async () => {
 const insertDefaultMount = async () => {
   log.info("Inserting default mount...");
   const sql = `
-    INSERT OR IGNORE INTO mounts (name, description, particles) VALUES ('horse', 'A sturdy horse for traveling.', NULL);
+    INSERT OR IGNORE INTO mounts (name, description, particles) VALUES ('horse', 'A sturdy horse for traveling.', 'mount_horse');
   `;
   await query(sql);
 }
