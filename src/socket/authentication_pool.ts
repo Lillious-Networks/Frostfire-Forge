@@ -7,22 +7,11 @@ const prepareAssets = async () => {
     const maps = await assetCache.get("maps");
     const mounts = await assetCache.get("mounts");
 
-    // Debug what we got from cache
-    console.log(`[AUTH POOL] From cache - mounts: ${mounts?.length || 0}`);
-    if (mounts && mounts.length > 0) {
-        const firstMount = mounts[0];
-        console.log(`[AUTH POOL] First mount from cache: name=${firstMount.name}, has icon=${!!firstMount.icon}, icon type=${typeof firstMount.icon}, isBuffer=${Buffer.isBuffer(firstMount.icon)}`);
-    }
-
-    // When JSON.stringify encounters a Buffer, it converts it to {type: 'Buffer', data: [...]}
-    // This is exactly what we want for the worker and client
-    const serialized = {
+    return {
         items: items ? JSON.stringify(items) : null,
         maps: maps ? JSON.stringify(maps) : null,
         mounts: mounts ? JSON.stringify(mounts) : null,
     };
-
-    return serialized;
 };
 
 // DO NOT cache assets at module scope - fetch fresh each time worker is created

@@ -419,26 +419,7 @@ authWorker.on("message", async (result: any) => {
       }
     });
 
-    // Debug inventory icons
-    if (playerData.inventory && playerData.inventory.length > 0) {
-      const firstItem = playerData.inventory[0];
-      if (firstItem.icon) {
-        log.debug(`[INVENTORY] First item icon type: ${typeof firstItem.icon}, has .data: ${!!firstItem.icon?.data}, isBuffer: ${Buffer.isBuffer(firstItem.icon)}`);
-      }
-    }
-
     sendPacket(ws, packetManager.inventory(playerData.inventory));
-
-    // Debug collectable icons
-    log.debug(`[COLLECTABLES] Total collectables: ${playerData.collectables?.length || 0}`);
-    if (playerData.collectables && playerData.collectables.length > 0) {
-      const firstCollectable = playerData.collectables[0];
-      log.debug(`[COLLECTABLES] First collectable: type=${firstCollectable.type}, item=${firstCollectable.item}, has icon=${!!firstCollectable.icon}`);
-      if (firstCollectable.icon) {
-        log.debug(`[COLLECTABLES] First collectable icon type: ${typeof firstCollectable.icon}, has .data: ${!!firstCollectable.icon?.data}, isBuffer: ${Buffer.isBuffer(firstCollectable.icon)}`);
-      }
-    }
-
     sendPacket(ws, packetManager.collectables(playerData.collectables || []));
     sendPacket(ws, packetManager.questlog(completedQuest, incompleteQuest));
     sendPacket(ws, packetManager.clientConfig(playerData.config || []));
