@@ -5,9 +5,34 @@ import log from "../modules/logger.ts";
 import parties from "../systems/parties.ts";
 import collectables from "../systems/collectables.ts";
 
+/** Recursively reconstruct all Buffer objects in parsed JSON */
+function reconstructBuffers(obj: any, depth: number = 0): any {
+  if (!obj || typeof obj !== 'object') return obj;
+
+  // Check if this object is a serialized Buffer
+  if (obj.type === 'Buffer' && Array.isArray(obj.data)) {
+    return Buffer.from(obj.data);
+  }
+
+  // Recursively process arrays
+  if (Array.isArray(obj)) {
+    return obj.map(item => reconstructBuffers(item, depth + 1));
+  }
+
+  // Recursively process object properties
+  const result: any = {};
+  for (const key in obj) {
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      result[key] = reconstructBuffers(obj[key], depth + 1);
+    }
+  }
+  return result;
+}
+
 // Assets are passed once via workerData when worker is created
-const items = workerData?.assets?.items ? JSON.parse(workerData.assets.items) : [];
-const mounts = workerData?.assets?.mounts ? JSON.parse(workerData.assets.mounts) : [];
+// Reconstruct Buffers that were serialized via JSON.stringify
+const items = workerData?.assets?.items ? reconstructBuffers(JSON.parse(workerData.assets.items)) : [];
+const mounts = workerData?.assets?.mounts ? reconstructBuffers(JSON.parse(workerData.assets.mounts)) : [];
 
 const authentication = {
     async process(token: string, id: string): Promise<Authentication> {

@@ -117,15 +117,15 @@ if (!world.find((w) => w.name === worldName)) {
 
 // Load item data
 const itemnow = performance.now();
-await assetCache.add("items", await item.list());
+const itemList = await item.list();
 // For each item, find the icon data and add the compressed data to the item object
-const itemList = await assetCache.get("items");
 await Promise.all(itemList.map(async (item: any) => {
   if (item.icon) {
     const iconData = await assetCache.get(item.icon);
     item.icon = iconData || null; // Replace the icon with the compressed data if it exists
   }
 }));
+await assetCache.add("items", itemList);
 const items = await assetCache.get("items") as Item[];
 
 log.success(`Loaded ${items.length} item(s) from the database in ${(performance.now() - itemnow).toFixed(2)}ms`);
@@ -162,20 +162,11 @@ const spellList = await spell.list();
 await Promise.all(spellList.map(async (spell: any) => {
   if (spell.icon) {
     const iconData = await assetCache.get(spell.icon);
-    if (!iconData) {
-      log.warn(`Failed to load icon data for spell: ${spell.name}, icon name: ${spell.icon}`);
-    } else {
-      log.debug(`Loaded icon for spell ${spell.name}: Buffer=${Buffer.isBuffer(iconData)}, size=${iconData?.length || 0}`);
-    }
     spell.icon = iconData || null; // Replace the icon with the compressed data if it exists
-    log.debug(`After replacement, spell.icon for ${spell.name}: Buffer=${Buffer.isBuffer(spell.icon)}, type=${typeof spell.icon}`);
   }
 }));
-log.debug(`Before adding to cache, first spell icon: Buffer=${Buffer.isBuffer(spellList[0]?.icon)}`);
 await assetCache.add("spells", spellList);
-log.debug(`After adding to cache, retrieving spells...`);
 const spells = await assetCache.get("spells") as SpellData[];
-log.debug(`After retrieval, first spell icon: Buffer=${Buffer.isBuffer(spells[0]?.icon)}, type=${typeof spells[0]?.icon}`);
 
 log.success(`Loaded ${spells.length} spell(s) from the database in ${(performance.now() - spellnow).toFixed(2)}ms`);
 log.info(`Spells loaded: ${spells.map((s) => s.name).join(", ")}`);

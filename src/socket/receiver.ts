@@ -1250,11 +1250,6 @@ export default async function packetReceiver(
         // Set another timeout to simulate spell travel time on the server
         // If target is self, no travel time
         if (target.id !== currentPlayer.id) {
-          log.debug(`Checking spell ${spell.name} icon before sending: isBuffer=${Buffer.isBuffer(spell.icon)}, type=${typeof spell.icon}`);
-          if (spell.icon && !Buffer.isBuffer(spell.icon)) {
-            log.warn(`Spell ${spell.name} icon is not a Buffer! Type: ${typeof spell.icon}, structure: ${JSON.stringify(spell.icon)}`);
-          }
-
           playersInMap.forEach((player) => {
             sendPacket(
               player.ws,
