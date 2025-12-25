@@ -156,8 +156,21 @@ await Promise.all(filteredMounts.map(async (mount: any) => {
   }
 }));
 
+// Debug mount icons before caching
+if (filteredMounts.length > 0 && filteredMounts[0].icon) {
+  const icon = filteredMounts[0].icon;
+  log.debug(`[ASSETLOADER] Mount ${filteredMounts[0].name} icon BEFORE cache: type=${typeof icon}, isBuffer=${Buffer.isBuffer(icon)}, has .data=${!!icon?.data}`);
+}
+
 await assetCache.add("mounts", filteredMounts);
 const mountList = await assetCache.get("mounts") as Mount[];
+
+// Debug mount icons after caching
+if (mountList.length > 0 && mountList[0].icon) {
+  const icon = mountList[0].icon;
+  log.debug(`[ASSETLOADER] Mount ${mountList[0].name} icon AFTER cache: type=${typeof icon}, isBuffer=${Buffer.isBuffer(icon)}, has .data=${!!icon?.data}`);
+}
+
 log.success(`Loaded ${mountList.length} mount(s) from the database in ${(performance.now() - mountNow).toFixed(2)}ms`);
 log.info(`Mounts loaded: ${mountList.map((m) => m.name).join(", ")}`);
 
