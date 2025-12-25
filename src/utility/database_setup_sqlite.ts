@@ -184,6 +184,25 @@ const createItemsTable = async () => {
   await query(sql);
 };
 
+// Insert default item
+const insertDefaultItem = async () => {
+  log.info("Inserting default item...");
+  const sql = `
+    INSERT OR IGNORE INTO items (name, quality, description, icon) VALUES
+    ('Red Apple', 'common', 'A fresh red apple that restores a small amount of health when consumed.', 'red_apple');
+  `;
+  await query(sql);
+};
+
+// Insert red apple
+const insertDefaultInventoryItem = async () => {
+  log.info("Inserting default inventory item...");
+  const sql = `
+    INSERT OR IGNORE INTO inventory (username, item, quantity) VALUES ('demo_user', 'Red Apple', 1);
+  `;
+  await query(sql);
+};
+
 const createStatsTable = async () => {
   log.info("Creating stats table...");
   const sql = `
@@ -496,7 +515,7 @@ const createMountsTable = async () => {
 const insertDefaultMount = async () => {
   log.info("Inserting default mount...");
   const sql = `
-    INSERT OR IGNORE INTO mounts (name, description, particles) VALUES ('horse', 'A sturdy horse for traveling.', 'mount_horse');
+    INSERT OR IGNORE INTO mounts (name, description, particles, icon) VALUES ('horse', 'A sturdy horse for traveling.', NULL, 'mount_horse');
   `;
   await query(sql);
 }
@@ -530,6 +549,7 @@ const setupDatabase = async () => {
   await insertLocalhost();
   await createInventoryTable();
   await createItemsTable();
+  await insertDefaultItem();
   await createStatsTable();
   await createClientConfig();
   await createWeaponsTable();
@@ -566,6 +586,7 @@ try {
   await insertDemoQuestLog();
   await insertDemoMount();
   await insertDefaultSpell();
+  await insertDefaultInventoryItem();
   log.success("Database setup complete!");
   process.exit(0);
 } catch (error) {

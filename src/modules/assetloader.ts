@@ -153,6 +153,7 @@ await Promise.all(filteredMounts.map(async (mount: any) => {
 
 await assetCache.add("mounts", filteredMounts);
 const mountList = await assetCache.get("mounts") as Mount[];
+
 log.success(`Loaded ${mountList.length} mount(s) from the database in ${(performance.now() - mountNow).toFixed(2)}ms`);
 log.info(`Mounts loaded: ${mountList.map((m) => m.name).join(", ")}`);
 

@@ -14,14 +14,19 @@ const prepareAssets = async () => {
     };
 };
 
-// Pre-load and serialize assets once
-const serializedAssets = await prepareAssets();
+// DO NOT cache assets at module scope - fetch fresh each time worker is created
+// This prevents stale data issues in development/hot-reload environments
+let serializedAssets: Awaited<ReturnType<typeof prepareAssets>> | null = null;
 
 // Single persistent worker that gets reused
 // This prevents creating multiple connection pools
 let persistentWorker: Worker | null = null;
 
-function createPersistentWorker(): Worker {
+async function createPersistentWorker(): Promise<Worker> {
+    // Fetch fresh assets from cache each time worker is created
+    // This ensures we always have the latest data, especially after hot reloads
+    serializedAssets = await prepareAssets();
+
     const worker = new Worker(new URL("authentication.ts", import.meta.url).href, {
         workerData: { assets: serializedAssets }
     });
@@ -30,6 +35,7 @@ function createPersistentWorker(): Worker {
         console.error("[AUTH POOL] Worker error:", error);
         // Recreate worker on error
         persistentWorker = null;
+        serializedAssets = null;
     });
 
     worker.on("exit", (code) => {
@@ -37,14 +43,24 @@ function createPersistentWorker(): Worker {
             console.error(`[AUTH POOL] Worker exited with code ${code}`);
         }
         persistentWorker = null;
+        serializedAssets = null;
     });
 
     return worker;
 }
 
-export function getAuthWorker(): Worker {
+export async function getAuthWorker(): Promise<Worker> {
     if (!persistentWorker) {
-        persistentWorker = createPersistentWorker();
+        persistentWorker = await createPersistentWorker();
     }
     return persistentWorker;
+}
+
+// Force recreation of worker (useful for hot reloads in development)
+export function resetAuthWorker(): void {
+    if (persistentWorker) {
+        persistentWorker.terminate();
+        persistentWorker = null;
+        serializedAssets = null;
+    }
 }
