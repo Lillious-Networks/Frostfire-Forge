@@ -1252,7 +1252,7 @@ export default async function packetReceiver(
         if (target.id !== currentPlayer.id) {
           log.debug(`Checking spell ${spell.name} icon before sending: isBuffer=${Buffer.isBuffer(spell.icon)}, type=${typeof spell.icon}`);
           if (spell.icon && !Buffer.isBuffer(spell.icon)) {
-            log.warn(`Spell ${spell.name} icon is not a Buffer! Type: ${typeof spell.icon}, structure:`, spell.icon);
+            log.warn(`Spell ${spell.name} icon is not a Buffer! Type: ${typeof spell.icon}, structure: ${JSON.stringify(spell.icon)}`);
           }
 
           playersInMap.forEach((player) => {

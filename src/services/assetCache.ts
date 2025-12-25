@@ -135,13 +135,15 @@ class RedisCacheService implements CacheService {
     // Check if this object is a serialized Buffer
     if (obj.type === 'Buffer' && Array.isArray(obj.data)) {
       const buffer = Buffer.from(obj.data);
-      console.log(`[Redis] Reconstructed Buffer at depth ${depth}, size: ${buffer.length} bytes`);
+      // Only log if it looks like an icon (smaller buffers, depth > 0)
+      if (depth > 0 && buffer.length < 10000) {
+        console.log(`[Redis] Reconstructed Buffer at depth ${depth}, size: ${buffer.length} bytes`);
+      }
       return buffer;
     }
 
     // Recursively process arrays
     if (Array.isArray(obj)) {
-      console.log(`[Redis] Processing array at depth ${depth}, length: ${obj.length}`);
       return obj.map(item => this.reconstructBuffers(item, depth + 1));
     }
 
