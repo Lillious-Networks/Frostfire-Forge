@@ -5,33 +5,9 @@ import log from "../modules/logger.ts";
 import parties from "../systems/parties.ts";
 import collectables from "../systems/collectables.ts";
 
-/** Recursively reconstruct all Buffer objects in parsed JSON */
-function reconstructBuffers(obj: any, depth: number = 0): any {
-  if (!obj || typeof obj !== 'object') return obj;
-
-  // Check if this object is a serialized Buffer
-  if (obj.type === 'Buffer' && Array.isArray(obj.data)) {
-    return Buffer.from(obj.data);
-  }
-
-  // Recursively process arrays
-  if (Array.isArray(obj)) {
-    return obj.map(item => reconstructBuffers(item, depth + 1));
-  }
-
-  // Recursively process object properties
-  const result: any = {};
-  for (const key in obj) {
-    if (Object.prototype.hasOwnProperty.call(obj, key)) {
-      result[key] = reconstructBuffers(obj[key], depth + 1);
-    }
-  }
-  return result;
-}
-
 // Assets are passed once via workerData when worker is created
-// Only reconstruct items - mounts were already working without reconstruction
-const items = workerData?.assets?.items ? reconstructBuffers(JSON.parse(workerData.assets.items)) : [];
+// Keep as plain objects - they get JSON.stringified again when sent back to main thread
+const items = workerData?.assets?.items ? JSON.parse(workerData.assets.items) : [];
 const mounts = workerData?.assets?.mounts ? JSON.parse(workerData.assets.mounts) : [];
 
 const authentication = {

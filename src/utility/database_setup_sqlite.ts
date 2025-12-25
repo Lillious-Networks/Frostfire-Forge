@@ -184,6 +184,15 @@ const createItemsTable = async () => {
   await query(sql);
 };
 
+// Insert red apple
+const insertDefaultInventoryItem = async () => {
+  log.info("Inserting default inventory item...");
+  const sql = `
+    INSERT OR IGNORE INTO inventory (username, item, quantity) VALUES ('demo_user', 'Red Apple', 1);
+  `;
+  await query(sql);
+};
+
 const createStatsTable = async () => {
   log.info("Creating stats table...");
   const sql = `
@@ -566,6 +575,7 @@ try {
   await insertDemoQuestLog();
   await insertDemoMount();
   await insertDefaultSpell();
+  await insertDefaultInventoryItem();
   log.success("Database setup complete!");
   process.exit(0);
 } catch (error) {
