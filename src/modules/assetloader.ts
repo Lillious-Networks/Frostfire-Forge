@@ -158,8 +158,7 @@ log.info(`Mounts loaded: ${mountList.map((m) => m.name).join(", ")}`);
 
 // Load spell data
 const spellnow = performance.now();
-await assetCache.add("spells", await spell.list());
-const spellList = await assetCache.get("spells") as SpellData[];
+const spellList = await spell.list();
 await Promise.all(spellList.map(async (spell: any) => {
   if (spell.icon) {
     const iconData = await assetCache.get(spell.icon);
@@ -169,6 +168,7 @@ await Promise.all(spellList.map(async (spell: any) => {
     spell.icon = iconData || null; // Replace the icon with the compressed data if it exists
   }
 }));
+await assetCache.add("spells", spellList);
 const spells = await assetCache.get("spells") as SpellData[];
 
 log.success(`Loaded ${spells.length} spell(s) from the database in ${(performance.now() - spellnow).toFixed(2)}ms`);
