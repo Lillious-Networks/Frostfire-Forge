@@ -7,6 +7,14 @@ const prepareAssets = async () => {
     const maps = await assetCache.get("maps");
     const mounts = await assetCache.get("mounts");
 
+    console.log(`[AUTH POOL] Preparing assets for worker:`);
+    console.log(`  - Items: ${items?.length || 0}`);
+    console.log(`  - Maps: ${maps?.length || 0}`);
+    console.log(`  - Mounts: ${mounts?.length || 0}`);
+    if (mounts && mounts.length > 0) {
+        console.log(`  - First mount icon type: ${typeof mounts[0]?.icon}, has .data: ${!!mounts[0]?.icon?.data}, isBuffer: ${Buffer.isBuffer(mounts[0]?.icon)}`);
+    }
+
     return {
         items: items ? JSON.stringify(items) : null,
         maps: maps ? JSON.stringify(maps) : null,
@@ -54,4 +62,13 @@ export async function getAuthWorker(): Promise<Worker> {
         persistentWorker = await createPersistentWorker();
     }
     return persistentWorker;
+}
+
+// Force recreation of worker (useful for hot reloads in development)
+export function resetAuthWorker(): void {
+    if (persistentWorker) {
+        persistentWorker.terminate();
+        persistentWorker = null;
+        serializedAssets = null;
+    }
 }
