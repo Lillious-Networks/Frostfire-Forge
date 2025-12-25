@@ -128,6 +128,11 @@ await Promise.all(itemList.map(async (item: any) => {
 await assetCache.add("items", itemList);
 const items = await assetCache.get("items") as Item[];
 
+// Debug first item after loading
+if (items.length > 0 && items[0].icon) {
+  log.debug(`[ASSETLOADER] First item icon type: ${typeof items[0].icon}, has .data: ${!!(items[0].icon as any)?.data}, isBuffer: ${Buffer.isBuffer(items[0].icon)}`);
+}
+
 log.success(`Loaded ${items.length} item(s) from the database in ${(performance.now() - itemnow).toFixed(2)}ms`);
 
 // Load mount data

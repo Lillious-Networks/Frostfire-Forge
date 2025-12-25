@@ -54,6 +54,10 @@ const authentication = {
                     const itemDetails = (items as any).find((i: any) => i.name === item.item);
 
                     if (itemDetails) {
+                    // Debug first item icon in worker
+                    if (item.item === inventoryData[0].item && itemDetails.icon) {
+                        log.debug(`[WORKER] Item ${item.item} icon type: ${typeof itemDetails.icon}, has .data: ${!!itemDetails.icon?.data}, isBuffer: ${Buffer.isBuffer(itemDetails.icon)}`);
+                    }
                     return {
                         ...item, // Inventory item details
                         ...itemDetails, // Item details from cache
