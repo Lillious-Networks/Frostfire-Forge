@@ -69,7 +69,7 @@ jobs:
             echo 'WEB_SOCKET_PORT=3000' >> .env.production
             echo 'DOMAIN="https://forge.lillious.com"' >> .env.production
             echo 'GAME_NAME="Frostfire Forge"' >> .env.production
-            echo 'CACHE="redis"' >> .env.production
+            echo 'CACHE="memory"' >> .env.production
             echo 'REDIS_URL="redis://default:${{ secrets.REDIS_PASSWORD }}@redis:6379"' >> .env.production
             echo 'REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"' >> .env.production
             echo 'VERSION="${{ needs.create_release_number.outputs.release-number }}"' >> .env.production
