@@ -28,10 +28,7 @@ function loadAnimations() {
   const now = performance.now();
 
   const animationPath = path.join(assetPath, assetData.animations.path);
-  if (!fs.existsSync(animationPath)) {
-    console.log("No animations found");
-    return;
-  }
+  if (!fs.existsSync(animationPath)) return;
 
   const animationFiles = parseAnimations();
   const animations = [] as any[];

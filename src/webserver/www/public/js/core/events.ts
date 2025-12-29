@@ -19,14 +19,36 @@ import { friendsListSearch } from "./friends.js";
 import { createContextMenu, createPartyContextMenu } from "./actions.js";
 let typingTimer: number | null = null;
 
+// Fix iOS Safari 100vh bug immediately on page load
+// Use visualViewport if available (more accurate on mobile), fallback to innerHeight
+const getActualViewportHeight = () => {
+  if (window.visualViewport) {
+    return window.visualViewport.height;
+  }
+  return window.innerHeight;
+};
+
+document.documentElement.style.setProperty('--viewport-height', `${getActualViewportHeight()}px`);
+
+// Update on visualViewport resize (when address bar shows/hides)
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => {
+    document.documentElement.style.setProperty('--viewport-height', `${window.visualViewport.height}px`);
+  });
+}
+
 const userInteractionListener = () => {
   if (!getUserHasInteracted()) {
     setUserHasInteracted(true);
     document.removeEventListener("mousedown", userInteractionListener);
+    document.removeEventListener("keydown", userInteractionListener);
+    document.removeEventListener("touchstart", userInteractionListener);
   }
 };
 
-window.addEventListener("mousedown", userInteractionListener);
+document.addEventListener("mousedown", userInteractionListener);
+document.addEventListener("keydown", userInteractionListener);
+document.addEventListener("touchstart", userInteractionListener);
 window.addEventListener("gamepadconnected", () => {
   setControllerConnected(true);
 });
@@ -177,18 +199,89 @@ window.addEventListener("keyup", (e) => {
   }
 });
 
+// Detect if device is iOS
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
+const isIPhone = /iPhone/.test(navigator.userAgent);
+const isIPad = /iPad/.test(navigator.userAgent);
+
+// Detect orientation and apply appropriate scaling class
+function updateOrientationClass() {
+  const isLandscape = window.innerWidth > window.innerHeight;
+  const viewportHeight = window.innerHeight;
+  const viewportWidth = window.innerWidth;
+
+  // Remove all existing classes
+  document.body.classList.remove('portrait-mode', 'landscape-mode', 'ios-device', 'iphone-device', 'ipad-device', 'mobile-landscape', 'small-landscape', 'tiny-landscape');
+
+  if (isIOS) {
+    document.body.classList.add('ios-device');
+  }
+
+  if (isIPhone) {
+    document.body.classList.add('iphone-device');
+  }
+
+  if (isIPad) {
+    document.body.classList.add('ipad-device');
+  }
+
+  if (isLandscape) {
+    document.body.classList.add('landscape-mode');
+
+    // Add more specific landscape classes based on actual viewport dimensions
+    if (viewportHeight <= 600) {
+      document.body.classList.add('mobile-landscape');
+
+      // Very small landscape (phones)
+      if (viewportHeight <= 450) {
+        document.body.classList.add('small-landscape');
+
+        // Ultra small landscape (edge browser on iPhone, etc)
+        if (viewportHeight <= 380) {
+          document.body.classList.add('tiny-landscape');
+        }
+      }
+    }
+  } else {
+    document.body.classList.add('portrait-mode');
+  }
+
+  // Log for debugging on actual devices
+  console.log(`Viewport: ${viewportWidth}x${viewportHeight}, iOS: ${isIOS}, iPhone: ${isIPhone}, Landscape: ${isLandscape}`);
+}
+
 window.addEventListener("resize", () => {
+  // Fix iOS Safari 100vh bug by setting actual viewport height
+  const actualHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  document.documentElement.style.setProperty('--viewport-height', `${actualHeight}px`);
+
   // Update canvas size to match new window size with device pixel ratio support
   const dpr = window.devicePixelRatio || 1;
   canvas.width = window.innerWidth * dpr;
-  canvas.height = window.innerHeight * dpr;
+  canvas.height = actualHeight * dpr;
+
+  // Use actual viewport pixel dimensions instead of vw/vh to avoid iOS Safari bugs
   canvas.style.width = window.innerWidth + "px";
-  canvas.style.height = window.innerHeight + "px";
+  canvas.style.height = actualHeight + "px";
 
   // Re-scale context to match device pixel ratio after resize
   if (ctx) {
     ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform
-    ctx.scale(dpr, dpr);
+
+    // Check if device is touch-capable (mobile)
+    const isTouchDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+
+    // Apply zoom out on mobile devices for better visibility
+    if (isTouchDevice) {
+      const mobileZoom = 0.85; // 85% zoom = show more of the world
+      ctx.scale(dpr * mobileZoom, dpr * mobileZoom);
+      // Translate to center the zoomed out view
+      ctx.translate((window.innerWidth * (1 - mobileZoom)) / (2 * mobileZoom),
+                    (actualHeight * (1 - mobileZoom)) / (2 * mobileZoom));
+    } else {
+      ctx.scale(dpr, dpr);
+    }
+
   }
 
   // Remove any open context menu on resize
@@ -196,9 +289,23 @@ window.addEventListener("resize", () => {
     document.getElementById("context-menu")!.remove();
   }
 
+  // Update orientation classes for responsive UI
+  updateOrientationClass();
+
   // Note: Camera position is maintained in world coordinates, which are independent
   // of viewport size. The renderer will automatically recalculate offsets on next frame.
 });
+
+// Listen for orientation changes on mobile devices
+window.addEventListener("orientationchange", () => {
+  // Small delay to ensure dimensions are updated
+  setTimeout(() => {
+    updateOrientationClass();
+  }, 100);
+});
+
+// Initialize orientation class on load
+updateOrientationClass();
 
 window.addEventListener("blur", () => {
   setIsKeyPressed(false);

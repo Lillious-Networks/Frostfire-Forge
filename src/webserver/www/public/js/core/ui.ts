@@ -1,5 +1,6 @@
 import { sendRequest, cachedPlayerId } from "./socket.js";
 import Cache from "./cache.js";
+import { cast } from "./input.js";
 const debugContainer = document.getElementById("debug-container") as HTMLDivElement;
 const statUI = document.getElementById("stat-screen") as HTMLDivElement;
 const positionText = document.getElementById("position") as HTMLDivElement;
@@ -58,6 +59,14 @@ const hotbar = document.getElementById("hotbar") as HTMLDivElement;
 const hotbarGrid = hotbar.querySelector("#grid") as HTMLDivElement;
 const hotbarSlots = hotbarGrid.querySelectorAll(".slot") as NodeListOf<HTMLDivElement>;
 const castbar = document.getElementById("castbar") as HTMLDivElement;
+
+// Add click support to hotbar slots
+hotbarSlots.forEach((slot, index) => {
+  slot.addEventListener("click", (event) => {
+    event.preventDefault();
+    cast(index);
+  });
+});
 
 // Track active castbar clone
 let activeCastbarClone: HTMLDivElement | null = null;

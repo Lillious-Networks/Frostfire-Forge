@@ -628,7 +628,6 @@ socket.onmessage = async (event) => {
         if (data.length > 0) {
           // Assign each collectable to a slot
           for (let i = 0; i < data.length; i++) {
-            console.log(`Creating collectable slot for:`, data[i]);
             // Create a new slot
             const slot = document.createElement("div");
             slot.classList.add("slot");
@@ -945,10 +944,9 @@ socket.onmessage = async (event) => {
       break;
     }
     case "MUSIC": {
-      const name = JSON.parse(packet.decode(event.data))["name"];
       const data = JSON.parse(packet.decode(event.data))["data"];
-      const timestamp = JSON.parse(packet.decode(event.data))["timestamp"];
-      playMusic(name, data.data.data, timestamp);
+      const name = data.name;
+      await playMusic(name);
       break;
     }
     case "INSPECTPLAYER": {

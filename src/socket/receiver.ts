@@ -334,6 +334,10 @@ authWorker.on("message", async (result: any) => {
           }
         }
       }
+
+      // Send music
+      sendPacket(ws, packetManager.music({ name: 'music_entry'}));
+
     });
     setImmediate(() => {
       // Get fresh player data at send time
@@ -2729,7 +2733,7 @@ export default async function packetReceiver(
                 sendPacket(player.ws, packetManager.loadMap(mapData));
               });
             } else {
-              console.error(`Failed to reload map ${mapName}`);
+              log.error(`Failed to reload map ${mapName}`);
               const notifyData = {
                 message: `Failed to reload map ${mapName}`,
               };

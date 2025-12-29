@@ -10,28 +10,11 @@ import  { typingImage } from "./images.js";
 import { getLines } from "./chat.js";
 
 async function createPlayer(data: any) {
-  console.log("Creating player:", data);
   if (data.id === cachedPlayerId) {
     positionText.innerText = `Position: ${data.location.x}, ${data.location.y}`;
   }
 
   updateFriendOnlineStatus(data.username, true);
-
-  console.log(`
-    Username: ${data.username}
-    UserID: ${data.userid}
-    WebSocket ID: ${data.id}
-    Animation: ${data.animation ? "Loaded" : "None"}
-    Friends: ${data.friends ? data.friends.join(", ") : "None"}
-    Position: (${data.location.x}, ${data.location.y})
-    Stealth: ${data.isStealth ? "Yes" : "No"}
-    Admin: ${data.isAdmin ? "Yes" : "No"}
-    Guest: ${data.isGuest ? "Yes" : "No"}
-    Party: ${data.party ? data.party.join(", ") : "None"}
-    Stats: ${JSON.stringify(data.stats, null, 2)}
-    Collectables: ${data.collectables ? JSON.stringify(data.collectables) : "None"}
-  `);
-
   const animationPromise = initializeAnimationWithWorker(data.animation);
 
   const player = {
@@ -471,7 +454,6 @@ async function createPlayer(data: any) {
         const u = data?.username;
         if (!u) {
           // Clear cookies and session storage, then reload the page because we have no username due to an error
-          console.error("No username found, logging out for safety.");
           // Clear all cookies
           document.cookie.split(";").forEach(function(c) {
             document.cookie = c.trim().split("=")[0] + "=;expires=Thu, 01 Jan 1970 00:00:00 GMT";

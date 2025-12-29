@@ -2,6 +2,11 @@
     <head>
         <link rel="icon" type="image/ico" href="./img/icons/favicon.ico">
         <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="theme-color" content="#000000">
         <title>Login</title>
         <script src="./js/web/notification.js"></script>
         <script defer src="./js/web/login.js"></script>
@@ -9,6 +14,7 @@
     </head>
     <body>
         <div id="container"> <!-- Displays the background of the webpage -->
+            <div id="logo"></div>
             <div id="login-container"> <!-- Creates the container for the login form-->
                 <form>
                     <input type="text" id="username" name="username" placeholder="Username" spellcheck="false" autocomplete="new-password" required>
@@ -21,8 +27,6 @@
                     <a href="#" id="guest-login-link">Guest Login</a>
                 </div>
             </div>
-            <div id="login"></div> <!-- Displays the login UI-->
-            <div id="logo"></div>
         </div>
     </body>
 </html>

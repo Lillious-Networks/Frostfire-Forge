@@ -423,7 +423,7 @@ listener.on("onDisconnect", async (data) => {
       await assetCache.set("worlds", JSON.stringify(_worlds));
     }
 
-    console.log(
+    log.info(
       `World: ${playerData.location.map.replace(".json", "")} now has ${
         thisWorld?.players || 0
       } players.`

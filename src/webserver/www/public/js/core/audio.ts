@@ -1,61 +1,66 @@
-
-const audioCache = new Map<string, string>();
 import { getUserHasInteracted } from "./input.js";
 import { musicSlider, effectsSlider, mutedCheckbox } from "./ui.js";
-import pako from '../libs/pako.js';
 
-export function playMusic(name: string, data: Uint8Array, timestamp: number): void {
-    // Check if the user has interacted with the page yet
+async function fetchAudio(url: string): Promise<ArrayBuffer> {
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error(`Failed to fetch audio: ${response.statusText}`);
+    }
+    return await response.arrayBuffer();
+}
+
+function fadeInMusic(music: HTMLAudioElement, targetVolume: number, duration: number = 2000): void {
+    const startTime = performance.now();
+    const startVolume = 0;
+
+    function updateVolume() {
+        const elapsed = performance.now() - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+
+        // Ease-in curve for smoother fade
+        const easedProgress = progress * progress;
+        music.volume = startVolume + (targetVolume - startVolume) * easedProgress;
+
+        if (progress < 1) {
+            requestAnimationFrame(updateVolume);
+        }
+    }
+
+    requestAnimationFrame(updateVolume);
+}
+
+export async function playMusic(name: string): Promise<void> {
+    // Keep retrying until the user has interacted with the page
     if (!getUserHasInteracted()) {
-        console.warn("Audio blocked: waiting for user interaction.");
+        setTimeout(() => {
+            playMusic(name);
+        }, 100);
         return; // Safari will not allow autoplay without gesture
     }
 
-    // Inflate or retrieve cached audio
-    let cachedAudio: string | undefined;
-    if (timestamp < performance.now() - 3.6e6) {
-        // Older than 1 hour: re-inflate
-        // @ts-expect-error - pako is loaded in index.html
-        cachedAudio = pako.inflate(new Uint8Array(data), { to: 'string' });
-    } else {
-        // @ts-expect-error - pako is loaded in index.html
-        cachedAudio = audioCache.get(name) || pako.inflate(new Uint8Array(data), { to: 'string' });
-    }
+    const audio = await fetchAudio(`/music?name=${encodeURIComponent(name)}`);
+    const music = new Audio(URL.createObjectURL(new Blob([audio], { type: 'audio/mpeg' })));
+    if (!music) return;
 
-    if (!cachedAudio) {
-        console.error("Failed to decode audio data.");
-        return;
-    }
-
-    // Create audio element
-    const music = new Audio(`data:audio/wav;base64,${cachedAudio}`);
-    if (!music) {
-        console.error("Failed to create audio element.");
-        return;
-    }
-
-    // Set volume based on slider and muted state
+    // Calculate target volume based on slider and muted state
     const musicVolume = Number(musicSlider.value);
-    music.volume = mutedCheckbox.checked || musicVolume === 0 ? 0 : musicVolume / 100;
+    const targetVolume = mutedCheckbox.checked || musicVolume === 0 ? 0 : musicVolume / 100;
+
+    // Start at volume 0 for fade-in
+    music.volume = 0;
     music.loop = true;
 
     // Play the audio
     try {
-        const playPromise = music.play();
-        if (playPromise !== undefined) {
-            playPromise.catch(err => {
-                console.error("Audio play failed:", err);
-                // Optional: show a "Click to start music" prompt here for Safari
-            });
-        }
+        await music.play();
 
-        // Cache inflated audio for later
-        audioCache.set(name, cachedAudio);
+        // Fade in the music
+        fadeInMusic(music, targetVolume, 2000);
 
         // Start interval if needed (for UI updates or other logic)
         startMusicInterval(music);
-    } catch (e) {
-        console.error("Unexpected audio error:", e);
+    } catch (err) {
+        console.error("Audio play failed:", err);
     }
 }
 
@@ -93,9 +98,7 @@ export function playAudio(name: string, data: Uint8Array, pitch: number, timesta
 
   try {
     audio.play();
-    // Cache the audio
-    audioCache.set(name, cachedAudio);
   } catch (e) {
     console.error(e);
-  }  
+  }
 }

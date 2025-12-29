@@ -107,6 +107,10 @@ export default async function loadMap(data: any): Promise<boolean> {
       },
     };
 
+    // Initialize camera immediately to prevent sliding on spawn
+    const { initializeCamera } = await import('./renderer.js');
+    initializeCamera(spawnX, spawnY);
+
     // Update progress: 40% after map metadata initialized
     progressBar.style.width = "40%";
 
@@ -178,19 +182,46 @@ export default async function loadMap(data: any): Promise<boolean> {
 
     // Set canvas to fixed viewport size with device pixel ratio support
     const dpr = window.devicePixelRatio || 1;
+    // Use window.innerHeight (380px on iOS) for canvas dimensions to cover address bar area
+    // but visualViewport.height (360px) for CSS variable
+    const actualHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+    const fullHeight = actualHeight; // Add 20px to cover the white bar
     canvas.width = window.innerWidth * dpr;
-    canvas.height = window.innerHeight * dpr;
-    canvas.style.width = window.innerWidth + "px";
-    canvas.style.height = window.innerHeight + "px";
-    canvas.style.display = "block";
-    canvas.style.backgroundColor = "#000000";
+    canvas.height = fullHeight * dpr;
+
+    // Check if device is touch-capable (mobile)
+    const isTouchDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+
+    // Fix iOS Safari 100vh bug by setting actual viewport height
+    document.documentElement.style.setProperty('--viewport-height', `${actualHeight}px`);
+
+    // Set positioning BEFORE changing display to prevent iOS Safari layout issues
     canvas.style.position = "fixed";
     canvas.style.top = "0";
     canvas.style.left = "0";
+    canvas.style.backgroundColor = "#000000";
+
+    // Use full height to cover address bar area on iOS
+    canvas.style.width = window.innerWidth + "px";
+    canvas.style.height = fullHeight + "px";
+
+    // Set display last after all positioning is applied
+    canvas.style.display = "block";
+
 
     // Scale context to match device pixel ratio
     if (ctx) {
-      ctx.scale(dpr, dpr);
+      // Apply zoom out on mobile devices for better visibility
+      if (isTouchDevice) {
+        const mobileZoom = 0.85; // 85% zoom = show more of the world
+        ctx.scale(dpr * mobileZoom, dpr * mobileZoom);
+        // Translate to center the zoomed out view
+        ctx.translate((window.innerWidth * (1 - mobileZoom)) / (2 * mobileZoom),
+                      (fullHeight * (1 - mobileZoom)) / (2 * mobileZoom));
+      } else {
+        ctx.scale(dpr, dpr);
+      }
+
     }
 
     // Wait to ensure 100% progress is visible, then hide loading screen
