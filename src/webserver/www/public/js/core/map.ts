@@ -107,6 +107,10 @@ export default async function loadMap(data: any): Promise<boolean> {
       },
     };
 
+    // Initialize camera immediately to prevent sliding on spawn
+    const { initializeCamera } = await import('./renderer.js');
+    initializeCamera(spawnX, spawnY);
+
     // Update progress: 40% after map metadata initialized
     progressBar.style.width = "40%";
 

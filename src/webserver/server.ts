@@ -230,6 +230,34 @@ const routes = {
       return new Response(JSON.stringify({ message: "Internal server error" }), { status: 500 });
     }
   },
+  "/music": async (req: Request) => {
+    const url = tryParseURL(req.url);
+    if (!url) {
+      return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
+    }
+
+    // Get query ? parameter 'name'
+    const name = url.searchParams.get("name");
+    if (!name) {
+      return new Response(JSON.stringify({ message: "Invalid request" }), { status: 400 });
+    }
+
+    const musicPath = path.join(import.meta.dir, "./www/public/music/", `${name}.mp3`);
+    if (!fs.existsSync(musicPath)) {
+      return new Response(JSON.stringify({ message: "Music not found" }), { status: 404 });
+    }
+
+    try {
+      const musicData = fs.readFileSync(musicPath);
+      return new Response(musicData, {
+        status: 200,
+        headers: { "Content-Type": "audio/mpeg" }
+      });
+    } catch (error: any) {
+      log.error(`Error serving music file: ${error.message}`);
+      return new Response(JSON.stringify({ message: "Internal server error" }), { status: 500 });
+    }
+  },
 } as Record<string, any>;
 
 Bun.serve({
@@ -252,6 +280,7 @@ Bun.serve({
       "/verify": routes["/verify"],
       "/tileset": routes["/tileset"],
       "/map-chunk": routes["/map-chunk"],
+      "/music": routes["/music"],
     },
   async fetch(req: Request, server: any) {
     const url = tryParseURL(req.url);

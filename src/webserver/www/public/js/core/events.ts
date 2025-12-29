@@ -23,10 +23,14 @@ const userInteractionListener = () => {
   if (!getUserHasInteracted()) {
     setUserHasInteracted(true);
     document.removeEventListener("mousedown", userInteractionListener);
+    document.removeEventListener("keydown", userInteractionListener);
+    document.removeEventListener("touchstart", userInteractionListener);
   }
 };
 
-window.addEventListener("mousedown", userInteractionListener);
+document.addEventListener("mousedown", userInteractionListener);
+document.addEventListener("keydown", userInteractionListener);
+document.addEventListener("touchstart", userInteractionListener);
 window.addEventListener("gamepadconnected", () => {
   setControllerConnected(true);
 });
@@ -177,6 +181,25 @@ window.addEventListener("keyup", (e) => {
   }
 });
 
+// Detect if device is iOS
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
+
+// Detect orientation and apply appropriate scaling class
+function updateOrientationClass() {
+  const isLandscape = window.innerWidth > window.innerHeight;
+  document.body.classList.remove('portrait-mode', 'landscape-mode', 'ios-device');
+
+  if (isIOS) {
+    document.body.classList.add('ios-device');
+  }
+
+  if (isLandscape) {
+    document.body.classList.add('landscape-mode');
+  } else {
+    document.body.classList.add('portrait-mode');
+  }
+}
+
 window.addEventListener("resize", () => {
   // Update canvas size to match new window size with device pixel ratio support
   const dpr = window.devicePixelRatio || 1;
@@ -196,9 +219,21 @@ window.addEventListener("resize", () => {
     document.getElementById("context-menu")!.remove();
   }
 
+  // Update orientation classes for responsive UI
+  updateOrientationClass();
+
   // Note: Camera position is maintained in world coordinates, which are independent
   // of viewport size. The renderer will automatically recalculate offsets on next frame.
 });
+
+// Listen for orientation changes on mobile devices
+window.addEventListener("orientationchange", () => {
+  // Small delay to ensure dimensions are updated
+  setTimeout(updateOrientationClass, 100);
+});
+
+// Initialize orientation class on load
+updateOrientationClass();
 
 window.addEventListener("blur", () => {
   setIsKeyPressed(false);

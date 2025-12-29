@@ -1,9 +1,10 @@
-import { weatherCanvas, weatherCtx, canvas } from "./ui.ts";
+import { weatherCanvas, weatherCtx } from "./ui.ts";
 
-// Set initial canvas size with buffer and device pixel ratio
+// Set initial canvas size to viewport with buffer
 const dpr = window.devicePixelRatio || 1;
-let width: number = window.innerWidth + 800;  // Logical width
-let height: number = window.innerHeight + 800;  // Logical height
+const buffer = 200; // Extra pixels on each side
+let width: number = window.innerWidth + buffer * 2;
+let height: number = window.innerHeight + buffer * 2;
 weatherCanvas.width = width * dpr;
 weatherCanvas.height = height * dpr;
 weatherCanvas.style.width = width + "px";
@@ -12,11 +13,20 @@ if (weatherCtx) {
   weatherCtx.scale(dpr, dpr);
 }
 
+// Track camera offset for rain movement
+let cameraOffsetX = 0;
+let cameraOffsetY = 0;
+
+// Track time for frame-rate independent animation
+let lastFrameTime = performance.now();
+const TARGET_FPS = 60;
+const FRAME_TIME = 1000 / TARGET_FPS;
+
 // Handle window resize
 window.addEventListener("resize", () => {
   const dpr = window.devicePixelRatio || 1;
-  width = window.innerWidth + 800;
-  height = window.innerHeight + 800;
+  width = window.innerWidth + buffer * 2;
+  height = window.innerHeight + buffer * 2;
   weatherCanvas.width = width * dpr;
   weatherCanvas.height = height * dpr;
   weatherCanvas.style.width = width + "px";
@@ -29,33 +39,47 @@ window.addEventListener("resize", () => {
 
 // Splash particle
 class SplashParticle {
-  x = 0;
-  y = 0;
+  worldX = 0; // World X coordinate (relative to camera)
+  worldY = 0; // World Y coordinate (relative to camera)
   alpha = 0;
   radius = 0;
+  maxRadius = 0;
+  growthRate = 0;
   active = false; // reuse flag
 
-  init(x: number, y: number) {
-    this.x = x;
-    this.y = y;
-    this.alpha = 1;
-    this.radius = 1 + Math.random() * 2;
+  init(x: number, y: number, depthFactor: number = 1) {
+    // Store position in world space (with current camera offset)
+    this.worldX = x + cameraOffsetX;
+    this.worldY = y + cameraOffsetY;
+    this.alpha = 0.8; // Moderate opacity
+    this.radius = 1;
+    // Moderate splash size - scale with depth
+    this.maxRadius = (3 + Math.random() * 3) * depthFactor;
+    this.growthRate = 0.5 * depthFactor;
     this.active = true;
   }
 
-  update() {
+  update(deltaTime: number) {
     if (!this.active) return;
-    this.alpha -= 0.05;
-    this.radius += 0.3;
-    if (this.alpha <= 0) this.active = false;
+    this.alpha -= 0.05 * deltaTime;
+    this.radius += this.growthRate * deltaTime;
+    if (this.alpha <= 0 || this.radius >= this.maxRadius * 2) this.active = false;
   }
 
   draw(ctx: CanvasRenderingContext2D) {
     if (!this.active) return;
-    ctx.strokeStyle = `rgba(0,200,255,${this.alpha})`;
-    ctx.lineWidth = 1;
+
+    // Convert world position to screen position (compensate for camera movement)
+    const screenX = this.worldX - cameraOffsetX;
+    const screenY = this.worldY - cameraOffsetY;
+
+    // Only draw if visible on screen
+    if (screenX < -50 || screenX > width + 50 || screenY < -50 || screenY > height + 50) return;
+
+    ctx.strokeStyle = `rgba(200,230,255,${this.alpha})`;
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+    ctx.arc(screenX, screenY, this.radius, 0, Math.PI * 2);
     ctx.stroke();
   }
 }
@@ -69,6 +93,7 @@ class RainParticle {
   tilt = 0;
   opacity = 0;
   trail: Array<{ x: number; y: number; alpha: number }> = [];
+  splashHeight = 0; // Random height where this raindrop will splash
 
   constructor(spawnY?: number) {
     this.reset(spawnY);
@@ -77,35 +102,44 @@ class RainParticle {
   reset(spawnY?: number) {
     this.x = Math.random() * width;
     this.y = spawnY ?? Math.random() * height;
-    this.speed = 10 + Math.random() * 10;
-    this.length = 2 + Math.random() * 2;
+    this.speed = 30 + Math.random() * 20; // Even faster
+    // Adjust trail length inversely with speed to maintain consistent visual length
+    const baseLength = 2; // Target visual length in pixels (shorter)
+    this.length = baseLength;
     this.tilt = -0.5 + Math.random();
-    this.opacity = 0.6 + Math.random() * 0.4;
+    this.opacity = 0.8 + Math.random() * 0.2; // Higher opacity for better visibility
     this.trail = [];
+
+    // Set random splash height to create depth (anywhere from 40% to 100% down the screen)
+    this.splashHeight = height * (0.4 + Math.random() * 0.6);
   }
 
-  update() {
-    this.y += this.speed;
-    this.x += this.tilt;
+  update(deltaTime: number) {
+    this.y += this.speed * deltaTime;
+    this.x += this.tilt * deltaTime;
 
     this.trail.push({ x: this.x, y: this.y, alpha: this.opacity });
     if (this.trail.length > this.length) this.trail.shift();
 
-    // Reuse a splash particle from the pool
-    if (this.y >= height) {
+    // Create splash when raindrop reaches its splash height
+    if (this.y >= this.splashHeight && this.trail.length > 0) {
       const splash = splashPool.find(s => !s.active);
-      if (splash) splash.init(this.x, height);
-      this.y = 0;
-      this.x = Math.random() * width;
-      this.trail = [];
+      if (splash) {
+        // Scale splash based on depth - closer to bottom = larger
+        const depthFactor = this.splashHeight / height;
+        splash.init(this.x, this.splashHeight, depthFactor);
+      }
+      // Reuse particle by resetting it to spawn at top
+      this.reset(0);
     }
   }
 
   draw(ctx: CanvasRenderingContext2D) {
     if (this.trail.length < 2) return;
 
-    ctx.strokeStyle = "rgba(0,200,255,0.8)";
-    ctx.lineWidth = 1;
+    // Brighter, more visible rain with white/light blue color
+    ctx.strokeStyle = `rgba(200,230,255,${this.opacity})`;
+    ctx.lineWidth = 1; // Skinnier lines
     ctx.lineCap = "round";
 
     ctx.beginPath();
@@ -118,11 +152,161 @@ class RainParticle {
   }
 }
 
+// Snow particle
+class SnowParticle {
+  x = 0;
+  y = 0;
+  speed = 0;
+  size = 0;
+  opacity = 0;
+  windSpeed = 0;
+  turbulence = 0;
+  rotation = 0;
+  rotationSpeed = 0;
+  time = 0;
+  depth = 0; // 0-1, closer to 1 is foreground
+  meltHeight = 0; // Random height where snowflake melts
+
+  constructor(spawnY?: number) {
+    this.reset(spawnY);
+  }
+
+  reset(spawnY?: number) {
+    this.x = Math.random() * width;
+    this.y = spawnY ?? Math.random() * height;
+
+    // Depth affects size, speed, and opacity
+    this.depth = Math.random();
+    const depthFactor = 0.3 + this.depth * 0.7;
+
+    // Blizzard: much faster falling with wind
+    this.speed = (4 + Math.random() * 8) * depthFactor;
+    this.size = (1 + Math.random() * 1.5) * depthFactor; // Smaller particles
+    this.opacity = (0.85 + Math.random() * 0.15); // Very opaque, don't scale with depth
+
+    // Strong horizontal wind with turbulence
+    this.windSpeed = (3 + Math.random() * 5) * depthFactor;
+    this.turbulence = Math.random() * 2;
+
+    this.rotation = Math.random() * Math.PI * 2;
+    this.rotationSpeed = (Math.random() - 0.5) * 0.1 * depthFactor; // Faster rotation in blizzard
+    this.time = Math.random() * 100;
+
+    // Set random melt height for depth (anywhere from 40% to 100% down the screen)
+    this.meltHeight = height * (0.4 + Math.random() * 0.6);
+  }
+
+  update(deltaTime: number) {
+    // Vertical movement
+    this.y += this.speed * deltaTime;
+
+    // Strong horizontal wind movement (blizzard effect)
+    this.x += this.windSpeed * deltaTime;
+
+    // Add turbulence for chaotic movement
+    this.time += 0.02 * deltaTime;
+    this.x += Math.sin(this.time * this.turbulence) * 0.8 * deltaTime;
+    this.y += Math.cos(this.time * this.turbulence * 0.7) * 0.3 * deltaTime;
+
+    // Rotate faster in wind
+    this.rotation += this.rotationSpeed * deltaTime;
+
+    // Create melt when snowflake reaches its melt height
+    if (this.y >= this.meltHeight) {
+      const melt = meltPool.find(m => !m.active);
+      if (melt) {
+        melt.init(this.x, this.meltHeight, this.size);
+      }
+      // Respawn snowflake at top, across entire width
+      this.reset(-20);
+    }
+
+    // Also reset when off screen horizontally
+    if (this.x > width + 50 || this.x < -50) {
+      this.reset(-20);
+    }
+  }
+
+  draw(ctx: CanvasRenderingContext2D) {
+    ctx.save();
+    ctx.globalAlpha = this.opacity;
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.rotation);
+
+    // Draw bright white snowflake
+    ctx.fillStyle = 'rgba(255,255,255,1)';
+    ctx.beginPath();
+    ctx.arc(0, 0, this.size, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Add outer glow for visibility
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.beginPath();
+    ctx.arc(0, 0, this.size * 1.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
+
 // Create rain particles
-const particles: RainParticle[] = [];
-const particleCount = 200;
-for (let i = 0; i < particleCount; i++) {
-  particles.push(new RainParticle(Math.random() * height));
+const rainParticles: RainParticle[] = [];
+const rainCount = 100;
+for (let i = 0; i < rainCount; i++) {
+  rainParticles.push(new RainParticle(Math.random() * height));
+}
+
+// Melt particle (for snow hitting ground)
+class MeltParticle {
+  worldX = 0;
+  worldY = 0;
+  alpha = 0;
+  size = 0;
+  active = false;
+
+  init(x: number, y: number, snowSize: number) {
+    this.worldX = x + cameraOffsetX;
+    this.worldY = y + cameraOffsetY;
+    this.alpha = 0.6;
+    this.size = snowSize * 1.5;
+    this.active = true;
+  }
+
+  update(deltaTime: number) {
+    if (!this.active) return;
+    this.alpha -= 0.025 * deltaTime;
+    this.size += 0.15 * deltaTime;
+    if (this.alpha <= 0) this.active = false;
+  }
+
+  draw(ctx: CanvasRenderingContext2D) {
+    if (!this.active) return;
+
+    const screenX = this.worldX - cameraOffsetX;
+    const screenY = this.worldY - cameraOffsetY;
+
+    if (screenX < -50 || screenX > width + 50 || screenY < -50 || screenY > height + 50) return;
+
+    // Draw melt spot with soft edges
+    ctx.fillStyle = `rgba(210,230,250,${this.alpha * 0.4})`;
+    ctx.beginPath();
+    ctx.arc(screenX, screenY, this.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// Create snow particles
+const snowParticles: SnowParticle[] = [];
+const snowCount = 400; // Many more particles
+for (let i = 0; i < snowCount; i++) {
+  snowParticles.push(new SnowParticle(Math.random() * height));
+}
+
+// Pre-create melt particle pool
+const meltPoolSize = 100;
+const meltPool: MeltParticle[] = [];
+for (let i = 0; i < meltPoolSize; i++) {
+  meltPool.push(new MeltParticle());
 }
 
 // Pre-create splash particle pool
@@ -136,62 +320,53 @@ for (let i = 0; i < splashPoolSize; i++) {
 function weather(type: string): void {
   if (!weatherCtx) return;
 
-  // Only render if type is "rainy"
-  if (type !== "rainy") return;
+  // Calculate delta time for frame-rate independent animation
+  const currentTime = performance.now();
+  const deltaMs = currentTime - lastFrameTime;
+  lastFrameTime = currentTime;
+
+  // Normalize to 60fps (deltaTime = 1.0 at 60fps)
+  const deltaTime = deltaMs / FRAME_TIME;
 
   weatherCtx.clearRect(0, 0, width, height);
 
-  // Draw rain
-  for (const p of particles) {
-    p.update();
-    p.draw(weatherCtx);
-  }
+  if (type === "rainy") {
+    // Draw rain
+    for (const p of rainParticles) {
+      p.update(deltaTime);
+      p.draw(weatherCtx);
+    }
 
-  // Draw splashes
-  for (const s of splashPool) {
-    s.update();
-    s.draw(weatherCtx);
+    // Draw splashes (they handle world-to-canvas conversion internally)
+    for (const s of splashPool) {
+      s.update(deltaTime);
+      s.draw(weatherCtx);
+    }
+  } else if (type === "snowy") {
+    // Draw snow
+    for (const p of snowParticles) {
+      p.update(deltaTime);
+      p.draw(weatherCtx);
+    }
+
+    // Draw melt effects
+    for (const m of meltPool) {
+      m.update(deltaTime);
+      m.draw(weatherCtx);
+    }
   }
 }
 
 
-// Adjust canvas position relative to camera
+// Update camera offset for weather effects
 function updateWeatherCanvas(cameraX: number, cameraY: number): void {
-  const buffer = 400;
+  // Store camera position for world-space calculations
+  // Account for the buffer when calculating viewport center
+  const halfViewportWidth = (window.innerWidth / 2);
+  const halfViewportHeight = (window.innerHeight / 2);
 
-  // Calculate desired weather canvas position (centered around viewport with buffer)
-  let weatherLeft = cameraX - buffer;
-  let weatherTop = cameraY - buffer;
-
-  // Game canvas is at (0, 0) and represents the entire game world
-  // Constrain weather canvas to not go beyond game canvas boundaries
-
-  // Left boundary: weather canvas should not go below 0
-  weatherLeft = Math.max(0, weatherLeft);
-
-  // Top boundary: weather canvas should not go below 0
-  weatherTop = Math.max(0, weatherTop);
-
-  // Right boundary: weather canvas right edge should not exceed game canvas width
-  const maxLeft = canvas.width - weatherCanvas.width;
-  if (maxLeft >= 0) {
-    weatherLeft = Math.min(weatherLeft, maxLeft);
-  } else {
-    // If weather canvas is larger than game canvas, center it
-    weatherLeft = 0;
-  }
-
-  // Bottom boundary: weather canvas bottom edge should not exceed game canvas height
-  const maxTop = canvas.height - weatherCanvas.height;
-  if (maxTop >= 0) {
-    weatherTop = Math.min(weatherTop, maxTop);
-  } else {
-    // If weather canvas is larger than game canvas, center it
-    weatherTop = 0;
-  }
-
-  weatherCanvas.style.left = `${weatherLeft}px`;
-  weatherCanvas.style.top = `${weatherTop}px`;
+  cameraOffsetX = cameraX - halfViewportWidth - buffer;
+  cameraOffsetY = cameraY - halfViewportHeight - buffer;
 }
 
 export { weather, updateWeatherCanvas };

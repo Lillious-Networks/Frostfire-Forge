@@ -334,6 +334,10 @@ authWorker.on("message", async (result: any) => {
           }
         }
       }
+
+      // Send music
+      sendPacket(ws, packetManager.music({ name: 'music_entry'}));
+
     });
     setImmediate(() => {
       // Get fresh player data at send time

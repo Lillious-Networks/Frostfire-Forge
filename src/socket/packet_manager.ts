@@ -267,7 +267,7 @@ export const packetManager = {
   },
   music: (data: any) => {
     return [
-      packet.encode(JSON.stringify({ type: "MUSIC", name: data.name, data: data.data })),
+      packet.encode(JSON.stringify({ type: "MUSIC", data })),
     ] as any[];
   },
   notify: (data: any) => {

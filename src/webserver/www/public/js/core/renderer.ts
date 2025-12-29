@@ -11,6 +11,8 @@ const times = [] as number[];
 let lastDirection = "";
 let pendingRequest = false;
 let cameraX: number = 0, cameraY: number = 0, lastFrameTime: number = 0;
+let smoothMapX: number = 0, smoothMapY: number = 0; // Smoothed position for map rendering only
+let cameraInitialized: boolean = false;
 import { canvas, ctx, fpsSlider, healthBar, staminaBar, targetHealthBar, targetStaminaBar, collisionDebugCheckbox, chunkOutlineDebugCheckbox, collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox, loadedChunksText } from "./ui.js";
 
 canvas.style.position = 'fixed';
@@ -21,8 +23,8 @@ declare global {
   }
 }
 
-const cameraSmoothing = 1;
-const snapThreshold = 0.1;
+const cameraSmoothing = 0.25;
+const snapThreshold = 1.5;
 const loadedChunksSet = new Set<string>();
 const pendingChunks = new Set<string>();
 
@@ -36,21 +38,9 @@ function updateCamera(currentPlayer: any, deltaTime: number) {
     const targetX = currentPlayer.position.x;
     const targetY = currentPlayer.position.y;
 
-    // Calculate distance to target
-    const distX = Math.abs(targetX - cameraX);
-    const distY = Math.abs(targetY - cameraY);
-
-    // If very close, snap directly to avoid micro-jitter
-    if (distX < snapThreshold && distY < snapThreshold) {
-      cameraX = targetX;
-      cameraY = targetY;
-    } else {
-      // Use frame-rate independent smoothing with adaptive speed
-      // Smoother camera that follows more closely
-      const baseSmoothness = 1 - Math.pow(1 - cameraSmoothing, deltaTime);
-      cameraX = lerp(cameraX, targetX, baseSmoothness);
-      cameraY = lerp(cameraY, targetY, baseSmoothness);
-    }
+    // Camera follows player instantly for entity rendering
+    cameraX = targetX;
+    cameraY = targetY;
 
     // Clamp camera to map bounds to prevent showing black area outside map
     const mapWidth = window.mapData.width * window.mapData.tilewidth;
@@ -61,6 +51,19 @@ function updateCamera(currentPlayer: any, deltaTime: number) {
     // Prevent camera from showing area beyond map edges
     cameraX = Math.max(halfViewportWidth, Math.min(mapWidth - halfViewportWidth, cameraX));
     cameraY = Math.max(halfViewportHeight, Math.min(mapHeight - halfViewportHeight, cameraY));
+
+    // Smoothed camera position for map rendering only
+    const distX = Math.abs(cameraX - smoothMapX);
+    const distY = Math.abs(cameraY - smoothMapY);
+
+    if (distX < snapThreshold && distY < snapThreshold) {
+      smoothMapX = cameraX;
+      smoothMapY = cameraY;
+    } else {
+      const baseSmoothness = 1 - Math.pow(1 - cameraSmoothing, deltaTime);
+      smoothMapX = lerp(smoothMapX, cameraX, baseSmoothness);
+      smoothMapY = lerp(smoothMapY, cameraY, baseSmoothness);
+    }
 
     if (weatherType) {
       updateWeatherCanvas(cameraX, cameraY);
@@ -277,15 +280,12 @@ function drawAllLayersWithOpacity(layer: 'lower' | 'upper', visibleChunks: any[]
 function renderMap(layer: 'lower' | 'upper' = 'lower') {
   if (!ctx || !window.mapData) return;
 
-  // Ensure image smoothing is disabled for pixel-perfect map rendering
-  ctx.imageSmoothingEnabled = false;
-
   const viewportWidth = window.innerWidth;
   const viewportHeight = window.innerHeight;
 
-  // Calculate camera offset (center camera on player) and round to avoid seams
-  const offsetX = Math.round(viewportWidth / 2 - cameraX);
-  const offsetY = Math.round(viewportHeight / 2 - cameraY);
+  // Calculate camera offset using smoothed map position and round to avoid seams
+  const offsetX = Math.round(viewportWidth / 2 - smoothMapX);
+  const offsetY = Math.round(viewportHeight / 2 - smoothMapY);
 
   const visibleChunks = getVisibleChunks();
 
@@ -343,10 +343,15 @@ function animationLoop() {
     return;
   }
 
-  // Initialize camera to spawn position on first frame
-  if (cameraX === 0 && cameraY === 0 && window.mapData) {
-    cameraX = window.mapData.spawnX || currentPlayer.position.x;
-    cameraY = window.mapData.spawnY || currentPlayer.position.y;
+  // Initialize camera to spawn position on first frame (before any smoothing)
+  if (!cameraInitialized && window.mapData) {
+    const initialX = window.mapData.spawnX || currentPlayer.position.x;
+    const initialY = window.mapData.spawnY || currentPlayer.position.y;
+    cameraX = initialX;
+    cameraY = initialY;
+    smoothMapX = initialX;
+    smoothMapY = initialY;
+    cameraInitialized = true;
   }
 
   updateCamera(currentPlayer, deltaTime * 60);
@@ -863,6 +868,16 @@ function setWeatherType(type: string | null) {
   weatherType = type;
 }
 
+function initializeCamera(x: number, y: number) {
+  if (!cameraInitialized) {
+    cameraX = x;
+    cameraY = y;
+    smoothMapX = x;
+    smoothMapY = y;
+    cameraInitialized = true;
+  }
+}
+
 export {
   lastDirection,
   setDirection,
@@ -873,5 +888,6 @@ export {
   getCameraX,
   getCameraY,
   setWeatherType,
-  getWeatherType
+  getWeatherType,
+  initializeCamera
 };
