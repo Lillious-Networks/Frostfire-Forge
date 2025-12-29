@@ -23,14 +23,9 @@ declare global {
   }
 }
 
-const cameraSmoothing = 0.25;
-const snapThreshold = 1.5;
 const loadedChunksSet = new Set<string>();
 const pendingChunks = new Set<string>();
 
-function lerp(start: number, end: number, amount: number) {
-  return start + (end - start) * amount;
-}
 
 function updateCamera(currentPlayer: any, deltaTime: number) {
   if (!getIsLoaded()) return;
@@ -38,7 +33,7 @@ function updateCamera(currentPlayer: any, deltaTime: number) {
     const targetX = currentPlayer.position.x;
     const targetY = currentPlayer.position.y;
 
-    // Camera follows player instantly for entity rendering
+    // Camera follows player position instantly
     cameraX = targetX;
     cameraY = targetY;
 
@@ -52,18 +47,9 @@ function updateCamera(currentPlayer: any, deltaTime: number) {
     cameraX = Math.max(halfViewportWidth, Math.min(mapWidth - halfViewportWidth, cameraX));
     cameraY = Math.max(halfViewportHeight, Math.min(mapHeight - halfViewportHeight, cameraY));
 
-    // Smoothed camera position for map rendering only
-    const distX = Math.abs(cameraX - smoothMapX);
-    const distY = Math.abs(cameraY - smoothMapY);
-
-    if (distX < snapThreshold && distY < snapThreshold) {
-      smoothMapX = cameraX;
-      smoothMapY = cameraY;
-    } else {
-      const baseSmoothness = 1 - Math.pow(1 - cameraSmoothing, deltaTime);
-      smoothMapX = lerp(smoothMapX, cameraX, baseSmoothness);
-      smoothMapY = lerp(smoothMapY, cameraY, baseSmoothness);
-    }
+    // No camera smoothing - use instant camera for all rendering
+    smoothMapX = cameraX;
+    smoothMapY = cameraY;
 
     if (weatherType) {
       updateWeatherCanvas(cameraX, cameraY);
@@ -446,9 +432,10 @@ function animationLoop() {
   // Save context state
   ctx.save();
 
-  // Translate to camera space (round to avoid subpixel rendering)
-  const offsetX = Math.round(window.innerWidth / 2 - cameraX);
-  const offsetY = Math.round(window.innerHeight / 2 - cameraY);
+  // Translate to camera space using smoothed camera (round to avoid subpixel rendering)
+  // Must match map rendering to prevent entities from appearing to slide
+  const offsetX = Math.round(window.innerWidth / 2 - smoothMapX);
+  const offsetY = Math.round(window.innerHeight / 2 - smoothMapY);
   ctx.translate(offsetX, offsetY);
 
   // Ensure image smoothing is disabled for crisp pixel art rendering
@@ -606,8 +593,8 @@ function animationLoop() {
   } else {
     // In wireframe mode, draw chunk grid
     ctx.save();
-    const offsetX = Math.round(window.innerWidth / 2 - cameraX);
-    const offsetY = Math.round(window.innerHeight / 2 - cameraY);
+    const offsetX = Math.round(window.innerWidth / 2 - smoothMapX);
+    const offsetY = Math.round(window.innerHeight / 2 - smoothMapY);
     ctx.translate(offsetX, offsetY);
 
     if (window.mapData) {
@@ -813,8 +800,8 @@ function animationLoop() {
   // Render tile editor preview if active
   if ((window as any).tileEditor) {
     ctx.save();
-    const offsetX = Math.round(window.innerWidth / 2 - cameraX);
-    const offsetY = Math.round(window.innerHeight / 2 - cameraY);
+    const offsetX = Math.round(window.innerWidth / 2 - smoothMapX);
+    const offsetY = Math.round(window.innerHeight / 2 - smoothMapY);
     ctx.translate(offsetX, offsetY);
     (window as any).tileEditor.renderPreview();
     ctx.restore();

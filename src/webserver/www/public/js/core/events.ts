@@ -183,21 +183,53 @@ window.addEventListener("keyup", (e) => {
 
 // Detect if device is iOS
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
+const isIPhone = /iPhone/.test(navigator.userAgent);
+const isIPad = /iPad/.test(navigator.userAgent);
 
 // Detect orientation and apply appropriate scaling class
 function updateOrientationClass() {
   const isLandscape = window.innerWidth > window.innerHeight;
-  document.body.classList.remove('portrait-mode', 'landscape-mode', 'ios-device');
+  const viewportHeight = window.innerHeight;
+  const viewportWidth = window.innerWidth;
+
+  // Remove all existing classes
+  document.body.classList.remove('portrait-mode', 'landscape-mode', 'ios-device', 'iphone-device', 'ipad-device', 'mobile-landscape', 'small-landscape', 'tiny-landscape');
 
   if (isIOS) {
     document.body.classList.add('ios-device');
   }
 
+  if (isIPhone) {
+    document.body.classList.add('iphone-device');
+  }
+
+  if (isIPad) {
+    document.body.classList.add('ipad-device');
+  }
+
   if (isLandscape) {
     document.body.classList.add('landscape-mode');
+
+    // Add more specific landscape classes based on actual viewport dimensions
+    if (viewportHeight <= 600) {
+      document.body.classList.add('mobile-landscape');
+
+      // Very small landscape (phones)
+      if (viewportHeight <= 450) {
+        document.body.classList.add('small-landscape');
+
+        // Ultra small landscape (edge browser on iPhone, etc)
+        if (viewportHeight <= 380) {
+          document.body.classList.add('tiny-landscape');
+        }
+      }
+    }
   } else {
     document.body.classList.add('portrait-mode');
   }
+
+  // Log for debugging on actual devices
+  console.log(`Viewport: ${viewportWidth}x${viewportHeight}, iOS: ${isIOS}, iPhone: ${isIPhone}, Landscape: ${isLandscape}`);
 }
 
 window.addEventListener("resize", () => {
@@ -229,7 +261,9 @@ window.addEventListener("resize", () => {
 // Listen for orientation changes on mobile devices
 window.addEventListener("orientationchange", () => {
   // Small delay to ensure dimensions are updated
-  setTimeout(updateOrientationClass, 100);
+  setTimeout(() => {
+    updateOrientationClass();
+  }, 100);
 });
 
 // Initialize orientation class on load

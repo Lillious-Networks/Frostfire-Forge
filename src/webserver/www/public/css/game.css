@@ -12,16 +12,28 @@
   src: url('../fonts/ComicRelief-Regular.ttf') format('truetype');
 }
 
-html,
-body {
+/* Reset box-sizing for all elements */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+    margin: 0;
+    padding: 0;
     overflow: hidden;
     font-family: 'Comic Relief';
+    width: 100%;
+    height: 100%;
 }
 
 body {
-    background-color: #000;
     margin: 0;
     padding: 0;
+    overflow: hidden;
+    font-family: 'Comic Relief';
+    background-color: #000;
+    width: 100%;
+    height: 100%;
 }
 
 .ui {
@@ -29,8 +41,14 @@ body {
 }
 
 #container {
+  position: fixed;
+  top: 0;
+  left: 0;
   width: 100vw; /* Full width of the viewport */
   height: 100vh; /* Full height of the viewport */
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
 }
 
 #game {
@@ -40,6 +58,8 @@ body {
   left: 0;
   right: 0;
   bottom: 0;
+  margin: 0;
+  padding: 0;
   display: none;
 }
 
@@ -52,12 +72,19 @@ body {
 }
 
 #overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  margin: 0;
+  padding: 0;
   z-index: 100;
 }
 
 #inventory {
   position: fixed;
-  bottom: 10;
+  bottom: 25px;
   right: -350;
   z-index: 100;
   background: url("../img/ui/ui-inventory-container.png");
@@ -108,7 +135,7 @@ body {
 
 #guild-container {
   position: fixed;
-  top: 75;
+  top: 25px;
   right: -425;
   z-index: 100;
   background: url("../img/ui/ui-guild-container.png");
@@ -167,7 +194,7 @@ body {
 
 #friends-list-container {
   position: fixed;
-  top: 75;
+  top: 25px;
   right: -425;
   z-index: 100;
   background: url("../img/ui/ui-friendslist.png");
@@ -263,7 +290,7 @@ body {
 
 #spell-book-container, #collectables-container {
   position: fixed;
-  top: 75;
+  top: 25px;
   right: -425;
   z-index: 100;
   background: url("../img/ui/ui-spellbook.png");
@@ -507,8 +534,8 @@ body {
 
 #chat-container {
   position: fixed;
-  bottom: 25;
-  left: 10;
+  bottom: 25px;
+  left: 25px;
   z-index: 100;
   background: url("../img/ui/ui-chat-container.png");
   background-repeat: no-repeat;
@@ -606,7 +633,7 @@ input::placeholder {
 
 #hotbar {
   position: fixed;
-  bottom: 10;
+  bottom: 25px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 100;
@@ -714,8 +741,8 @@ input::placeholder {
 
 #stats-container {
   transform: scaleX(var(--xscale, 1));
-  top: 27;
-  left: 10;
+  top: 25px;
+  left: 25px;
 }
 
 #target-stats-container {
@@ -727,8 +754,8 @@ input::placeholder {
 #player-image-container {
   position: fixed;
   z-index: 101;
-  top: 10;
-  left: 10;
+  top: 25px;
+  left: 25px;
   width: 97px;
   height: 102px;
   background: url("../img/ui/ui-player-image.png");
@@ -792,8 +819,8 @@ input::placeholder {
 
 #map-container {
   position: fixed;
-  top: 10;
-  right: 10;
+  top: 25px;
+  right: 25px;
   z-index: 101;
   width: 218px;
   height: 224px;
@@ -1338,7 +1365,7 @@ input[type=range]:disabled {
   width: 500px;
   height: 100px;
   bottom: 250px;
-  left: 15px;
+  left: 25px;
 }
 
 .party-member {
@@ -1442,6 +1469,8 @@ input[type=range]:disabled {
   position: fixed;
   top: -200px;
   left: -200px;
+  margin: 0;
+  padding: 0;
   pointer-events: none;
   z-index: 10;
 }
@@ -1810,46 +1839,27 @@ input[type=range]:disabled {
 
 /* ===== iOS and Mobile Landscape Mode Responsive Styles ===== */
 
-/* General mobile landscape optimizations */
-@media only screen and (max-height: 500px) and (orientation: landscape) {
+/* General mobile landscape optimizations - Using class-based detection for better iOS compatibility */
+body.mobile-landscape {
   /* Scale down chat container more aggressively */
   #chat-container {
-    width: 450px;
-    height: 180px;
-    bottom: 8px;
-    left: 8px;
+    bottom: 25px;
+    left: 25px;
     transform: scale(0.65);
     transform-origin: bottom left;
   }
 
   /* Scale down hotbar more aggressively */
   #hotbar {
-    width: 375px;
-    height: 65px;
-    bottom: 8px;
+    bottom: 25px;
     transform: translateX(-50%) scale(0.7);
     transform-origin: bottom center;
   }
 
-  #hotbar #grid .slot {
-    width: 32px;
-    height: 32px;
-    font-size: 10px;
-  }
-
-  #hotbar #grid {
-    padding-top: 24px;
-    padding-bottom: 20px;
-    padding-left: 28px;
-    padding-right: 28px;
-  }
-
   /* Scale down stats containers - use scaleY only to avoid conflict with scaleX animation */
   #stats-container {
-    width: 264px;
-    height: 88px;
-    top: 8px;
-    left: 8px;
+    top: 25px;
+    left: 25px;
     transform: scale(calc(0.7 * var(--xscale, 1)), 0.7);
     transform-origin: top left;
   }
@@ -1860,10 +1870,8 @@ input[type=range]:disabled {
   }
 
   #player-image-container {
-    width: 77px;
-    height: 82px;
-    top: 5px;
-    left: 8px;
+    top: 25px;
+    left: 25px;
     transform: scale(0.7);
     transform-origin: top left;
   }
@@ -1889,7 +1897,7 @@ input[type=range]:disabled {
   }
 
   #inventory.open {
-    right: 0;
+    right: 25px;
   }
 
   #spell-book-container, #collectables-container,
@@ -1907,7 +1915,7 @@ input[type=range]:disabled {
     width: 400px;
     height: 80px;
     bottom: 150px;
-    left: 8px;
+    left: 25px;
     transform: scale(0.65);
     transform-origin: bottom left;
   }
@@ -1925,24 +1933,20 @@ input[type=range]:disabled {
 
   /* Server time container */
   #server-time-container {
-    top: 8px;
-    right: 8px;
+    top: 25px;
+    right: 25px;
     min-width: 80px;
     min-height: 24px;
-    transform: scale(0.7);
+    transform: scale(1.0);
     transform-origin: top right;
-  }
-
-  #server-time-container #server-time-value {
-    font-size: 0.7em;
   }
 
   /* Map container (if used) */
   #map-container {
     width: 174px;
     height: 179px;
-    top: 8px;
-    right: 8px;
+    top: 25px;
+    right: 25px;
     transform: scale(0.7);
     transform-origin: top right;
   }
@@ -1977,103 +1981,318 @@ input[type=range]:disabled {
   }
 }
 
-/* iOS-specific landscape optimizations */
-@media only screen and (max-height: 500px) and (orientation: landscape) {
-  body.ios-device #chat-container {
-    /* Additional iOS-specific adjustments for iOS Safari */
-    bottom: max(8px, env(safe-area-inset-bottom, 8px));
-    left: max(8px, env(safe-area-inset-left, 8px));
-  }
-
-  body.ios-device #hotbar {
-    /* Account for iOS safe areas */
-    bottom: max(8px, env(safe-area-inset-bottom, 8px));
-  }
-
-  body.ios-device #stats-container {
-    top: max(8px, env(safe-area-inset-top, 8px));
-    left: max(8px, env(safe-area-inset-left, 8px));
-  }
-
-  body.ios-device #player-image-container {
-    top: max(5px, env(safe-area-inset-top, 5px));
-    left: max(8px, env(safe-area-inset-left, 8px));
-  }
-
-  body.ios-device #server-time-container {
-    top: max(8px, env(safe-area-inset-top, 8px));
-    right: max(8px, env(safe-area-inset-right, 8px));
-  }
-
-  body.ios-device #inventory,
-  body.ios-device #spell-book-container,
-  body.ios-device #collectables-container,
-  body.ios-device #friends-list-container,
-  body.ios-device #guild-container {
-    right: max(-350px, calc(-350px - env(safe-area-inset-right, 0px)));
-  }
+/* iOS-specific landscape optimizations - Using class-based detection */
+body.ios-device.mobile-landscape #chat-container {
+  /* Additional iOS-specific adjustments for iOS Safari */
+  bottom: max(25px, env(safe-area-inset-bottom, 25px));
+  left: max(25px, env(safe-area-inset-left, 25px));
 }
 
-/* Tablet landscape (iPad, etc.) */
-@media only screen and (min-height: 500px) and (max-height: 800px) and (orientation: landscape) {
-  #chat-container {
-    transform: scale(0.9);
+body.ios-device.mobile-landscape #hotbar {
+  /* Account for iOS safe areas */
+  bottom: max(25px, env(safe-area-inset-bottom, 25px));
+}
+
+body.ios-device.mobile-landscape #stats-container {
+  top: max(25px, env(safe-area-inset-top, 25px));
+  left: max(25px, env(safe-area-inset-left, 25px));
+}
+
+body.ios-device.mobile-landscape #player-image-container {
+  top: max(25px, env(safe-area-inset-top, 25px));
+  left: max(25px, env(safe-area-inset-left, 25px));
+}
+
+body.ios-device.mobile-landscape #server-time-container {
+  top: max(25px, env(safe-area-inset-top, 25px));
+  right: max(25px, env(safe-area-inset-right, 25px));
+}
+
+body.ios-device.mobile-landscape #inventory,
+body.ios-device.mobile-landscape #spell-book-container,
+body.ios-device.mobile-landscape #collectables-container,
+body.ios-device.mobile-landscape #friends-list-container,
+body.ios-device.mobile-landscape #guild-container {
+  right: max(-350px, calc(-350px - env(safe-area-inset-right, 0px)));
+}
+
+/* Tablet landscape (iPad, etc.) - Using class-based detection */
+body.ipad-device.landscape-mode #chat-container {
+  transform: scale(0.9);
+  transform-origin: bottom left;
+}
+
+body.ipad-device.landscape-mode #hotbar {
+  transform: translateX(-50%) scale(0.9);
+  transform-origin: bottom center;
+}
+
+body.ipad-device.landscape-mode #stats-container {
+  transform: scale(calc(0.9 * var(--xscale, 1)), 0.9);
+  transform-origin: top left;
+}
+
+/* Target stats remain hidden - no transform override */
+
+body.ipad-device.landscape-mode #player-image-container {
+  transform: scale(0.9);
+  transform-origin: top left;
+}
+
+/* Very small screens (phones in landscape) - Using class-based detection */
+body.small-landscape #chat-container {
+  bottom: 25px;
+  left: 25px;
+  transform: scale(0.6);
+  transform-origin: bottom left;
+}
+
+body.small-landscape #hotbar {
+  bottom: 25px;
+  transform: translateX(-50%) scale(0.65);
+  transform-origin: bottom center;
+}
+
+body.small-landscape #stats-container {
+  top: 25px;
+  left: 25px;
+  transform: scale(calc(0.65 * var(--xscale, 1)), 0.65);
+  transform-origin: top left;
+}
+
+body.small-landscape #player-image-container {
+  top: 25px;
+  left: 25px;
+  transform: scale(0.65);
+  transform-origin: top left;
+}
+
+body.small-landscape #server-time-container {
+  top: 25px;
+  right: 25px;
+  transform: scale(1.0);
+  transform-origin: top right;
+}
+
+/* Target stats remain hidden - no transform override */
+
+body.small-landscape #castbar {
+  bottom: 50px;
+  transform: translateX(-50%) scale(0.65);
+}
+
+body.small-landscape #party-container {
+  bottom: 130px;
+  transform: scale(0.6);
+}
+
+body.small-landscape #inventory,
+body.small-landscape #spell-book-container,
+body.small-landscape #collectables-container,
+body.small-landscape #friends-list-container,
+body.small-landscape #guild-container {
+  transform: scale(0.6);
+}
+
+/* Ultra small screens (Edge on iPhone, very small viewports ≤380px) */
+body.tiny-landscape #chat-container {
+  bottom: 25px;
+  left: 25px;
+  transform: scale(0.4);
+  transform-origin: bottom left;
+}
+
+body.tiny-landscape #hotbar {
+  bottom: 25px;
+  transform: translateX(-50%) scale(0.45);
+  transform-origin: bottom center;
+}
+
+body.tiny-landscape #stats-container {
+  top: 25px;
+  left: 25px;
+  transform: scale(calc(0.45 * var(--xscale, 1)), 0.45);
+  transform-origin: top left;
+}
+
+body.tiny-landscape #player-image-container {
+  top: 25px;
+  left: 25px;
+  transform: scale(0.45);
+  transform-origin: top left;
+}
+
+body.tiny-landscape #server-time-container {
+  top: 25px;
+  right: 25px;
+  transform: scale(1.0);
+  transform-origin: top right;
+}
+
+body.tiny-landscape #castbar {
+  bottom: 40px;
+  transform: translateX(-50%) scale(0.45);
+  transform-origin: bottom center;
+}
+
+body.tiny-landscape #party-container {
+  bottom: 95px;
+  left: 25px;
+  transform: scale(0.4);
+  transform-origin: bottom left;
+}
+
+body.tiny-landscape #inventory,
+body.tiny-landscape #spell-book-container,
+body.tiny-landscape #collectables-container,
+body.tiny-landscape #friends-list-container,
+body.tiny-landscape #guild-container {
+  transform: scale(0.4);
+  transform-origin: top right;
+  top: 35px;
+}
+
+body.tiny-landscape #game-notification-container {
+  transform: scale(0.75);
+  transform-origin: top center;
+}
+
+body.tiny-landscape .notification {
+  bottom: 3px;
+  right: 3px;
+  transform: scale(0.6);
+  transform-origin: bottom right;
+}
+
+/* Fallback media queries for when JavaScript hasn't loaded yet or is disabled */
+@media only screen and (max-height: 600px) and (orientation: landscape) and (max-width: 950px) {
+  body:not(.portrait-mode) #chat-container {
+    bottom: 25px;
+    left: 25px;
+    transform: scale(0.65);
     transform-origin: bottom left;
   }
 
-  #hotbar {
-    transform: translateX(-50%) scale(0.9);
+  body:not(.portrait-mode) #hotbar {
+    bottom: 25px;
+    transform: translateX(-50%) scale(0.7);
     transform-origin: bottom center;
   }
 
-  #stats-container {
-    transform: scale(calc(0.9 * var(--xscale, 1)), 0.9);
-    transform-origin: top left;
-  }
-
-  /* Target stats remain hidden - no transform override */
-
-  #player-image-container {
-    transform: scale(0.9);
-    transform-origin: top left;
-  }
-}
-
-/* Very small screens (phones in landscape) */
-@media only screen and (max-height: 400px) and (orientation: landscape) {
-  #chat-container {
-    width: 400px;
-    height: 150px;
-    transform: scale(0.7);
-  }
-
-  #hotbar {
-    width: 320px;
-    height: 55px;
-    transform: translateX(-50%) scale(0.7);
-  }
-
-  #stats-container {
+  body:not(.portrait-mode) #stats-container {
+    top: 25px;
+    left: 25px;
     transform: scale(calc(0.7 * var(--xscale, 1)), 0.7);
+    transform-origin: top left;
   }
 
-  /* Target stats remain hidden - no transform override */
+  body:not(.portrait-mode) #player-image-container {
+    top: 25px;
+    left: 25px;
+    transform: scale(0.7);
+    transform-origin: top left;
+  }
 
-  #castbar {
+  body:not(.portrait-mode) #server-time-container {
+    top: 25px;
+    right: 25px;
+    transform: scale(1.0);
+    transform-origin: top right;
+  }
+
+  body:not(.portrait-mode) #castbar {
     bottom: 55px;
     transform: translateX(-50%) scale(0.7);
-  }
-
-  #party-container {
-    bottom: 140px;
-    transform: scale(0.65);
+    transform-origin: bottom center;
   }
 }
 
-/* Ensure safe areas are respected on iOS */
-body.ios-device {
-  padding-left: env(safe-area-inset-left);
-  padding-right: env(safe-area-inset-right);
-  padding-top: env(safe-area-inset-top);
-  padding-bottom: env(safe-area-inset-bottom);
+/* iPhone-specific detection using aspect ratio and dimensions */
+@media only screen
+  and (orientation: landscape)
+  and (max-height: 450px)
+  and (-webkit-min-device-pixel-ratio: 2) {
+
+  body:not(.portrait-mode) #chat-container {
+    bottom: 25px;
+    left: 25px;
+    transform: scale(0.6) !important;
+    transform-origin: bottom left;
+  }
+
+  body:not(.portrait-mode) #hotbar {
+    bottom: 25px;
+    transform: translateX(-50%) scale(0.65) !important;
+    transform-origin: bottom center;
+  }
+
+  body:not(.portrait-mode) #stats-container {
+    top: 25px;
+    left: 25px;
+    transform: scale(calc(0.65 * var(--xscale, 1)), 0.65) !important;
+    transform-origin: top left;
+  }
+
+  body:not(.portrait-mode) #player-image-container {
+    top: 25px;
+    left: 25px;
+    transform: scale(0.65) !important;
+    transform-origin: top left;
+  }
+
+  body:not(.portrait-mode) #server-time-container {
+    top: 25px;
+    right: 25px;
+    transform: scale(1.0) !important;
+    transform-origin: top right;
+  }
 }
+
+/* Ultra-small iPhone screens (Edge browser, minimal UI, etc.) */
+@media only screen
+  and (orientation: landscape)
+  and (max-height: 380px)
+  and (-webkit-min-device-pixel-ratio: 2) {
+
+  body:not(.portrait-mode) #chat-container {
+    bottom: 25px;
+    left: 25px;
+    transform: scale(0.4) !important;
+    transform-origin: bottom left;
+  }
+
+  body:not(.portrait-mode) #hotbar {
+    bottom: 25px;
+    transform: translateX(-50%) scale(0.45) !important;
+    transform-origin: bottom center;
+  }
+
+  body:not(.portrait-mode) #stats-container {
+    top: 25px;
+    left: 25px;
+    transform: scale(calc(0.45 * var(--xscale, 1)), 0.45) !important;
+    transform-origin: top left;
+  }
+
+  body:not(.portrait-mode) #player-image-container {
+    top: 25px;
+    left: 25px;
+    transform: scale(0.45) !important;
+    transform-origin: top left;
+  }
+
+  body:not(.portrait-mode) #server-time-container {
+    top: 25px;
+    right: 25px;
+    transform: scale(1.0) !important;
+    transform-origin: top right;
+  }
+
+  body:not(.portrait-mode) #castbar {
+    bottom: 40px;
+    transform: translateX(-50%) scale(0.45) !important;
+    transform-origin: bottom center;
+  }
+}
+
+/* iOS safe areas handled per element, not on body to avoid centering issues */
