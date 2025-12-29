@@ -150,8 +150,6 @@ const player = {
       await query("TRUNCATE TABLE parties");
     }
 
-    // Clear all guest accounts
-    await query("DELETE FROM accounts WHERE guest_mode = 1");
     // Clear stats of guest accounts
     await query("DELETE FROM stats WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
     // Clear client configs of guest accounts
@@ -160,6 +158,10 @@ const player = {
     await query("DELETE FROM quest_log WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
     // Clear currency of guest accounts
     await query("DELETE FROM currency WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
+    // Clear collectables of guest accounts
+    await query("DELETE FROM collectables WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
+    // Clear all guest accounts
+    await query("DELETE FROM accounts WHERE guest_mode = 1");
   },
   register: async (
     username: string,
@@ -222,6 +224,9 @@ const player = {
       "INSERT INTO currency (username, copper, silver, gold) VALUES (?, ?, ?, ?)",
       [username, 0, 0, 0]
     );
+
+    // Insert default mount
+    await query("INSERT INTO collectables (type, item, username) VALUES (?, ?, ?)", ["mount", "horse", username]);
     return username;
   },
   verify: async (session_id: string) => {
@@ -1057,7 +1062,7 @@ const player = {
   },
   canMount: (player: Player): boolean => {
     // Don't allow guest players to mount
-    if (player.isGuest) return false;
+    // if (player.isGuest) return false;
     if (!player || !player.stats) return false;
     // Optional level requirement to mount
     // if (player.stats.level < 5) return false;

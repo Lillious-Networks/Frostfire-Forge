@@ -6,16 +6,16 @@
 }
 
 input:-webkit-autofill,
-input:-webkit-autofill:hover, 
-input:-webkit-autofill:focus, 
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
 input:-webkit-autofill:active{
     -webkit-background-clip: text;
-    -webkit-text-fill-color: #b17767;
+    -webkit-text-fill-color: #c4b5fd;
     transition: background-color 5000s ease-in-out 0s;
-    box-shadow: inset 0 0 20px 20px #23232329;
-    caret-color: #b17767;
-    font-size: 16px;
-    font-weight: 600;
+    box-shadow: inset 0 0 20px 20px rgba(31, 41, 55, 0.6);
+    caret-color: #c4b5fd;
+    font-size: 15px;
+    font-weight: 500;
 }
 
 button, input[type="submit"] {
@@ -29,22 +29,35 @@ p {
 }
 
 #link-container {
-  position: absolute;
-  bottom: 10px;
-  /* Center the container */
-  left: 0;
-  right: 0;
-  margin: auto;
   display: flex;
   justify-content: center;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 20px;
 }
 
 a {
-  color: #b17767;
-  font-weight: 600;
-  text-decoration: underline;
+  color: #c4b5fd;
+  font-weight: 500;
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  text-decoration: none;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(31, 41, 55, 0.3) 0%, rgba(31, 41, 55, 0.15) 100%);
+  border: 1px solid rgba(139, 92, 246, 0.15);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+a:hover {
+  color: #e8eaf6;
+  background: linear-gradient(135deg, rgba(31, 41, 55, 0.4) 0%, rgba(31, 41, 55, 0.2) 100%);
+  border-color: rgba(139, 92, 246, 0.3);
+  box-shadow: 0 4px 20px rgba(139, 92, 246, 0.15);
+  transform: translateY(-2px);
 }
 
 ::-ms-reveal {
@@ -63,106 +76,179 @@ html, body {
 body {
   margin: 0;
   padding: 0;
-  font-family: "Roboto", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
   overflow: hidden;
+  background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+  min-height: 100vh;
+  min-height: -webkit-fill-available;
 }
 
 #container {
   width: 100%;
   height: 100vh;
-  background-color: #f1f1f1;
-  background: url("../img/background-blur.png");
-  background-size: cover;
-  background-repeat: no-repeat;
-  background-origin: border-box;
+  min-height: 100vh;
+  min-height: -webkit-fill-available;
+  background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  box-sizing: border-box;
+  gap: 30px;
 }
 
 #logo {
-  content: url("../img/logo.gif");
-  width: auto;
-  height: auto;
-  /* Position at top center */
-  position: absolute;
-  right: 0;
-  left: 0;
-  top: 75px;
-  margin: auto;
-  /* animation: move_logo 2s infinite ease-in-out; */
+  width: 450px;
+  height: 130px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-image: url("../img/engine-logo-transparent.png");
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+  filter: drop-shadow(0 4px 20px rgba(139, 92, 246, 0.4));
+  flex-shrink: 0;
+  order: -1;
 }
 
 #login, #register, #forgotpassword, #changepassword {
-  width: 500px;
-  height: auto;
-  /* Position at top center */
-  position: absolute;
-  top: 200px;
-  left: 0;
-  right: 0;
-  margin: auto;
-  /* Move up and down smoothly */
-  animation: move_login 2s infinite ease-in-out;
-}
-
-#login {
-  content: url("../img/login.png");
-}
-
-#register {
-  content: url("../img/registration.png");
-}
-
-#forgotpassword {
-  content: url("../img/forgotpassword.png");
-}
-
-#changepassword {
-  content: url("../img/changepassword.png");
+  width: 100%;
+  max-width: 420px;
+  background: rgba(17, 24, 39, 0.7);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  border-radius: 20px;
+  box-shadow:
+    0 20px 60px rgba(0, 0, 0, 0.3),
+    0 0 80px rgba(139, 92, 246, 0.1);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  padding: 80px 30px 30px;
+  box-sizing: border-box;
+  margin: 0 auto;
+  position: relative;
 }
 
 #login-container, #register-container, #forgotpassword-container, #changepassword-container {
-  width: 315px;
-  height: 205px;
-  align-items: center;
-  align-content: center;
-  position: absolute;
-  left: 0;
-  right: 0;
-  margin: auto;
-  transform: translateY(-50%);
-  padding: 20px;
-  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-#login-container {
-    top: 525px;
-    animation: move_login_container 2s infinite ease-in-out;
+#login::before {
+  content: "Login";
+  display: block;
+  text-align: center;
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+  font-size: 2em;
+  font-weight: 800;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  position: absolute;
+  top: 40px;
+  left: 0;
+  right: 0;
+  letter-spacing: -0.5px;
+}
+
+#register::before {
+  content: "Register";
+  display: block;
+  text-align: center;
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+  font-size: 2em;
+  font-weight: 800;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 30px;
+  letter-spacing: -0.5px;
+}
+
+#forgotpassword::before {
+  content: "Forgot Password";
+  display: block;
+  text-align: center;
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+  font-size: 1.8em;
+  font-weight: 800;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 30px;
+  letter-spacing: -0.5px;
+}
+
+#changepassword::before {
+  content: "Change Password";
+  display: block;
+  text-align: center;
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+  font-size: 1.8em;
+  font-weight: 800;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 30px;
+  letter-spacing: -0.5px;
+}
+
+#login-container, #register-container, #forgotpassword-container, #changepassword-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+#login-container form, #forgotpassword-container, #changepassword-container form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 #register-container {
-  top: 525px;
-  animation: move_login_container 2s infinite ease-in-out;
+  max-width: 600px;
 }
 
-#forgotpassword-container {
-  top: 525px;
-  animation: move_login_container 2s infinite ease-in-out;
+#register-container form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 16px;
 }
 
-#changepassword-container {
-  top: 525px;
-  animation: move_login_container 2s infinite ease-in-out;
+#register-button {
+  grid-column: 1 / -1;
 }
 
 input[type="text"], input[type="password"] {
-  display: block;
+  width: 100%;
+  background: rgba(31, 41, 55, 0.6);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  color: #c4b5fd;
+  padding: 12px 16px;
+  border-radius: 10px;
+  font-size: 15px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+  box-sizing: border-box;
   outline: none;
-  border: none;
-  z-index: 10000;
-  font-size: 16px;
-  height: 30px;
-  width: 92%;
-  color: #b17767;
-  font-weight: 600;
+  transition: all 0.3s ease;
+}
+
+input[type="text"]:focus,
+input[type="password"]:focus {
+  border-color: rgba(139, 92, 246, 0.6);
+  background: rgba(31, 41, 55, 0.8);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.1);
+}
+
+input[type="text"]::placeholder,
+input[type="password"]::placeholder {
+  color: #9ca3af;
 }
 
 input[type="range"] {
@@ -177,162 +263,49 @@ input[type="range"] {
   font-weight: 600;
 }
 
-#username {
-  margin-top: 34px;
-  margin-left: 10px;
-  background-color: transparent;
+#username, #password, #confirm-password {
+  position: relative;
+  width: 100%;
+  margin: 8px 0;
 }
 
-#password {
-  margin-top: 55px;
-  margin-left: 10px;
-  background-color: transparent;
+#register-email, #register-username, #register-password, #register-confirm-password,
+#forgotpassword-email,
+#changepassword-email, #changepassword-password, #changepassword-confirm-password {
+  position: relative;
+  width: 100%;
+  margin: 8px 0;
 }
 
-#confirm-password {
-  margin-top: 55px;
-  margin-left: 10px;
-  background-color: transparent;
-}
-
-#login-button {
-  position: absolute;
-  margin-top: 70px;
-  background-color: transparent;
-  /* Center the button */
-  left: 50%;
-  transform: translateX(-50%);
-  width: 175px;
-  height: 70px;
-  color: transparent;
+input[type="button"] {
+  width: 100%;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: white;
+  padding: 14px 32px;
+  border-radius: 10px;
+  font-size: 16px;
+  font-weight: 600;
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
   cursor: pointer;
   outline: none;
-  border: none;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  margin-top: 8px;
+  box-sizing: border-box;
 }
 
-#register-email, #register-username, #register-password, #register-confirm-password, #forgotpassword-email, #changepassword-email, #changepassword-password, #changepassword-confirm-password {
-  position: absolute;
-  background-color: transparent;
-  left: 32px;
-  right: 32px;
-  width: unset;
+input[type="button"]:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(102, 126, 234, 0.4);
 }
 
-#forgotpassword-email {
-  top: 98px;
+input[type="button"]:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
 }
 
-#register-email{
-  top: 12px;
-}
-
-#register-username {
-  top: 87px;
-}
-
-#register-password {
-  top: 158px;
-}
-
-#register-confirm-password {
-  top: 200px;
-}
-
-#changepassword-email {
-  top: 55px;
-}
-
-#changepassword-password {
-  top: 126px;
-}
-
-#changepassword-confirm-password {
-  top: 169px;
-}
-
-#register-button {
-  position: absolute;
-  margin-top: 143px;
-  background-color: transparent;
-  /* Center the button */
-  left: 50%;
-  transform: translateX(-50%);
-  width: 175px;
-  height: 70px;
-  color: transparent;
-  cursor: pointer;
-  outline: none;
-  border: none;
-}
-
-#forgotpassword-button {
-  position: absolute;
-  margin-top: 143px;
-  background-color: transparent;
-  /* Center the button */
-  left: 50%;
-  transform: translateX(-50%);
-  width: 175px;
-  height: 70px;
-  color: transparent;
-  cursor: pointer;
-  outline: none;
-  border: none;
-}
-
-#changepassword-button {
-  position: absolute;
-  margin-top: 143px;
-  background-color: transparent;
-  /* Center the button */
-  left: 50%;
-  transform: translateX(-50%);
-  width: 175px;
-  height: 70px;
-  color: transparent;
-  cursor: pointer;
-  outline: none;
-  border: none;
-}
-
-/* Move #logo up and down over time very smoothly */
-@keyframes move_logo {
-  0% {
-    top: 165px;
-  }
-  50% {
-    top: 173px;
-  }
-  100% {
-    top: 165px;
-  }
-}
-
-/* Move #login up and down over time very smoothly and slightly delayed */
-@keyframes move_login {
-  0% {
-    top: 200px;
-  }
-  50% {
-    top: 205px;
-  }
-  100% {
-    top: 200px;
-  }
-}
-
-/* Move #login-container up and down over time very smoothly and slightly delayed */
-@keyframes move_login_container {
-  0% {
-    top: 525px;
-  }
-  50% {
-    top: 530px;
-  }
-  100% {
-    top: 525px;
-  }
-}
+/* Buttons now styled globally via input[type="button"] above */
 
 input[type="range"] {
   display: block;
@@ -392,27 +365,156 @@ input[type="range"] {
 
 .home-button {
   position: fixed;
-  z-index: 1000000;
-  top: 10px;
-  left: 10px;
-  background-color: transparent;
-  color: #b17767;
-  font-weight: 600;
+  z-index: 1000;
+  top: 20px;
+  left: 20px;
+  width: 48px;
+  height: 48px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
   cursor: pointer;
   outline: none;
-  border: none;
-  width: 32px;
-  height: 32px;
-  background-color: #ffffff10;
-  box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
-  border-radius: 50%;
-  padding: 10px;
-  content: url("../img/icons/home-dark.png");
-  transition: ease-in-out 0.3s;
+  box-shadow: 0 8px 24px rgba(102, 126, 234, 0.25);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.home-button::before {
+  content: '🏠';
+  font-size: 22px;
 }
 
 .home-button:hover {
-  background-color: #ffffff50;
-  box-shadow: 0 0 15px rgba(0, 0, 0, 0.7);
-  transition: ease-in-out 0.3s;
+  transform: translateY(-2px);
+  box-shadow: 0 12px 32px rgba(102, 126, 234, 0.4);
+}
+
+/* ===============================================
+   Mobile Optimizations
+   =============================================== */
+
+/* Mobile devices */
+@media (max-width: 480px) {
+  #logo {
+    width: 280px;
+    height: 80px;
+    top: 15px;
+  }
+
+  #container {
+    padding: 15px;
+  }
+
+  #login, #register, #forgotpassword, #changepassword {
+    padding: 30px 20px 25px;
+  }
+
+  #login::before, #register::before {
+    font-size: 1.8em;
+    margin-bottom: 25px;
+  }
+
+  #forgotpassword::before, #changepassword::before {
+    font-size: 1.6em;
+    margin-bottom: 25px;
+  }
+
+  input[type="text"], input[type="password"] {
+    padding: 11px 14px;
+    font-size: 14px;
+  }
+
+  input[type="button"] {
+    padding: 12px 24px;
+    font-size: 15px;
+  }
+
+  a {
+    font-size: 12px;
+    padding: 7px 12px;
+  }
+
+  #link-container {
+    gap: 10px;
+  }
+
+  .home-button {
+    width: 42px;
+    height: 42px;
+    top: 15px;
+    left: 15px;
+  }
+
+  .home-button::before {
+    font-size: 20px;
+  }
+}
+
+/* Landscape mode optimizations */
+@media (orientation: landscape) and (max-height: 500px) {
+  #logo {
+    width: 280px;
+    height: 80px;
+  }
+
+  #container {
+    padding: 15px 5%;
+    gap: 15px;
+    justify-content: center;
+  }
+
+  #login, #register, #forgotpassword, #changepassword {
+    max-width: 650px;
+    width: auto;
+    min-width: 550px;
+    padding: 25px 35px 25px;
+  }
+
+  #login::before, #register::before {
+    font-size: 1.8em;
+    margin-bottom: 20px;
+  }
+
+  #forgotpassword::before, #changepassword::before {
+    font-size: 1.6em;
+    margin-bottom: 20px;
+  }
+
+  #login-container, #register-container, #forgotpassword-container, #changepassword-container {
+    gap: 10px;
+  }
+
+  input[type="text"], input[type="password"] {
+    padding: 11px 16px;
+    font-size: 15px;
+  }
+
+  input[type="button"] {
+    padding: 12px 28px;
+    font-size: 15px;
+  }
+
+  a {
+    font-size: 12px;
+    padding: 7px 12px;
+  }
+
+  #link-container {
+    gap: 10px;
+    margin-top: 12px;
+  }
+
+  .home-button {
+    width: 40px;
+    height: 40px;
+    top: 12px;
+    left: 12px;
+  }
+
+  .home-button::before {
+    font-size: 19px;
+  }
 }

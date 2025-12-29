@@ -105,9 +105,7 @@ export const keyHandlers = {
     toggleGuild = toggleUI(guildContainer, toggleGuild, -450);
   },
   ShiftLeft: () => {
-    if (isKeyOnCooldown("ShiftLeft")) return;
-    putKeyOnCooldown("ShiftLeft");
-    sendRequest({ type: "MOUNT", data: { mount: cache.mount || "horse" } })
+    mount();
   },
   Digit1: async () => {
     cast(0);
@@ -179,6 +177,12 @@ function cast(hotbar_index: number) {
     stopMovement();
     const target = Array.from(cache?.players).find(p => p?.targeted) || null;
     sendRequest({ type: "HOTBAR", data: { spell: hotbar_index + 1, target } });
+}
+
+function mount() {
+    if (isKeyOnCooldown("Mount")) return;
+    putKeyOnCooldown("Mount");
+    sendRequest({ type: "MOUNT", data: { mount: cache.mount || "horse" } });
 }
 
 function selectHotbarSlot(index: number) {
@@ -391,5 +395,6 @@ function setIsKeyPressed(value: boolean) {
 export {
     getIsKeyPressed, setIsKeyPressed, pressedKeys, movementKeys, handleKeyPress, stopMovement, setIsMoving, getIsMoving, getUserHasInteracted, setUserHasInteracted,
     getControllerConnected, setControllerConnected, getLastSentDirection, setLastSentDirection, getLastTypingPacket,
-    setLastTypingPacket, cooldowns, COOLDOWN_DURATION, getContextMenuKeyTriggered, setContextMenuKeyTriggered, blacklistedKeys
+    setLastTypingPacket, cooldowns, COOLDOWN_DURATION, getContextMenuKeyTriggered, setContextMenuKeyTriggered, blacklistedKeys,
+    cast, mount
 };

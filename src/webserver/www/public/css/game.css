@@ -22,8 +22,13 @@ html {
     padding: 0;
     overflow: hidden;
     font-family: 'Comic Relief';
-    width: 100%;
-    height: 100%;
+    width: 100vw;
+    height: var(--viewport-height, 100vh);
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
 }
 
 body {
@@ -32,8 +37,13 @@ body {
     overflow: hidden;
     font-family: 'Comic Relief';
     background-color: #000;
-    width: 100%;
-    height: 100%;
+    width: 100vw;
+    height: var(--viewport-height, 100vh);
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
 }
 
 .ui {
@@ -48,11 +58,10 @@ body {
   height: 100vh; /* Full height of the viewport */
   margin: 0;
   padding: 0;
-  overflow: hidden;
+  overflow: scroll;
 }
 
 #game {
-  background-color: transparent;
   position: absolute;
   top: 0;
   left: 0;
@@ -60,6 +69,8 @@ body {
   bottom: 0;
   margin: 0;
   padding: 0;
+  width: 100vw;
+  height: var(--viewport-height, 100vh);
   display: none;
 }
 
@@ -80,6 +91,38 @@ body {
   margin: 0;
   padding: 0;
   z-index: 100;
+  pointer-events: none;
+}
+
+/* Re-enable pointer events for interactive UI elements */
+#overlay input,
+#overlay button,
+#overlay textarea,
+#overlay select,
+#overlay canvas,
+#overlay a,
+#overlay label[for],
+#overlay .slot,
+#game-notification-container,
+#pause-menu-container,
+#options-menu-container,
+#chat-container,
+#inventory,
+#hotbar,
+#spell-book-container,
+#collectables-container,
+#friends-list-container,
+#guild-container,
+#stats-container,
+#target-stats-container,
+#castbar,
+#stat-screen,
+#full-map,
+#debug-container,
+#server-time-container,
+#party-container,
+#tile-editor-container {
+  pointer-events: auto;
 }
 
 #inventory {
@@ -666,6 +709,8 @@ input::placeholder {
   left: 0;
   right: 0;
   bottom: 0;
+  width: 100vw;
+  height: var(--viewport-height, 100vh);
   background: url("../img/background-blur.png");
   background-size: cover;
   background-repeat: no-repeat;
@@ -749,18 +794,7 @@ input::placeholder {
   transform: scaleX(var(--xscale, 0));
   top: 27;
   left: 350;
-}
-
-#player-image-container {
-  position: fixed;
-  z-index: 101;
-  top: 25px;
-  left: 25px;
-  width: 97px;
-  height: 102px;
-  background: url("../img/ui/ui-player-image.png");
-  background-repeat: no-repeat;
-  background-size: 100% 100%;
+  display: none;
 }
 
 #health-bar-container, #target-health-bar-container {
@@ -854,23 +888,6 @@ input::placeholder {
   text-align: right;
 }
 
-#map-border {
-  position: absolute;
-  z-index: 100;
-  width: 100%;
-  height: 100%;
-  scale: 1.05;
-}
-
-#map img {
-  position: absolute;
-  top: 0;
-  width: 100%;
-  height: 100%;
-  z-index: 99;
-  border-radius: 50%;
-}
-
 #options-menu-container {
   display:none;
   position: fixed;
@@ -899,8 +916,8 @@ input::placeholder {
 }
 
 #options-menu-selections-container {
-  width: 100%;
-  height: 100%;
+  width: 100vw;
+  height: 100vh;
   display: flex;
   flex-direction: row;
 }
@@ -963,8 +980,8 @@ input::placeholder {
 }
 
 #pause-menu-button-container {
-  width: 100%;
-  height: 100%;
+  width: 100vw;
+  height: 100vh;
   display: block;
   align-content: center;
   justify-content: center;
@@ -1081,24 +1098,6 @@ input::placeholder {
   cursor: pointer;
 }
 
-/* Center of the screen */
-#full-map {
-  position: fixed;
-  z-index: 1000;
-  display: none;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  border: 8px solid #b3996a;
-  background: rgba(179, 153, 106, 0.2);
-}
-
-#full-map img {
-  width: 100%;
-  height: 100%;
-  opacity: 0.8;
-}
-
 .self {
   background: #fff;
 }
@@ -1120,7 +1119,7 @@ input::placeholder {
   top: 0;
   left: 50%;
   transform: translateX(-50%);
-  width: 100vw;
+  width: 100%;
   height: 2em;
   z-index: 1006;
   background: linear-gradient(
@@ -1473,14 +1472,15 @@ input[type=range]:disabled {
   padding: 0;
   pointer-events: none;
   z-index: 10;
+  overflow: hidden;
 }
 /* Tile Editor Floating Panels */
 #tile-editor-container {
   position: fixed;
   top: 0;
   left: 0;
-  width: 100%;
-  height: 100%;
+  width: 100vw;
+  height: 100vh;
   z-index: 1000;
   pointer-events: none;
 }
@@ -2153,7 +2153,7 @@ body.tiny-landscape #guild-container {
 }
 
 body.tiny-landscape #game-notification-container {
-  transform: scale(0.75);
+  transform: translateX(-50%) scale(0.75);
   transform-origin: top center;
 }
 
@@ -2296,3 +2296,461 @@ body.tiny-landscape .notification {
 }
 
 /* iOS safe areas handled per element, not on body to avoid centering issues */
+
+/* ===============================================
+   Virtual Joystick for Mobile Touch Controls
+   =============================================== */
+
+/* Wrapper - covers entire screen but doesn't block anything */
+#virtual-joystick-wrapper {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1000;
+  pointer-events: none;
+  display: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+/* Show only on touch devices */
+@media (hover: none) and (pointer: coarse) {
+  #virtual-joystick-wrapper {
+    display: block;
+  }
+}
+
+/* Container - the actual touchable area */
+#virtual-joystick-container {
+  position: absolute;
+  bottom: 120px;
+  left: 120px;
+  width: 200px;
+  height: 200px;
+  pointer-events: auto;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Base - the outer circle visual */
+#virtual-joystick-base {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 35% 35%,
+    rgba(255, 255, 255, 0.15),
+    rgba(255, 255, 255, 0.05)
+  );
+  border: 2.5px solid rgba(255, 255, 255, 0.35);
+  box-shadow:
+    0 10px 40px rgba(0, 0, 0, 0.4),
+    inset 0 2px 4px rgba(255, 255, 255, 0.25),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.25);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  pointer-events: none;
+}
+
+/* Stick - the inner movable circle */
+#virtual-joystick-stick {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 80px;
+  height: 80px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 40% 40%,
+    rgba(255, 255, 255, 0.45),
+    rgba(255, 255, 255, 0.2)
+  );
+  border: 2.5px solid rgba(255, 255, 255, 0.55);
+  box-shadow:
+    0 6px 20px rgba(0, 0, 0, 0.5),
+    inset 0 2px 4px rgba(255, 255, 255, 0.6),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: box-shadow 0.1s ease;
+  will-change: transform;
+  pointer-events: none;
+}
+
+/* Active state when touched */
+#virtual-joystick-stick.active {
+  background: radial-gradient(
+    circle at 40% 40%,
+    rgba(255, 255, 255, 0.6),
+    rgba(255, 255, 255, 0.3)
+  );
+  box-shadow:
+    0 4px 16px rgba(0, 0, 0, 0.6),
+    inset 0 2px 4px rgba(255, 255, 255, 0.7),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.45),
+    0 0 25px rgba(255, 255, 255, 0.35);
+}
+
+/* Responsive adjustments for landscape mobile */
+@media (max-height: 600px) and (orientation: landscape) {
+  #virtual-joystick-container {
+    bottom: 80px;
+    left: 80px;
+    width: 160px;
+    height: 160px;
+  }
+
+  #virtual-joystick-stick {
+    width: 65px;
+    height: 65px;
+  }
+}
+
+/* Small landscape screens (phones) */
+@media (max-height: 450px) and (orientation: landscape) {
+  #virtual-joystick-container {
+    bottom: 60px;
+    left: 60px;
+    width: 140px;
+    height: 140px;
+  }
+
+  #virtual-joystick-stick {
+    width: 56px;
+    height: 56px;
+  }
+}
+
+/* Ultra small screens (edge case) */
+@media (max-height: 380px) and (orientation: landscape) {
+  #virtual-joystick-container {
+    bottom: 50px;
+    left: 50px;
+    width: 120px;
+    height: 120px;
+  }
+
+  #virtual-joystick-stick {
+    width: 48px;
+    height: 48px;
+  }
+}
+
+/* Virtual Mount Button */
+#virtual-mount-button {
+  position: absolute;
+  bottom: 30px;
+  left: 30px;
+  width: 85px;
+  height: 85px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 35% 35%,
+    rgba(255, 255, 255, 0.15),
+    rgba(255, 255, 255, 0.05)
+  );
+  border: 2.5px solid rgba(255, 255, 255, 0.35);
+  box-shadow:
+    0 10px 40px rgba(0, 0, 0, 0.4),
+    inset 0 2px 4px rgba(255, 255, 255, 0.25),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.25);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  pointer-events: auto;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Comic Relief';
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  transition: all 0.15s ease;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+#virtual-mount-button:active {
+  background: radial-gradient(
+    circle at 35% 35%,
+    rgba(255, 255, 255, 0.25),
+    rgba(255, 255, 255, 0.1)
+  );
+  box-shadow:
+    0 6px 24px rgba(0, 0, 0, 0.5),
+    inset 0 2px 4px rgba(255, 255, 255, 0.35),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.35),
+    0 0 20px rgba(255, 255, 255, 0.25);
+  transform: scale(0.95);
+}
+
+/* Responsive sizing for mount button */
+@media (max-height: 600px) and (orientation: landscape) {
+  #virtual-mount-button {
+    bottom: 25px;
+    left: 25px;
+    width: 70px;
+    height: 70px;
+    font-size: 12px;
+  }
+}
+
+@media (max-height: 450px) and (orientation: landscape) {
+  #virtual-mount-button {
+    bottom: 20px;
+    left: 20px;
+    width: 60px;
+    height: 60px;
+    font-size: 11px;
+  }
+}
+
+@media (max-height: 380px) and (orientation: landscape) {
+  #virtual-mount-button {
+    bottom: 15px;
+    left: 15px;
+    width: 50px;
+    height: 50px;
+    font-size: 10px;
+  }
+}
+
+/* ===============================================
+   Hotbar Scaling for Mobile Touch Devices
+   =============================================== */
+
+/* Make hotbar bigger on all touch devices - portrait mode */
+@media (hover: none) and (pointer: coarse) and (orientation: portrait) {
+  #hotbar {
+    bottom: 10px !important;
+    transform: translateX(-50%) scale(1.5) !important;
+    transform-origin: bottom center !important;
+  }
+}
+
+/* Make hotbar bigger on mobile landscape - override the small scales */
+body.mobile-landscape #hotbar {
+  bottom: 10px !important;
+  transform: translateX(-50%) scale(1.1) !important;
+  transform-origin: bottom center !important;
+}
+
+body.ipad-device.landscape-mode #hotbar {
+  bottom: 15px !important;
+  transform: translateX(-50%) scale(1.3) !important;
+  transform-origin: bottom center !important;
+}
+
+body.small-landscape #hotbar {
+  bottom: 10px !important;
+  transform: translateX(-50%) scale(1.0) !important;
+  transform-origin: bottom center !important;
+}
+
+body.tiny-landscape #hotbar {
+  bottom: 10px !important;
+  transform: translateX(-50%) scale(0.9) !important;
+  transform-origin: bottom center !important;
+}
+
+/* ===============================================
+   Hide Chat Container on Mobile Touch Devices
+   =============================================== */
+
+/* Hide chat on all touch devices */
+@media (hover: none) and (pointer: coarse) {
+  #chat-container {
+    display: none !important;
+  }
+}
+
+/* ===============================================
+   Move Server Time Container on Mobile Touch Devices
+   =============================================== */
+
+/* Move server time more to the right and up on mobile - equal padding on all sides */
+@media (hover: none) and (pointer: coarse) {
+  #server-time-container {
+    top: 10px !important;
+    right: 10px !important;
+  }
+}
+
+body.mobile-landscape #server-time-container {
+  top: 10px !important;
+  right: 10px !important;
+}
+
+body.ipad-device.landscape-mode #server-time-container {
+  top: 10px !important;
+  right: 10px !important;
+}
+
+body.small-landscape #server-time-container {
+  top: 10px !important;
+  right: 10px !important;
+}
+
+body.tiny-landscape #server-time-container {
+  top: 10px !important;
+  right: 10px !important;
+}
+
+/* ===============================================
+   Move Stats Container and Player Image on Mobile Touch Devices
+   =============================================== */
+
+/* Move stats container to top left with equal padding on mobile */
+@media (hover: none) and (pointer: coarse) {
+  #stats-container {
+    top: 10px !important;
+    left: 10px !important;
+  }
+
+  #player-image-container {
+    top: 10px !important;
+    left: 10px !important;
+  }
+}
+
+body.mobile-landscape #stats-container {
+  top: 10px !important;
+  left: 10px !important;
+}
+
+body.mobile-landscape #player-image-container {
+  top: 10px !important;
+  left: 10px !important;
+}
+
+body.ipad-device.landscape-mode #stats-container {
+  top: 10px !important;
+  left: 10px !important;
+}
+
+body.ipad-device.landscape-mode #player-image-container {
+  top: 10px !important;
+  left: 10px !important;
+}
+
+body.small-landscape #stats-container {
+  top: 10px !important;
+  left: 10px !important;
+}
+
+body.small-landscape #player-image-container {
+  top: 10px !important;
+  left: 10px !important;
+}
+
+body.tiny-landscape #stats-container {
+  top: 10px !important;
+  left: 10px !important;
+}
+
+body.tiny-landscape #player-image-container {
+  top: 10px !important;
+  left: 10px !important;
+}
+
+/* ===============================================
+   Stats Container Scaling for Mobile Touch Devices
+   =============================================== */
+
+/* Make stats container bigger on all touch devices - portrait mode */
+@media (hover: none) and (pointer: coarse) and (orientation: portrait) {
+  #stats-container {
+    transform: scale(calc(1.1 * var(--xscale, 1)), 1.1) !important;
+    transform-origin: top left !important;
+  }
+
+  #player-image-container {
+    transform: scale(1.1) !important;
+    transform-origin: top left !important;
+  }
+}
+
+/* Make stats container bigger on mobile landscape - override the small scales */
+body.mobile-landscape #stats-container {
+  transform: scale(calc(0.8 * var(--xscale, 1)), 0.8) !important;
+  transform-origin: top left !important;
+}
+
+body.mobile-landscape #player-image-container {
+  transform: scale(0.8) !important;
+  transform-origin: top left !important;
+}
+
+body.ipad-device.landscape-mode #stats-container {
+  transform: scale(calc(1.0 * var(--xscale, 1)), 1.0) !important;
+  transform-origin: top left !important;
+}
+
+body.ipad-device.landscape-mode #player-image-container {
+  transform: scale(1.0) !important;
+  transform-origin: top left !important;
+}
+
+body.small-landscape #stats-container {
+  transform: scale(calc(0.75 * var(--xscale, 1)), 0.75) !important;
+  transform-origin: top left !important;
+}
+
+body.small-landscape #player-image-container {
+  transform: scale(0.75) !important;
+  transform-origin: top left !important;
+}
+
+body.tiny-landscape #stats-container {
+  transform: scale(calc(0.65 * var(--xscale, 1)), 0.65) !important;
+  transform-origin: top left !important;
+}
+
+body.tiny-landscape #player-image-container {
+  transform: scale(0.65) !important;
+  transform-origin: top left !important;
+}
+
+/* ===============================================
+   Game Notification Bar for Mobile Touch Devices
+   =============================================== */
+
+/* Game notification is now outside #overlay to fix z-index stacking on mobile */
+/* z-index 1003: Above virtual joystick (1000) but below loading screen (1005) */
+@media (hover: none) and (pointer: coarse) {
+  #game-notification-container {
+    z-index: 1003 !important;
+    pointer-events: none !important;
+  }
+
+  #game-notification-message {
+    pointer-events: none !important;
+  }
+}
+
+/* Apply to mobile body classes */
+body.mobile-landscape #game-notification-container,
+body.small-landscape #game-notification-container,
+body.tiny-landscape #game-notification-container,
+body.ipad-device #game-notification-container {
+  z-index: 1003 !important;
+  pointer-events: none !important;
+}
+
+/* ===============================================
+   iOS Game Canvas Zoom Out
+   =============================================== */
+
+/* Canvas zoom is handled via context scaling in JavaScript for proper rendering */

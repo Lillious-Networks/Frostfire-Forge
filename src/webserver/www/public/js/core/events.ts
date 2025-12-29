@@ -19,6 +19,24 @@ import { friendsListSearch } from "./friends.js";
 import { createContextMenu, createPartyContextMenu } from "./actions.js";
 let typingTimer: number | null = null;
 
+// Fix iOS Safari 100vh bug immediately on page load
+// Use visualViewport if available (more accurate on mobile), fallback to innerHeight
+const getActualViewportHeight = () => {
+  if (window.visualViewport) {
+    return window.visualViewport.height;
+  }
+  return window.innerHeight;
+};
+
+document.documentElement.style.setProperty('--viewport-height', `${getActualViewportHeight()}px`);
+
+// Update on visualViewport resize (when address bar shows/hides)
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => {
+    document.documentElement.style.setProperty('--viewport-height', `${window.visualViewport.height}px`);
+  });
+}
+
 const userInteractionListener = () => {
   if (!getUserHasInteracted()) {
     setUserHasInteracted(true);
@@ -233,17 +251,37 @@ function updateOrientationClass() {
 }
 
 window.addEventListener("resize", () => {
+  // Fix iOS Safari 100vh bug by setting actual viewport height
+  const actualHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  document.documentElement.style.setProperty('--viewport-height', `${actualHeight}px`);
+
   // Update canvas size to match new window size with device pixel ratio support
   const dpr = window.devicePixelRatio || 1;
   canvas.width = window.innerWidth * dpr;
-  canvas.height = window.innerHeight * dpr;
+  canvas.height = actualHeight * dpr;
+
+  // Use actual viewport pixel dimensions instead of vw/vh to avoid iOS Safari bugs
   canvas.style.width = window.innerWidth + "px";
-  canvas.style.height = window.innerHeight + "px";
+  canvas.style.height = actualHeight + "px";
 
   // Re-scale context to match device pixel ratio after resize
   if (ctx) {
     ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform
-    ctx.scale(dpr, dpr);
+
+    // Check if device is touch-capable (mobile)
+    const isTouchDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+
+    // Apply zoom out on mobile devices for better visibility
+    if (isTouchDevice) {
+      const mobileZoom = 0.85; // 85% zoom = show more of the world
+      ctx.scale(dpr * mobileZoom, dpr * mobileZoom);
+      // Translate to center the zoomed out view
+      ctx.translate((window.innerWidth * (1 - mobileZoom)) / (2 * mobileZoom),
+                    (actualHeight * (1 - mobileZoom)) / (2 * mobileZoom));
+    } else {
+      ctx.scale(dpr, dpr);
+    }
+
   }
 
   // Remove any open context menu on resize

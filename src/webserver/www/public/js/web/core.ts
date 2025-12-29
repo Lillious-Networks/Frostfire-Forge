@@ -4,3 +4,4 @@ import '../core/preventzoomcontrols';
 import './notification';
 import '../core/packets';
 import '../core/gamepad';
+import '../core/virtualcontroller';

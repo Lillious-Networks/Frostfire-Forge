@@ -249,9 +249,10 @@ class SnowParticle {
   }
 }
 
-// Create rain particles
+// Create rain particles - reduce count on mobile devices
 const rainParticles: RainParticle[] = [];
-const rainCount = 100;
+const isMobileDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+const rainCount = isMobileDevice ? 50 : 100; // 50% fewer particles on mobile
 for (let i = 0; i < rainCount; i++) {
   rainParticles.push(new RainParticle(Math.random() * height));
 }
@@ -295,22 +296,22 @@ class MeltParticle {
   }
 }
 
-// Create snow particles
+// Create snow particles - reduce count on mobile devices
 const snowParticles: SnowParticle[] = [];
-const snowCount = 400; // Many more particles
+const snowCount = isMobileDevice ? 200 : 400; // 50% fewer particles on mobile
 for (let i = 0; i < snowCount; i++) {
   snowParticles.push(new SnowParticle(Math.random() * height));
 }
 
-// Pre-create melt particle pool
-const meltPoolSize = 100;
+// Pre-create melt particle pool - reduce on mobile
+const meltPoolSize = isMobileDevice ? 50 : 100;
 const meltPool: MeltParticle[] = [];
 for (let i = 0; i < meltPoolSize; i++) {
   meltPool.push(new MeltParticle());
 }
 
-// Pre-create splash particle pool
-const splashPoolSize = 100;
+// Pre-create splash particle pool - reduce on mobile
+const splashPoolSize = isMobileDevice ? 50 : 100;
 const splashPool: SplashParticle[] = [];
 for (let i = 0; i < splashPoolSize; i++) {
   splashPool.push(new SplashParticle());
