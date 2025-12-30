@@ -128,13 +128,15 @@ body {
 #inventory {
   position: fixed;
   bottom: 25px;
-  right: -350;
+  right: -350px;
   z-index: 100;
   background: url("../img/ui/ui-inventory-container.png");
   background-repeat: no-repeat;
   background-size: 100% 100%;
   transition: right ease-in-out 1s;
   will-change: right;
+  width: 335px;
+  height: 260px;
 }
 
 #inventory #grid{
@@ -143,7 +145,6 @@ body {
   padding: 35px;
   padding-bottom: 15px;
   padding-top: 25px;
-  max-width: calc((40px + 10px) * 5 - 30px);
   gap: 5px;
 }
 
@@ -714,7 +715,7 @@ input::placeholder {
   background: url("../img/background-blur.png");
   background-size: cover;
   background-repeat: no-repeat;
-  z-index: 1005;
+  z-index: 10000;
 }
 
 #loading-screen #progress-bar-container {
@@ -916,8 +917,8 @@ input::placeholder {
 }
 
 #options-menu-selections-container {
-  width: 100vw;
-  height: 100vh;
+  width: 100%;
+  height: 100%;
   display: flex;
   flex-direction: row;
 }
@@ -980,8 +981,8 @@ input::placeholder {
 }
 
 #pause-menu-button-container {
-  width: 100vw;
-  height: 100vh;
+  width: 100%;
+  height: 100%;
   display: block;
   align-content: center;
   justify-content: center;
@@ -1900,15 +1901,7 @@ body.mobile-landscape {
     right: 25px;
   }
 
-  #spell-book-container, #collectables-container,
-  #friends-list-container, #guild-container {
-    width: 323px;
-    height: 310px;
-    top: 50px;
-    right: -350px;
-    transform: scale(0.65);
-    transform-origin: top right;
-  }
+  /* Scale removed for spell-book, collectables, friends-list, guild - handled by touch device centering */
 
   /* Scale party container */
   #party-container {
@@ -2008,11 +2001,7 @@ body.ios-device.mobile-landscape #server-time-container {
   right: max(25px, env(safe-area-inset-right, 25px));
 }
 
-body.ios-device.mobile-landscape #inventory,
-body.ios-device.mobile-landscape #spell-book-container,
-body.ios-device.mobile-landscape #collectables-container,
-body.ios-device.mobile-landscape #friends-list-container,
-body.ios-device.mobile-landscape #guild-container {
+body.ios-device.mobile-landscape #inventory {
   right: max(-350px, calc(-350px - env(safe-area-inset-right, 0px)));
 }
 
@@ -2086,11 +2075,7 @@ body.small-landscape #party-container {
   transform: scale(0.6);
 }
 
-body.small-landscape #inventory,
-body.small-landscape #spell-book-container,
-body.small-landscape #collectables-container,
-body.small-landscape #friends-list-container,
-body.small-landscape #guild-container {
+body.small-landscape #inventory {
   transform: scale(0.6);
 }
 
@@ -2142,14 +2127,8 @@ body.tiny-landscape #party-container {
   transform-origin: bottom left;
 }
 
-body.tiny-landscape #inventory,
-body.tiny-landscape #spell-book-container,
-body.tiny-landscape #collectables-container,
-body.tiny-landscape #friends-list-container,
-body.tiny-landscape #guild-container {
-  transform: scale(0.4);
-  transform-origin: top right;
-  top: 35px;
+body.tiny-landscape #inventory {
+  transform: scale(0.6);
 }
 
 body.tiny-landscape #game-notification-container {
@@ -2472,7 +2451,7 @@ body.tiny-landscape .notification {
   align-items: center;
   justify-content: center;
   font-family: 'Comic Relief';
-  font-size: 14px;
+  font-size: 32px;
   font-weight: 600;
   color: rgba(255, 255, 255, 0.9);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
@@ -2503,7 +2482,7 @@ body.tiny-landscape .notification {
     left: 25px;
     width: 70px;
     height: 70px;
-    font-size: 12px;
+    font-size: 28px;
   }
 }
 
@@ -2513,7 +2492,7 @@ body.tiny-landscape .notification {
     left: 20px;
     width: 60px;
     height: 60px;
-    font-size: 11px;
+    font-size: 24px;
   }
 }
 
@@ -2523,7 +2502,7 @@ body.tiny-landscape .notification {
     left: 15px;
     width: 50px;
     height: 50px;
-    font-size: 10px;
+    font-size: 20px;
   }
 }
 
@@ -2754,3 +2733,180 @@ body.ipad-device #game-notification-container {
    =============================================== */
 
 /* Canvas zoom is handled via context scaling in JavaScript for proper rendering */
+
+/* ===============================================
+   Mobile UI Toggle Buttons
+   =============================================== */
+
+/* Mobile UI Backdrop */
+#mobile-ui-backdrop {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1999;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(2px);
+}
+
+/* Show only on touch devices */
+@media (hover: none) and (pointer: coarse) {
+  #mobile-ui-backdrop {
+    display: none;
+  }
+
+  #mobile-ui-backdrop.active {
+    display: block;
+  }
+}
+
+#mobile-ui-buttons {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2003;
+  display: none;
+  gap: 8px;
+  pointer-events: auto;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Show only on touch devices */
+@media (hover: none) and (pointer: coarse) {
+  #mobile-ui-buttons {
+    display: flex;
+  }
+}
+
+.mobile-ui-btn {
+  width: 45px;
+  height: 45px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 35% 35%,
+    rgba(255, 255, 255, 0.15),
+    rgba(255, 255, 255, 0.05)
+  );
+  border: 2.5px solid rgba(255, 255, 255, 0.35);
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.4),
+    inset 0 2px 4px rgba(255, 255, 255, 0.25),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.25);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  transition: all 0.15s ease;
+  touch-action: manipulation;
+  padding: 0;
+  outline: none;
+}
+
+.mobile-ui-btn:active {
+  background: radial-gradient(
+    circle at 35% 35%,
+    rgba(255, 255, 255, 0.25),
+    rgba(255, 255, 255, 0.1)
+  );
+  box-shadow:
+    0 4px 16px rgba(0, 0, 0, 0.5),
+    inset 0 2px 4px rgba(255, 255, 255, 0.35),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.35),
+    0 0 20px rgba(255, 255, 255, 0.25);
+  transform: scale(0.95);
+}
+
+.mobile-ui-btn.active {
+  background: radial-gradient(
+    circle at 35% 35%,
+    rgba(46, 204, 113, 0.3),
+    rgba(46, 204, 113, 0.1)
+  );
+  border-color: rgba(46, 204, 113, 0.6);
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.4),
+    0 0 20px rgba(46, 204, 113, 0.4),
+    inset 0 2px 4px rgba(255, 255, 255, 0.35);
+}
+
+/* Responsive sizing for smaller screens */
+@media (max-height: 600px) and (orientation: landscape) {
+  .mobile-ui-btn {
+    width: 40px;
+    height: 40px;
+    font-size: 18px;
+  }
+
+  #mobile-ui-buttons {
+    gap: 6px;
+  }
+}
+
+@media (max-height: 450px) and (orientation: landscape) {
+  .mobile-ui-btn {
+    width: 35px;
+    height: 35px;
+    font-size: 16px;
+  }
+
+  #mobile-ui-buttons {
+    gap: 5px;
+  }
+}
+
+/* ===============================================
+   Center UI Panels on Mobile Touch Devices
+   =============================================== */
+
+/* Center and adjust UI panels on mobile touch devices */
+@media (hover: none) and (pointer: coarse) {
+  #inventory {
+    position: fixed !important;
+    top: 50% !important;
+    bottom: auto !important;
+    right: auto !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) scale(1) !important;
+    transition: opacity 0.3s ease, visibility 0.3s ease !important;
+    opacity: 0 !important;
+    visibility: hidden !important;
+    z-index: 2001 !important;
+  }
+
+  #inventory.open {
+    opacity: 1 !important;
+    visibility: visible !important;
+  }
+
+  #spell-book-container,
+  #collectables-container,
+  #friends-list-container,
+  #guild-container {
+    position: fixed !important;
+    top: 50% !important;
+    margin-top: 5px;
+    bottom: auto !important;
+    right: auto !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) scale(0.7) !important;
+    transition: opacity 0.3s ease, visibility 0.3s ease !important;
+    opacity: 0 !important;
+    visibility: hidden !important;
+    z-index: 2001 !important;
+  }
+
+  #spell-book-container.open,
+  #collectables-container.open,
+  #friends-list-container.open,
+  #guild-container.open {
+    opacity: 1 !important;
+    visibility: visible !important;
+  }
+}
