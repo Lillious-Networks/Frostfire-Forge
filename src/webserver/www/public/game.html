@@ -24,6 +24,8 @@
       <div id="game-notification-message" class="ui"></div>
     </div>
     <div id="overlay" class="ui">
+      <!-- Mobile UI Backdrop -->
+      <div id="mobile-ui-backdrop"></div>
       <div id="pause-menu-container" class="ui">
         <div id="pause-menu" class="ui">
           <div id="pause-menu-button-container" class="ui">
@@ -252,6 +254,14 @@
         </div>
       </div>
     </div>
+    <!-- Mobile UI Toggle Buttons -->
+    <div id="mobile-ui-buttons">
+      <button id="mobile-inventory-button" type="button" class="mobile-ui-btn" title="Inventory">🎒</button>
+      <button id="mobile-spellbook-button" type="button" class="mobile-ui-btn" title="Spellbook">📖</button>
+      <button id="mobile-collectables-button" type="button" class="mobile-ui-btn" title="Collectables">💎</button>
+      <button id="mobile-friends-button" type="button" class="mobile-ui-btn" title="Friends">👥</button>
+      <button id="mobile-guild-button" type="button" class="mobile-ui-btn" title="Guild">🛡️</button>
+    </div>
     <!-- Virtual Joystick -->
     <div id="virtual-joystick-wrapper">
       <div id="virtual-joystick-container">
@@ -259,7 +269,7 @@
         <div id="virtual-joystick-stick"></div>
       </div>
       <button id="virtual-mount-button" type="button">
-        <span>Mount</span>
+        <span>🐴</span>
       </button>
     </div>
     <canvas id="game"></canvas>
