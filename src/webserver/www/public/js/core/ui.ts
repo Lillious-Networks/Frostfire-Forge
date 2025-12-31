@@ -17,6 +17,7 @@ const fpsSlider = document.getElementById("fps-slider") as HTMLInputElement;
 const healthBar = document.getElementById("health-progress-bar") as HTMLDivElement;
 const staminaBar = document.getElementById("stamina-progress-bar") as HTMLDivElement;
 const xpBar = document.getElementById("xp-bar") as HTMLDivElement;
+const levelContainer = document.getElementById("level-container") as HTMLDivElement;
 const musicSlider = document.getElementById("music-slider") as HTMLInputElement;
 const effectsSlider = document.getElementById("effects-slider") as HTMLInputElement;
 const mutedCheckbox = document.getElementById("muted-checkbox") as HTMLInputElement;
@@ -83,12 +84,68 @@ function saveHotbarConfiguration() {
 }
 
 // Add drag-and-drop support to hotbar slots
+// Track if a successful hotbar-to-hotbar drop occurred
+let successfulHotbarDrop = false;
+
 hotbarSlots.forEach((slot, index) => {
+  // Make hotbar slots draggable when shift is held
+  slot.addEventListener("mousedown", (event: MouseEvent) => {
+    if (event.shiftKey && slot.dataset.spellName) {
+      slot.draggable = true;
+    } else {
+      slot.draggable = false;
+    }
+  });
+
+  // Handle drag start from hotbar slot
+  slot.addEventListener("dragstart", (event: DragEvent) => {
+    if (!event.shiftKey || !slot.dataset.spellName) {
+      event.preventDefault();
+      return;
+    }
+
+    // Reset the flag at the start of each drag
+    successfulHotbarDrop = false;
+
+    if (event.dataTransfer) {
+      // Mark this as a hotbar-to-hotbar drag
+      event.dataTransfer.setData("hotbar-source-index", index.toString());
+      event.dataTransfer.setData("text/plain", slot.dataset.spellName);
+
+      const img = slot.querySelector("img") as HTMLImageElement;
+      if (img) {
+        event.dataTransfer.setData("image/src", img.src);
+      }
+
+      event.dataTransfer.effectAllowed = "move";
+      slot.style.opacity = "0.5";
+    }
+  });
+
+  // Handle drag end to detect if spell was dragged off hotbar
+  slot.addEventListener("dragend", (event: DragEvent) => {
+    slot.style.opacity = "1";
+    slot.draggable = false;
+
+    // Only clear if dropped outside hotbar and wasn't a successful hotbar-to-hotbar drop
+    if (!successfulHotbarDrop && event.dataTransfer && event.dataTransfer.dropEffect === "none") {
+      // Clear the slot since it was dragged off
+      delete slot.dataset.spellName;
+      slot.innerHTML = "";
+      saveHotbarConfiguration();
+    }
+
+    // Reset the flag after handling dragend
+    successfulHotbarDrop = false;
+  });
+
   // Prevent default drag over behavior
   slot.addEventListener("dragover", (event: DragEvent) => {
     event.preventDefault();
     if (event.dataTransfer) {
-      event.dataTransfer.dropEffect = "copy";
+      // Check if dragging from another hotbar slot
+      const isHotbarDrag = event.dataTransfer.types.includes("hotbar-source-index");
+      event.dataTransfer.dropEffect = isHotbarDrag ? "move" : "copy";
     }
     slot.style.backgroundColor = "rgba(255, 255, 255, 0.2)";
   });
@@ -104,26 +161,68 @@ hotbarSlots.forEach((slot, index) => {
     slot.style.backgroundColor = "";
 
     if (event.dataTransfer) {
+      const sourceIndex = event.dataTransfer.getData("hotbar-source-index");
       const spellName = event.dataTransfer.getData("text/plain");
       const imageSrc = event.dataTransfer.getData("image/src");
 
       if (spellName) {
-        // Store spell name in data attribute
-        slot.dataset.spellName = spellName;
+        // Check if this is a hotbar-to-hotbar drag (swap operation)
+        if (sourceIndex !== "" && sourceIndex !== index.toString()) {
+          const sourceSlot = hotbarSlots[parseInt(sourceIndex)];
 
-        // Clear existing content
-        slot.innerHTML = "";
-        slot.classList.remove("empty");
+          // Store target slot's current spell (if any)
+          const targetSpellName = slot.dataset.spellName;
+          const targetImg = slot.querySelector("img") as HTMLImageElement;
+          const targetImageSrc = targetImg ? targetImg.src : null;
 
-        // Add spell icon if available
-        if (imageSrc) {
-          const iconImage = new Image();
-          iconImage.src = imageSrc;
-          iconImage.draggable = false;
-          slot.appendChild(iconImage);
+          // Move source spell to target slot
+          slot.dataset.spellName = spellName;
+          slot.innerHTML = "";
+
+          if (imageSrc) {
+            const iconImage = new Image();
+            iconImage.src = imageSrc;
+            iconImage.draggable = false;
+            slot.appendChild(iconImage);
+          } else {
+            slot.innerText = spellName;
+          }
+
+          // Move target spell to source slot (or clear if empty)
+          if (targetSpellName && targetSpellName !== "") {
+            // Swap: move target spell to source slot
+            sourceSlot.dataset.spellName = targetSpellName;
+            sourceSlot.innerHTML = "";
+
+            if (targetImageSrc) {
+              const iconImage = new Image();
+              iconImage.src = targetImageSrc;
+              iconImage.draggable = false;
+              sourceSlot.appendChild(iconImage);
+            } else {
+              sourceSlot.innerText = targetSpellName;
+            }
+          } else {
+            // Target was empty, so clear source slot and mark it as empty
+            delete sourceSlot.dataset.spellName;
+            sourceSlot.innerHTML = "";
+          }
+
+          // Mark this as a successful hotbar-to-hotbar drop
+          successfulHotbarDrop = true;
         } else {
-          // Fallback to spell name text
-          slot.innerText = spellName;
+          // Regular drag from spellbook to hotbar
+          slot.dataset.spellName = spellName;
+          slot.innerHTML = "";
+
+          if (imageSrc) {
+            const iconImage = new Image();
+            iconImage.src = imageSrc;
+            iconImage.draggable = false;
+            slot.appendChild(iconImage);
+          } else {
+            slot.innerText = spellName;
+          }
         }
 
         // Save hotbar configuration to server
@@ -140,7 +239,6 @@ hotbarSlots.forEach((slot, index) => {
       // Clear the slot
       delete slot.dataset.spellName;
       slot.innerHTML = "";
-      slot.classList.add("empty");
 
       // Save updated configuration
       saveHotbarConfiguration();
@@ -592,7 +690,6 @@ async function loadHotbarConfiguration(hotbarConfig: any) {
       // Clear the slot
       delete slot.dataset.spellName;
       slot.innerHTML = "";
-      slot.classList.add("empty");
     }
   });
 }
@@ -600,7 +697,7 @@ async function loadHotbarConfiguration(hotbarConfig: any) {
 export {
     toggleUI, toggleDebugContainer, handleStatsUI, createPartyUI, updatePartyMemberStats, updateHealthBar, updateStaminaBar, castSpell, positionText,
     friendsListUI, inventoryUI, spellBookUI, pauseMenu, menuElements, chatInput, canvas, ctx, fpsSlider, healthBar,
-    staminaBar, xpBar, musicSlider, effectsSlider, mutedCheckbox, statUI, overlay,
+    staminaBar, xpBar, levelContainer, musicSlider, effectsSlider, mutedCheckbox, statUI, overlay,
     packetsSentReceived, optionsMenu, friendsList, friendsListSearch, onlinecount, progressBar, progressBarContainer,
     inventoryGrid, chatMessages, loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage,
     serverTime, ambience, weatherCanvas, weatherCtx, guildContainer, guildName, guildRank, guildMembersList,

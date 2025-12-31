@@ -104,7 +104,7 @@ export const keyHandlers = {
 
     toggleGuild = toggleUI(guildContainer, toggleGuild, -450);
   },
-  ShiftLeft: () => {
+  KeyQ: () => {
     mount();
   },
   Digit1: async () => {

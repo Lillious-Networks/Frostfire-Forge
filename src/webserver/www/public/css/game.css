@@ -733,6 +733,19 @@ input::placeholder(:not(#chat-container input)) {
   height: 161px;
 }
 
+#level-container {
+  position: absolute;
+  left: 50%;
+  top: 18px;
+  transform: translateX(-50%);
+  font-size: 26px;
+  z-index: 101;
+  color: #00ffb3;
+  text-shadow: 1px 1px 1px #000;
+  -webkit-text-stroke-width: 1px;
+  -webkit-text-stroke-color: rgb(38, 0, 255);
+}
+
 #xp-bar-container {
   position: absolute;
   height: 10px;
