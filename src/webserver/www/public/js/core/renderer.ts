@@ -13,7 +13,7 @@ let pendingRequest = false;
 let cameraX: number = 0, cameraY: number = 0, lastFrameTime: number = 0;
 let smoothMapX: number = 0, smoothMapY: number = 0; // Smoothed position for map rendering only
 let cameraInitialized: boolean = false;
-import { canvas, ctx, fpsSlider, healthBar, staminaBar, targetHealthBar, targetStaminaBar, collisionDebugCheckbox, chunkOutlineDebugCheckbox, collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox, loadedChunksText } from "./ui.js";
+import { canvas, ctx, fpsSlider, healthBar, staminaBar, collisionDebugCheckbox, chunkOutlineDebugCheckbox, collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox, loadedChunksText } from "./ui.js";
 
 canvas.style.position = 'fixed';
 
@@ -414,15 +414,6 @@ function animationLoop() {
     const staminaPercent = (stamina / max_stamina) * 100;
     updateHealthBar(healthBar, healthPercent);
     updateStaminaBar(staminaBar, staminaPercent);
-  }
-
-  const targetPlayer = playersArray.find(p => p.targeted);
-  if (targetPlayer) {
-    const { health, max_health, stamina, max_stamina } = targetPlayer.stats;
-    const healthPercent = (health / max_health) * 100;
-    const staminaPercent = (stamina / max_stamina) * 100;
-    updateHealthBar(targetHealthBar, healthPercent);
-    updateStaminaBar(targetStaminaBar, staminaPercent);
   }
 
   const visibleNpcs = cache.npcs.filter(npc =>

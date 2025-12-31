@@ -40,6 +40,7 @@ async function createPlayer(data: any) {
     party: data.party || null,
     mounted: data.mounted || false,
     moving: data.location.moving || false,
+    chatType: "global" as "global" | "party" | "whisper",
     damageNumbers: [] as Array<{
       value: number;
       x: number;
@@ -86,8 +87,14 @@ async function createPlayer(data: any) {
       // Draw chat bubbles on top
       if (this.chat) {
         if (this.chat.trim() !== "") {
+          // Determine chat color based on chat type
+          let chatColor = "white";
+          if (this.chatType === "party") {
+            chatColor = "#86b3ff";
+          }
+
           context.fillStyle = "black";
-          context.fillStyle = "white";
+          context.fillStyle = chatColor;
           context.textAlign = "center";
           context.shadowBlur = 1;
           context.shadowColor = "black";
@@ -107,7 +114,7 @@ async function createPlayer(data: any) {
               textWidth + 10,
               20
             );
-            context.fillStyle = "white";
+            context.fillStyle = chatColor;
             context.fillText(lines[i], this.position.x, startingPosition);
           }
         }
@@ -550,7 +557,7 @@ async function createPlayer(data: any) {
     setCameraY(player.position.y - window.innerHeight / 2 + 48);
     window.scrollTo(getCameraX(), getCameraY());
     updateFriendsList({friends: data.friends || []});
-    createPartyUI(data.party || []);
+    createPartyUI(data.party || [], Array.from(cache.players));
     updateXp(data.stats.xp, data.stats.level, data.stats.max_xp);
   }
 }

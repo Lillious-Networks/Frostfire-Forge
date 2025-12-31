@@ -7,11 +7,13 @@ const prepareAssets = async () => {
     const items = await assetCache.get("items");
     const maps = await assetCache.get("maps");
     const mounts = await assetCache.get("mounts");
+    const spells = await assetCache.get("spells");
 
     return {
         items: items ? JSON.stringify(items) : null,
         maps: maps ? JSON.stringify(maps) : null,
         mounts: mounts ? JSON.stringify(mounts) : null,
+        spells: spells ? JSON.stringify(spells) : null,
     };
 };
 

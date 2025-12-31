@@ -849,7 +849,6 @@ const player = {
         collisionData = fetched !== undefined ? fetched : (await assetCache.get(mapKey))?.collision;
         if (!collisionData || !Array.isArray(collisionData)) return { value: true, reason: "no_collision_data" };
       } catch (err: any) {
-        console.error(`[RedisDebug] Failed to fetch collision for ${mapKey}:`, err);
         return { value: true, reason: "redis_error" };
       }
 
@@ -983,25 +982,47 @@ const player = {
     const selfPosition = self.location.position as unknown as PositionData;
     const direction = selfPosition.direction;
 
-    // Calculate angle between players
+    // Check if direction exists
+    if (!direction) {
+      return { value: false, reason: "invalid_direction" };
+    }
+
+    // Calculate angle between players (in degrees)
+    // 0° = right, 90° = down, ±180° = left, -90° = up
     const dx = targetPosition.x - selfPosition.x;
     const dy = targetPosition.y - selfPosition.y;
     const angle = Math.atan2(dy, dx) * (180 / Math.PI);
 
-    // Check if player is facing the target based on direction
-    const directionAngles = {
-      up: angle > -135 && angle < -45,
-      down: angle > 45 && angle < 135,
-      left: angle > 135 || angle < -135,
-      right: angle > -45 && angle < 45,
-      upleft: angle > 135 || (angle > -180 && angle < -135),
-      upright: angle > -135 && angle < -45,
-      downleft: angle > 135 && angle < 180,
-      downright: angle > 45 && angle < 135,
+    // Check if player is facing the target based on direction (with 45-degree tolerance)
+    const isFacingTarget = (targetAngle: number, tolerance: number = 45): boolean => {
+      const minAngle = targetAngle - tolerance;
+      const maxAngle = targetAngle + tolerance;
+
+      // Handle wrapping around ±180
+      if (minAngle < -180) {
+        return angle >= (minAngle + 360) || angle <= maxAngle;
+      } else if (maxAngle > 180) {
+        return angle >= minAngle || angle <= (maxAngle - 360);
+      }
+
+      return angle >= minAngle && angle <= maxAngle;
     };
 
-    if (!directionAngles[direction as keyof typeof directionAngles])
+    const directionAngles: { [key: string]: number } = {
+      right: 0,
+      downright: 45,
+      down: 90,
+      downleft: 135,
+      left: 180,
+      upleft: -135,
+      up: -90,
+      upright: -45,
+    };
+
+    const targetAngle = directionAngles[direction];
+    if (targetAngle === undefined || !isFacingTarget(targetAngle)) {
       return { value: false, reason: "direction" };
+    }
 
     // Check if the target is in PvP zone
     const isPvpAllowedTarget = await player.isInPvPZone(
@@ -1068,6 +1089,16 @@ const player = {
     // if (player.stats.level < 5) return false;
     return true;
   },
+  saveHotBarConfig: async (username: string, hotbar: any[]) => {
+    if (!username) return;
+    username = username.toLowerCase();
+    const hotbarString = JSON.stringify(hotbar);
+    const response = await query(
+      "UPDATE clientconfig SET hotbar_config = ? WHERE username = ?",
+      [hotbarString, username]
+    );
+    return response;
+  },
   GetPlayerLoginData: async (username: string) => {
     if (!username) return null;
     username = username.toLowerCase();
@@ -1103,6 +1134,7 @@ const player = {
         cc.music_volume,
         cc.effects_volume,
         cc.muted,
+        cc.hotbar_config,
         ql.completed_quests,
         ql.incomplete_quests
       FROM accounts a
@@ -1154,7 +1186,8 @@ const player = {
         fps: data.fps,
         music_volume: data.music_volume,
         effects_volume: data.effects_volume,
-        muted: data.muted
+        muted: data.muted,
+        hotbar_config: data.hotbar_config || null
       }] : [],
       questlog: {
         completed: data.completed_quests ? data.completed_quests.split(",") : [],

@@ -167,7 +167,6 @@ export default async function loadMap(data: any): Promise<boolean> {
     });
 
     if (!allChunksLoaded) {
-      console.warn("Not all chunks loaded, retrying...");
       // Retry loading any missing chunks
       for (const chunk of chunksToLoad) {
         const chunkKey = `${chunk.x}-${chunk.y}`;
@@ -373,7 +372,6 @@ function clearMapCache(mapName?: string): void {
         }
       }
     }
-    console.log(`Cleared chunk cache${mapName ? ` for map: ${mapName}` : ''}`);
   } catch (error) {
     console.warn('Failed to clear chunk cache:', error);
   }

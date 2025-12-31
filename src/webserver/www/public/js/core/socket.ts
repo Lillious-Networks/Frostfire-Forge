@@ -16,6 +16,7 @@ import { updateFriendOnlineStatus } from "./friends.js";
 import loadMap from "./map.ts";
 import {
   createPartyUI,
+  updatePartyMemberStats,
   positionText,
   fpsSlider,
   musicSlider,
@@ -33,6 +34,9 @@ import {
   notificationMessage,
   collectablesUI,
   castSpell,
+  spellBookUI,
+  loadHotbarConfiguration,
+  hotbarSlots,
 } from "./ui.ts";
 import { playAudio, playMusic } from "./audio.ts";
 import { updateXp } from "./xp.ts";
@@ -129,10 +133,7 @@ socket.onmessage = async (event) => {
       // Decompress and cache icon if provided and not already cached (same as mount icons)
       if (icon && spell && !cache.projectileIcons.has(spell)) {
         // Check if icon has the correct structure
-        if (!icon.data || !Array.isArray(icon.data)) {
-          console.error(`Invalid icon structure for ${spell}:`, icon);
-          break;
-        }
+        if (!icon.data || !Array.isArray(icon.data)) break;
 
         try {
           // @ts-expect-error - pako is loaded in index.html
@@ -269,7 +270,7 @@ socket.onmessage = async (event) => {
         : null;
       if (currentPlayer) {
         currentPlayer.party = data.members || [];
-        createPartyUI(currentPlayer.party);
+        createPartyUI(currentPlayer.party, Array.from(cache.players));
       }
       break;
     }
@@ -612,6 +613,131 @@ socket.onmessage = async (event) => {
         window.location.href = "/";
       }
       break;
+    case "SPELLS": {
+      const data = JSON.parse(packet.decode(event.data))["data"];
+      const slots = JSON.parse(packet.decode(event.data))["slots"];
+
+      const grid = spellBookUI.querySelector("#grid");
+      if (!grid) return;
+
+      // Clear existing slots
+      grid.querySelectorAll(".slot").forEach((slot) => {
+        grid.removeChild(slot);
+      });
+
+      // Convert data object to array if needed
+      const spellsArray = Array.isArray(data) ? data : Object.values(data);
+
+      if (spellsArray.length > 0) {
+        // Assign each spell to a slot
+        for (let i = 0; i < spellsArray.length; i++) {
+          const spell = spellsArray[i];
+
+          // Create a new slot
+          const slot = document.createElement("div");
+          slot.classList.add("slot");
+          slot.classList.add("ui");
+          slot.classList.add("common");
+
+          // Make slot draggable and store spell data
+          slot.draggable = true;
+          slot.dataset.spellName = spell.name || Object.keys(data)[i] || 'Unknown';
+
+          // Add icon if available
+          if (spell.sprite?.data) {
+            // @ts-expect-error - pako is loaded in index.html
+            const inflatedData = pako.inflate(
+              new Uint8Array(spell.sprite.data),
+              { to: "string" }
+            );
+            const iconImage = new Image();
+            iconImage.src = `data:image/png;base64,${inflatedData}`;
+            // Scale to 32x32
+            iconImage.width = 32;
+            iconImage.height = 32;
+            iconImage.draggable = false;
+            iconImage.onload = () => {
+              slot.appendChild(iconImage);
+            };
+          } else {
+            // Fallback if no icon
+            slot.innerHTML = `${spell.name || Object.keys(data)[i] || 'Unknown'}`;
+          }
+
+          // Add dragstart event
+          slot.addEventListener("dragstart", (event: DragEvent) => {
+            if (event.dataTransfer) {
+              event.dataTransfer.effectAllowed = "copy";
+              event.dataTransfer.setData("text/plain", slot.dataset.spellName || '');
+              // Store the icon data for the drop
+              const iconImg = slot.querySelector('img');
+              if (iconImg) {
+                event.dataTransfer.setData("image/src", iconImg.src);
+              }
+            }
+          });
+
+          // Add click event to cast spell
+          slot.addEventListener("click", () => {
+            const target = Array.from(cache?.players).find(p => p?.targeted) || null;
+            sendRequest({
+              type: "HOTBAR",
+              data: {
+                spell: slot.dataset.spellName,
+                target
+              }
+            });
+          });
+
+          grid.appendChild(slot);
+        }
+      }
+
+      // Create empty slots for remaining space
+      const totalSlots = slots || 20; // Default to 20 if slots not provided
+      for (let i = spellsArray.length; i < totalSlots; i++) {
+        const slot = document.createElement("div");
+        slot.classList.add("slot");
+        slot.classList.add("empty");
+        slot.classList.add("ui");
+        grid.appendChild(slot);
+      }
+
+      // Populate hotbar slots with icons if they have spell names configured
+      hotbarSlots.forEach((hotbarSlot) => {
+        const spellName = hotbarSlot.dataset.spellName;
+        if (spellName) {
+
+          // Find matching spell in the spellsArray
+          const matchingSpell = spellsArray.find((spell: any) =>
+            (spell.name || '') === spellName
+          );
+
+          if (matchingSpell && matchingSpell.sprite?.data) {
+
+            // @ts-expect-error - pako is loaded in index.html
+            const inflatedData = pako.inflate(
+              new Uint8Array(matchingSpell.sprite.data),
+              { to: "string" }
+            );
+            const iconImage = new Image();
+            iconImage.src = `data:image/png;base64,${inflatedData}`;
+            iconImage.width = 32;
+            iconImage.height = 32;
+            iconImage.draggable = false;
+
+            // Clear and add icon
+            hotbarSlot.innerHTML = "";
+            hotbarSlot.classList.remove("empty");
+            iconImage.onload = () => {
+              hotbarSlot.appendChild(iconImage);
+            };
+          }
+        }
+      });
+
+      break;
+    }
     case "COLLECTABLES":
       {
         const data = JSON.parse(packet.decode(event.data))["data"];
@@ -746,6 +872,7 @@ socket.onmessage = async (event) => {
         if (player.id === data.id) {
           // Escape HTML tags before setting chat message
           player.chat = data.message;
+          player.chatType = "normal"; // Set chat type to normal
           // Username with first letter uppercase
           const username =
             data?.username?.charAt(0)?.toUpperCase() + data?.username?.slice(1);
@@ -754,12 +881,13 @@ socket.onmessage = async (event) => {
           if (data.message?.trim() !== "" && username) {
             const message = document.createElement("div");
             message.classList.add("message");
+            message.classList.add("ui");
             message.style.userSelect = "text";
             // Escape HTML in the message before inserting
             const escapedMessage = data.message
               .replace(/</g, "&lt;")
               .replace(/>/g, "&gt;");
-            message.innerHTML = `<span class='bold'>[${timestamp}] </span><span ${player.isAdmin ? "class='admin'" : ""}>${username}: </span><span>${escapedMessage.toString()}</span>`
+            message.innerHTML = `<span>${timestamp} <span ${player.isAdmin ? "class='admin'" : "class='user'"}>${username}: </span><span>${escapedMessage.toString()}</span></span>`;
             chatMessages.appendChild(message);
             // Scroll to the bottom of the chat messages
             chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -807,6 +935,20 @@ socket.onmessage = async (event) => {
       if (!player) return;
       updateXp(data.xp, data.level, data.max_xp);
       player.stats = data;
+
+      // Update party member UI if this player is in the party
+      const currentPlayer = Array.from(cache.players).find(
+        (p) => p.id === cachedPlayerId
+      );
+      if (currentPlayer?.party?.includes(player.username)) {
+        updatePartyMemberStats(
+          player.username,
+          data.health,
+          data.max_health,
+          data.stamina,
+          data.max_stamina
+        );
+      }
       break;
     }
     case "CLIENTCONFIG": {
@@ -827,6 +969,13 @@ socket.onmessage = async (event) => {
       document.getElementById(
         "muted-checkbox"
       )!.innerText = `Muted: ${mutedCheckbox.checked}`;
+
+      // Load hotbar configuration (async)
+      if (data.hotbar_config) {
+        loadHotbarConfiguration(data.hotbar_config).catch(err =>
+          console.error('Failed to load hotbar configuration:', err)
+        );
+      }
       break;
     }
     case "SELECTPLAYER": {
@@ -875,10 +1024,16 @@ socket.onmessage = async (event) => {
       break;
     }
     case "UPDATESTATS": {
-      const { target, stats, isCrit } = JSON.parse(packet.decode(event.data))["data"];
+      const { target, stats, isCrit, username } = JSON.parse(packet.decode(event.data))["data"];
       const t = Array.from(cache.players).find(
         (player) => player.id === target
       );
+
+      // Get current player for party check
+      const currentPlayer = Array.from(cache.players).find(
+        (player) => player.id === cachedPlayerId
+      );
+
       if (t) {
         // Track health change for damage numbers
         const oldHealth = t.stats.health;
@@ -905,6 +1060,27 @@ socket.onmessage = async (event) => {
         }
 
         t.stats = stats;
+
+        // Update party member UI if this player is in the party
+        if (currentPlayer?.party?.includes(t.username)) {
+          updatePartyMemberStats(
+            t.username,
+            stats.health,
+            stats.max_health,
+            stats.stamina,
+            stats.max_stamina
+          );
+        }
+      } else if (username && currentPlayer?.party?.includes(username)) {
+        // Player not in visible cache but is a party member and we have their username
+        // Update their party frame directly
+        updatePartyMemberStats(
+          username,
+          stats.health,
+          stats.max_health,
+          stats.stamina,
+          stats.max_stamina
+        );
       }
       break;
     }
@@ -925,6 +1101,20 @@ socket.onmessage = async (event) => {
 
       //displayElement(targetStats, false);
       cache.players.forEach((player) => (player.targeted = false));
+
+      // Update party member UI if this player is in the party
+      const currentPlayer = Array.from(cache.players).find(
+        (player) => player.id === cachedPlayerId
+      );
+      if (currentPlayer?.party?.includes(target.username)) {
+        updatePartyMemberStats(
+          target.username,
+          data.stats.health,
+          data.stats.max_health,
+          data.stats.stamina,
+          data.stats.max_stamina
+        );
+      }
       break;
     }
     case "UPDATE_XP": {
@@ -975,11 +1165,12 @@ socket.onmessage = async (event) => {
       if (data.message?.trim() !== "" && data.username) {
         const message = document.createElement("div");
         message.classList.add("message");
+        message.classList.add("ui");
         message.style.userSelect = "text";
         // Username with first letter uppercase
         const username =
           data?.username?.charAt(0)?.toUpperCase() + data?.username?.slice(1);
-        message.innerHTML = `${timestamp} <span class="whisper-username">${username}:</span> <span class="whisper-message">${escapedMessage}</span>`;
+        message.innerHTML = `<span>${timestamp} <span class="whisper-username">${username}:</span> <span class="whisper-message">${escapedMessage}</span></span>`;
         chatMessages.appendChild(message);
         // Scroll to the bottom of the chat messages
         chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -993,15 +1184,34 @@ socket.onmessage = async (event) => {
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;");
       const timestamp = new Date().toLocaleTimeString();
+
+      // Set overhead chat for party members
+      cache.players.forEach((player) => {
+        if (player.id === data.id) {
+          player.chat = data.message;
+          player.chatType = "party";
+
+          // Set timeout to clear party chat
+          setTimeout(() => {
+            const currentPlayer = Array.from(cache.players).find(p => p.id === data.id);
+            if (currentPlayer?.chat === data.message && currentPlayer?.chatType === "party") {
+              currentPlayer.chat = "";
+              currentPlayer.chatType = "global";
+            }
+          }, 7000 + data.message.length * 35);
+        }
+      });
+
       // Update chat box
       if (data.message?.trim() !== "" && data.username) {
         const message = document.createElement("div");
         message.classList.add("message");
+        message.classList.add("ui");
         message.style.userSelect = "text";
         // Username with first letter uppercase
         const username =
           data?.username?.charAt(0)?.toUpperCase() + data?.username?.slice(1);
-        message.innerHTML = `${timestamp} <span class="party-username">${username}:</span> <span class="party-message">${escapedMessage}</span>`;
+        message.innerHTML = `<span>${timestamp} <span class="party-username">${username}:</span> <span class="party-message">${escapedMessage}</span></span>`;
         chatMessages.appendChild(message);
         // Scroll to the bottom of the chat messages
         chatMessages.scrollTop = chatMessages.scrollHeight;

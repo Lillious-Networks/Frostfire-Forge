@@ -232,7 +232,8 @@ const createClientConfig = async () => {
         fps INTEGER NOT NULL DEFAULT 240,
         music_volume INTEGER NOT NULL DEFAULT 100,
         effects_volume INTEGER NOT NULL DEFAULT 100,
-        muted INTEGER NOT NULL DEFAULT 0
+        muted INTEGER NOT NULL DEFAULT 0,
+        hotbar_config TEXT DEFAULT NULL
     );
   `;
   await query(sql);
@@ -267,6 +268,7 @@ const createSpellsTable = async () => {
         type TEXT NOT NULL,
         cast_time INTEGER NOT NULL,
         cooldown INTEGER NOT NULL,
+        can_move INTEGER NOT NULL DEFAULT 0,
         description TEXT DEFAULT NULL,
         icon TEXT DEFAULT NULL
     );
@@ -277,8 +279,16 @@ const createSpellsTable = async () => {
 const insertDefaultSpell = async () => {
   log.info("Inserting default spell...");
   const sql = `
-    INSERT OR IGNORE INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon) VALUES
-    ('frost_bolt', 10, 10, 1000, 'spell', 2, 1, 'A frosty projectile that deals damage to a single target.', 'frost_bolt');
+    INSERT OR IGNORE INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move) VALUES
+    ('frost_bolt', 10, 10, 1000, 'spell', 2, 1, 'A frosty projectile that deals damage to a single target.', 'frost_bolt', 0);
+  `;
+  await query(sql);
+};
+
+const insertDefaultLearnedSpell = async () => {
+  log.info("Inserting default learned spell for demo user...");
+  const sql = `
+    INSERT OR IGNORE INTO learned_spells (spell, username) VALUES ('frost_bolt', 'demo_user');
   `;
   await query(sql);
 };
@@ -541,6 +551,18 @@ const insertDemoMount = async () => {
   await query(sql);
 }
 
+const createLearnedSpellsTable = async () => {
+  log.info("Creating learned_spells table...");
+  const sql = `
+    CREATE TABLE IF NOT EXISTS learned_spells (
+        id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
+        spell TEXT NOT NULL,
+        username TEXT NOT NULL
+    );
+  `;
+  await query(sql);
+}
+
 // Run the database setup
 const setupDatabase = async () => {
   await createAccountsTable();
@@ -573,6 +595,7 @@ const setupDatabase = async () => {
   await createMountsTable();
   await insertDefaultMount();
   await createCollectablesTable();
+  await createLearnedSpellsTable();
 };
 
 try {
@@ -587,6 +610,7 @@ try {
   await insertDemoMount();
   await insertDefaultSpell();
   await insertDefaultInventoryItem();
+  await insertDefaultLearnedSpell();
   log.success("Database setup complete!");
   process.exit(0);
 } catch (error) {

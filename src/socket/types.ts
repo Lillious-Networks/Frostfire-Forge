@@ -73,4 +73,6 @@ export const packetTypes: PacketType = {
   COLLECTABLES: "COLLECTABLES",
   HOTBAR: "HOTBAR",
   CAST_SPELL: "CAST_SPELL",
+  SAVE_HOTBAR: "SAVE_HOTBAR",
+  LOAD_HOTBAR: "LOAD_HOTBAR",
 };

@@ -92,8 +92,8 @@
       <div id="chat-container" class="ui">
         <div id="chat" class="ui">
           <div id="chat-messages" class="ui"></div>
-          <input id="chat-input" type="text" placeholder="Type here..." spellcheck="false" autocomplete="off" class="ui"/>
         </div>
+        <input id="chat-input" type="text" placeholder="Type here..." spellcheck="false" autocomplete="off" class="ui"/>
       </div>
       <div id="full-map" class="ui">
       </div>
@@ -111,6 +111,14 @@
         <div id="castbar-text" class="ui"></div>
       </div>
       <div id="hotbar" class="ui">
+        <div id="health-bar-container" class="ui">
+          <div id="health-progress-bar" class="ui health">
+          </div>
+        </div>
+        <div id="stamina-bar-container" class="ui">
+          <div id="stamina-progress-bar" class="ui">
+          </div>
+        </div>
         <div id="xp-bar-container">
           <div id="xp-bar"></div>
         </div>
@@ -193,26 +201,6 @@
             <input type="text" id="guild-invite-input" placeholder="Player Name" class="ui" autocomplete="off" spellcheck="false">
             <button type="button" id="guild-invite-submit-button" class="ui">Invite</button>
           </div>
-      </div>
-      <div id="stats-container" class="ui">
-        <div id="health-bar-container" class="ui">
-          <div id="health-progress-bar" class="ui health">
-          </div>
-        </div>
-        <div id="stamina-bar-container" class="ui">
-          <div id="stamina-progress-bar" class="ui">
-          </div>
-        </div>
-      </div>
-      <div id="target-stats-container" class="ui">
-        <div id="target-health-bar-container" class="ui">
-          <div id="target-health-progress-bar" class="ui health">
-          </div>
-        </div>
-        <div id="target-stamina-bar-container" class="ui">
-          <div id="target-stamina-progress-bar" class="ui">
-          </div>
-        </div>
       </div>
       <div id="party-container" class="ui"></div>
       <!-- Tile Editor Floating Panels -->

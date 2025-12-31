@@ -205,8 +205,15 @@ declare interface SpellData {
   type: string;
   cast_time: number;
   description: string;
+  can_move: number;
   cooldown: number;
   icon: Nullable<string>;
+  sprite: Nullable<string>;
+}
+
+declare interface LearnedSpell {
+  spell: string;
+  username: string;
 }
 
 type NPCScript = {
@@ -369,6 +376,7 @@ declare interface PlayerData {
     music_volume: number;
     effects_volume: number;
     muted: boolean;
+    hotbar_config: any[];
   }>;
   questlog: {
     completed: string[];
@@ -382,6 +390,8 @@ declare interface PlayerData {
   party: string[];
   friends: string[];
   collectables: object[Collectable];
+  learnedSpells: {[key: string]: { sprite: Nullable<string> }};
+  hotbarConfig: string | null;
 }
 
 declare interface Collectable {

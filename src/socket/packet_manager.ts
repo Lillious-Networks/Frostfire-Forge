@@ -83,6 +83,26 @@ export const packetManager = {
       )
     ] as any[];
   },
+  spells: (data: any) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "SPELLS",
+          data,
+        }),
+      )
+    ] as any[];
+  },
+  loadHotBar: (data: any) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "LOAD_HOTBAR",
+          data,
+        }),
+      )
+    ] as any[];
+  },
   questlog: (completedQuest: Quest[], incompleteQuest: Quest[]) => {
     return [
       packet.encode(

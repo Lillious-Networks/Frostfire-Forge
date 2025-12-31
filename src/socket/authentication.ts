@@ -8,6 +8,7 @@ import collectables from "../systems/collectables.ts";
 // Assets are passed once via workerData when worker is created
 // Keep as plain objects - they get JSON.stringified again when sent back to main thread
 const items = workerData?.assets?.items ? JSON.parse(workerData.assets.items) : [];
+const spells = workerData?.assets?.spells ? JSON.parse(workerData.assets.spells) : [];
 const mounts = workerData?.assets?.mounts ? JSON.parse(workerData.assets.mounts) : [];
 
 const authentication = {
@@ -31,6 +32,7 @@ const authentication = {
             const playerData = await player.GetPlayerLoginData(username) as PlayerData;
             const inventoryData = await query("SELECT item, quantity FROM inventory WHERE username = ?", [username]) as any[];
             const collectablesData = await collectables.list(username) as unknown as Collectable[];
+            const learnedSpellsData = await query("SELECT spell FROM learned_spells WHERE username = ?", [username]) as any[];
             // Fetch all types of collectables that are mounts and validate against mounts cache to see if they exist
             collectablesData.filter((c) => c.type === "mount" && !mounts.some((m: Mount) => m.name === c.item)).forEach((invalidMount) => {
                 collectablesData.splice(collectablesData.indexOf(invalidMount), 1);
@@ -76,6 +78,29 @@ const authentication = {
 
             playerData.inventory = playerInventoryData;
             playerData.party = partyMembers || [];
+
+            // Build a fast lookup map for spells cache: name -> spell details
+            const spellsByName: Record<string, SpellData> = Object.create(null);
+            for (const sp of spells) {
+                spellsByName[sp.name] = sp;
+            }
+
+            // Build learnedSpells as an object keyed by spell name (O(n))
+            const learnedSpells: Record<string, { sprite: SpellData["sprite"] | null }> = Object.create(null);
+
+            for (const row of learnedSpellsData) {
+                const name = row.spell;
+                const spellDetails = spellsByName[name];
+
+                // Only keep valid spells that exist in cache
+                if (!spellDetails) continue;
+
+                learnedSpells[name] = {
+                    sprite: spellDetails.sprite ?? null,
+                };
+            }
+
+            playerData.learnedSpells = learnedSpells;
 
             if (!playerData) {
                 return {

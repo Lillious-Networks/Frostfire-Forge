@@ -14,12 +14,10 @@ import { reloadMap } from "../modules/assetloader";
 import { clearMapCache } from "../systems/player.ts";
 import language from "../systems/language";
 import quests from "../systems/quests";
-import generate from "../modules/sprites";
 import friends from "../systems/friends";
 import parties from "../systems/parties.ts";
 import spells from "../systems/spells";
 const maps = await assetCache.get("maps");
-const spritesheets = await assetCache.get("spritesheets");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const animationsCache = await assetCache.get("animations");
 const mapPropertiesCache = await assetCache.get("mapProperties");
@@ -34,26 +32,6 @@ let restartScheduled: boolean;
 let restartTimers: ReturnType<typeof setTimeout>[];
 
 let globalStateRevision: number = 0;
-
-// Create sprites from the spritesheets
-const spritePromises = await Promise.all(
-  spritesheets
-    .filter(
-      (spritesheet: any) => spritesheet?.file && spritesheet.file.length > 0
-    )
-    .map(async (spritesheet: any) => {
-      try {
-        const sprite = await generate(spritesheet);
-        return sprite;
-      } catch (err) {
-        log.error(`Failed to generate sprite for ${spritesheet.file}: ${err}`);
-        return null;
-      }
-    })
-);
-
-const sprites = spritePromises.filter(Boolean).flat();
-assetCache.add("sprites", sprites);
 
 const npcs = await assetCache.get("npcs");
 const particles = await assetCache.get("particles");
@@ -210,7 +188,9 @@ authWorker.on("message", async (result: any) => {
       collectables: playerData.collectables || [],
       spellCooldowns: {},
       casting: false,
-      lastInterruptTime: 0
+      lastInterruptTime: 0,
+      interruptableSpell: false,
+      learnedSpells: playerData.learnedSpells || [],
     });
 
     const mapData = [
@@ -247,7 +227,6 @@ authWorker.on("message", async (result: any) => {
         party_id: playerData.party_id ? Number(playerData.party_id) : null,
         party: playerData.party || [],
         currency: playerData.currency || { copper: 0, silver: 0, gold: 0 },
-        collectables: playerData.collectables || [],
       };
 
       const playerDataForLoad: any[] = [];
@@ -425,6 +404,7 @@ authWorker.on("message", async (result: any) => {
 
     sendPacket(ws, packetManager.inventory(playerData.inventory));
     sendPacket(ws, packetManager.collectables(playerData.collectables || []));
+    sendPacket(ws, packetManager.spells(playerData.learnedSpells));
     sendPacket(ws, packetManager.questlog(completedQuest, incompleteQuest));
     sendPacket(ws, packetManager.clientConfig(playerData.config || []));
   }
@@ -590,12 +570,10 @@ export default async function packetReceiver(
           return;
         }
 
-        if (currentPlayer.casting) {
+        if (currentPlayer.casting && currentPlayer.interruptableSpell) {
           currentPlayer.casting = false;
           currentPlayer.lastInterruptTime = performance.now();
           playerCache.set(currentPlayer.id, currentPlayer);
-          // Send interrupt casting packet
-          log.debug(`Casting interrupted for user: ${currentPlayer.username}`);
           const playersInMap = filterPlayersByMap(currentPlayer.location.map);
           playersInMap.forEach((player) => {
             sendPacket(
@@ -1054,6 +1032,11 @@ export default async function packetReceiver(
         }
         break;
       }
+      case "SAVE_HOTBAR": {
+        if (!currentPlayer) return;
+        await player.saveHotBarConfig(currentPlayer.username, data as any);
+        break;
+      }
       case "HOTBAR": {
         if (!currentPlayer) return;
         if (currentPlayer.isGuest) {
@@ -1081,32 +1064,6 @@ export default async function packetReceiver(
         }
 
         const spell_identifier = (data as any).spell;
-        const target = playerCache.get((data as any).target?.id) || currentPlayer;
-
-        if (!target?.id) {
-          sendPacket(
-            ws,
-            packetManager.notify({ message: "Target player not found." })
-          );
-          return;
-        }
-
-        // Check if spell identifier is provided
-        if (!spell_identifier) {
-          sendPacket(
-            ws,
-            packetManager.notify({ message: "No spell selected." })
-          );
-          break;
-        }
-
-        if (target.isGuest) {
-          sendPacket(
-            ws,
-            packetManager.notify({ message: "You cannot attack guests." })
-          );
-          return;
-        }
 
         const spell = await spells.find(spell_identifier);
         const spell_id = spell?.id;
@@ -1118,6 +1075,38 @@ export default async function packetReceiver(
           break;
         }
 
+        // Check if spell identifier is provided
+        if (!spell_identifier) {
+          sendPacket(
+            ws,
+            packetManager.notify({ message: "No spell selected." })
+          );
+          break;
+        }
+
+        if (!currentPlayer.learnedSpells?.[spell.name]) {
+          sendPacket(ws, packetManager.notify({ message: "You have not learned this spell." }));
+          return;
+        }
+
+        const target = playerCache.get((data as any).target?.id) || currentPlayer;
+
+        if (!target?.id) {
+          sendPacket(
+            ws,
+            packetManager.notify({ message: "Target player not found." })
+          );
+          return;
+        }
+
+        if (target.isGuest) {
+          sendPacket(
+            ws,
+            packetManager.notify({ message: "You cannot attack guests." })
+          );
+          return;
+        }
+
         // Check if spell is on cooldown
         currentPlayer.spellCooldowns = currentPlayer.spellCooldowns || {};
         const spellCooldownEnd = currentPlayer.spellCooldowns[spell_id] || 0;
@@ -1126,6 +1115,25 @@ export default async function packetReceiver(
         const spell_range = spell.range || 100;
         const spell_damage = spell?.damage;
         const spell_mana = spell?.mana || 0;
+        // Set interruptable spell flag so we can check later if movement interrupts it
+        currentPlayer.interruptableSpell = !spell?.can_move || false;
+
+        // If spell can't be cast while moving and player is currently moving, reject cast
+        if (!spell?.can_move && currentPlayer.moving) {
+          // Send interrupted notification to all players in map
+          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+          playersInMap.forEach((player) => {
+            sendPacket(
+              player.ws,
+              packetManager.castSpell({ id: currentPlayer.id, spell: 'interrupted', time: 1 })
+            );
+          });
+          currentPlayer.lastInterruptTime = performance.now();
+          playerCache.set(currentPlayer.id, currentPlayer);
+          return;
+        }
+
+        playerCache.set(currentPlayer.id, currentPlayer);
 
         // If not enough mana, return
         if ((currentPlayer.stats.stamina || 0) < spell_mana) return;
@@ -1218,7 +1226,7 @@ export default async function packetReceiver(
           );
         });
         await new Promise((resolve) => setTimeout(resolve, spell.cast_time * 1000));
-        if (!playerCache.get(currentPlayer.id)?.casting) return; // If casting was interrupted, exit
+        if (!spell.can_move && !playerCache.get(currentPlayer.id)?.casting) return; // If casting was interrupted, exit
         currentPlayer.casting = false;
         playerCache.set(currentPlayer.id, currentPlayer);
 
@@ -1242,6 +1250,16 @@ export default async function packetReceiver(
         }
 
         if (canAttack2?.reason == "path_blocked") {
+          playersInMap.forEach((player) => {
+            sendPacket(
+              player.ws,
+              packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
+            );
+          });
+          return;
+        }
+
+        if (canAttack2?.reason == "direction") {
           playersInMap.forEach((player) => {
             sendPacket(
               player.ws,
@@ -1371,6 +1389,10 @@ export default async function packetReceiver(
               })
             );
           });
+
+          // Send stats to party members who are not in the same map
+          sendStatsToPartyMembers(currentPlayer.username, currentPlayer.id, currentPlayer.stats);
+          sendStatsToPartyMembers(target.username, target.id, target.stats);
         } else {
           // Always send updated stats to all players in map
           playersInMap.forEach((player) => {
@@ -1393,6 +1415,10 @@ export default async function packetReceiver(
               })
             );
           });
+
+          // Send stats to party members who are not in the same map
+          sendStatsToPartyMembers(target.username, target.id, target.stats);
+          sendStatsToPartyMembers(currentPlayer.username, currentPlayer.id, currentPlayer.stats);
         }
 
         // PVP flags + cooldown
@@ -1604,13 +1630,6 @@ export default async function packetReceiver(
                     username:
                       currentPlayer.username.charAt(0).toUpperCase() +
                       currentPlayer.username.slice(1),
-                  })
-                );
-              } else {
-                sendPacket(
-                  ws,
-                  packetManager.notify({
-                    message: `Player ${member.username} is not online`,
                   })
                 );
               }
@@ -3621,6 +3640,35 @@ function sendPacket(ws: any, packets: any[]) {
   packets.forEach((packet) => {
     ws.send(packet);
   });
+}
+
+async function sendStatsToPartyMembers(playerUsername: string, playerId: string, stats: any) {
+  // Get the player's party ID first
+  const partyId = await parties.getPartyId(playerUsername);
+  if (!partyId) return;
+
+  // Get the player's party members
+  const partyMembers = await parties.getPartyMembers(partyId);
+  if (!partyMembers || partyMembers.length === 0) return;
+
+  // Send stats update to all party members (excluding self, they already get it)
+  for (const memberName of partyMembers) {
+    if (memberName.toLowerCase() === playerUsername.toLowerCase()) continue;
+
+    const sessionId = await player.getSessionIdByUsername(memberName);
+    const partyMember = sessionId && playerCache.get(sessionId);
+
+    if (partyMember && partyMember.ws) {
+      sendPacket(
+        partyMember.ws,
+        packetManager.updateStats({
+          target: playerId,
+          username: playerUsername, // Include username so client can identify party member
+          stats: stats,
+        })
+      );
+    }
+  }
 }
 
 function sendAnimation(ws: any, name: string, playerId?: string, revision?: number) {
