@@ -615,7 +615,7 @@ body {
 
 #chat {
   position: absolute;
-  background: url("../img/ui/ui-chat-input-container.png");
+  background: url("../img/ui/ui-chat-container.png");
   background-repeat: no-repeat;
   background-size: 100% 100%;
   width: 400px;
@@ -628,20 +628,20 @@ body {
 #chat-container input {
   position: absolute;
   bottom: 0;
-  left: 10px;
+  left: 13px;
   padding-left: 75px;
   padding-right: 20px;
   padding-bottom: 15px;
   box-sizing: border-box;
   color: #FFF1DA;
-  font-size: 0.8em;
+  font-size: 0.7em;
   font-weight: 600;
   text-shadow: 1px 1px 1px rgba(0,0,0,0.8);
   font-family: 'Comic Relief';
-  background: url("../img/ui/ui-chat-container.png");
+  background: url("../img/ui/ui-chat-input-container.png");
   background-repeat: no-repeat;
   background-size: 100% 100%;
-  width: 377px;
+  width: 374px;
   height: 87px;
   letter-spacing: 0.3px;
 }
