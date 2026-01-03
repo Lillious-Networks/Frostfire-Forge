@@ -584,7 +584,7 @@ const createEquipmentTable = async () => {
   const sql = `
     CREATE TABLE IF NOT EXISTS equipment (
         id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
-        username TEXT NOT NULL UNIQUE PRIMARY KEY,
+        username TEXT NOT NULL
         head TEXT DEFAULT NULL,
         necklace TEXT DEFAULT NULL,
         shoulders TEXT DEFAULT NULL,
