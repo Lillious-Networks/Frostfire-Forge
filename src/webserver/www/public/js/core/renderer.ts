@@ -409,9 +409,9 @@ function animationLoop() {
   );
 
   if (currentPlayer) {
-    const { health, max_health, stamina, max_stamina } = currentPlayer.stats;
-    const healthPercent = (health / max_health) * 100;
-    const staminaPercent = (stamina / max_stamina) * 100;
+    const { health, total_max_health, stamina, total_max_stamina } = currentPlayer.stats;
+    const healthPercent = (health / total_max_health) * 100;
+    const staminaPercent = (stamina / total_max_stamina) * 100;
     updateHealthBar(healthBar, healthPercent);
     updateStaminaBar(staminaBar, staminaPercent);
   }

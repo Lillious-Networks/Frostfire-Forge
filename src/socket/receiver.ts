@@ -17,6 +17,7 @@ import quests from "../systems/quests";
 import friends from "../systems/friends";
 import parties from "../systems/parties.ts";
 import spells from "../systems/spells";
+import equipment from "../systems/equipment.ts";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const animationsCache = await assetCache.get("animations");
@@ -191,7 +192,27 @@ authWorker.on("message", async (result: any) => {
       lastInterruptTime: 0,
       interruptableSpell: false,
       learnedSpells: playerData.learnedSpells || [],
+      inventory: playerData.inventory || [],
+      equipment: playerData.equipment || {},
     });
+
+    const stats = await player.synchronizeStats(playerData.username);
+
+    // Prevent health and stamina from exceeding max values
+    if (stats.stamina > stats.total_max_stamina) {
+      stats.stamina = stats.total_max_stamina;
+    }
+
+    if (stats.health > stats.total_max_health) {
+      stats.health = stats.total_max_health;
+    }
+
+    // Update the player cache with synchronized stats (use session ID, not database user ID)
+    const _pcache = playerCache.get(ws.data.id);
+    if (_pcache) {
+      _pcache.stats = stats;
+      playerCache.set(_pcache.id, _pcache);
+    }
 
     const mapData = [
       map?.compressed,
@@ -221,7 +242,7 @@ authWorker.on("message", async (result: any) => {
         isAdmin: playerData.isAdmin,
         isGuest: playerData.isGuest,
         isStealth: playerData.isStealth,
-        stats: playerData.stats || {},
+        stats: stats || {},
         animation: null,
         friends: playerData.friends || [],
         party_id: playerData.party_id ? Number(playerData.party_id) : null,
@@ -249,7 +270,7 @@ authWorker.on("message", async (result: any) => {
             isAdmin: playerData.isAdmin,
             isGuest: playerData.isGuest,
             isStealth: playerData.isStealth,
-            stats: playerData.stats || {},
+            stats: stats || {},
             animation: null,
           };
           sendPacket(p.ws, packetManager.spawnPlayer(spawnForOther));
@@ -1288,11 +1309,11 @@ export default async function packetReceiver(
         const maxDamage = spell_damage < 0 ?
           spell_damage - (playerLevel - 1) * 5 :
           spell_damage + (playerLevel - 1) * 5;
-        const baseDamage = Math.floor(Math.random() * (Math.abs(maxDamage - minDamage) + 1)) + Math.min(minDamage, maxDamage);
+        const baseDamage = Math.floor(Math.random() * (Math.abs(maxDamage - minDamage) + 1)) + Math.min(minDamage, maxDamage) + currentPlayer.stats.stat_damage || 0;
 
         // Calculate crit
-        const critChance = currentPlayer.stats.crit_chance || 10;
-        const critDamage = currentPlayer.stats.crit_damage || 10;
+        const critChance = currentPlayer.stats.stat_critical_chance || 0;
+        const critDamage = currentPlayer.stats.stat_critical_damage || 0;
         const critRoll = Math.random() * 100;
         const isCrit = critRoll < critChance;
 
@@ -1308,6 +1329,15 @@ export default async function packetReceiver(
           }
         }
 
+        // Check targets avoidance stat for damage spells only
+        if (finalDamage > 0) {
+          const targetAvoidance = target.stats.stat_avoidance || 0;
+          const avoidanceRoll = Math.random() * 100;
+          if (avoidanceRoll < targetAvoidance) {
+            finalDamage = 0;
+          }
+        }
+
         target.stats.health = Math.round(target.stats.health - finalDamage);
         currentPlayer.stats.stamina -= spell_mana;
 
@@ -1317,14 +1347,14 @@ export default async function packetReceiver(
         }
 
         // Handle overhealing
-        if (target.stats.health > target.stats.max_health) {
-          target.stats.health = target.stats.max_health;
+        if (target.stats.health > target.stats.total_max_health) {
+          target.stats.health = target.stats.total_max_health;
         }
 
         // Handle death
         if (target.stats.health <= 0) {
-          target.stats.health = target.stats.max_health;
-          target.stats.stamina = target.stats.max_stamina;
+          target.stats.health = target.stats.total_max_health;
+          target.stats.stamina = target.stats.total_max_stamina;
 
           // Calculate center of map for respawn position
           const currentMapName = target.location.map;
@@ -1403,6 +1433,7 @@ export default async function packetReceiver(
                 target: target.id,
                 stats: target.stats,
                 isCrit: isCrit,
+                damage: finalDamage,
               })
             );
 
@@ -3592,6 +3623,72 @@ export default async function packetReceiver(
           const moveDirection = currentPlayer.location.position?.direction || "down";
           // Send MOVEXY packet internally to restart movement
           await packetReceiver(server, ws, JSON.stringify({ type: "MOVEXY", data: moveDirection }));
+        }
+        break;
+      }
+      case "EQUIP_ITEM": {
+        if (!currentPlayer) return;
+        const item = (data as any).item;
+        if (!item) return;
+        const equipmentItems = currentPlayer.inventory.filter((invItem: any) => invItem.type === "equipment");
+        const foundEquipment = equipmentItems.find((invItem: any) => invItem.name.toLowerCase() === item.toLowerCase());
+        const slot = foundEquipment?.equipment_slot;
+        const result = await equipment.equipItem(currentPlayer.username, slot, item);
+        if (result) {
+          // Update the players equipment in cache
+          currentPlayer.equipment[slot] = item;
+          playerCache.set(currentPlayer.id, currentPlayer);
+
+          const stats = await player.synchronizeStats(currentPlayer.username);
+          if (stats) {
+            const currentHealth = currentPlayer.stats.health;
+            const currentStamina = currentPlayer.stats.stamina;
+
+            currentPlayer.stats = stats;
+
+            // Preserve current health and stamina values
+            currentPlayer.stats.health = currentHealth;
+            currentPlayer.stats.stamina = currentStamina;
+
+            playerCache.set(currentPlayer.id, currentPlayer);
+
+            sendPacket(
+              ws,
+              packetManager.updateStats({
+                target: currentPlayer.id,
+                stats: currentPlayer.stats,
+              })
+            );
+
+            // Send updated stats to party members
+            await sendStatsToPartyMembers(
+              currentPlayer.username,
+              currentPlayer.id,
+              currentPlayer.stats
+            );
+
+            const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+            // Update equipment for all players in the same map
+            playersInMap.forEach((player) => {
+              sendPacket(
+                player.ws,
+                packetManager.updateStats({
+                  target: currentPlayer.id,
+                  stats: currentPlayer.stats,
+                })
+              );
+            });
+
+            // Send updated inventory and equipment to player
+            sendPacket(
+              ws,
+              packetManager.inventory(currentPlayer.inventory)
+            );
+            sendPacket(
+              ws,
+              packetManager.equipment(currentPlayer.equipment)
+            );
+          }
         }
         break;
       }

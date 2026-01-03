@@ -3,6 +3,7 @@ import { verify, randomBytes } from "../modules/hash";
 import log from "../modules/logger";
 import assetCache from "../services/assetCache";
 import * as settings from "../config/settings.json";
+import playerCache from "../services/playermanager.ts";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 const mapCache: Map<
   string,
@@ -160,6 +161,10 @@ const player = {
     await query("DELETE FROM currency WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
     // Clear collectables of guest accounts
     await query("DELETE FROM collectables WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
+    // Clear equipment of guest accounts
+    await query("DELETE FROM equipment WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
+    // Clear learned spells of guest accounts
+    await query("DELETE FROM learned_spells WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
     // Clear all guest accounts
     await query("DELETE FROM accounts WHERE guest_mode = 1");
   },
@@ -223,6 +228,12 @@ const player = {
     await query(
       "INSERT INTO currency (username, copper, silver, gold) VALUES (?, ?, ?, ?)",
       [username, 0, 0, 0]
+    );
+
+    // Create equipment
+    await query(
+      "INSERT INTO equipment (username) VALUES (?)",
+      [username]
     );
 
     // Insert default mount
@@ -624,20 +635,27 @@ const player = {
     if (!username) return;
     username = username.toLowerCase();
     const response = (await query(
-      "SELECT max_health, health, max_stamina, stamina, xp, max_xp, level, crit_chance, crit_damage FROM stats WHERE username = ?",
+      "SELECT * FROM stats WHERE username = ?",
       [username]
     )) as StatsData[];
     if (!response || response.length === 0) return [];
     return {
       health: response[0].health,
       max_health: response[0].max_health,
+      total_max_health: response[0].max_health,
       stamina: response[0].stamina,
       max_stamina: response[0].max_stamina,
+      total_max_stamina: response[0].max_stamina,
       level: response[0].level,
       xp: response[0].xp,
       max_xp: response[0].max_xp,
-      crit_chance: response[0].crit_chance,
-      crit_damage: response[0].crit_damage,
+      stat_critical_chance: response[0].stat_critical_chance,
+      stat_critical_damage: response[0].stat_critical_damage,
+      stat_armor: response[0].stat_armor,
+      stat_damage: response[0].stat_damage,
+      stat_health: response[0].stat_health,
+      stat_stamina: response[0].stat_stamina,
+      stat_avoidance: response[0].stat_avoidance,
     };
   },
   setStats: async (username: string, stats: StatsData) => {
@@ -699,6 +717,9 @@ const player = {
         ? [stats.xp, stats.max_xp, stats.level, stats.max_health, stats.health, stats.max_stamina, stats.stamina, username]
         : [stats.xp, stats.max_xp, stats.level, username]
     );
+    if (leveledUp) {
+      await player.synchronizeStats(username);
+    }
     if (!response) return [];
     return {
       xp: stats.xp,
@@ -959,6 +980,9 @@ const player = {
     // No self or target or no range
     if (!self || !target) return { value: false, reason: "invalid" };
 
+    // Check if target or self is in stealth mode
+    if (target.isStealth || self.isStealth) return { value: false, reason: "path_blocked" };
+
     // Prevent attacks on self
     if (self.id === target.id) return { value: false, reason: "self" };
 
@@ -1099,6 +1123,47 @@ const player = {
     );
     return response;
   },
+  // Sync stats in cache whenever anything has changed like equipment, buffs, etc.
+  synchronizeStats: async (username: string) => {
+    const id = await player.getSessionIdByUsername(username);
+    const pcache = playerCache.get(id);
+    if (!pcache) return;
+    const currentStats = { ...pcache.stats };
+
+    // Reset total_max_health and total_max_stamina to base values before adding equipment bonuses
+    currentStats.total_max_health = currentStats.max_health;
+    currentStats.total_max_stamina = currentStats.max_stamina;
+
+    // Get all equipped items and synchronize stats
+    const equippedItems = Object.values(pcache.equipment).filter((eqItem: any) => eqItem !== null);
+    const items = [];
+    for (const equippedItemName of equippedItems) {
+      const itemDetails = pcache.inventory.find((invItem: any) =>
+        invItem.name.toLowerCase() === (equippedItemName as string).toLowerCase()
+      );
+      if (itemDetails) {
+        items.push(itemDetails);
+      }
+    }
+
+    // Example equipment bonuses
+    if (pcache.equipment) {
+      for (const slot in pcache.equipment) {
+        const item = pcache.equipment[slot];
+        if (!item) continue;
+        const itemData = items.find((it: any) => it.name.toLowerCase() === item.toLowerCase()) as StatsData;
+        currentStats.total_max_health += itemData?.stat_health || 0;
+        currentStats.total_max_stamina += itemData?.stat_stamina || 0;
+        currentStats.stat_critical_chance += itemData?.stat_critical_chance || 0;
+        currentStats.stat_critical_damage += itemData?.stat_critical_damage || 0;
+        currentStats.stat_armor += itemData?.stat_armor || 0;
+        currentStats.stat_damage += itemData?.stat_damage || 0;
+        currentStats.stat_avoidance += itemData?.stat_avoidance || 0;
+      }
+    }
+
+    return currentStats;
+  },
   GetPlayerLoginData: async (username: string) => {
     if (!username) return null;
     username = username.toLowerCase();
@@ -1124,8 +1189,13 @@ const player = {
         s.xp,
         s.max_xp,
         s.level,
-        s.crit_chance,
-        s.crit_damage,
+        s.stat_critical_damage,
+        s.stat_critical_chance,
+        s.stat_armor,
+        s.stat_damage,
+        s.stat_health,
+        s.stat_stamina,
+        s.stat_avoidance,
         c.copper,
         c.silver,
         c.gold,
@@ -1136,7 +1206,21 @@ const player = {
         cc.muted,
         cc.hotbar_config,
         ql.completed_quests,
-        ql.incomplete_quests
+        ql.incomplete_quests,
+        eq.head,
+        eq.necklace,
+        eq.shoulder,
+        eq.chest,
+        eq.wrists,
+        eq.hands,
+        eq.waist,
+        eq.legs,
+        eq.feet,
+        eq.ring_1,
+        eq.ring_2,
+        eq.trinket_1,
+        eq.trinket_2,
+        weapon
       FROM accounts a
       LEFT JOIN permissions p ON a.username = p.username
       LEFT JOIN stats s ON a.username = s.username
@@ -1144,6 +1228,7 @@ const player = {
       LEFT JOIN friendslist f ON a.username = f.username
       LEFT JOIN clientconfig cc ON a.username = cc.username
       LEFT JOIN quest_log ql ON a.username = ql.username
+      LEFT JOIN equipment eq ON a.username = eq.username
       WHERE a.username = ?
     `;
 
@@ -1166,14 +1251,21 @@ const player = {
       permissions: data.permissions || [],
       stats: {
         max_health: data.max_health,
+        total_max_health: data.max_health,
         health: data.health,
         max_stamina: data.max_stamina,
+        total_max_stamina: data.max_stamina,
         stamina: data.stamina,
         xp: data.xp,
         max_xp: data.max_xp,
         level: data.level,
-        crit_chance: data.crit_chance,
-        crit_damage: data.crit_damage
+        stat_critical_chance: data.stat_critical_chance || 0,
+        stat_critical_damage: data.stat_critical_damage || 0,
+        stat_armor: data.stat_armor || 0,
+        stat_damage: data.stat_damage || 0,
+        stat_health: data.stat_health || 0,
+        stat_stamina: data.stat_stamina || 0,
+        stat_avoidance: data.stat_avoidance || 0
       },
       currency: {
         copper: data.copper || 0,
@@ -1197,6 +1289,22 @@ const player = {
       isGuest: data.guest_mode === 1,
       isStealth: data.stealth === 1,
       isNoclip: data.noclip === 1,
+      equipment: {
+        head: data.head,
+        necklace: data.necklace,
+        shoulder: data.shoulder,
+        chest: data.chest,
+        wrists: data.wrists,
+        hands: data.hands,
+        waist: data.waist,
+        legs: data.legs,
+        feet: data.feet,
+        ring_1: data.ring_1,
+        ring_2: data.ring_2,
+        trinket_1: data.trinket_1,
+        trinket_2: data.trinket_2,
+        weapon: data.weapon
+      }
     };
   },
 };

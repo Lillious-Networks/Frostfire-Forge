@@ -89,7 +89,8 @@ const createInventoryTable = async () => {
         id INT AUTO_INCREMENT PRIMARY KEY UNIQUE NOT NULL,
         username VARCHAR(255) NOT NULL,
         item VARCHAR(255) NOT NULL,
-        quantity INT NOT NULL
+        quantity INT NOT NULL,
+        equipped INT NOT NULL DEFAULT 0
     )
   `;
   await query(sql);
@@ -102,9 +103,19 @@ const createItemsTable = async () => {
     CREATE TABLE IF NOT EXISTS items (
         id INT AUTO_INCREMENT PRIMARY KEY UNIQUE NOT NULL,
         name VARCHAR(255) NOT NULL UNIQUE,
+        type VARCHAR(255) NOT NULL UNIQUE,
         quality VARCHAR(255) NOT NULL,
         description VARCHAR(255) DEFAULT NULL,
-        icon VARCHAR(1000) DEFAULT NULL
+        icon VARCHAR(1000) DEFAULT NULL,
+        stat_armor INT DEFAULT NULL,
+        stat_damage INT DEFAULT NULL,
+        stat_critical_chance INT DEFAULT NULL,
+        stat_critical_damage INT DEFAULT NULL,
+        stat_health INT DEFAULT NULL,
+        stat_stamina INT DEFAULT NULL,
+        stat_avoidance INT DEFAULT NULL,
+        level_requirement INT DEFAULT NULL,
+        equipable INT NOT NULL DEFAULT 0
     )
   `;
   await query(sql);
@@ -123,8 +134,13 @@ const createStatsTable = async () => {
         xp INT NOT NULL DEFAULT 0,
         max_xp INT NOT NULL DEFAULT 100,
         level INT NOT NULL DEFAULT 1,
-        crit_chance INT NOT NULL DEFAULT 10,
-        crit_damage INT NOT NULL DEFAULT 10
+        stat_critical_damage INT NOT NULL DEFAULT 0,
+        stat_critical_chance INT NOT NULL DEFAULT 0,
+        stat_armor INT NOT NULL DEFAULT 0,
+        stat_damage INT NOT NULL DEFAULT 0,
+        stat_health INT NOT NULL DEFAULT 0,
+        stat_stamina INT NOT NULL DEFAULT 0,
+        stat_avoidance INT NOT NULL DEFAULT 0
     )
   `;
   await query(sql);
@@ -453,6 +469,32 @@ const createLearnedSpellsTable = async () => {
   await query(sql);
 }
 
+const createEquipmentTable = async () => {
+  log.info("Creating equipment table...");
+  const sql = `
+    CREATE TABLE IF NOT EXISTS equipment (
+      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+      username VARCHAR(255) NOT NULL UNIQUE,
+      head VARCHAR(255) DEFAULT NULL,
+      necklace VARCHAR(255) DEFAULT NULL,
+      shoulder VARCHAR(255) DEFAULT NULL,
+      back VARCHAR(255) DEFAULT NULL,
+      chest VARCHAR(255) DEFAULT NULL,
+      wrists VARCHAR(255) DEFAULT NULL,
+      hands VARCHAR(255) DEFAULT NULL,
+      waist VARCHAR(255) DEFAULT NULL,
+      legs VARCHAR(255) DEFAULT NULL,
+      feet VARCHAR(255) DEFAULT NULL,
+      ring_1 VARCHAR(255) DEFAULT NULL,
+      ring_2 VARCHAR(255) DEFAULT NULL,
+      trinket_1 VARCHAR(255) DEFAULT NULL,
+      trinket_2 VARCHAR(255) DEFAULT NULL,
+      weapon VARCHAR(255) DEFAULT NULL
+    )
+  `;
+  await query(sql);
+};
+
 // Create indexes for performance optimization
 const createIndexes = async () => {
   log.info("Creating performance indexes...");
@@ -497,6 +539,9 @@ const createIndexes = async () => {
 
     // Learned Spells table index
     ,{ name: "idx_learned_spells_username", sql: "CREATE INDEX idx_learned_spells_username ON learned_spells(username)" }
+
+    // Equipment table index
+    ,{ name: "idx_equipment_username", sql: "CREATE INDEX idx_equipment_username ON equipment(username)" }
   ];
 
   for (const index of indexes) {
@@ -560,6 +605,7 @@ const setupDatabase = async () => {
   await insertDefaultMount();
   await createCollectablesTable();
   await createLearnedSpellsTable();
+  await createEquipmentTable();
   await createIndexes(); // Add indexes after all tables are created
 };
 

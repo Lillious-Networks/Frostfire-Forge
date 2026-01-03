@@ -163,7 +163,8 @@ const createInventoryTable = async () => {
     CREATE TABLE IF NOT EXISTS inventory (
         username TEXT NOT NULL,
         item TEXT NOT NULL,
-        quantity INTEGER NOT NULL
+        quantity INTEGER NOT NULL,
+        equipped INTEGER NOT NULL DEFAULT 0,
     );
   `;
   await query(sql);
@@ -176,9 +177,19 @@ const createItemsTable = async () => {
     CREATE TABLE IF NOT EXISTS items (
         id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
         name TEXT NOT NULL UNIQUE,
+        type TEXT NOT NULL,
         quality TEXT NOT NULL,
         description TEXT DEFAULT NULL,
-        icon TEXT DEFAULT NULL
+        icon TEXT DEFAULT NULL,
+        stat_armor INTEGER DEFAULT NULL,
+        stat_damage INTEGER DEFAULT NULL,
+        stat_critical_chance INTEGER DEFAULT NULL,
+        stat_critical_damage INTEGER DEFAULT NULL,
+        stat_health INTEGER DEFAULT NULL,
+        stat_stamina INTEGER DEFAULT NULL,
+        stat_avoidance INTEGER DEFAULT NULL,
+        level_requirement INTEGER DEFAULT NULL,
+        equipable INTEGER NOT NULL DEFAULT 0
     );
   `;
   await query(sql);
@@ -188,8 +199,8 @@ const createItemsTable = async () => {
 const insertDefaultItem = async () => {
   log.info("Inserting default item...");
   const sql = `
-    INSERT OR IGNORE INTO items (name, quality, description, icon) VALUES
-    ('Red Apple', 'common', 'A fresh red apple that restores a small amount of health when consumed.', 'red_apple');
+    INSERT OR IGNORE INTO items (name, type, quality, description, icon, level_requirement, equipable) VALUES
+    ('Red Apple', 'consumable', 'common', 'A fresh red apple that restores a small amount of health when consumed.', 'red_apple', 1, 0);
   `;
   await query(sql);
 };
@@ -216,8 +227,13 @@ const createStatsTable = async () => {
         xp INTEGER NOT NULL DEFAULT 0,
         max_xp INTEGER NOT NULL DEFAULT 0,
         level INTEGER NOT NULL DEFAULT 1,
-        crit_chance INTEGER NOT NULL DEFAULT 10,
-        crit_damage INTEGER NOT NULL DEFAULT 10
+        stat_critical_damage INTEGER NOT NULL DEFAULT 0,
+        stat_critical_chance INTEGER NOT NULL DEFAULT 0,
+        stat_armor INTEGER NOT NULL DEFAULT 0,
+        stat_damage INTEGER NOT NULL DEFAULT 0,
+        stat_health INTEGER NOT NULL DEFAULT 0,
+        stat_stamina INTEGER NOT NULL DEFAULT 0,
+        stat_avoidance INTEGER NOT NULL DEFAULT 0
     );
   `;
   await query(sql);
@@ -563,6 +579,32 @@ const createLearnedSpellsTable = async () => {
   await query(sql);
 }
 
+const createEquipmentTable = async () => {
+  log.info("Creating equipment table...");
+  const sql = `
+    CREATE TABLE IF NOT EXISTS equipment (
+        id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
+        username TEXT NOT NULL UNIQUE PRIMARY KEY,
+        head TEXT DEFAULT NULL,
+        necklace TEXT DEFAULT NULL,
+        shoulders TEXT DEFAULT NULL,
+        back TEXT DEFAULT NULL,
+        chest TEXT DEFAULT NULL,
+        wrists TEXT DEFAULT NULL,
+        hands TEXT DEFAULT NULL,
+        waist TEXT DEFAULT NULL,
+        legs TEXT DEFAULT NULL,
+        feet TEXT DEFAULT NULL,
+        ring_1 TEXT DEFAULT NULL,
+        ring_2 TEXT DEFAULT NULL,
+        trinket_1 TEXT DEFAULT NULL,
+        trinket_2 TEXT DEFAULT NULL,
+        weapon TEXT DEFAULT NULL
+    );
+  `;
+  await query(sql);
+}
+
 // Run the database setup
 const setupDatabase = async () => {
   await createAccountsTable();
@@ -596,6 +638,7 @@ const setupDatabase = async () => {
   await insertDefaultMount();
   await createCollectablesTable();
   await createLearnedSpellsTable();
+  await createEquipmentTable();
 };
 
 try {

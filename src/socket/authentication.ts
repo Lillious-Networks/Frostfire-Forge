@@ -30,6 +30,19 @@ const authentication = {
             const getUsername = (await player.getUsernameBySession(id)) as any[];
             const username = getUsername[0]?.username as string;
             const playerData = await player.GetPlayerLoginData(username) as PlayerData;
+            const equipmentItems = items.filter((i: Item) => i.type === "equipment" && i.equipment_slot && i.name);
+
+            // Remove invalid equipment items that do not exist in items cache
+            for (const slot in playerData.equipment) {
+                const itemName = playerData.equipment[slot as keyof Equipment];
+                if (itemName) {
+                    const exists = equipmentItems.some((item: Item) => item.name.toLowerCase() === itemName.toLowerCase() && item.equipment_slot?.toLowerCase() === slot.toLowerCase());
+                    if (!exists) {
+                        playerData.equipment[slot as keyof Equipment] = null as any;
+                    }
+                }
+            }
+
             const inventoryData = await query("SELECT item, quantity FROM inventory WHERE username = ?", [username]) as any[];
             const collectablesData = await collectables.list(username) as unknown as Collectable[];
             const learnedSpellsData = await query("SELECT spell FROM learned_spells WHERE username = ?", [username]) as any[];

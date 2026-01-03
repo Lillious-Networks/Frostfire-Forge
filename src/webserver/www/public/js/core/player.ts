@@ -48,6 +48,7 @@ async function createPlayer(data: any) {
       startTime: number;
       isHealing: boolean;
       isCrit: boolean;
+      isMiss?: boolean;
     }>,
     castingSpell: null as string | null,
     castingStartTime: 0,
@@ -156,7 +157,11 @@ async function createPlayer(data: any) {
         context.textAlign = "center";
 
         // Set color based on damage or healing
-        if (dmg.isHealing) {
+        if (dmg.isMiss) {
+          // White for misses
+          context.fillStyle = `rgba(255, 255, 255, ${opacity})`;
+          context.strokeStyle = `rgba(100, 100, 100, ${opacity})`;
+        } else if (dmg.isHealing) {
           context.fillStyle = `rgba(0, 255, 0, ${opacity})`;
           context.strokeStyle = `rgba(0, 100, 0, ${opacity})`;
         } else if (dmg.isCrit) {
@@ -168,8 +173,10 @@ async function createPlayer(data: any) {
           context.strokeStyle = `rgba(139, 0, 0, ${opacity})`;
         }
 
-        // Draw text with outline - add ! for crits
-        const displayText = dmg.isCrit && !dmg.isHealing
+        // Draw text with outline - show "Miss" for misses, add ! for crits
+        const displayText = dmg.isMiss
+          ? "Miss"
+          : dmg.isCrit && !dmg.isHealing
           ? `${dmg.value}!`
           : `${dmg.value}`;
 
@@ -495,7 +502,8 @@ async function createPlayer(data: any) {
           context.shadowBlur = 2;
 
           // Set health bar color based on health percentage
-          const healthPercent = this.stats.health / this.stats.max_health;
+          const maxHealth = this.stats.total_max_health || this.stats.max_health;
+          const healthPercent = this.stats.health / maxHealth;
           if (healthPercent < 0.3) {
             context.fillStyle = "#C81D1D"; // red
           } else if (healthPercent < 0.5) {
@@ -520,10 +528,11 @@ async function createPlayer(data: any) {
         context.fillStyle = "rgba(0, 0, 0, 0.8)";
         context.fillRect(this.position.x - 50, this.position.y + 51 + uiOffset, 100, 3);
         context.fillStyle = "#469CD9";
+        const maxStamina = this.stats.total_max_stamina || this.stats.max_stamina;
         context.fillRect(
           this.position.x - 50,
             this.position.y + 51 + uiOffset,
-            (this.stats.stamina / this.stats.max_stamina) * 100,
+            (this.stats.stamina / maxStamina) * 100,
             3
           );
         }

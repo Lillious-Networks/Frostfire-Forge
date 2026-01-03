@@ -804,10 +804,19 @@ socket.onmessage = async (event) => {
         }
         break;
       }
+    case "EQUIPMENT": {
+      const data = JSON.parse(packet.decode(event.data))["data"];
+      console.log("Equipment data received:", data);
+      break;
+    }
     case "INVENTORY":
       {
         const data = JSON.parse(packet.decode(event.data))["data"];
         const slots = JSON.parse(packet.decode(event.data))["slots"];
+        // Clear existing slots
+        inventoryGrid.querySelectorAll(".slot").forEach((slot) => {
+          inventoryGrid.removeChild(slot);
+        });
         if (data.length > 0) {
           // Assign each item to a slot
           for (let i = 0; i < data.length; i++) {
@@ -816,6 +825,15 @@ socket.onmessage = async (event) => {
             slot.classList.add("slot");
             slot.classList.add("ui");
             const item = data[i];
+            // If item is equipped, don't show it in inventory
+
+            // TODO: Show in equipment viewer instead
+            if (item.equipped) {
+              slot.classList.add("empty");
+              inventoryGrid.appendChild(slot);
+              continue;
+            }
+
             slot.classList.add(item.quality.toLowerCase() || "empty");
 
             if (item.icon) {
@@ -839,6 +857,15 @@ socket.onmessage = async (event) => {
                 quantityLabel.classList.add("quantity-label");
                 quantityLabel.innerText = `x${item.quantity}`;
                 slot.appendChild(quantityLabel);
+              }
+              // If data.type is equipment, add click event to equip item
+                if (item.type === "equipment") {
+                slot.addEventListener("dblclick", () => {
+                  sendRequest({
+                    type: "EQUIP_ITEM",
+                    data: { item: item.name },
+                  });
+                });
               }
               inventoryGrid.appendChild(slot);
             } else {
@@ -935,6 +962,9 @@ socket.onmessage = async (event) => {
       if (!player) return;
       updateXp(data.xp, data.level, data.max_xp);
       player.stats = data;
+      player.max_health = data.total_max_health;
+      player.max_stamina = data.total_max_stamina;
+      console.log(`Stats updated for player ${player.username}:`, data);
 
       // Update party member UI if this player is in the party
       const currentPlayer = Array.from(cache.players).find(
@@ -944,9 +974,9 @@ socket.onmessage = async (event) => {
         updatePartyMemberStats(
           player.username,
           data.health,
-          data.max_health,
+          data.total_max_health,
           data.stamina,
-          data.max_stamina
+          data.total_max_stamina
         );
       }
       break;
@@ -1024,7 +1054,7 @@ socket.onmessage = async (event) => {
       break;
     }
     case "UPDATESTATS": {
-      const { target, stats, isCrit, username } = JSON.parse(packet.decode(event.data))["data"];
+      const { target, stats, isCrit, username, damage } = JSON.parse(packet.decode(event.data))["data"];
       const t = Array.from(cache.players).find(
         (player) => player.id === target
       );
@@ -1040,10 +1070,10 @@ socket.onmessage = async (event) => {
         const newHealth = stats.health;
         const healthDiff = newHealth - oldHealth;
 
-        // Only show damage number if health actually changed and player is alive
-        // Don't show damage/healing numbers when dead (health <= 0)
-        // Also don't show if it's a revive (going to full health from low/zero)
-        const isRevive = oldHealth <= 0 || (newHealth === stats.max_health && healthDiff > stats.max_health * 0.5);
+        // Check if this is a revive scenario
+        const isRevive = oldHealth <= 0 || (newHealth === stats.total_max_health && healthDiff > stats.total_max_health * 0.5);
+
+        // Show damage/heal numbers if health changed
         if (healthDiff !== 0 && newHealth > 0 && oldHealth > 0 && !isRevive) {
           // Add slight random offset so multiple damage numbers don't overlap
           const randomOffsetX = (Math.random() - 0.5) * 20;
@@ -1056,19 +1086,36 @@ socket.onmessage = async (event) => {
             startTime: performance.now(),
             isHealing: healthDiff > 0,
             isCrit: isCrit || false,
+            isMiss: false,
+          });
+        } else if (damage === 0 && newHealth > 0 && oldHealth > 0 && !isRevive) {
+          // Show "Miss" when incoming damage is exactly 0 (avoided)
+          const randomOffsetX = (Math.random() - 0.5) * 20;
+          const randomOffsetY = (Math.random() - 0.5) * 10;
+
+          t.damageNumbers.push({
+            value: 0,
+            x: t.position.x + randomOffsetX,
+            y: t.position.y - 30 + randomOffsetY,
+            startTime: performance.now(),
+            isHealing: false,
+            isCrit: false,
+            isMiss: true,
           });
         }
 
         t.stats = stats;
+        t.max_health = stats.total_max_health;
+        t.max_stamina = stats.total_max_stamina;
 
         // Update party member UI if this player is in the party
         if (currentPlayer?.party?.includes(t.username)) {
           updatePartyMemberStats(
             t.username,
             stats.health,
-            stats.max_health,
+            stats.total_max_health,
             stats.stamina,
-            stats.max_stamina
+            stats.total_max_stamina
           );
         }
       } else if (username && currentPlayer?.party?.includes(username)) {
@@ -1077,9 +1124,9 @@ socket.onmessage = async (event) => {
         updatePartyMemberStats(
           username,
           stats.health,
-          stats.max_health,
+          stats.total_max_health,
           stats.stamina,
-          stats.max_stamina
+          stats.total_max_stamina
         );
       }
       break;
@@ -1092,6 +1139,8 @@ socket.onmessage = async (event) => {
       if (!target) return;
 
       target.stats = data.stats;
+      target.max_health = data.stats.total_max_health;
+      target.max_stamina = data.stats.total_max_stamina;
 
       const isSelf = target.id.toString() === cachedPlayerId;
 
@@ -1110,9 +1159,9 @@ socket.onmessage = async (event) => {
         updatePartyMemberStats(
           target.username,
           data.stats.health,
-          data.stats.max_health,
+          data.stats.total_max_health,
           data.stats.stamina,
-          data.stats.max_stamina
+          data.stats.total_max_stamina
         );
       }
       break;

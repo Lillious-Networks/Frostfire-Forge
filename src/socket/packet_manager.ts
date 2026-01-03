@@ -72,6 +72,16 @@ export const packetManager = {
       )
     ] as any[];
   },
+  equipment: (data: Equipment) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "EQUIPMENT",
+          data,
+        }),
+      )
+    ] as any[];
+  },
   collectables: (data: Collectable[]) => {
     return [
       packet.encode(

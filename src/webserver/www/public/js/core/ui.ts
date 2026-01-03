@@ -353,9 +353,9 @@ function createPartyUI(partyMembers: string[], players?: any[]) {
           updatePartyMemberStats(
             member,
             playerData.stats.health,
-            playerData.stats.max_health,
+            playerData.stats.total_max_health,
             playerData.stats.stamina,
-            playerData.stats.max_stamina
+            playerData.stats.total_max_stamina
           );
         }
       }
