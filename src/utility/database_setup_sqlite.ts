@@ -164,7 +164,7 @@ const createInventoryTable = async () => {
         username TEXT NOT NULL,
         item TEXT NOT NULL,
         quantity INTEGER NOT NULL,
-        equipped INTEGER NOT NULL DEFAULT 0,
+        equipped INTEGER NOT NULL DEFAULT 0
     );
   `;
   await query(sql);
