@@ -214,7 +214,7 @@ const player = {
 
     // Create stats
     await query(
-      "INSERT INTO stats (username, health, max_health, stamina, max_stamina, xp, max_xp, level, crit_chance, crit_damage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO stats (username, health, max_health, stamina, max_stamina, xp, max_xp, level, stat_critical_damage, stat_critical_chance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [username, 100, 100, 100, 100, 0, 100, 1, 10, 10]
     );
     // Create client config

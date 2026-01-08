@@ -1,6 +1,6 @@
 import query from "../controllers/sqldatabase";
 import assetCache from "../services/assetCache";
-import inventory from "./inventory";
+import inventory from "../socket/inventory";
 import log from "../modules/logger";
 
 const equipment = {
