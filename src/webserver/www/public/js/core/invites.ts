@@ -13,8 +13,10 @@ export function createInvitationPopup(invitationData: any) {
   popup.innerHTML = `
     <h2>Invitation</h2>
     <p>${invitationData.message}</p>
-    <button id="accept-invitation">Accept</button>
-    <button id="decline-invitation">Decline</button>
+    <div class="button-container">
+      <button id="accept-invitation">Accept</button>
+      <button id="decline-invitation">Decline</button>
+    </div>
   `;
 
   document.body.appendChild(popup);

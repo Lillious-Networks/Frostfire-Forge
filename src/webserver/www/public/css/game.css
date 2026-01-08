@@ -1361,12 +1361,16 @@ input[type=range]:disabled {
   z-index: 1000;
   top: 50%;
   left: 50%;
+  width: 494px;
+  height: 332px;
   transform: translate(-50%, -50%);
-  background: rgba(255, 255, 255, 0.9);
-  border: 1px solid #ccc;
-  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
-  border-radius: 5px;
-  padding: 20px;
+  background: url("../img/ui/ui-message-popup.png") no-repeat center center;
+  background-size: cover;
+  padding: 110px 20px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
 }
 
 #invitation-popup button {
@@ -1377,16 +1381,33 @@ input[type=range]:disabled {
 
 #invitation-popup h2 {
   margin: 0;
+  margin-bottom: 10px;
   font-family: Comic Relief;
-  font-size: 1.2em;
-  color: #333;
+  font-size: 1.4em;
+  font-weight: 600;
+  color: #FFF1DA;
+  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.8);
+  letter-spacing: 0.5px;
 }
 
 #invitation-popup p {
   margin: 10px 0;
   font-family: Comic Relief;
   font-size: 1em;
-  color: #555;
+  font-weight: 500;
+  color: #FFF1DA;
+  text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.8);
+  text-align: center;
+  line-height: 1.4;
+}
+
+#invitation-popup .button-container {
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+  justify-content: center;
+  margin-top: auto;
+  padding-bottom: 25px;
 }
 
 #accept-invitation {
@@ -1395,11 +1416,27 @@ input[type=range]:disabled {
   border: none;
   outline: none;
   cursor: pointer;
-  background: #4CAF50;
+  background: linear-gradient(180deg, #5a8f5a 0%, #4a7a4a 100%);
+  color: #FFF1DA;
+  font-family: 'Comic Relief';
+  font-weight: 600;
+  font-size: 0.9em;
+  border-radius: 5px;
+  border: 2px solid #3d6b3d;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.4), inset 0 1px 2px rgba(255, 255, 255, 0.3);
+  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
+  transition: all 0.2s ease;
 }
 
 #accept-invitation:hover {
-  background: #45a049;
+  background: linear-gradient(180deg, #6aa06a 0%, #5a8f5a 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.5), inset 0 1px 2px rgba(255, 255, 255, 0.3);
+}
+
+#accept-invitation:active {
+  transform: translateY(0px);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4), inset 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
 #decline-invitation {
@@ -1408,11 +1445,27 @@ input[type=range]:disabled {
   border: none;
   outline: none;
   cursor: pointer;
-  background: #f44336;
+  background: linear-gradient(180deg, #a85555 0%, #8f4545 100%);
+  color: #FFF1DA;
+  font-family: 'Comic Relief';
+  font-weight: 600;
+  font-size: 0.9em;
+  border-radius: 5px;
+  border: 2px solid #7a3838;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.4), inset 0 1px 2px rgba(255, 255, 255, 0.3);
+  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
+  transition: all 0.2s ease;
 }
 
 #decline-invitation:hover {
-  background: #e53935;
+  background: linear-gradient(180deg, #b86565 0%, #a85555 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.5), inset 0 1px 2px rgba(255, 255, 255, 0.3);
+}
+
+#decline-invitation:active {
+  transform: translateY(0px);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4), inset 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
 /* Bottom center with row grid of 5 items */
@@ -1433,14 +1486,12 @@ input[type=range]:disabled {
 
 .party-member {
   position: relative;
-  backdrop-filter: blur(1px);
-  background:  #ffffffbf;
-  width: 100px;
-  height: 60px;
+ background: url("../img/ui/ui-party.png");
+  background-size: cover;
+  width: 128px;
+  height: 72px;
   margin: 5px 0;
   padding: 5px;
-  border-radius: 5px;
-  box-shadow: 0 0 10px #0000004d;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -1451,13 +1502,17 @@ input[type=range]:disabled {
   text-align: center;
   font-family: "Comic Relief";
   font-size: 0.8em;
-  color: #000000c9;
+  padding-top: 7px;
+  color: #fff1da;
+  padding-left: 25px;
+  padding-right: 10px;
+  text-align: left;
+  text-shadow: 0 0 5px #000000;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   user-select: none;
-  margin-bottom: 2px;
 }
 
 .party-member-bars {
@@ -1470,16 +1525,16 @@ input[type=range]:disabled {
 .party-member-health-bar,
 .party-member-stamina-bar {
   position: relative;
-  width: 100%;
-  height: 8px;
-  background: rgba(0, 0, 0, 0.3);
-  border-radius: 2px;
+  width: 91px;
+  height: 10px;
+  margin-left: 6px;
+  margin-bottom: 2px;
   overflow: hidden;
 }
 
 .party-member-health-progress {
   height: 100%;
-  background: url("../img/ui/ui-health-green.png");
+  background: url("../img/ui/ui-party-health.png");
   background-size: cover;
   width: 100%;
   transform: scaleX(var(--health-scale, 1));
@@ -1489,7 +1544,7 @@ input[type=range]:disabled {
 
 .party-member-stamina-progress {
   height: 100%;
-  background: url("../img/ui/ui-stamina.png");
+  background: url("../img/ui/ui-party-stamina.png");
   background-size: cover;
   width: 100%;
   transform: scaleX(var(--stamina-scale, 1));
