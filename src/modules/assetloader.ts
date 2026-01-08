@@ -10,7 +10,6 @@ import worlds from "../systems/worlds";
 import quest from "../systems/quests";
 // import NPC from "../systems/npc_scripting";
 import assetCache from "../services/assetCache";
-import generate from "../modules/sprites";
 import zlib from "zlib";
 import * as settings from "../config/settings.json";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
@@ -57,6 +56,46 @@ function loadAnimations() {
   log.success(`Loaded ${animations.length} animation(s) in ${(performance.now() - now).toFixed(2)}ms`);
 }
 loadAnimations();
+
+function loadSprites() {
+  const now = performance.now();
+  const sprites = [] as any[];
+
+  const spriteDir = path.join(assetPath, assetData.sprites.path);
+
+  if (!fs.existsSync(spriteDir)) {
+    throw new Error(`Sprites directory not found at ${spriteDir}`);
+  }
+
+  const spriteFiles = fs.readdirSync(spriteDir).filter((file) => file.endsWith(".png"));
+
+  spriteFiles.forEach((file) => {
+    const name = file.replace(".png", "");
+    const rawData = fs.readFileSync(path.join(spriteDir, file));
+    const base64Data = rawData.toString("base64");
+
+    log.debug(`Loaded sprite: ${name}`);
+
+    const compressedData = zlib.deflateSync(base64Data);
+
+    sprites.push({ name, data: compressedData });
+    assetCache.add(`sprite_${name}`, compressedData);
+
+    const originalSize = base64Data.length;
+    const compressedSize = compressedData.length;
+    const ratio = (originalSize / compressedSize).toFixed(2);
+    const savings = (((originalSize - compressedSize) / originalSize) * 100).toFixed(2);
+
+    log.debug(`Compressed sprite: ${name}
+  - Original: ${originalSize} bytes
+  - Compressed: ${compressedSize} bytes
+  - Compression Ratio: ${ratio}x
+  - Compression Savings: ${savings}%`);
+  });
+  assetCache.add("sprites", sprites);
+  log.success(`Loaded ${sprites.length} sprite(s) in ${(performance.now() - now).toFixed(2)}ms`);
+}
+loadSprites();
 
 function loadIcons() {
   const now = performance.now();
@@ -160,7 +199,9 @@ const spellList = await spell.list();
 await Promise.all(spellList.map(async (spell: any) => {
   if (spell.icon) {
     const iconData = await assetCache.get(spell.icon);
+    const spriteData = await assetCache.get(`sprite_${spell.icon}`);
     spell.icon = iconData || null; // Replace the icon with the compressed data if it exists
+    spell.sprite = spriteData || null;
   }
 }));
 await assetCache.add("spells", spellList);
@@ -709,43 +750,6 @@ function loadSoundEffects() {
   log.success(`Loaded ${soundEffects.length} sound effect(s) in ${(performance.now() - now).toFixed(2)}ms`);
 }
 loadSoundEffects();
-
-async function loadSpriteSheets() {
-  const spritesheetnow = performance.now();
-  const spritesheets = [] as SpriteSheetData[];
-  const spriteDir = path.join(assetPath, assetData.spritesheets.path);
-  if (!fs.existsSync(spriteDir)) {
-    throw new Error(`Sprites directory not found at ${spriteDir}`);
-  }
-
-  // Not a folder
-  fs.readdirSync(spriteDir).filter((file) => file.endsWith(".png")).map((file) => {
-    const name = file.replace(".png", "");
-    const data = fs.readFileSync(path.join(spriteDir, file), "base64");
-    const buffer = Buffer.from(data, "base64");
-    log.debug(`Loaded sprite sheet: ${name}`);
-    spritesheets.push({ name, width: 24, height: 40, data: buffer });
-  });
-
-  assetCache.add("spritesheets", spritesheets);
-  log.success(`Loaded ${spritesheets.length} sprite sheet(s) in ${(performance.now() - spritesheetnow).toFixed(2)}ms`);
-
-  const sprites = [] as SpriteData[];
-  const spritenow = performance.now();
-  const spritePromises = spritesheets.map(async (spritesheet: any) => {
-    const sprite = await generate(spritesheet) as any;
-    return sprite;
-  });
-
-  const spriteData = await Promise.all(spritePromises);
-  spriteData.forEach((sprite) => {
-    sprites.push(sprite);
-  });
-
-  log.success(`Generated ${sprites.length} sprite(s) in ${(performance.now() - spritenow).toFixed(2)}ms`);
-}
-
-await loadSpriteSheets();
 
 function parseAnimations() {
   const animationFiles = fs

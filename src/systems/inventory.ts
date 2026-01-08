@@ -37,6 +37,13 @@ const inventory = {
       ]
     );
   },
+  async setEquipped(name: string, item: string, equipped: boolean) {
+    if (!name || !item || typeof equipped !== "boolean") return;
+    return await query(
+      "UPDATE inventory SET equipped = ? WHERE item = ? AND username = ?",
+      [equipped ? 1 : 0, item, name]
+    );
+  },
   async remove(name: string, item: InventoryItem) {
     if (!name || !item?.quantity || !item?.name) return;
     if (Number(item.quantity) <= 0) return;

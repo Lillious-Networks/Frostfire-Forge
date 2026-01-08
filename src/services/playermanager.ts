@@ -10,7 +10,7 @@ class PlayerManager {
         this.cache[key] = value;
     }
     // Get an item from the cache
-    get(key: string) {
+        get(key: string) {
         return this.cache[key];
     }
     // Remove an item from the cache

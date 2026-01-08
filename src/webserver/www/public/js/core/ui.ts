@@ -16,9 +16,8 @@ const ctx = canvas.getContext("2d");
 const fpsSlider = document.getElementById("fps-slider") as HTMLInputElement;
 const healthBar = document.getElementById("health-progress-bar") as HTMLDivElement;
 const staminaBar = document.getElementById("stamina-progress-bar") as HTMLDivElement;
-const targetHealthBar = document.getElementById("target-health-progress-bar") as HTMLDivElement;
-const targetStaminaBar = document.getElementById("target-stamina-progress-bar") as HTMLDivElement;
 const xpBar = document.getElementById("xp-bar") as HTMLDivElement;
+const levelContainer = document.getElementById("level-container") as HTMLDivElement;
 const musicSlider = document.getElementById("music-slider") as HTMLInputElement;
 const effectsSlider = document.getElementById("effects-slider") as HTMLInputElement;
 const mutedCheckbox = document.getElementById("muted-checkbox") as HTMLInputElement;
@@ -68,6 +67,185 @@ hotbarSlots.forEach((slot, index) => {
   });
 });
 
+// Function to build hotbar configuration and save to server
+function saveHotbarConfiguration() {
+  const hotbarConfig: { [key: string]: string | null } = {};
+
+  hotbarSlots.forEach((slot, index) => {
+    const spellName = slot.dataset.spellName;
+    hotbarConfig[index.toString()] = spellName || null;
+  });
+
+  // Send configuration to server
+  sendRequest({
+    type: "SAVE_HOTBAR",
+    data: hotbarConfig
+  });
+}
+
+// Add drag-and-drop support to hotbar slots
+// Track if a successful hotbar-to-hotbar drop occurred
+let successfulHotbarDrop = false;
+
+hotbarSlots.forEach((slot, index) => {
+  // Make hotbar slots draggable when shift is held
+  slot.addEventListener("mousedown", (event: MouseEvent) => {
+    if (event.shiftKey && slot.dataset.spellName) {
+      slot.draggable = true;
+    } else {
+      slot.draggable = false;
+    }
+  });
+
+  // Handle drag start from hotbar slot
+  slot.addEventListener("dragstart", (event: DragEvent) => {
+    if (!event.shiftKey || !slot.dataset.spellName) {
+      event.preventDefault();
+      return;
+    }
+
+    // Reset the flag at the start of each drag
+    successfulHotbarDrop = false;
+
+    if (event.dataTransfer) {
+      // Mark this as a hotbar-to-hotbar drag
+      event.dataTransfer.setData("hotbar-source-index", index.toString());
+      event.dataTransfer.setData("text/plain", slot.dataset.spellName);
+
+      const img = slot.querySelector("img") as HTMLImageElement;
+      if (img) {
+        event.dataTransfer.setData("image/src", img.src);
+      }
+
+      event.dataTransfer.effectAllowed = "move";
+      slot.style.opacity = "0.5";
+    }
+  });
+
+  // Handle drag end to detect if spell was dragged off hotbar
+  slot.addEventListener("dragend", (event: DragEvent) => {
+    slot.style.opacity = "1";
+    slot.draggable = false;
+
+    // Only clear if dropped outside hotbar and wasn't a successful hotbar-to-hotbar drop
+    if (!successfulHotbarDrop && event.dataTransfer && event.dataTransfer.dropEffect === "none") {
+      // Clear the slot since it was dragged off
+      delete slot.dataset.spellName;
+      slot.innerHTML = "";
+      saveHotbarConfiguration();
+    }
+
+    // Reset the flag after handling dragend
+    successfulHotbarDrop = false;
+  });
+
+  // Prevent default drag over behavior
+  slot.addEventListener("dragover", (event: DragEvent) => {
+    event.preventDefault();
+    if (event.dataTransfer) {
+      // Check if dragging from another hotbar slot
+      const isHotbarDrag = event.dataTransfer.types.includes("hotbar-source-index");
+      event.dataTransfer.dropEffect = isHotbarDrag ? "move" : "copy";
+    }
+    slot.style.backgroundColor = "rgba(255, 255, 255, 0.2)";
+  });
+
+  // Remove highlight when drag leaves
+  slot.addEventListener("dragleave", () => {
+    slot.style.backgroundColor = "";
+  });
+
+  // Handle drop
+  slot.addEventListener("drop", (event: DragEvent) => {
+    event.preventDefault();
+    slot.style.backgroundColor = "";
+
+    if (event.dataTransfer) {
+      const sourceIndex = event.dataTransfer.getData("hotbar-source-index");
+      const spellName = event.dataTransfer.getData("text/plain");
+      const imageSrc = event.dataTransfer.getData("image/src");
+
+      if (spellName) {
+        // Check if this is a hotbar-to-hotbar drag (swap operation)
+        if (sourceIndex !== "" && sourceIndex !== index.toString()) {
+          const sourceSlot = hotbarSlots[parseInt(sourceIndex)];
+
+          // Store target slot's current spell (if any)
+          const targetSpellName = slot.dataset.spellName;
+          const targetImg = slot.querySelector("img") as HTMLImageElement;
+          const targetImageSrc = targetImg ? targetImg.src : null;
+
+          // Move source spell to target slot
+          slot.dataset.spellName = spellName;
+          slot.innerHTML = "";
+
+          if (imageSrc) {
+            const iconImage = new Image();
+            iconImage.src = imageSrc;
+            iconImage.draggable = false;
+            slot.appendChild(iconImage);
+          } else {
+            slot.innerText = spellName;
+          }
+
+          // Move target spell to source slot (or clear if empty)
+          if (targetSpellName && targetSpellName !== "") {
+            // Swap: move target spell to source slot
+            sourceSlot.dataset.spellName = targetSpellName;
+            sourceSlot.innerHTML = "";
+
+            if (targetImageSrc) {
+              const iconImage = new Image();
+              iconImage.src = targetImageSrc;
+              iconImage.draggable = false;
+              sourceSlot.appendChild(iconImage);
+            } else {
+              sourceSlot.innerText = targetSpellName;
+            }
+          } else {
+            // Target was empty, so clear source slot and mark it as empty
+            delete sourceSlot.dataset.spellName;
+            sourceSlot.innerHTML = "";
+          }
+
+          // Mark this as a successful hotbar-to-hotbar drop
+          successfulHotbarDrop = true;
+        } else {
+          // Regular drag from spellbook to hotbar
+          slot.dataset.spellName = spellName;
+          slot.innerHTML = "";
+
+          if (imageSrc) {
+            const iconImage = new Image();
+            iconImage.src = imageSrc;
+            iconImage.draggable = false;
+            slot.appendChild(iconImage);
+          } else {
+            slot.innerText = spellName;
+          }
+        }
+
+        // Save hotbar configuration to server
+        saveHotbarConfiguration();
+      }
+    }
+  });
+
+  // Right-click to clear hotbar slot
+  slot.addEventListener("contextmenu", (event: MouseEvent) => {
+    event.preventDefault();
+
+    if (slot.dataset.spellName) {
+      // Clear the slot
+      delete slot.dataset.spellName;
+      slot.innerHTML = "";
+
+      // Save updated configuration
+      saveHotbarConfiguration();
+    }
+  });
+});
+
 // Track active castbar clone
 let activeCastbarClone: HTMLDivElement | null = null;
 
@@ -91,7 +269,7 @@ function handleStatsUI() {
   }
 }
 
-function createPartyUI(partyMembers: string[]) {
+function createPartyUI(partyMembers: string[], players?: any[]) {
   const partyContainer = document.getElementById("party-container");
   if (!partyContainer) return;
 
@@ -141,9 +319,92 @@ function createPartyUI(partyMembers: string[]) {
       usernameElement.className = "party-member-username ui";
       usernameElement.innerText = member.charAt(0).toUpperCase() + member.slice(1);
 
+      // Create bars container
+      const barsContainer = document.createElement("div");
+      barsContainer.className = "party-member-bars ui";
+
+      // Create health bar
+      const healthBarContainer = document.createElement("div");
+      healthBarContainer.className = "party-member-health-bar ui";
+      const healthProgress = document.createElement("div");
+      healthProgress.className = "party-member-health-progress ui green";
+      healthProgress.style.setProperty("--health-scale", "1");
+      healthBarContainer.appendChild(healthProgress);
+
+      // Create stamina bar
+      const staminaBarContainer = document.createElement("div");
+      staminaBarContainer.className = "party-member-stamina-bar ui";
+      const staminaProgress = document.createElement("div");
+      staminaProgress.className = "party-member-stamina-progress ui";
+      staminaProgress.style.setProperty("--stamina-scale", "1");
+      staminaBarContainer.appendChild(staminaProgress);
+
+      barsContainer.appendChild(healthBarContainer);
+      barsContainer.appendChild(staminaBarContainer);
+
       memberElement.appendChild(usernameElement);
+      memberElement.appendChild(barsContainer);
       partyContainer.appendChild(memberElement);
+
+      // Initialize bars with current stats if player data is available
+      if (players) {
+        const playerData = players.find(p => p.username?.toLowerCase() === lowerName);
+        if (playerData?.stats) {
+          updatePartyMemberStats(
+            member,
+            playerData.stats.health,
+            playerData.stats.total_max_health,
+            playerData.stats.stamina,
+            playerData.stats.total_max_stamina
+          );
+        }
+      }
     }
+  }
+}
+
+function updatePartyMemberStats(username: string, health: number, maxHealth: number, stamina: number, maxStamina: number) {
+  const partyContainer = document.getElementById("party-container");
+  if (!partyContainer) return;
+
+  const lowerUsername = username.toLowerCase();
+  const memberElement = partyContainer.querySelector(
+    `.party-member[data-username="${lowerUsername}"]`
+  ) as HTMLElement;
+
+  if (!memberElement) return;
+
+  const healthProgress = memberElement.querySelector(".party-member-health-progress") as HTMLElement;
+  const staminaProgress = memberElement.querySelector(".party-member-stamina-progress") as HTMLElement;
+
+  if (healthProgress && maxHealth > 0) {
+    const healthPercent = (health / maxHealth) * 100;
+    const healthScale = Math.max(0, Math.min(1, health / maxHealth));
+    healthProgress.style.setProperty("--health-scale", healthScale.toString());
+
+    // Update color based on health percentage
+    let colorClass = "green";
+    if (healthPercent < 30) {
+      colorClass = "red";
+    } else if (healthPercent < 50) {
+      colorClass = "orange";
+    } else if (healthPercent < 80) {
+      colorClass = "yellow";
+    }
+
+    const current = Array.from(healthProgress.classList).find(c =>
+      ["green", "yellow", "orange", "red"].includes(c)
+    );
+
+    if (current !== colorClass) {
+      healthProgress.classList.remove("green", "yellow", "orange", "red");
+      healthProgress.classList.add(colorClass);
+    }
+  }
+
+  if (staminaProgress && maxStamina > 0) {
+    const staminaScale = Math.max(0, Math.min(1, stamina / maxStamina));
+    staminaProgress.style.setProperty("--stamina-scale", staminaScale.toString());
   }
 }
 
@@ -268,7 +529,7 @@ function castSpell(id: string, spell: string, time: number) {
     // Set display and positioning for the interrupt clone
     interruptClone.style.display = "block";
     interruptClone.style.position = "fixed";
-    interruptClone.style.bottom = "100px";
+    interruptClone.style.bottom = "200px";
     interruptClone.style.left = "50%";
     interruptClone.style.transform = "translateX(-50%)";
     interruptClone.style.width = "300px";
@@ -327,7 +588,7 @@ function castSpell(id: string, spell: string, time: number) {
     // Set display to block and copy essential positioning styles
     castClone.style.display = "block";
     castClone.style.position = "fixed";
-    castClone.style.bottom = "100px";
+    castClone.style.bottom = "200px";
     castClone.style.left = "50%";
     castClone.style.transform = "translateX(-50%)";
     castClone.style.width = "300px";
@@ -367,14 +628,80 @@ function castSpell(id: string, spell: string, time: number) {
   }
 }
 
+// Function to load hotbar configuration from server
+async function loadHotbarConfiguration(hotbarConfig: any) {
+
+  // Wait for spellbook images to be loaded
+  const waitForSpellbookImages = async (maxAttempts = 50, delayMs = 100) => {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const spellbookSpells = document.querySelectorAll("#spell-book-container #grid .slot") as NodeListOf<HTMLDivElement>;
+      const imagesExist = Array.from(spellbookSpells).some(slot => slot.querySelector("img"));
+
+      if (imagesExist) {
+        return true;
+      }
+
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+
+    return false;
+  };
+
+  await waitForSpellbookImages();
+
+  // Build spell image map from spellbook
+  const spellbookSpells = document.querySelectorAll("#spell-book-container #grid .slot") as NodeListOf<HTMLDivElement>;
+  const spellImageMap: { [key: string]: string } = {};
+
+  spellbookSpells.forEach(slot => {
+    const spellName = slot.dataset.spellName;
+    const img = slot.querySelector("img") as HTMLImageElement;
+    if (spellName && img) {
+      spellImageMap[spellName] = img.src;
+    }
+  });
+
+  // Load hotbar slots
+  hotbarSlots.forEach((slot, index) => {
+    const slotData = hotbarConfig[index.toString()];
+
+    // Handle both string format "fireball" and object format { name: "fireball" }
+    const spellName = typeof slotData === 'string' ? slotData : slotData?.name;
+
+    if (spellName) {
+      // Store spell name in data attribute
+      slot.dataset.spellName = spellName;
+
+      // Clear existing content
+      slot.innerHTML = "";
+
+      // Use image from spellbook if available
+      const imageSrc = spellImageMap[spellName];
+      if (imageSrc) {
+        const iconImage = new Image();
+        iconImage.src = imageSrc;
+        iconImage.draggable = false;
+        slot.appendChild(iconImage);
+      } else {
+        // Fallback to spell name text
+        slot.innerText = spellName;
+      }
+    } else {
+      // Clear the slot
+      delete slot.dataset.spellName;
+      slot.innerHTML = "";
+    }
+  });
+}
+
 export {
-    toggleUI, toggleDebugContainer, handleStatsUI, createPartyUI, updateHealthBar, updateStaminaBar, castSpell, positionText,
+    toggleUI, toggleDebugContainer, handleStatsUI, createPartyUI, updatePartyMemberStats, updateHealthBar, updateStaminaBar, castSpell, positionText,
     friendsListUI, inventoryUI, spellBookUI, pauseMenu, menuElements, chatInput, canvas, ctx, fpsSlider, healthBar,
-    staminaBar, targetHealthBar, targetStaminaBar, xpBar, musicSlider, effectsSlider, mutedCheckbox, statUI, overlay,
+    staminaBar, xpBar, levelContainer, musicSlider, effectsSlider, mutedCheckbox, statUI, overlay,
     packetsSentReceived, optionsMenu, friendsList, friendsListSearch, onlinecount, progressBar, progressBarContainer,
     inventoryGrid, chatMessages, loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage,
     serverTime, ambience, weatherCanvas, weatherCtx, guildContainer, guildName, guildRank, guildMembersList,
     guildMemberCount, guildMemberInviteInput, guildMemberInviteButton, collisionDebugCheckbox, chunkOutlineDebugCheckbox,
     collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox, loadedChunksText, collectablesUI,
-    hotbarSlots,
+    hotbarSlots, saveHotbarConfiguration, loadHotbarConfiguration,
 };

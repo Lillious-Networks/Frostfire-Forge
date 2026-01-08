@@ -30,13 +30,6 @@ const getActualViewportHeight = () => {
 
 document.documentElement.style.setProperty('--viewport-height', `${getActualViewportHeight()}px`);
 
-// Update on visualViewport resize (when address bar shows/hides)
-if (window.visualViewport) {
-  window.visualViewport.addEventListener('resize', () => {
-    document.documentElement.style.setProperty('--viewport-height', `${window.visualViewport.height}px`);
-  });
-}
-
 const userInteractionListener = () => {
   if (!getUserHasInteracted()) {
     setUserHasInteracted(true);
@@ -208,7 +201,6 @@ const isIPad = /iPad/.test(navigator.userAgent);
 function updateOrientationClass() {
   const isLandscape = window.innerWidth > window.innerHeight;
   const viewportHeight = window.innerHeight;
-  const viewportWidth = window.innerWidth;
 
   // Remove all existing classes
   document.body.classList.remove('portrait-mode', 'landscape-mode', 'ios-device', 'iphone-device', 'ipad-device', 'mobile-landscape', 'small-landscape', 'tiny-landscape');
@@ -245,9 +237,6 @@ function updateOrientationClass() {
   } else {
     document.body.classList.add('portrait-mode');
   }
-
-  // Log for debugging on actual devices
-  console.log(`Viewport: ${viewportWidth}x${viewportHeight}, iOS: ${isIOS}, iPhone: ${isIPhone}, Landscape: ${isLandscape}`);
 }
 
 window.addEventListener("resize", () => {

@@ -105,12 +105,46 @@ declare interface InventoryItem {
   quantity: Nullable<number>;
 }
 
+type ItemType = "consumable" | "equipment" | "material" | "quest" | "miscellaneous";
+type ItemQuality = "common" | "uncommon" | "rare" | "epic" | "legendary";
+type ItemSlot = "head" | "necklace" | "shoulder" | "back" | "chest" | "wrists" | "hands" | "waist" | "legs" | "feet" | "ring_1" | "ring_2" | "trinket_1" | "trinket_2" | "weapon";
+
 // Define item data
 declare interface Item {
   name: string;
-  quality: string;
+  quality: ItemQuality;
+  type: ItemType;
   description: string;
   icon: Nullable<string>;
+  stat_armor?: Nullable<number>;
+  stat_damage?: Nullable<number>;
+  stat_critical_chance?: Nullable<number>;
+  stat_critical_damage?: Nullable<number>;
+  stat_health?: Nullable<number>;
+  stat_stamina?: Nullable<number>;
+  stat_avoidance?: Nullable<number>;
+  level_requirement: Nullable<number>;
+  equipable: boolean;
+  equipment_slot: Nullable<ItemSlot>;
+}
+
+declare interface Equipment {
+  username: string;
+  head: Nullable<string>;
+  necklace: Nullable<string>;
+  shoulder: Nullable<string>;
+  back: Nullable<string>;
+  chest: Nullable<string>;
+  wrists: Nullable<string>;
+  hands: Nullable<string>;
+  waist: Nullable<string>;
+  legs: Nullable<string>;
+  feet: Nullable<string>;
+  ring_1: Nullable<string>;
+  ring_2: Nullable<string>;
+  trinket_1: Nullable<string>;
+  trinket_2: Nullable<string>;
+  weapon: Nullable<string>;
 }
 
 // Define icon data
@@ -148,13 +182,20 @@ declare interface PositionData {
 declare interface StatsData {
   health: number;
   max_health: number;
+  total_max_health: number;
   stamina: number;
   max_stamina: number;
+  total_max_stamina: number;
   level: number;
   xp: number;
   max_xp: number;
-  crit_damage: number;
-  crit_chance: number;
+  stat_critical_damage: number;
+  stat_critical_chance: number;
+  stat_armor: number;
+  stat_damage: number;
+  stat_health: number;
+  stat_stamina: number;
+  stat_avoidance: number;
 }
 
 // Define config data
@@ -205,8 +246,15 @@ declare interface SpellData {
   type: string;
   cast_time: number;
   description: string;
+  can_move: number;
   cooldown: number;
   icon: Nullable<string>;
+  sprite: Nullable<string>;
+}
+
+declare interface LearnedSpell {
+  spell: string;
+  username: string;
 }
 
 type NPCScript = {
@@ -346,17 +394,7 @@ declare interface PlayerData {
     };
   };
   permissions: string[];
-  stats: {
-    max_health: number;
-    health: number;
-    max_stamina: number;
-    stamina: number;
-    xp: number;
-    max_xp: number;
-    level: number;
-    crit_chance: number;
-    crit_damage: number;
-  };
+  stats: statsData;
   currency: {
     copper: number;
     silver: number;
@@ -369,6 +407,7 @@ declare interface PlayerData {
     music_volume: number;
     effects_volume: number;
     muted: boolean;
+    hotbar_config: any[];
   }>;
   questlog: {
     completed: string[];
@@ -382,6 +421,9 @@ declare interface PlayerData {
   party: string[];
   friends: string[];
   collectables: object[Collectable];
+  learnedSpells: {[key: string]: { sprite: Nullable<string> }};
+  hotbarConfig: string | null;
+  equipment: Equipment;
 }
 
 declare interface Collectable {

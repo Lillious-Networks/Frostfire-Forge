@@ -104,7 +104,7 @@ export const keyHandlers = {
 
     toggleGuild = toggleUI(guildContainer, toggleGuild, -450);
   },
-  ShiftLeft: () => {
+  KeyQ: () => {
     mount();
   },
   Digit1: async () => {
@@ -173,10 +173,21 @@ function cast(hotbar_index: number) {
     if (isKeyOnCooldown(`Digit${hotbar_index + 1}`)) return;
     selectHotbarSlot(hotbar_index);
     putKeyOnCooldown(`Digit${hotbar_index + 1}`);
-    // Send movement abort packet
-    stopMovement();
     const target = Array.from(cache?.players).find(p => p?.targeted) || null;
-    sendRequest({ type: "HOTBAR", data: { spell: hotbar_index + 1, target } });
+
+    // Get the spell name from the hotbar slot data attribute
+    const slot = hotbarSlots[hotbar_index];
+    const spellName = slot?.dataset?.spellName;
+    if (!spellName) return;
+
+    // Send request with spell name
+    sendRequest({
+      type: "HOTBAR",
+      data: {
+        spell: spellName,
+        target
+      }
+    });
 }
 
 function mount() {
@@ -187,10 +198,10 @@ function mount() {
 
 function selectHotbarSlot(index: number) {
   const slot = hotbarSlots[index];
-  slot.style.border = "2px solid rgba(255, 255, 255, 0.7)";
+  slot.classList.add("selected");
   setTimeout(() => {
-    slot.style.border = "2px solid transparent";
-  }, 100);
+    slot.classList.remove("selected");
+  }, 250);
 }
 
 function putKeyOnCooldown(key: string) {
@@ -235,11 +246,11 @@ addEventListener("keypress", (event: KeyboardEvent) => {
           event.preventDefault();
           chatInput.value = "";
           chatInput.dataset.mode = "party";
-          chatInput.style.color = "#5389ff";
+          chatInput.style.color = "#86b3ff";
           // Update placeholder text
           chatInput.placeholder = "[Party] Type here...";
           // Make placeholder the same color as party mode
-          chatInput.style.setProperty('--chat-placeholder-color', '#5389ff');
+          chatInput.style.setProperty('--chat-placeholder-color', '#86b3ff');
         }
         break;
       case inputValue === "/say" || inputValue === "/s":
@@ -249,11 +260,11 @@ addEventListener("keypress", (event: KeyboardEvent) => {
           chatInput.value = "";
           // Remove any existing mode
           delete chatInput.dataset.mode;
-          chatInput.style.color = "#ffffff";
+          chatInput.style.color = "#FFF1DA";
           // Reset placeholder text
           chatInput.placeholder = "Type here...";
           // Reset placeholder color
-          chatInput.style.setProperty('--chat-placeholder-color', '#b17767');
+          chatInput.style.setProperty('--chat-placeholder-color', '#FFF1DA');
         }
         break;
       case inputValue.startsWith("/whisper ") || inputValue.startsWith("/w "):
@@ -263,10 +274,10 @@ addEventListener("keypress", (event: KeyboardEvent) => {
           const name = inputValue.split(" ")[1];
           chatInput.value = "";
           chatInput.dataset.mode = `whisper ${name}`;
-          chatInput.style.color = "#d670e4";
+          chatInput.style.color = "#ff59f8";
           // Update placeholder text
           chatInput.placeholder = `[${name}] Type here...`;
-          chatInput.style.setProperty('--chat-placeholder-color', '#d670e4');
+          chatInput.style.setProperty('--chat-placeholder-color', '#ff59f8');
         }
         break;
       default:

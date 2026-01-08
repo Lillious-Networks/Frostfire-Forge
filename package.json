@@ -18,7 +18,7 @@
     "typescript-eslint": "^8.51.0"
   },
   "scripts": {
-    "production": "bun transpile-production && bun --env-file=.env.production ./src/webserver/server.ts",
+    "production": "bun transpile-production && bun --env-file=.env.production ./src/webserver/server.ts --sql-preconnect",
     "transpile-local": "bun --env-file=.env.local ./src/utility/transpiler.ts",
     "transpile-development": "bun --env-file=.env.development ./src/utility/transpiler.ts",
     "transpile-production": "bun --env-file=.env.production ./src/utility/transpiler.ts",

@@ -39,8 +39,6 @@ function togglePanel(panel: HTMLElement, isOpen: boolean): boolean {
       panel.classList.add('open');
     }
   } else {
-    // Desktop: use existing slide animation
-    const currentRight = parseInt(window.getComputedStyle(panel).right);
     if (isOpen) {
       panel.style.right = panel === inventoryUI ? '-350px' : '-450px';
     } else {

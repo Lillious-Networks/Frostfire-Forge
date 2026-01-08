@@ -37,11 +37,5 @@ src/utility/*.md
 .VSCodeCounter
 bun.lockb
 
-src/assets/sprites/*
-
-src/assets/spritesheets/*
-!src/assets/spritesheets/frostfire-player.png
-
 .vscode/
-
 .claude/

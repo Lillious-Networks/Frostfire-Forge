@@ -40,6 +40,7 @@ async function createPlayer(data: any) {
     party: data.party || null,
     mounted: data.mounted || false,
     moving: data.location.moving || false,
+    chatType: "global" as "global" | "party" | "whisper",
     damageNumbers: [] as Array<{
       value: number;
       x: number;
@@ -47,6 +48,7 @@ async function createPlayer(data: any) {
       startTime: number;
       isHealing: boolean;
       isCrit: boolean;
+      isMiss?: boolean;
     }>,
     castingSpell: null as string | null,
     castingStartTime: 0,
@@ -86,8 +88,14 @@ async function createPlayer(data: any) {
       // Draw chat bubbles on top
       if (this.chat) {
         if (this.chat.trim() !== "") {
+          // Determine chat color based on chat type
+          let chatColor = "white";
+          if (this.chatType === "party") {
+            chatColor = "#86b3ff";
+          }
+
           context.fillStyle = "black";
-          context.fillStyle = "white";
+          context.fillStyle = chatColor;
           context.textAlign = "center";
           context.shadowBlur = 1;
           context.shadowColor = "black";
@@ -107,7 +115,7 @@ async function createPlayer(data: any) {
               textWidth + 10,
               20
             );
-            context.fillStyle = "white";
+            context.fillStyle = chatColor;
             context.fillText(lines[i], this.position.x, startingPosition);
           }
         }
@@ -149,7 +157,11 @@ async function createPlayer(data: any) {
         context.textAlign = "center";
 
         // Set color based on damage or healing
-        if (dmg.isHealing) {
+        if (dmg.isMiss) {
+          // White for misses
+          context.fillStyle = `rgba(255, 255, 255, ${opacity})`;
+          context.strokeStyle = `rgba(100, 100, 100, ${opacity})`;
+        } else if (dmg.isHealing) {
           context.fillStyle = `rgba(0, 255, 0, ${opacity})`;
           context.strokeStyle = `rgba(0, 100, 0, ${opacity})`;
         } else if (dmg.isCrit) {
@@ -161,8 +173,10 @@ async function createPlayer(data: any) {
           context.strokeStyle = `rgba(139, 0, 0, ${opacity})`;
         }
 
-        // Draw text with outline - add ! for crits
-        const displayText = dmg.isCrit && !dmg.isHealing
+        // Draw text with outline - show "Miss" for misses, add ! for crits
+        const displayText = dmg.isMiss
+          ? "Miss"
+          : dmg.isCrit && !dmg.isHealing
           ? `${dmg.value}!`
           : `${dmg.value}`;
 
@@ -488,7 +502,8 @@ async function createPlayer(data: any) {
           context.shadowBlur = 2;
 
           // Set health bar color based on health percentage
-          const healthPercent = this.stats.health / this.stats.max_health;
+          const maxHealth = this.stats.total_max_health || this.stats.max_health;
+          const healthPercent = this.stats.health / maxHealth;
           if (healthPercent < 0.3) {
             context.fillStyle = "#C81D1D"; // red
           } else if (healthPercent < 0.5) {
@@ -513,10 +528,11 @@ async function createPlayer(data: any) {
         context.fillStyle = "rgba(0, 0, 0, 0.8)";
         context.fillRect(this.position.x - 50, this.position.y + 51 + uiOffset, 100, 3);
         context.fillStyle = "#469CD9";
+        const maxStamina = this.stats.total_max_stamina || this.stats.max_stamina;
         context.fillRect(
           this.position.x - 50,
             this.position.y + 51 + uiOffset,
-            (this.stats.stamina / this.stats.max_stamina) * 100,
+            (this.stats.stamina / maxStamina) * 100,
             3
           );
         }
@@ -550,7 +566,7 @@ async function createPlayer(data: any) {
     setCameraY(player.position.y - window.innerHeight / 2 + 48);
     window.scrollTo(getCameraX(), getCameraY());
     updateFriendsList({friends: data.friends || []});
-    createPartyUI(data.party || []);
+    createPartyUI(data.party || [], Array.from(cache.players));
     updateXp(data.stats.xp, data.stats.level, data.stats.max_xp);
   }
 }

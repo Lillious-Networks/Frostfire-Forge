@@ -72,6 +72,16 @@ export const packetManager = {
       )
     ] as any[];
   },
+  equipment: (data: Equipment) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "EQUIPMENT",
+          data,
+        }),
+      )
+    ] as any[];
+  },
   collectables: (data: Collectable[]) => {
     return [
       packet.encode(
@@ -79,6 +89,26 @@ export const packetManager = {
           type: "COLLECTABLES",
           data,
           slots: 20,
+        }),
+      )
+    ] as any[];
+  },
+  spells: (data: any) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "SPELLS",
+          data,
+        }),
+      )
+    ] as any[];
+  },
+  loadHotBar: (data: any) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "LOAD_HOTBAR",
+          data,
         }),
       )
     ] as any[];
