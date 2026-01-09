@@ -15,7 +15,7 @@
     "@types/nodemailer": "^7.0.4",
     "eslint": "^9.39.2",
     "husky": "^9.1.7",
-    "typescript-eslint": "^8.51.0"
+    "typescript-eslint": "^8.52.0"
   },
   "scripts": {
     "production": "bun transpile-production && bun --env-file=.env.production ./src/webserver/server.ts --sql-preconnect",
