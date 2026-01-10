@@ -72,13 +72,16 @@ jobs:
 
           if [ -n "$RUNNING_IMAGES" ]; then
             echo "Backing up current Docker images..."
+            # Remove duplicates and filter out SHA256 hashes
+            UNIQUE_IMAGES=$(echo "$RUNNING_IMAGES" | sort -u | grep -v "^sha256:")
+
             while IFS= read -r image; do
-              if [ -n "$image" ]; then
+              if [ -n "$image" ] && [ "$image" != "sha256:"* ]; then
                 # Tag each running image with a backup suffix
                 echo "Tagging $image as ${image}-backup"
                 docker tag "$image" "${image}-backup" || echo "Failed to tag $image, might not exist"
               fi
-            done <<< "$RUNNING_IMAGES"
+            done <<< "$UNIQUE_IMAGES"
           else
             echo "No running containers found to backup"
           fi
