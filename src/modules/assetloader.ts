@@ -1,7 +1,6 @@
 import path from "path";
 import fs from "fs";
 import log from "./logger";
-import weapon from "../systems/weapons";
 import item from "../systems/items";
 import spell from "../systems/spells";
 import npc from "../systems/npcs";
@@ -209,12 +208,6 @@ const spells = await assetCache.get("spells") as SpellData[];
 
 log.success(`Loaded ${spells.length} spell(s) from the database in ${(performance.now() - spellnow).toFixed(2)}ms`);
 log.info(`Spells loaded: ${spells.map((s) => s.name).join(", ")}`);
-
-// Load weapon data
-const weaponnow = performance.now();
-await assetCache.add("weapons", await weapon.list());
-const weapons = await assetCache.get("weapons") as WeaponData[];
-log.success(`Loaded ${weapons.length} weapon(s) from the database in ${(performance.now() - weaponnow).toFixed(2)}ms`);
 
 // Load npc data
 const npcnow = performance.now();
