@@ -22,6 +22,7 @@ jobs:
     create_release_number:
         name: Create Release Number
         uses: ./.github/workflows/generate_release_number.yml
+        # output: release-number
 
     build:
       name: Build v${{ needs.create_release_number.outputs.release-number }}
@@ -91,10 +92,180 @@ jobs:
             export REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"
             docker compose -f docker-compose.prod.yml build
 
+    backup-docker-images:
+      name: Backup Current Docker Images
+      runs-on: self-hosted
+      environment: production
+      needs: [build]
+      steps:
+        - name: Tag current images as backup
+          run: |
+            # Get list of running containers and their images
+            RUNNING_IMAGES=$(docker compose -f docker-compose.prod.yml ps --format json | jq -r '.Image' 2>/dev/null || echo "")
+
+            if [ -n "$RUNNING_IMAGES" ]; then
+              echo "Backing up current Docker images..."
+              while IFS= read -r image; do
+                if [ -n "$image" ]; then
+                  # Tag each running image with a backup suffix
+                  echo "Tagging $image as ${image}-backup"
+                  docker tag "$image" "${image}-backup" || echo "Failed to tag $image, might not exist"
+                fi
+              done <<< "$RUNNING_IMAGES"
+            else
+              echo "No running containers found to backup"
+            fi
+
+    stop-docker-containers:
+      name: Stop Existing Docker Containers
+      runs-on: self-hosted
+      environment: production
+      needs: [backup-docker-images]
+      steps:
+        - name: Stop Docker Container
+          run: |
+            docker compose -f docker-compose.prod.yml down || echo "No container to stop"
+
+    start-docker-container:
+      name: Start Docker Container
+      runs-on: self-hosted
+      environment: production
+      needs: [stop-docker-containers]
+      steps:
+        - name: Start Docker Services
+          run: |
+            export REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"
+            docker compose -f docker-compose.prod.yml up -d
+
+    verify-docker-container:
+      name: Verify Docker Container is Running
+      runs-on: self-hosted
+      environment: production
+      needs: [start-docker-container]
+      outputs:
+        status: ${{ steps.verify.outcome }}
+      steps:
+        - name: Wait for services and check logs
+          id: verify
+          continue-on-error: true
+          run: |
+            echo "Waiting 15 seconds for services to start..."
+            sleep 15
+
+            echo "Fetching Docker logs..."
+            LOGS=$(docker compose -f docker-compose.prod.yml logs --tail=50)
+
+            echo "$LOGS"
+
+            if echo "$LOGS" | grep -q "Webserver started"; then
+              echo "✅ Webserver started successfully"
+              exit 0
+            else
+              echo "❌ Webserver did NOT start"
+              exit 1
+            fi
+
+        - name: Check verification result
+          if: steps.verify.outcome == 'failure'
+          run: |
+            echo "Verification failed, triggering rollback..."
+            exit 1
+
+    rollback:
+      name: Rollback to Previous Docker Images
+      runs-on: self-hosted
+      environment: production
+      needs: [verify-docker-container]
+      if: failure() && needs.verify-docker-container.outputs.status == 'failure'
+      steps:
+        - name: Checkout Repository
+          uses: actions/checkout@v4
+
+        - name: Stop failed containers
+          run: |
+            echo "Stopping failed Docker containers..."
+            docker compose -f docker-compose.prod.yml down || echo "No containers to stop"
+
+        - name: Restore backup images
+          run: |
+            echo "Restoring backup Docker images..."
+
+            # Find all backup images
+            BACKUP_IMAGES=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep -- "-backup$" || echo "")
+
+            if [ -n "$BACKUP_IMAGES" ]; then
+              while IFS= read -r backup_image; do
+                if [ -n "$backup_image" ]; then
+                  # Remove -backup suffix to get original image name
+                  original_image="${backup_image%-backup}"
+                  echo "Restoring $backup_image to $original_image"
+
+                  # Remove the new (failed) image if it exists
+                  docker rmi "$original_image" 2>/dev/null || echo "No new image to remove"
+
+                  # Re-tag backup image to original name
+                  docker tag "$backup_image" "$original_image"
+                fi
+              done <<< "$BACKUP_IMAGES"
+            else
+              echo "No backup images found to restore"
+              exit 1
+            fi
+
+        - name: Start containers with backup images
+          run: |
+            echo "Starting Docker containers with backup images..."
+            export REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"
+            docker compose -f docker-compose.prod.yml up -d
+
+        - name: Verify rollback
+          run: |
+            echo "Waiting 15 seconds for services to start..."
+            sleep 15
+
+            echo "Fetching Docker logs..."
+            LOGS=$(docker compose -f docker-compose.prod.yml logs --tail=50)
+
+            echo "$LOGS"
+
+            if echo "$LOGS" | grep -q "Webserver started"; then
+              echo "✅ Rollback successful - Previous version is running"
+            else
+              echo "❌ Rollback failed - Manual intervention required"
+              exit 1
+            fi
+
+    cleanup:
+      name: Cleanup Old Docker Images
+      runs-on: self-hosted
+      environment: production
+      needs: [start-docker-container, verify-docker-container]
+      if: success() && needs.verify-docker-container.outputs.status == 'success'
+      steps:
+        - name: Remove Backup and Unused Docker Images
+          run: |
+            echo "Removing backup Docker images..."
+            # Remove all backup images
+            BACKUP_IMAGES=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep -- "-backup$" || echo "")
+
+            if [ -n "$BACKUP_IMAGES" ]; then
+              while IFS= read -r backup_image; do
+                if [ -n "$backup_image" ]; then
+                  echo "Removing backup image: $backup_image"
+                  docker rmi "$backup_image" || echo "Failed to remove $backup_image"
+                fi
+              done <<< "$BACKUP_IMAGES"
+            else
+              echo "No backup images found"
+            fi
+
+            echo "Removing unused Docker images..."
+            docker image prune -f
+
     create_release_tag:
         name: Create Release Tag
         runs-on: ubuntu-latest
-        needs: [create_release_number, build]
+        needs: [create_release_number, build, verify-docker-container]
         steps:
         - name: Create Git Tag
           env:
@@ -125,49 +296,6 @@ jobs:
               RELEASE_NUMBER: ${{ needs.create_release_number.outputs.release-number }}
           run: |
               gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/${RELEASE_NUMBER}
-
-    stop-docker-containers:
-      name: Stop Existing Docker Containers
-      runs-on: self-hosted
-      environment: production
-      needs: [create_github_release]
-      steps:
-        - name: Stop Docker Container
-          run: |
-            docker compose -f docker-compose.prod.yml down || echo "No container to stop"
-
-    start-docker-container:
-      name: Start Docker Container
-      runs-on: self-hosted
-      environment: production
-      needs: [stop-docker-containers]
-      steps:
-        - name: Start Docker Services
-          run: |
-            export REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}"
-            docker compose -f docker-compose.prod.yml up -d
-
-    verify-docker-container:
-      name: Verify Docker Container is Running
-      runs-on: self-hosted
-      environment: production
-      needs: [start-docker-container]
-      steps:
-        - name: Output Docker Logs
-          run: |
-            echo "Waiting 15 seconds for services to start..."
-            sleep 15
-            docker compose -f docker-compose.prod.yml logs --tail=50
-
-    cleanup:
-      name: Cleanup Old Docker Images
-      runs-on: self-hosted
-      environment: production
-      needs: [start-docker-container]
-      steps:
-        - name: Remove Unused Docker Images
-          run: |
-            docker image prune -f
 
     build-and-push-docker-image:
       name: Build and Push Docker Image

@@ -1,0 +1,48 @@
+# Used to verify Docker image builds before pushing to main or development branches
+name: Docker Pre-Build Check
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches-ignore:
+      - main
+      - development
+
+jobs:
+  build:
+    name: Build Docker Pre-Build Check Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Update environment variables for Docker Pre-Build Check Image
+        run: |
+          # Check if .env.development is a directory (should not be)
+          if [ -d ".env.development" ]; then
+            echo ".env.development is a directory. Removing it."
+            rm -rf .env.development
+          fi
+
+          # Remove existing .env.development file if it exists and is not a directory
+          if [ -f ".env.development" ]; then
+            echo ".env.development file exists. Removing it."
+            rm .env.development
+          fi
+
+          echo 'DATABASE_ENGINE="sqlite"' >> .env.development
+          echo 'DATABASE_NAME="docker-pre-build"' >> .env.development
+          echo 'WEBSRV_PORT=8080' >> .env.development
+          echo 'WEBSRV_USESSL=false' >> .env.development
+          echo 'WEB_SOCKET_URL="ws://localhost"' >> .env.development
+          echo 'WEB_SOCKET_PORT=3001' >> .env.development
+          echo 'DOMAIN="http://localhost:8080"' >> .env.development
+          echo 'GAME_NAME="Docker Pre-Build"' >> .env.development
+          echo 'CACHE="memory"' >> .env.development
+          echo 'VERSION="${{ github.run_number }}-pre-build"' >> .env.development
+
+      - name: Build Docker Pre-Build Check Image
+        run: |
+          docker compose -f docker-compose.dev.yml build
