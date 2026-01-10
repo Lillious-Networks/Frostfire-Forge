@@ -8,6 +8,7 @@ import packet from "./packetencoder.ts";
 import Cache from "./cache.ts";
 import { updateTime } from "./ambience.ts";
 import { setWeatherType } from "./renderer.ts";
+import { setupItemTooltip, removeItemTooltip, hideItemTooltip } from "./tooltip.ts";
 const cache = Cache.getInstance();
 import { createPlayer } from "./player.ts";
 import { updateFriendsList } from "./friends.ts";
@@ -28,8 +29,15 @@ import {
   progressBarContainer,
   inventoryGrid,
   chatMessages,
+  usernameLabel,
+  levelLabel,
   healthLabel,
   manaLabel,
+  damageLabel,
+  armorLabel,
+  critChanceLabel,
+  critDamageLabel,
+  avoidanceLabel,
   notificationContainer,
   notificationMessage,
   collectablesUI,
@@ -37,6 +45,10 @@ import {
   spellBookUI,
   loadHotbarConfiguration,
   hotbarSlots,
+  equipmentLeftColumn,
+  equipmentRightColumn,
+  equipmentBottomCenter,
+  setupInventorySlotHandlers,
 } from "./ui.ts";
 import { playAudio, playMusic } from "./audio.ts";
 import { updateXp } from "./xp.ts";
@@ -806,35 +818,242 @@ socket.onmessage = async (event) => {
       }
     case "EQUIPMENT": {
       const data = JSON.parse(packet.decode(event.data))["data"];
-      console.log("Equipment data received:", data);
+
+      // Store equipment data in cache
+      cache.equipment = data;
+
+      // Only update equipment slots if stat sheet is closed or showing current player
+      const statSheetOpen = statUI.style.left === "10px";
+      const showingCurrentPlayer = statUI.getAttribute("data-id") === cachedPlayerId;
+
+      // Skip updating equipment UI if viewing another player's stats
+      if (statSheetOpen && !showingCurrentPlayer) {
+        break;
+      }
+
+      // Clear all equipment slots first
+      const allSlots = [
+        ...equipmentLeftColumn.querySelectorAll(".slot"),
+        ...equipmentRightColumn.querySelectorAll(".slot"),
+        ...equipmentBottomCenter.querySelectorAll(".slot"),
+      ];
+
+      allSlots.forEach((slot) => {
+        // Remove tooltip event listeners before clearing
+        removeItemTooltip(slot as HTMLElement);
+
+        // Clear the slot content
+        slot.innerHTML = "";
+        slot.className = "slot empty ui";
+        const slotType = slot.getAttribute("data-slot");
+        if (slotType) {
+          slot.setAttribute("data-slot", slotType);
+        }
+      });
+
+      // Populate equipment slots with equipped items
+      for (const [slotName, itemName] of Object.entries(data)) {
+        if (!itemName) continue; // Skip empty slots
+
+        // Find the slot element by data-slot attribute
+        const slotElement = document.querySelector(`.slot[data-slot="${slotName}"]`) as HTMLDivElement;
+        if (!slotElement) {
+          console.warn(`Equipment slot not found for: ${slotName}`);
+          continue;
+        }
+
+        // Get item details from inventory cache to display icon
+        // If inventory isn't loaded yet, this will be populated when INVENTORY packet arrives
+        const inventoryData = cache.inventory || [];
+        const itemDetails = inventoryData.find((item: any) => item.name === itemName);
+
+        if (itemDetails && itemDetails.icon) {
+          // Remove empty class and add quality class
+          if (itemDetails.quality) {
+            slotElement.classList.add(itemDetails.quality.toLowerCase());
+            slotElement.classList.remove("empty");
+          }
+
+          // @ts-expect-error - pako is loaded in index.html
+          const inflatedData = pako.inflate(
+            new Uint8Array(itemDetails.icon.data),
+            { to: "string" }
+          );
+          const iconImage = new Image();
+          iconImage.src = `data:image/png;base64,${inflatedData}`;
+          iconImage.draggable = false;
+          iconImage.width = 32;
+          iconImage.height = 32;
+          iconImage.onload = () => {
+            slotElement.appendChild(iconImage);
+          };
+
+          // Add double-click to unequip
+          slotElement.addEventListener("dblclick", () => {
+            // Hide tooltip when unequipping
+            hideItemTooltip();
+
+            // Find first empty inventory slot
+            const inventorySlots = inventoryGrid.querySelectorAll(".slot");
+            let firstEmptySlot = -1;
+            inventorySlots.forEach((invSlot, idx) => {
+              if (firstEmptySlot === -1 && invSlot.classList.contains("empty")) {
+                firstEmptySlot = idx;
+              }
+            });
+
+            sendRequest({
+              type: "UNEQUIP_ITEM",
+              data: { slot: slotName, targetSlotIndex: firstEmptySlot >= 0 ? firstEmptySlot : undefined },
+            });
+          });
+
+          // Make equipped item draggable for unequipping
+          slotElement.draggable = true;
+          slotElement.dataset.equippedItem = String(itemName);
+
+          slotElement.addEventListener("dragstart", (event: DragEvent) => {
+            // Hide tooltip when starting to drag
+            hideItemTooltip();
+
+            if (event.dataTransfer) {
+              event.dataTransfer.setData("equipped-item-slot", slotName);
+              event.dataTransfer.setData("equipped-item-name", String(itemName));
+              event.dataTransfer.effectAllowed = "move";
+              slotElement.style.opacity = "0.5";
+            }
+          });
+
+          slotElement.addEventListener("dragend", () => {
+            slotElement.style.opacity = "1";
+          });
+
+          // Setup tooltip for equipped item
+          setupItemTooltip(slotElement, () => itemDetails);
+        } else {
+          // If no icon, just show item name
+          slotElement.innerHTML = String(itemName);
+          slotElement.classList.remove("empty");
+
+          // Add double-click to unequip
+          slotElement.addEventListener("dblclick", () => {
+            // Hide tooltip when unequipping
+            hideItemTooltip();
+
+            // Find first empty inventory slot
+            const inventorySlots = inventoryGrid.querySelectorAll(".slot");
+            let firstEmptySlot = -1;
+            inventorySlots.forEach((invSlot, idx) => {
+              if (firstEmptySlot === -1 && invSlot.classList.contains("empty")) {
+                firstEmptySlot = idx;
+              }
+            });
+
+            sendRequest({
+              type: "UNEQUIP_ITEM",
+              data: { slot: slotName, targetSlotIndex: firstEmptySlot >= 0 ? firstEmptySlot : undefined },
+            });
+          });
+
+          // Make equipped item draggable for unequipping
+          slotElement.draggable = true;
+          slotElement.dataset.equippedItem = String(itemName);
+
+          slotElement.addEventListener("dragstart", (event: DragEvent) => {
+            // Hide tooltip when starting to drag
+            hideItemTooltip();
+
+            if (event.dataTransfer) {
+              event.dataTransfer.setData("equipped-item-slot", slotName);
+              event.dataTransfer.setData("equipped-item-name", String(itemName));
+              event.dataTransfer.effectAllowed = "move";
+              slotElement.style.opacity = "0.5";
+            }
+          });
+
+          slotElement.addEventListener("dragend", () => {
+            slotElement.style.opacity = "1";
+          });
+
+          // Setup tooltip for equipped item
+          setupItemTooltip(slotElement, () => itemDetails);
+        }
+      }
       break;
     }
     case "INVENTORY":
       {
         const data = JSON.parse(packet.decode(event.data))["data"];
         const slots = JSON.parse(packet.decode(event.data))["slots"];
+
+        // Store inventory data in cache for equipment handler to access
+        cache.inventory = data;
+
         // Clear existing slots
         inventoryGrid.querySelectorAll(".slot").forEach((slot) => {
+          // Remove tooltip event listeners before removing slot
+          removeItemTooltip(slot as HTMLElement);
           inventoryGrid.removeChild(slot);
         });
-        if (data.length > 0) {
-          // Assign each item to a slot
-          for (let i = 0; i < data.length; i++) {
-            // Create a new item slot
-            const slot = document.createElement("div");
-            slot.classList.add("slot");
-            slot.classList.add("ui");
-            const item = data[i];
-            // If item is equipped, don't show it in inventory
 
-            // TODO: Show in equipment viewer instead
-            if (item.equipped) {
-              slot.classList.add("empty");
-              inventoryGrid.appendChild(slot);
-              continue;
+        // Create a map of items by name for quick lookup (only unequipped items)
+        const itemMap: { [key: string]: any } = {};
+        data.forEach((item: any) => {
+          if (!item.equipped) {
+            itemMap[item.name] = item;
+          }
+        });
+
+        // Build slot array - create exactly 'slots' number of slots
+        const slotArray: (any | null)[] = new Array(slots).fill(null);
+
+        // Apply saved inventory configuration if available
+        if (cache.inventoryConfig) {
+          // Place items according to configuration
+          for (const slotIndex in cache.inventoryConfig) {
+            const itemName = cache.inventoryConfig[slotIndex];
+            const idx = parseInt(slotIndex);
+            if (itemName && itemMap[itemName] && idx >= 0 && idx < slots) {
+              slotArray[idx] = itemMap[itemName];
+              delete itemMap[itemName]; // Remove from map so we don't add it twice
             }
+          }
 
-            slot.classList.add(item.quality.toLowerCase() || "empty");
+          // Add any remaining unequipped items that aren't in the config
+          let nextEmptySlot = 0;
+          for (const itemName in itemMap) {
+            // Find next empty slot
+            while (nextEmptySlot < slots && slotArray[nextEmptySlot] !== null) {
+              nextEmptySlot++;
+            }
+            if (nextEmptySlot < slots) {
+              slotArray[nextEmptySlot] = itemMap[itemName];
+              nextEmptySlot++;
+            }
+          }
+        } else {
+          // No configuration - just add unequipped items sequentially
+          let slotIndex = 0;
+          for (const itemName in itemMap) {
+            if (slotIndex < slots) {
+              slotArray[slotIndex] = itemMap[itemName];
+              slotIndex++;
+            }
+          }
+        }
+
+        // Now render all slots
+        for (let i = 0; i < slots; i++) {
+          const slot = document.createElement("div");
+          slot.classList.add("slot");
+          slot.classList.add("ui");
+          slot.dataset.inventoryIndex = i.toString();
+
+          const item = slotArray[i];
+
+          if (item) {
+            // Item slot
+            slot.classList.add(item.quality.toLowerCase() || "common");
 
             if (item.icon) {
               // @ts-expect-error - pako is loaded in index.html
@@ -845,45 +1064,72 @@ socket.onmessage = async (event) => {
               const iconImage = new Image();
               iconImage.src = `data:image/png;base64,${inflatedData}`;
               iconImage.draggable = false;
-              // Scale to 32x32
+              iconImage.style.pointerEvents = "none";
               iconImage.width = 32;
               iconImage.height = 32;
               iconImage.onload = () => {
                 slot.appendChild(iconImage);
               };
+
               // Overlay item quantity if greater than 1
               if (item.quantity > 1) {
                 const quantityLabel = document.createElement("div");
                 quantityLabel.classList.add("quantity-label");
                 quantityLabel.innerText = `x${item.quantity}`;
+                quantityLabel.style.pointerEvents = "none";
                 slot.appendChild(quantityLabel);
               }
-              // If data.type is equipment, add click event to equip item
-                if (item.type === "equipment") {
-                slot.addEventListener("dblclick", () => {
-                  sendRequest({
-                    type: "EQUIP_ITEM",
-                    data: { item: item.name },
-                  });
-                });
+
+              // Store item data
+              slot.dataset.itemName = item.name;
+              slot.dataset.itemType = item.type;
+
+              // If equipment type, add equipment slot data
+              if (item.type === "equipment") {
+                slot.dataset.equipmentSlot = item.equipment_slot;
               }
-              inventoryGrid.appendChild(slot);
+
+              // Make item slots draggable
+              slot.draggable = true;
+              slot.setAttribute("draggable", "true");
+
+              // Setup tooltip for this item - look up item data from slot's dataset
+              setupItemTooltip(slot, () => {
+                // Get item from cache using the slot's stored item name
+                const itemName = slot.dataset.itemName;
+                if (!itemName || !cache.inventory) return null;
+                return cache.inventory.find((invItem: any) => invItem.name === itemName);
+              });
             } else {
-              slot.innerHTML = `${item.item}${
+              slot.innerHTML = `${item.name}${
                 item.quantity > 1 ? `<br>x${item.quantity}` : ""
               }`;
-              inventoryGrid.appendChild(slot);
-            }
-          }
-        }
+              slot.dataset.itemName = item.name;
+              slot.dataset.itemType = item.type;
+              if (item.type === "equipment") {
+                slot.dataset.equipmentSlot = item.equipment_slot;
+              }
+              slot.draggable = true;
+              slot.setAttribute("draggable", "true");
 
-        for (let i = 0; i < slots - data.length; i++) {
-          const slot = document.createElement("div");
-          slot.classList.add("slot");
-          slot.classList.add("empty");
-          slot.classList.add("ui");
+              // Setup tooltip for this item - look up item data from slot's dataset
+              setupItemTooltip(slot, () => {
+                // Get item from cache using the slot's stored item name
+                const itemName = slot.dataset.itemName;
+                if (!itemName || !cache.inventory) return null;
+                return cache.inventory.find((invItem: any) => invItem.name === itemName);
+              });
+            }
+          } else {
+            // Empty slot
+            slot.classList.add("empty");
+          }
+
           inventoryGrid.appendChild(slot);
         }
+
+        // Setup drag and drop handlers for all inventory slots
+        setupInventorySlotHandlers();
       }
       break;
     case "QUESTLOG": {
@@ -964,7 +1210,18 @@ socket.onmessage = async (event) => {
       player.stats = data;
       player.max_health = data.total_max_health;
       player.max_stamina = data.total_max_stamina;
-      console.log(`Stats updated for player ${player.username}:`, data);
+
+      // Update stat sheet if it's open and showing this player's stats
+      if (statUI.style.left === "10px" && statUI.getAttribute("data-id") === data.id) {
+        levelLabel!.innerText = `Level: ${data.level}`;
+        healthLabel!.innerText = `Health: ${data.health} / ${data.total_max_health}`;
+        manaLabel!.innerText = `Mana: ${data.stamina} / ${data.total_max_stamina}`;
+        damageLabel!.innerText = `Damage: ${data.stat_damage || 0}`;
+        armorLabel!.innerText = `Armor: ${data.stat_armor || 0}%`;
+        critChanceLabel!.innerText = `Critical Chance: ${data.stat_critical_chance || 0}%`;
+        critDamageLabel!.innerText = `Critical Damage: ${data.stat_critical_damage || 0}%`;
+        avoidanceLabel!.innerText = `Avoidance: ${data.stat_avoidance || 0}%`;
+      }
 
       // Update party member UI if this player is in the party
       const currentPlayer = Array.from(cache.players).find(
@@ -1005,6 +1262,23 @@ socket.onmessage = async (event) => {
         loadHotbarConfiguration(data.hotbar_config).catch(err =>
           console.error('Failed to load hotbar configuration:', err)
         );
+      }
+
+      // Store inventory configuration in cache for later use
+      if (data.inventory_config) {
+        // Handle both string and object cases (depends on database driver)
+        if (typeof data.inventory_config === 'string') {
+          try {
+            cache.inventoryConfig = JSON.parse(data.inventory_config);
+          } catch (error) {
+            console.error('Failed to parse inventory_config:', error);
+            cache.inventoryConfig = {};
+          }
+        } else if (typeof data.inventory_config === 'object' && data.inventory_config !== null) {
+          cache.inventoryConfig = data.inventory_config;
+        } else {
+          cache.inventoryConfig = {};
+        }
       }
       break;
     }
@@ -1070,11 +1344,12 @@ socket.onmessage = async (event) => {
         const newHealth = stats.health;
         const healthDiff = newHealth - oldHealth;
 
-        // Check if this is a revive scenario
-        const isRevive = oldHealth <= 0 || (newHealth === stats.total_max_health && healthDiff > stats.total_max_health * 0.5);
+        // Check if this is a revive scenario (but not a death scenario)
+        const isRevive = (oldHealth <= 0 && newHealth === stats.total_max_health) ||
+                         (newHealth === stats.total_max_health && healthDiff > stats.total_max_health * 0.5);
 
-        // Show damage/heal numbers if health changed
-        if (healthDiff !== 0 && newHealth > 0 && oldHealth > 0 && !isRevive) {
+        // Show damage/heal numbers if health changed (including death)
+        if (healthDiff !== 0 && oldHealth > 0 && !isRevive) {
           // Add slight random offset so multiple damage numbers don't overlap
           const randomOffsetX = (Math.random() - 0.5) * 20;
           const randomOffsetY = (Math.random() - 0.5) * 10;
@@ -1107,6 +1382,18 @@ socket.onmessage = async (event) => {
         t.stats = stats;
         t.max_health = stats.total_max_health;
         t.max_stamina = stats.total_max_stamina;
+
+        // Update stat sheet if it's open and showing this player's stats
+        if (statUI.style.left === "10px" && statUI.getAttribute("data-id") === target) {
+          levelLabel!.innerText = `Level: ${stats.level}`;
+          healthLabel!.innerText = `Health: ${stats.health} / ${stats.total_max_health}`;
+          manaLabel!.innerText = `Mana: ${stats.stamina} / ${stats.total_max_stamina}`;
+          damageLabel!.innerText = `Damage: ${stats.stat_damage || 0}`;
+          armorLabel!.innerText = `Armor: ${stats.stat_armor || 0}%`;
+          critChanceLabel!.innerText = `Critical Chance: ${stats.stat_critical_chance || 0}%`;
+          critDamageLabel!.innerText = `Critical Damage: ${stats.stat_critical_damage || 0}%`;
+          avoidanceLabel!.innerText = `Avoidance: ${stats.stat_avoidance || 0}%`;
+        }
 
         // Update party member UI if this player is in the party
         if (currentPlayer?.party?.includes(t.username)) {
@@ -1192,8 +1479,87 @@ socket.onmessage = async (event) => {
       const data = JSON.parse(packet.decode(event.data))["data"];
       // Add the player ID as an attribute to the target stats container
       statUI.setAttribute("data-id", data.id);
-      healthLabel!.innerText = `Health: (${data.stats.health})`;
-      manaLabel!.innerText = `Mana: (${data.stats.stamina})`;
+
+      // Set username with first letter capitalized
+      const username = data.username.charAt(0).toUpperCase() + data.username.slice(1);
+      usernameLabel!.innerText = username;
+
+      levelLabel!.innerText = `Level: ${data.stats.level}`;
+      healthLabel!.innerText = `Health: ${data.stats.health} / ${data.stats.total_max_health}`;
+      manaLabel!.innerText = `Mana: ${data.stats.stamina} / ${data.stats.total_max_stamina}`;
+      damageLabel!.innerText = `Damage: ${data.stats.stat_damage || 0}`;
+      armorLabel!.innerText = `Armor: ${data.stats.stat_armor || 0}%`;
+      critChanceLabel!.innerText = `Critical Chance: ${data.stats.stat_critical_chance || 0}%`;
+      critDamageLabel!.innerText = `Critical Damage: ${data.stats.stat_critical_damage || 0}%`;
+      avoidanceLabel!.innerText = `Avoidance: ${data.stats.stat_avoidance || 0}%`;
+
+      // Display equipment if provided
+      if (data.equipment) {
+        // Clear all equipment slots first
+        const allSlots = [
+          ...equipmentLeftColumn.querySelectorAll(".slot"),
+          ...equipmentRightColumn.querySelectorAll(".slot"),
+          ...equipmentBottomCenter.querySelectorAll(".slot"),
+        ];
+
+        allSlots.forEach((slot) => {
+          // Remove tooltip event listeners before clearing
+          removeItemTooltip(slot as HTMLElement);
+
+          slot.innerHTML = "";
+          slot.className = "slot empty ui";
+          const slotType = slot.getAttribute("data-slot");
+          if (slotType) {
+            slot.setAttribute("data-slot", slotType);
+          }
+        });
+
+        // Populate equipment slots - simplified version without event handlers for inspecting
+        // Use target player's inventory for item details
+        const targetInventory = data.inventory || [];
+
+        for (const [slotName, itemName] of Object.entries(data.equipment)) {
+          if (!itemName) continue;
+
+          const slotElement = document.querySelector(`.slot[data-slot="${slotName}"]`) as HTMLDivElement;
+          if (!slotElement) continue;
+
+          // Get item details from target player's inventory
+          const itemDetails = targetInventory.find((item: any) => item.name === itemName);
+
+          if (itemDetails && itemDetails.icon) {
+            if (itemDetails.quality) {
+              slotElement.classList.add(itemDetails.quality.toLowerCase());
+              slotElement.classList.remove("empty");
+            }
+
+            // @ts-expect-error - pako is loaded in index.html
+            const inflatedData = pako.inflate(
+              new Uint8Array(itemDetails.icon.data),
+              { to: "string" }
+            );
+            const iconImage = new Image();
+            iconImage.src = `data:image/png;base64,${inflatedData}`;
+            iconImage.draggable = false;
+            iconImage.width = 32;
+            iconImage.height = 32;
+            iconImage.onload = () => {
+              slotElement.appendChild(iconImage);
+            };
+
+            // Setup tooltip for inspected player's equipment
+            setupItemTooltip(slotElement, () => itemDetails);
+          } else {
+            // If no icon, just show item name
+            slotElement.innerHTML = String(itemName);
+            slotElement.classList.remove("empty");
+
+            // Setup tooltip for inspected player's equipment
+            setupItemTooltip(slotElement, () => itemDetails);
+          }
+        }
+      }
+
       statUI.style.transition = "1s";
       statUI.style.left = "10";
       break;
@@ -1403,5 +1769,64 @@ async function saveAnimationToDB(name: string, data: Uint8Array) {
     req.onerror = () => reject(req.error);
   });
 }
+
+// Set up equipment slots drag and drop handlers (only once)
+const setupEquipmentSlotHandlers = () => {
+  const allEquipmentSlots = [
+    ...equipmentLeftColumn.querySelectorAll(".slot"),
+    ...equipmentRightColumn.querySelectorAll(".slot"),
+    ...equipmentBottomCenter.querySelectorAll(".slot"),
+  ];
+
+  allEquipmentSlots.forEach((slot) => {
+    const slotType = slot.getAttribute("data-slot");
+
+    // Add drag-and-drop handlers to equipment slots
+    // Prevent default drag over behavior
+    slot.addEventListener("dragover", (event: Event) => {
+      const dragEvent = event as DragEvent;
+      dragEvent.preventDefault();
+      if (dragEvent.dataTransfer) {
+        // Check if this is an inventory item being dragged (not equipment slot rearranging)
+        if (dragEvent.dataTransfer.types.includes("equipment-slot")) {
+          // Can't validate slot match until drop, so show white border
+          dragEvent.dataTransfer.dropEffect = "move";
+          (slot as HTMLElement).style.border = "2px solid white";
+        } else {
+          dragEvent.dataTransfer.dropEffect = "none";
+        }
+      }
+    });
+
+    // Remove border when drag leaves
+    slot.addEventListener("dragleave", () => {
+      (slot as HTMLElement).style.border = "";
+    });
+
+    // Handle drop
+    slot.addEventListener("drop", (event: Event) => {
+      const dragEvent = event as DragEvent;
+      dragEvent.preventDefault();
+      (slot as HTMLElement).style.border = "";
+
+      if (dragEvent.dataTransfer) {
+        const itemName = dragEvent.dataTransfer.getData("inventory-item-name");
+        const itemSlot = dragEvent.dataTransfer.getData("equipment-slot");
+        const slotIndex = dragEvent.dataTransfer.getData("inventory-rearrange-index");
+
+        // Only equip if the item's equipment slot matches this slot
+        if (itemName && itemSlot === slotType) {
+          sendRequest({
+            type: "EQUIP_ITEM",
+            data: { item: itemName, slotIndex: slotIndex ? parseInt(slotIndex) : undefined },
+          });
+        }
+      }
+    });
+  });
+};
+
+// Initialize equipment slot handlers when the page loads
+setupEquipmentSlotHandlers();
 
 export { sendRequest, cachedPlayerId, getIsLoaded };

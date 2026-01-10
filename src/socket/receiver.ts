@@ -18,6 +18,7 @@ import friends from "../systems/friends";
 import parties from "../systems/parties.ts";
 import spells from "../systems/spells";
 import equipment from "../systems/equipment.ts";
+import inventory from "../systems/inventory";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const animationsCache = await assetCache.get("animations");
@@ -141,7 +142,7 @@ authWorker.on("message", async (result: any) => {
         log.error(`Failed to update world player count: ${err}`)
       );
     }
-    log.info(`World: ${spawnLocation.map.replace(".json", "")} now has ${world?.players || 0 } players.`);
+    log.info(`World: ${spawnLocation.map.replace(".json", "")} now has ${world?.players || 0} players.`);
 
     // Send weather data - use already-fetched world instead of redundant lookup
     const weather = world?.weather || "clear";
@@ -336,7 +337,7 @@ authWorker.on("message", async (result: any) => {
       }
 
       // Send music
-      sendPacket(ws, packetManager.music({ name: 'music_entry'}));
+      sendPacket(ws, packetManager.music({ name: 'music_entry' }));
 
     });
     setImmediate(() => {
@@ -423,11 +424,13 @@ authWorker.on("message", async (result: any) => {
       }
     });
 
+    // Send client config BEFORE inventory so the config is loaded first
+    sendPacket(ws, packetManager.clientConfig(playerData.config || []));
     sendPacket(ws, packetManager.inventory(playerData.inventory));
+    sendPacket(ws, packetManager.equipment(playerData.equipment || {}));
     sendPacket(ws, packetManager.collectables(playerData.collectables || []));
     sendPacket(ws, packetManager.spells(playerData.learnedSpells));
     sendPacket(ws, packetManager.questlog(completedQuest, incompleteQuest));
-    sendPacket(ws, packetManager.clientConfig(playerData.config || []));
   }
 });
 
@@ -996,12 +999,22 @@ export default async function packetReceiver(
       }
       case "INSPECTPLAYER": {
         if (currentPlayer) {
-          const inspectPlayerData = {
-            id: currentPlayer?.id,
-            stats: currentPlayer?.stats,
-            username: currentPlayer?.username,
-          };
-          sendPacket(ws, packetManager.inspectPlayer(inspectPlayerData));
+          const targetId = (data as any)?.id;
+          // If no target ID is provided, inspect self
+          const targetPlayer = targetId
+            ? playerCache.get(targetId)
+            : currentPlayer;
+
+          if (targetPlayer) {
+            const inspectPlayerData = {
+              id: targetPlayer.id,
+              stats: targetPlayer.stats,
+              username: targetPlayer.username,
+              equipment: targetPlayer.equipment || {},
+              inventory: targetPlayer.inventory || [],
+            };
+            sendPacket(ws, packetManager.inspectPlayer(inspectPlayerData));
+          }
         }
         break;
       }
@@ -1058,6 +1071,11 @@ export default async function packetReceiver(
         await player.saveHotBarConfig(currentPlayer.username, data as any);
         break;
       }
+      case "SAVE_INVENTORY_CONFIG": {
+        if (!currentPlayer) return;
+        await player.saveInventoryConfig(currentPlayer.username, data as any);
+        break;
+      }
       case "HOTBAR": {
         if (!currentPlayer) return;
         if (currentPlayer.isGuest) {
@@ -1082,6 +1100,16 @@ export default async function packetReceiver(
         if (casting) {
           // Don't interrupt, just reject the new cast
           return;
+        }
+
+        // Global cast delay - prevent spamming casts too quickly
+        // Get fresh player data from cache to check the actual last cast time
+        const freshPlayerForDelay = playerCache.get(currentPlayer.id);
+        const lastCastTime = freshPlayerForDelay?.lastCastTime || 0;
+        const timeSinceLastCast = performance.now() - lastCastTime;
+        const globalCastDelay = 500; // 500ms delay between all casts
+        if (timeSinceLastCast < globalCastDelay) {
+          return; // Reject cast if too soon after previous cast
         }
 
         const spell_identifier = (data as any).spell;
@@ -1128,10 +1156,14 @@ export default async function packetReceiver(
           return;
         }
 
-        // Check if spell is on cooldown
-        currentPlayer.spellCooldowns = currentPlayer.spellCooldowns || {};
-        const spellCooldownEnd = currentPlayer.spellCooldowns[spell_id] || 0;
-        if (spellCooldownEnd >  performance?.now()) return;
+        // Check if spell is on cooldown (get fresh data from cache)
+        const freshPlayerForCooldown = playerCache.get(currentPlayer.id);
+        if (!freshPlayerForCooldown) return;
+        freshPlayerForCooldown.spellCooldowns = freshPlayerForCooldown.spellCooldowns || {};
+        const spellCooldownEnd = freshPlayerForCooldown.spellCooldowns[spell_id] || 0;
+        if (spellCooldownEnd > performance?.now()) {
+          return;
+        }
 
         const spell_range = spell.range || 100;
         const spell_damage = spell?.damage;
@@ -1157,10 +1189,33 @@ export default async function packetReceiver(
         playerCache.set(currentPlayer.id, currentPlayer);
 
         // If not enough mana, return
-        if ((currentPlayer.stats.stamina || 0) < spell_mana) return;
+        // Get fresh stats from cache to avoid race condition with rapid casts
+        const freshPlayerForMana = playerCache.get(currentPlayer.id);
+        if (!freshPlayerForMana) return;
+
+        // Calculate actual mana cost as percentage of max stamina
+        const actualManaCost = Math.floor(freshPlayerForMana.stats.total_max_stamina * (spell_mana / 100));
+        if ((freshPlayerForMana.stats.stamina || 0) < actualManaCost) {
+          return;
+        }
 
         // Return if no damage is set
         if (!spell_damage) return;
+
+        // Set lastCastTime IMMEDIATELY to start global cast delay and prevent concurrent casts
+        freshPlayerForMana.lastCastTime = performance.now();
+
+        // Set spell on cooldown NOW (includes cast time + cooldown)
+        freshPlayerForMana.spellCooldowns = freshPlayerForMana.spellCooldowns || {};
+        const totalCooldownTime = (spell.cast_time * 1000) + (spell.cooldown * 1000);
+        freshPlayerForMana.spellCooldowns[spell_id] = performance.now() + totalCooldownTime;
+
+        playerCache.set(freshPlayerForMana.id, freshPlayerForMana);
+
+        // Update currentPlayer stats with fresh stats
+        currentPlayer.stats = freshPlayerForMana.stats;
+        currentPlayer.lastCastTime = freshPlayerForMana.lastCastTime;
+        currentPlayer.spellCooldowns = freshPlayerForMana.spellCooldowns;
 
         const isInParty = currentPlayer?.party?.includes(target?.username) || null;
 
@@ -1177,7 +1232,7 @@ export default async function packetReceiver(
         }
 
         // If damage is negative, only allow on self or party members (healing)
-        if (spell_damage < 0 && target.id !== currentPlayer.id && !isInParty)  return;
+        if (spell_damage < 0 && target.id !== currentPlayer.id && !isInParty) return;
 
         const playersInMap = filterPlayersByMap(currentPlayer.location.map);
 
@@ -1189,8 +1244,8 @@ export default async function packetReceiver(
 
         const canAttack = await player.canAttack(currentPlayer, target,
           {
-          width: 24,
-          height: 40,
+            width: 24,
+            height: 40,
           },
           spell_range
         );
@@ -1234,9 +1289,6 @@ export default async function packetReceiver(
           delay = Math.min(calculatedDelay, maxTravelTime);
         }
 
-        log.debug(`User: ${currentPlayer.username} is casting the spell: ${spell.name} on ${target.username}`);
-        log.debug(`User: ${currentPlayer.username} spell travel time delay: ${delay}ms at distance: ${Math.round(distance)}px`);
-
         // Set an async timeout to simulate spell casting time
         currentPlayer.casting = true;
         playerCache.set(currentPlayer.id, currentPlayer);
@@ -1247,14 +1299,22 @@ export default async function packetReceiver(
           );
         });
         await new Promise((resolve) => setTimeout(resolve, spell.cast_time * 1000));
-        if (!spell.can_move && !playerCache.get(currentPlayer.id)?.casting) return; // If casting was interrupted, exit
+        if (!spell.can_move && !playerCache.get(currentPlayer.id)?.casting) {
+          // Cast was interrupted, reset cooldown
+          const resetPlayer = playerCache.get(currentPlayer.id);
+          if (resetPlayer && resetPlayer.spellCooldowns) {
+            delete resetPlayer.spellCooldowns[spell_id];
+            playerCache.set(resetPlayer.id, resetPlayer);
+          }
+          return;
+        }
         currentPlayer.casting = false;
         playerCache.set(currentPlayer.id, currentPlayer);
 
         const canAttack2 = await player.canAttack(currentPlayer, target,
           {
-          width: 24,
-          height: 40,
+            width: 24,
+            height: 40,
           },
           spell_range
         );
@@ -1267,6 +1327,12 @@ export default async function packetReceiver(
               packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
             );
           });
+          // Reset cooldown since spell failed
+          const resetPlayer = playerCache.get(currentPlayer.id);
+          if (resetPlayer && resetPlayer.spellCooldowns) {
+            delete resetPlayer.spellCooldowns[spell_id];
+            playerCache.set(resetPlayer.id, resetPlayer);
+          }
           return;
         }
 
@@ -1277,6 +1343,12 @@ export default async function packetReceiver(
               packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
             );
           });
+          // Reset cooldown since spell failed
+          const resetPlayer = playerCache.get(currentPlayer.id);
+          if (resetPlayer && resetPlayer.spellCooldowns) {
+            delete resetPlayer.spellCooldowns[spell_id];
+            playerCache.set(resetPlayer.id, resetPlayer);
+          }
           return;
         }
 
@@ -1287,6 +1359,12 @@ export default async function packetReceiver(
               packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
             );
           });
+          // Reset cooldown since spell failed
+          const resetPlayer = playerCache.get(currentPlayer.id);
+          if (resetPlayer && resetPlayer.spellCooldowns) {
+            delete resetPlayer.spellCooldowns[spell_id];
+            playerCache.set(resetPlayer.id, resetPlayer);
+          }
           return;
         }
 
@@ -1303,13 +1381,19 @@ export default async function packetReceiver(
         await new Promise((resolve) => setTimeout(resolve, delay));
 
         const playerLevel = currentPlayer.stats.level || 1;
+
+        // Calculate base spell damage with level scaling
         const minDamage = spell_damage < 0 ?
           spell_damage - (playerLevel - 1) * 2 :
           spell_damage + (playerLevel - 1) * 2;
         const maxDamage = spell_damage < 0 ?
           spell_damage - (playerLevel - 1) * 5 :
           spell_damage + (playerLevel - 1) * 5;
-        const baseDamage = Math.floor(Math.random() * (Math.abs(maxDamage - minDamage) + 1)) + Math.min(minDamage, maxDamage) + currentPlayer.stats.stat_damage || 0;
+        const spellDamage = Math.floor(Math.random() * (Math.abs(maxDamage - minDamage) + 1)) + Math.min(minDamage, maxDamage);
+
+        // Add attacker's stat_damage as flat bonus
+        const attackerDamageBonus = currentPlayer.stats.stat_damage || 0;
+        const baseDamage = spellDamage + attackerDamageBonus;
 
         // Calculate crit
         const critChance = currentPlayer.stats.stat_critical_chance || 0;
@@ -1320,13 +1404,9 @@ export default async function packetReceiver(
         // Apply crit multiplier if crit lands
         let finalDamage = baseDamage;
         if (isCrit) {
-          // For healing (negative damage), crit reduces the healing amount (makes it more negative)
+          // For healing (negative damage), crit increases the healing amount (makes it more negative)
           // For damage (positive), crit increases the damage amount
-          if (baseDamage < 0) {
-            finalDamage = Math.floor(baseDamage * (1 + critDamage / 100));
-          } else {
-            finalDamage = Math.floor(baseDamage * (1 + critDamage / 100));
-          }
+          finalDamage = Math.floor(baseDamage * (1 + critDamage / 100));
         }
 
         // Check targets avoidance stat for damage spells only
@@ -1336,15 +1416,40 @@ export default async function packetReceiver(
           if (avoidanceRoll < targetAvoidance) {
             finalDamage = 0;
           }
+
+          // Apply target's armor reduction if attack was not avoided
+          // Armor is a % damage reduction (e.g., 25 armor = 25% damage reduction)
+          if (finalDamage > 0) {
+            const targetArmor = target.stats.stat_armor || 0;
+            const armorReduction = Math.min(targetArmor, 75) / 100; // Cap at 75% reduction
+            finalDamage = Math.floor(finalDamage * (1 - armorReduction));
+          }
         }
 
+        // Re-check mana right before deduction (mana might have changed during cast/projectile delays)
+        const finalManaCheck = playerCache.get(currentPlayer.id);
+        if (!finalManaCheck || (finalManaCheck.stats.stamina || 0) < actualManaCost) {
+          // Reset cooldown since not enough mana
+          if (finalManaCheck && finalManaCheck.spellCooldowns) {
+            delete finalManaCheck.spellCooldowns[spell_id];
+            playerCache.set(finalManaCheck.id, finalManaCheck);
+          }
+          return;
+        }
+
+        // Update currentPlayer with fresh mana value
+        currentPlayer.stats.stamina = finalManaCheck.stats.stamina;
+
         target.stats.health = Math.round(target.stats.health - finalDamage);
-        currentPlayer.stats.stamina -= spell_mana;
+        currentPlayer.stats.stamina -= actualManaCost;
 
         // Ensure stamina doesn't go below 0
         if (currentPlayer.stats.stamina < 0) {
           currentPlayer.stats.stamina = 0;
         }
+
+        // Update cache immediately so concurrent casts see the reduced mana
+        playerCache.set(currentPlayer.id, currentPlayer);
 
         // Handle overhealing
         if (target.stats.health > target.stats.total_max_health) {
@@ -1353,30 +1458,76 @@ export default async function packetReceiver(
 
         // Handle death
         if (target.stats.health <= 0) {
+          // Store the death stats before restoration for showing damage numbers
+          const deathStats = { ...target.stats };
+
           target.stats.health = target.stats.total_max_health;
           target.stats.stamina = target.stats.total_max_stamina;
 
-          // Calculate center of map for respawn position
+          // Find closest graveyard or use default worldspawn
           const currentMapName = target.location.map;
           const respawnMapProps = mapPropertiesCache.find((m: any) => m.name === `${currentMapName}.json`);
-          const centerX = respawnMapProps
-            ? (respawnMapProps.width * respawnMapProps.tileWidth) / 2
-            : 0;
-          const centerY = respawnMapProps
-            ? (respawnMapProps.height * respawnMapProps.tileHeight) / 2
-            : 0;
 
-          target.location.position = { x: centerX, y: centerY, direction: "down" };
+          // Search for graveyards in the map
+          let respawnX: number;
+          let respawnY: number;
+
+          if (respawnMapProps?.graveyards && Array.isArray(respawnMapProps.graveyards) && respawnMapProps.graveyards.length > 0) {
+            // Find closest graveyard to death location
+            let closestGraveyard = respawnMapProps.graveyards[0];
+            let closestDistance = Math.sqrt(
+              Math.pow(target.location.position.x - closestGraveyard.position.x, 2) +
+              Math.pow(target.location.position.y - closestGraveyard.position.y, 2)
+            );
+
+            for (const graveyard of respawnMapProps.graveyards) {
+              const distance = Math.sqrt(
+                Math.pow(target.location.position.x - graveyard.position.x, 2) +
+                Math.pow(target.location.position.y - graveyard.position.y, 2)
+              );
+
+              if (distance < closestDistance) {
+                closestDistance = distance;
+                closestGraveyard = graveyard;
+              }
+            }
+
+            respawnX = closestGraveyard.position.x;
+            respawnY = closestGraveyard.position.y;
+          } else {
+            // No graveyards found, use default worldspawn
+            const defaultMapProps = mapPropertiesCache.find((m: any) => m.name === `${defaultMap}.json`);
+            respawnX = defaultMapProps
+              ? (defaultMapProps.width * defaultMapProps.tileWidth) / 2
+              : 0;
+            respawnY = defaultMapProps
+              ? (defaultMapProps.height * defaultMapProps.tileHeight) / 2
+              : 0;
+          }
+
+          target.location.position = { x: respawnX, y: respawnY, direction: "down" };
 
           // Give the attacker xp
           const xp = 10;
-          await player.increaseXp(currentPlayer.username, xp);
+          const xpResult = await player.increaseXp(currentPlayer.username, xp);
 
-          // Get the full updated stats from database after level up
-          const fullStats = await player.getStats(currentPlayer.username) as StatsData;
+          // Synchronize stats with equipment bonuses after level up
+          const syncedStats = await player.synchronizeStats(currentPlayer.username);
 
           // Update all stats in memory
-          currentPlayer.stats = fullStats;
+          if (syncedStats) {
+            currentPlayer.stats = syncedStats;
+          }
+
+          // Update XP values from increaseXp result
+          if (xpResult && typeof xpResult === 'object' && 'xp' in xpResult) {
+            currentPlayer.stats.xp = xpResult.xp;
+            currentPlayer.stats.level = xpResult.level;
+            currentPlayer.stats.max_xp = xpResult.max_xp;
+          }
+
+          // Update the player cache with the new stats including XP
+          playerCache.set(currentPlayer.id, currentPlayer);
 
           // Send XP update to attacker
           sendPacket(
@@ -1400,6 +1551,18 @@ export default async function packetReceiver(
 
           globalStateRevision++;
           playersInMap.forEach((player) => {
+            // Send damage numbers for the killing blow BEFORE revive
+            sendPacket(
+              player.ws,
+              packetManager.updateStats({
+                id: ws.data.id,
+                target: target.id,
+                stats: deathStats, // Use the stats from before restoration
+                isCrit: isCrit,
+                damage: finalDamage,
+              })
+            );
+
             sendPacket(
               player.ws,
               packetManager.moveXY({
@@ -1409,7 +1572,7 @@ export default async function packetReceiver(
               })
             );
 
-            // Send REVIVE packet (this updates stats without showing damage numbers)
+            // Send REVIVE packet to restore health after showing the killing blow
             sendPacket(
               player.ws,
               packetManager.revive({
@@ -1463,9 +1626,7 @@ export default async function packetReceiver(
         currentPlayer.last_attack = performance.now();
         target.last_attack = performance.now();
 
-        // Set spell on cooldown
-        currentPlayer.spellCooldowns = currentPlayer.spellCooldowns || {};
-        currentPlayer.spellCooldowns[spell_id] =  performance?.now() + spell.cooldown * 1000;
+        // Spell cooldown was already set at cast start (includes cast time + cooldown)
         playerCache.set(currentPlayer.id, currentPlayer);
 
         break;
@@ -3576,11 +3737,11 @@ export default async function packetReceiver(
 
         // Don't validate if unmounting
         if (!currentPlayer.mounted) {
-        // Check if the player has the specified mount in their collection
-        // Search currentPlayer.collectables for type mount where item matches the requested mount
+          // Check if the player has the specified mount in their collection
+          // Search currentPlayer.collectables for type mount where item matches the requested mount
           const hasMount = currentPlayer.collectables.some((c: any) => c.type === "mount" && c.item === mount);
           if (!hasMount) {
-            sendPacket( 
+            sendPacket(
               ws,
               packetManager.notify({ message: "You do not have the specified mount." })
             );
@@ -3629,14 +3790,82 @@ export default async function packetReceiver(
       case "EQUIP_ITEM": {
         if (!currentPlayer) return;
         const item = (data as any).item;
+        const slotIndex = (data as any).slotIndex;
         if (!item) return;
         const equipmentItems = currentPlayer.inventory.filter((invItem: any) => invItem.type === "equipment");
         const foundEquipment = equipmentItems.find((invItem: any) => invItem.name.toLowerCase() === item.toLowerCase());
         const slot = foundEquipment?.equipment_slot;
+
+        // Check level requirement
+        if (foundEquipment?.level_requirement) {
+          const playerLevel = currentPlayer.stats.level || 1;
+          if (playerLevel < foundEquipment.level_requirement) return;
+        }
+
+        // Get the currently equipped item in this slot (if any) before replacing it
+        const previouslyEquippedItem = currentPlayer.equipment[slot];
+
         const result = await equipment.equipItem(currentPlayer.username, slot, item);
         if (result) {
+          // If there was a previously equipped item, mark it as unequipped in cache
+          if (previouslyEquippedItem) {
+            const previousItem = currentPlayer.inventory.find((invItem: any) => invItem.name.toLowerCase() === previouslyEquippedItem.toLowerCase());
+            if (previousItem) {
+              previousItem.equipped = false;
+            }
+          }
+
           // Update the players equipment in cache
           currentPlayer.equipment[slot] = item;
+
+          // Update the equipped status in the inventory cache for the newly equipped item
+          const inventoryItem = currentPlayer.inventory.find((invItem: any) => invItem.name.toLowerCase() === item.toLowerCase());
+          if (inventoryItem) {
+            inventoryItem.equipped = true;
+          }
+
+          // Handle inventory slot updates if slotIndex was provided
+          if (slotIndex !== undefined) {
+            // Reload config from database to ensure we have the latest saved configuration
+            const freshConfig = await player.getConfig(currentPlayer.username);
+            currentPlayer.config = freshConfig;
+
+            // Get current inventory configuration
+            const config = currentPlayer.config && currentPlayer.config.length > 0 ? currentPlayer.config[0] : null;
+            // inventory_config is already an object from the database (MySQL JSON column)
+            const inventoryConfig = config?.inventory_config || {};
+
+            // Simply modify the existing configuration instead of rebuilding
+            // If there was a previously equipped item, place it at the slot where the new item was
+            if (previouslyEquippedItem) {
+              inventoryConfig[slotIndex.toString()] = previouslyEquippedItem;
+            }
+
+            // ALWAYS remove the newly equipped item from wherever it was in the configuration
+            // (since it's now equipped and shouldn't be in the inventory grid)
+            for (const key in inventoryConfig) {
+              if (inventoryConfig[key] && inventoryConfig[key].toLowerCase() === item.toLowerCase()) {
+                delete inventoryConfig[key];
+                break;
+              }
+            }
+
+            // Remove null values from config to keep it sparse
+            for (const key in inventoryConfig) {
+              if (inventoryConfig[key] === null) {
+                delete inventoryConfig[key];
+              }
+            }
+
+            // Save the updated configuration
+            await player.saveInventoryConfig(currentPlayer.username, inventoryConfig);
+
+            // Reload the config from database and update player cache
+            const updatedConfig = await player.getConfig(currentPlayer.username);
+            currentPlayer.config = updatedConfig;
+            playerCache.set(currentPlayer.id, currentPlayer);
+          }
+
           playerCache.set(currentPlayer.id, currentPlayer);
 
           const stats = await player.synchronizeStats(currentPlayer.username);
@@ -3646,9 +3875,9 @@ export default async function packetReceiver(
 
             currentPlayer.stats = stats;
 
-            // Preserve current health and stamina values
-            currentPlayer.stats.health = currentHealth;
-            currentPlayer.stats.stamina = currentStamina;
+            // Preserve current health and stamina values, but clamp to new max values
+            currentPlayer.stats.health = Math.min(currentHealth, stats.total_max_health);
+            currentPlayer.stats.stamina = Math.min(currentStamina, stats.total_max_stamina);
 
             playerCache.set(currentPlayer.id, currentPlayer);
 
@@ -3678,6 +3907,137 @@ export default async function packetReceiver(
                 })
               );
             });
+
+            // Send updated client config if inventory config was changed
+            if (slotIndex !== undefined) {
+              sendPacket(
+                ws,
+                packetManager.clientConfig(currentPlayer.config || [])
+              );
+            }
+
+            // Reload inventory from database to get updated equipped flags
+            const freshInventory = await inventory.get(currentPlayer.username);
+            currentPlayer.inventory = freshInventory;
+            playerCache.set(currentPlayer.id, currentPlayer);
+
+            // Send updated inventory and equipment to player
+            sendPacket(
+              ws,
+              packetManager.inventory(currentPlayer.inventory)
+            );
+            sendPacket(
+              ws,
+              packetManager.equipment(currentPlayer.equipment)
+            );
+          }
+        }
+        break;
+      }
+      case "UNEQUIP_ITEM": {
+        if (!currentPlayer) return;
+        const slot = (data as any).slot;
+        const targetSlotIndex = (data as any).targetSlotIndex;
+        if (!slot) return;
+
+        // Get the currently equipped item in this slot
+        const equippedItemName = currentPlayer.equipment[slot];
+        if (!equippedItemName) return; // Nothing equipped in this slot
+
+        const result = await equipment.unEquipItem(currentPlayer.username, slot, equippedItemName);
+        if (result) {
+          // Mark the item as unequipped in cache
+          const inventoryItem = currentPlayer.inventory.find((invItem: any) => invItem.name.toLowerCase() === equippedItemName.toLowerCase());
+          if (inventoryItem) {
+            inventoryItem.equipped = false;
+          }
+
+          // Update the players equipment in cache (remove from slot)
+          currentPlayer.equipment[slot] = null;
+
+          // Handle inventory slot placement if targetSlotIndex was provided
+          if (targetSlotIndex !== undefined) {
+            // Reload config from database to ensure we have the latest saved configuration
+            const freshConfig = await player.getConfig(currentPlayer.username);
+            currentPlayer.config = freshConfig;
+
+            // Get current inventory configuration
+            const config = currentPlayer.config && currentPlayer.config.length > 0 ? currentPlayer.config[0] : null;
+            // inventory_config is already an object from the database (MySQL JSON column)
+            const inventoryConfig = config?.inventory_config || {};
+
+            // Simply place the unequipped item at the target slot index
+            inventoryConfig[targetSlotIndex.toString()] = equippedItemName;
+
+            // Remove null values from config to keep it sparse
+            for (const key in inventoryConfig) {
+              if (inventoryConfig[key] === null) {
+                delete inventoryConfig[key];
+              }
+            }
+
+            // Save the updated configuration
+            await player.saveInventoryConfig(currentPlayer.username, inventoryConfig);
+
+            // Reload the config from database and update player cache
+            const updatedConfig = await player.getConfig(currentPlayer.username);
+            currentPlayer.config = updatedConfig;
+          }
+
+          playerCache.set(currentPlayer.id, currentPlayer);
+
+          const stats = await player.synchronizeStats(currentPlayer.username);
+          if (stats) {
+            const currentHealth = currentPlayer.stats.health;
+            const currentStamina = currentPlayer.stats.stamina;
+
+            currentPlayer.stats = stats;
+
+            // Preserve current health and stamina values, but clamp to new max values
+            currentPlayer.stats.health = Math.min(currentHealth, stats.total_max_health);
+            currentPlayer.stats.stamina = Math.min(currentStamina, stats.total_max_stamina);
+
+            playerCache.set(currentPlayer.id, currentPlayer);
+
+            sendPacket(
+              ws,
+              packetManager.updateStats({
+                target: currentPlayer.id,
+                stats: currentPlayer.stats,
+              })
+            );
+
+            // Send updated stats to party members
+            await sendStatsToPartyMembers(
+              currentPlayer.username,
+              currentPlayer.id,
+              currentPlayer.stats
+            );
+
+            const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+            // Update equipment for all players in the same map
+            playersInMap.forEach((player) => {
+              sendPacket(
+                player.ws,
+                packetManager.updateStats({
+                  target: currentPlayer.id,
+                  stats: currentPlayer.stats,
+                })
+              );
+            });
+
+            // Send updated client config if inventory config was changed
+            if (targetSlotIndex !== undefined) {
+              sendPacket(
+                ws,
+                packetManager.clientConfig(currentPlayer.config || [])
+              );
+            }
+
+            // Reload inventory from database to get updated equipped flags
+            const freshInventory = await inventory.get(currentPlayer.username);
+            currentPlayer.inventory = freshInventory;
+            playerCache.set(currentPlayer.id, currentPlayer);
 
             // Send updated inventory and equipment to player
             sendPacket(

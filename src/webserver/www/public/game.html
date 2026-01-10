@@ -101,9 +101,39 @@
         <div id="grid" class="ui"></div>
       </div>
       <div id="stat-screen" class="ui">
+        <div id="stats-screen-username-container" class="ui">
+          <label id="stats-screen-username-label" class="ui">Username</label>
+        </div>
+        <div id="equipment-left-column" class="ui">
+          <div class="slot empty ui" data-slot="head"></div>
+          <div class="slot empty ui" data-slot="necklace"></div>
+          <div class="slot empty ui" data-slot="shoulder"></div>
+          <div class="slot empty ui" data-slot="chest"></div>
+          <div class="slot empty ui" data-slot="wrists"></div>
+          <div class="slot empty ui" data-slot="hands"></div>
+          <div class="slot empty ui" data-slot="waist"></div>
+          <div class="slot empty ui" data-slot="legs"></div>
+        </div>
         <div id="stats-screen-player-info" class="ui">
+          <label id="stats-screen-level-label" class="ui">Level:</label>
           <label id="stats-screen-health-label" class="ui">Health:</label>
           <label id="stats-screen-mana-label" class="ui">Mana:</label>
+          <label id="stats-screen-damage-label" class="ui">Damage:</label>
+          <label id="stats-screen-armor-label" class="ui">Armor:</label>
+          <label id="stats-screen-crit-chance-label" class="ui">Critical Chance:</label>
+          <label id="stats-screen-crit-damage-label" class="ui">Critical Damage:</label>
+          <label id="stats-screen-avoidance-label" class="ui">Avoidance:</label>
+        </div>
+        <div id="equipment-right-column" class="ui">
+          <div class="slot empty ui" data-slot="feet"></div>
+          <div class="slot empty ui" data-slot="ring_1"></div>
+          <div class="slot empty ui" data-slot="ring_2"></div>
+          <div class="slot empty ui" data-slot="trinket_1"></div>
+          <div class="slot empty ui" data-slot="trinket_2"></div>
+        </div>
+        <div id="equipment-bottom-center" class="ui">
+          <div class="slot empty ui" data-slot="weapon"></div>
+          <div class="slot empty ui" data-slot="off_hand_weapon"></div>
         </div>
       </div>
       <div id="castbar" class="ui">
@@ -242,6 +272,13 @@
           <div class="te-resize-handle ui"></div>
         </div>
       </div>
+    </div>
+    <!-- Item Tooltip -->
+    <div id="item-tooltip" class="ui" style="display: none;">
+      <div id="tooltip-name" class="ui"></div>
+      <div id="tooltip-type" class="ui"></div>
+      <div id="tooltip-stats" class="ui"></div>
+      <div id="tooltip-description" class="ui"></div>
     </div>
     <!-- Mobile UI Toggle Buttons -->
     <div id="mobile-ui-buttons">

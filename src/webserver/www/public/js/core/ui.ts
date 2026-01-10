@@ -1,6 +1,7 @@
 import { sendRequest, cachedPlayerId } from "./socket.js";
 import Cache from "./cache.js";
 import { cast } from "./input.js";
+import { hideItemTooltip, setupItemTooltip, removeItemTooltip } from "./tooltip.js";
 const debugContainer = document.getElementById("debug-container") as HTMLDivElement;
 const statUI = document.getElementById("stat-screen") as HTMLDivElement;
 const positionText = document.getElementById("position") as HTMLDivElement;
@@ -32,8 +33,15 @@ const progressBarContainer = document.getElementById("progress-bar-container") a
 const inventoryGrid = document.getElementById("grid") as HTMLDivElement;
 const chatMessages = document.getElementById("chat-messages") as HTMLDivElement;
 const loadingScreen = document.getElementById("loading-screen");
+const usernameLabel = document.getElementById("stats-screen-username-label") as HTMLDivElement;
+const levelLabel = document.getElementById("stats-screen-level-label") as HTMLDivElement;
 const healthLabel = document.getElementById("stats-screen-health-label") as HTMLDivElement;
 const manaLabel = document.getElementById("stats-screen-mana-label") as HTMLDivElement;
+const damageLabel = document.getElementById("stats-screen-damage-label") as HTMLDivElement;
+const armorLabel = document.getElementById("stats-screen-armor-label") as HTMLDivElement;
+const critChanceLabel = document.getElementById("stats-screen-crit-chance-label") as HTMLDivElement;
+const critDamageLabel = document.getElementById("stats-screen-crit-damage-label") as HTMLDivElement;
+const avoidanceLabel = document.getElementById("stats-screen-avoidance-label") as HTMLDivElement;
 const notificationContainer = document.getElementById("game-notification-container");
 const notificationMessage = document.getElementById("game-notification-message");
 const serverTime = document.getElementById("server-time-value") as HTMLDivElement;
@@ -48,6 +56,9 @@ const guildMemberCount = document.getElementById("guild-member-count") as HTMLDi
 const guildMemberInviteInput = document.getElementById("guild-invite-input") as HTMLInputElement;
 const guildMemberInviteButton = document.getElementById("guild-invite-button") as HTMLButtonElement;
 const collisionDebugCheckbox = document.getElementById("collision-debug-checkbox") as HTMLInputElement;
+const equipmentLeftColumn = document.getElementById("equipment-left-column") as HTMLDivElement;
+const equipmentRightColumn = document.getElementById("equipment-right-column") as HTMLDivElement;
+const equipmentBottomCenter = document.getElementById("equipment-bottom-center") as HTMLDivElement;
 const chunkOutlineDebugCheckbox = document.getElementById("chunk-outline-debug-checkbox") as HTMLInputElement;
 const collisionTilesDebugCheckbox = document.getElementById("collision-tiles-debug-checkbox") as HTMLInputElement;
 const noPvpDebugCheckbox = document.getElementById("nopvp-debug-checkbox") as HTMLInputElement;
@@ -261,10 +272,14 @@ function toggleDebugContainer() {
 
 function handleStatsUI() {
   const isCurrentPlayerStats = statUI.getAttribute("data-id") === cachedPlayerId;
-  if (statUI.style.left === "10px" && isCurrentPlayerStats) {
+
+  // If stat sheet is open
+  if (statUI.style.left === "10px") {
+    // Close it (whether it's showing current player or inspected player)
     statUI.style.transition = "1s";
     statUI.style.left = "-570";
   } else {
+    // If closed, open it with current player's stats
     sendRequest({ type: "INSPECTPLAYER", data: null });
   }
 }
@@ -629,6 +644,52 @@ function castSpell(id: string, spell: string, time: number) {
 }
 
 // Function to load hotbar configuration from server
+function saveInventoryConfiguration() {
+  const inventoryConfig: { [key: string]: string | null } = {};
+  const inventorySlots = inventoryGrid.querySelectorAll(".slot");
+
+  inventorySlots.forEach((slot, index) => {
+    const itemName = (slot as HTMLElement).dataset.itemName;
+    inventoryConfig[index.toString()] = itemName || null;
+  });
+
+  // Send configuration to server
+  sendRequest({
+    type: "SAVE_INVENTORY_CONFIG",
+    data: inventoryConfig
+  });
+}
+
+async function loadInventoryConfiguration(inventoryConfig: any, inventoryData: any[]) {
+  // Create a map of items by name for quick lookup
+  const itemMap: { [key: string]: any } = {};
+  inventoryData.forEach(item => {
+    itemMap[item.name] = item;
+  });
+
+  // Return sorted inventory data based on saved configuration
+  const sortedInventory: any[] = [];
+  const usedItems = new Set<string>();
+
+  // First, add items in the configured order
+  Object.keys(inventoryConfig).sort((a, b) => parseInt(a) - parseInt(b)).forEach(index => {
+    const itemName = inventoryConfig[index];
+    if (itemName && itemMap[itemName] && !usedItems.has(itemName)) {
+      sortedInventory.push(itemMap[itemName]);
+      usedItems.add(itemName);
+    }
+  });
+
+  // Then add any items not in the configuration
+  inventoryData.forEach(item => {
+    if (!usedItems.has(item.name)) {
+      sortedInventory.push(item);
+    }
+  });
+
+  return sortedInventory;
+}
+
 async function loadHotbarConfiguration(hotbarConfig: any) {
 
   // Wait for spellbook images to be loaded
@@ -699,9 +760,215 @@ export {
     friendsListUI, inventoryUI, spellBookUI, pauseMenu, menuElements, chatInput, canvas, ctx, fpsSlider, healthBar,
     staminaBar, xpBar, levelContainer, musicSlider, effectsSlider, mutedCheckbox, statUI, overlay,
     packetsSentReceived, optionsMenu, friendsList, friendsListSearch, onlinecount, progressBar, progressBarContainer,
-    inventoryGrid, chatMessages, loadingScreen, healthLabel, manaLabel, notificationContainer, notificationMessage,
+    inventoryGrid, chatMessages, loadingScreen, usernameLabel, levelLabel, healthLabel, manaLabel, damageLabel, armorLabel, critChanceLabel, critDamageLabel, avoidanceLabel, notificationContainer, notificationMessage,
     serverTime, ambience, weatherCanvas, weatherCtx, guildContainer, guildName, guildRank, guildMembersList,
     guildMemberCount, guildMemberInviteInput, guildMemberInviteButton, collisionDebugCheckbox, chunkOutlineDebugCheckbox,
     collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox, loadedChunksText, collectablesUI,
-    hotbarSlots, saveHotbarConfiguration, loadHotbarConfiguration,
+    hotbarSlots, saveHotbarConfiguration, loadHotbarConfiguration, equipmentLeftColumn, equipmentRightColumn, equipmentBottomCenter,
+    saveInventoryConfiguration, loadInventoryConfiguration, setupInventorySlotHandlers,
 };
+
+// Function to setup inventory slot drag and drop handlers
+function setupInventorySlotHandlers() {
+  const inventorySlots = inventoryGrid.querySelectorAll(".slot") as NodeListOf<HTMLDivElement>;
+
+  inventorySlots.forEach((slot, index) => {
+    // Double-click to equip (for equipment items)
+    slot.addEventListener("dblclick", () => {
+      if (slot.dataset.itemType === "equipment" && slot.dataset.itemName) {
+        // Hide tooltip when equipping
+        hideItemTooltip();
+
+        sendRequest({
+          type: "EQUIP_ITEM",
+          data: { item: slot.dataset.itemName, slotIndex: index },
+        });
+      }
+    });
+
+    // Dragstart handler
+    slot.addEventListener("dragstart", (event: DragEvent) => {
+      if (!slot.draggable) {
+        event.preventDefault();
+        return;
+      }
+
+      // Hide tooltip when starting to drag
+      hideItemTooltip();
+
+      if (event.dataTransfer) {
+        event.dataTransfer.setData("inventory-rearrange-index", index.toString());
+
+        const itemName = slot.dataset.itemName;
+        if (itemName) {
+          event.dataTransfer.setData("inventory-item-name", itemName);
+        }
+
+        // If equipment type, also set equipment data
+        if (slot.dataset.itemType === "equipment" && slot.dataset.equipmentSlot) {
+          event.dataTransfer.setData("equipment-slot", slot.dataset.equipmentSlot);
+        }
+
+        event.dataTransfer.effectAllowed = "move";
+        slot.style.opacity = "0.5";
+      }
+    });
+
+    // Dragend handler
+    slot.addEventListener("dragend", () => {
+      slot.style.opacity = "1";
+    });
+
+    // Dragover handler
+    slot.addEventListener("dragover", (event: DragEvent) => {
+      event.preventDefault();
+      if (event.dataTransfer) {
+        if (event.dataTransfer.types.includes("inventory-rearrange-index") ||
+            event.dataTransfer.types.includes("equipped-item-slot")) {
+          event.dataTransfer.dropEffect = "move";
+          slot.style.border = "2px solid white";
+        }
+      }
+    });
+
+    // Dragleave handler
+    slot.addEventListener("dragleave", () => {
+      slot.style.border = "";
+    });
+
+    // Drop handler
+    slot.addEventListener("drop", (event: DragEvent) => {
+      event.preventDefault();
+      slot.style.border = "";
+
+      if (event.dataTransfer) {
+        // Check if dragging from equipment slot
+        const equippedItemSlot = event.dataTransfer.getData("equipped-item-slot");
+        const equippedItemName = event.dataTransfer.getData("equipped-item-name");
+
+        if (equippedItemSlot && equippedItemName) {
+          // Unequipping item to this inventory slot
+          sendRequest({
+            type: "UNEQUIP_ITEM",
+            data: { slot: equippedItemSlot, targetSlotIndex: index },
+          });
+          return;
+        }
+
+        const sourceIndex = event.dataTransfer.getData("inventory-rearrange-index");
+        const itemName = event.dataTransfer.getData("inventory-item-name");
+
+        if (sourceIndex !== "" && sourceIndex !== index.toString()) {
+          const sourceSlot = inventorySlots[parseInt(sourceIndex)];
+
+          // Store target slot's current item data
+          const targetItemName = slot.dataset.itemName;
+          const targetItemType = slot.dataset.itemType;
+          const targetEquipmentSlot = slot.dataset.equipmentSlot;
+          const targetImg = slot.querySelector("img") as HTMLImageElement;
+          const targetImgSrc = targetImg ? targetImg.src : null;
+          const targetHTML = slot.innerHTML;
+          const targetClasses = Array.from(slot.classList).filter(c => c !== "slot" && c !== "ui");
+
+          // Move source item to target slot
+          slot.innerHTML = "";
+          slot.className = "slot ui";
+
+          const sourceImg = sourceSlot.querySelector("img") as HTMLImageElement;
+          if (sourceImg) {
+            const newImg = new Image();
+            newImg.src = sourceImg.src;
+            newImg.draggable = false;
+            newImg.width = 32;
+            newImg.height = 32;
+            newImg.style.pointerEvents = "none";
+            slot.appendChild(newImg);
+          }
+
+          // Copy source item's quantity label if it exists
+          const sourceQuantityLabel = sourceSlot.querySelector(".quantity-label");
+          if (sourceQuantityLabel) {
+            const newQuantityLabel = sourceQuantityLabel.cloneNode(true) as HTMLElement;
+            newQuantityLabel.style.pointerEvents = "none";
+            slot.appendChild(newQuantityLabel);
+          }
+
+          // Copy source item's datasets and classes
+          if (sourceSlot.dataset.itemName) slot.dataset.itemName = sourceSlot.dataset.itemName;
+          if (sourceSlot.dataset.itemType) slot.dataset.itemType = sourceSlot.dataset.itemType;
+          if (sourceSlot.dataset.equipmentSlot) slot.dataset.equipmentSlot = sourceSlot.dataset.equipmentSlot;
+
+          Array.from(sourceSlot.classList).forEach(cls => {
+            if (cls !== "slot" && cls !== "ui") slot.classList.add(cls);
+          });
+
+          slot.draggable = true;
+
+          // Re-attach tooltip to target slot with moved item
+          const cache = Cache.getInstance();
+          removeItemTooltip(slot);
+          setupItemTooltip(slot, () => {
+            const itemName = slot.dataset.itemName;
+            if (!itemName || !cache.inventory) return null;
+            return cache.inventory.find((invItem: any) => invItem.name === itemName);
+          });
+
+          // Move target item to source slot (or clear if empty)
+          sourceSlot.innerHTML = "";
+          sourceSlot.className = "slot ui";
+
+          if (targetItemName) {
+            // Swap: move target item to source slot
+            if (targetImgSrc) {
+              const newImg = new Image();
+              newImg.src = targetImgSrc;
+              newImg.draggable = false;
+              newImg.width = 32;
+              newImg.height = 32;
+              newImg.style.pointerEvents = "none";
+              sourceSlot.appendChild(newImg);
+
+              // Copy quantity label if exists
+              const targetQuantityLabel = document.createElement("div");
+              const origQuantityLabel = targetHTML.match(/<div class="quantity-label">([^<]+)<\/div>/);
+              if (origQuantityLabel) {
+                targetQuantityLabel.classList.add("quantity-label");
+                targetQuantityLabel.innerText = origQuantityLabel[1];
+                targetQuantityLabel.style.pointerEvents = "none";
+                sourceSlot.appendChild(targetQuantityLabel);
+              }
+            }
+
+            if (targetItemName) sourceSlot.dataset.itemName = targetItemName;
+            if (targetItemType) sourceSlot.dataset.itemType = targetItemType;
+            if (targetEquipmentSlot) sourceSlot.dataset.equipmentSlot = targetEquipmentSlot;
+
+            targetClasses.forEach(cls => sourceSlot.classList.add(cls));
+            sourceSlot.draggable = true;
+
+            // Re-attach tooltip to source slot with swapped item
+            removeItemTooltip(sourceSlot);
+            setupItemTooltip(sourceSlot, () => {
+              const itemName = sourceSlot.dataset.itemName;
+              if (!itemName || !cache.inventory) return null;
+              return cache.inventory.find((invItem: any) => invItem.name === itemName);
+            });
+          } else {
+            // Target was empty, so clear source slot
+            delete sourceSlot.dataset.itemName;
+            delete sourceSlot.dataset.itemType;
+            delete sourceSlot.dataset.equipmentSlot;
+            sourceSlot.classList.add("empty");
+            sourceSlot.draggable = false;
+
+            // Remove tooltip from now-empty source slot
+            removeItemTooltip(sourceSlot);
+          }
+
+          // Save configuration
+          saveInventoryConfiguration();
+        }
+      }
+    });
+  });
+}

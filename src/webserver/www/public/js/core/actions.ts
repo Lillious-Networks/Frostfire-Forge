@@ -33,7 +33,10 @@ const contextActions: Record<string, { allowed_self: boolean, label: string, han
     label: 'Inspect',
     allowed_self: true,
     handler: (id) => {
-      console.log(`Inspecting player ${id}`);
+      sendRequest({
+        type: "INSPECTPLAYER",
+        data: { id: id },
+      });
     }
   },
   'send-message': {

@@ -1113,13 +1113,26 @@ const player = {
     // if (player.stats.level < 5) return false;
     return true;
   },
-  saveHotBarConfig: async (username: string, hotbar: any[]) => {
+  saveHotBarConfig: async (username: string, hotbar: any) => {
     if (!username) return;
     username = username.toLowerCase();
     const hotbarString = JSON.stringify(hotbar);
     const response = await query(
       "UPDATE clientconfig SET hotbar_config = ? WHERE username = ?",
       [hotbarString, username]
+    );
+    return response;
+  },
+  saveInventoryConfig: async (username: string, inventoryConfig: any) => {
+    if (!username) return;
+    username = username.toLowerCase();
+
+    // JSON.stringify the config before saving to the JSON column
+    const inventoryString = JSON.stringify(inventoryConfig);
+
+    const response = await query(
+      "UPDATE clientconfig SET inventory_config = ? WHERE username = ?",
+      [inventoryString, username]
     );
     return response;
   },
@@ -1130,9 +1143,19 @@ const player = {
     if (!pcache) return;
     const currentStats = { ...pcache.stats };
 
-    // Reset total_max_health and total_max_stamina to base values before adding equipment bonuses
+    // Reset all stats to base values before adding equipment bonuses
     currentStats.total_max_health = currentStats.max_health;
     currentStats.total_max_stamina = currentStats.max_stamina;
+
+    // Get base stat values from database (these are stored without equipment bonuses)
+    const baseStats = await player.getStats(username) as StatsData;
+    if (baseStats) {
+      currentStats.stat_critical_chance = baseStats.stat_critical_chance || 0;
+      currentStats.stat_critical_damage = baseStats.stat_critical_damage || 0;
+      currentStats.stat_armor = baseStats.stat_armor || 0;
+      currentStats.stat_damage = baseStats.stat_damage || 0;
+      currentStats.stat_avoidance = baseStats.stat_avoidance || 0;
+    }
 
     // Get all equipped items and synchronize stats
     const equippedItems = Object.values(pcache.equipment).filter((eqItem: any) => eqItem !== null);
@@ -1146,7 +1169,7 @@ const player = {
       }
     }
 
-    // Example equipment bonuses
+    // Apply equipment bonuses on top of base stats
     if (pcache.equipment) {
       for (const slot in pcache.equipment) {
         const item = pcache.equipment[slot];
@@ -1205,6 +1228,7 @@ const player = {
         cc.effects_volume,
         cc.muted,
         cc.hotbar_config,
+        cc.inventory_config,
         ql.completed_quests,
         ql.incomplete_quests,
         eq.head,
@@ -1279,7 +1303,8 @@ const player = {
         music_volume: data.music_volume,
         effects_volume: data.effects_volume,
         muted: data.muted,
-        hotbar_config: data.hotbar_config || null
+        hotbar_config: data.hotbar_config || null,
+        inventory_config: data.inventory_config || null
       }] : [],
       questlog: {
         completed: data.completed_quests ? data.completed_quests.split(",") : [],

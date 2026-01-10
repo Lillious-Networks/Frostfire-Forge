@@ -545,7 +545,8 @@ async function createPlayer(data: any) {
           // Text shadow for better visibility
           context.shadowColor = "black";
           context.shadowBlur = 2;
-          context.fillText(`${this.stats.level}`, this.position.x - 66, this.position.y + 56 + uiOffset);
+            const offsetX = this.position.x - 60 - (this.stats.level.toString().length * 5);
+          context.fillText(`${this.stats.level}`, offsetX, this.position.y + 55 + uiOffset);
         }
       }
 

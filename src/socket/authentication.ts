@@ -43,7 +43,7 @@ const authentication = {
                 }
             }
 
-            const inventoryData = await query("SELECT item, quantity FROM inventory WHERE username = ?", [username]) as any[];
+            const inventoryData = await query("SELECT item, quantity, equipped FROM inventory WHERE username = ?", [username]) as any[];
             const collectablesData = await collectables.list(username) as unknown as Collectable[];
             const learnedSpellsData = await query("SELECT spell FROM learned_spells WHERE username = ?", [username]) as any[];
             // Fetch all types of collectables that are mounts and validate against mounts cache to see if they exist
@@ -70,8 +70,8 @@ const authentication = {
 
                     if (itemDetails) {
                     return {
-                        ...item, // Inventory item details
                         ...itemDetails, // Item details from cache
+                        ...item, // Inventory item details (includes equipped and quantity)
                     };
                     } else {
                     // If item details are not found, return the item with blank details

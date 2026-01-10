@@ -17,6 +17,9 @@ class Cache {
     duration: number;
     spell: string;
   }> = [];
+  inventory: any[] = [];
+  equipment: any = {};
+  inventoryConfig: any = null;
 
   private constructor() {}
 
