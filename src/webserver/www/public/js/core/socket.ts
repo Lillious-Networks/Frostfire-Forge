@@ -49,6 +49,7 @@ import {
   equipmentRightColumn,
   equipmentBottomCenter,
   setupInventorySlotHandlers,
+  updateCurrencyDisplay,
 } from "./ui.ts";
 import { playAudio, playMusic } from "./audio.ts";
 import { updateXp } from "./xp.ts";
@@ -400,7 +401,12 @@ socket.onmessage = async (event) => {
         cache.players.delete(existingByUsername);
       }
 
-      createPlayer(data);
+      await createPlayer(data);
+
+      // Update currency display if this is the current player
+      if (data.id === cachedPlayerId) {
+        updateCurrencyDisplay();
+      }
       break;
     }
     case "RECONNECT": {
@@ -1634,6 +1640,24 @@ socket.onmessage = async (event) => {
       break;
     }
     case "CURRENCY": {
+      const data = JSON.parse(packet.decode(event.data))["data"];
+
+      if (!cachedPlayerId) break;
+
+      // Update currency in player cache
+      const currentPlayer = Array.from(cache.players).find(
+        (p) => p.id === cachedPlayerId
+      );
+      if (currentPlayer && data) {
+        currentPlayer.currency = {
+          copper: data.copper || 0,
+          silver: data.silver || 0,
+          gold: data.gold || 0,
+        };
+      }
+
+      // Update currency display
+      updateCurrencyDisplay();
       break;
     }
     default:

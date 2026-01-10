@@ -256,23 +256,6 @@ const createClientConfig = async () => {
   await query(sql);
 }
 
-const createWeaponsTable = async () => {
-  log.info("Creating weapons table...");
-  const sql = `
-    CREATE TABLE IF NOT EXISTS weapons (
-        id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
-        name TEXT NOT NULL UNIQUE,
-        damage INTEGER NOT NULL,
-        mana INTEGER NOT NULL,
-        \`range\` INTEGER NOT NULL,
-        type TEXT NOT NULL,
-        description TEXT DEFAULT NULL,
-        quality TEXT NOT NULL DEFAULT 'common'
-    );
-  `;
-  await query(sql);
-}
-
 const createSpellsTable = async () => {
   log.info("Creating spells table...");
   const sql = `
@@ -618,7 +601,6 @@ const setupDatabase = async () => {
   await insertDefaultItem();
   await createStatsTable();
   await createClientConfig();
-  await createWeaponsTable();
   await createSpellsTable();
   await createPermissionsTable();
   await createPermissionTypesTable();

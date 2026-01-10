@@ -765,8 +765,31 @@ export {
     guildMemberCount, guildMemberInviteInput, guildMemberInviteButton, collisionDebugCheckbox, chunkOutlineDebugCheckbox,
     collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox, loadedChunksText, collectablesUI,
     hotbarSlots, saveHotbarConfiguration, loadHotbarConfiguration, equipmentLeftColumn, equipmentRightColumn, equipmentBottomCenter,
-    saveInventoryConfiguration, loadInventoryConfiguration, setupInventorySlotHandlers,
+    saveInventoryConfiguration, loadInventoryConfiguration, setupInventorySlotHandlers, updateCurrencyDisplay,
 };
+
+// Function to update currency display
+function updateCurrencyDisplay() {
+  const cache = Cache.getInstance();
+
+  if (!cachedPlayerId) return;
+
+  // Get current player from cache
+  const currentPlayer = Array.from(cache.players).find(
+    (p) => p.id === cachedPlayerId
+  );
+
+  if (!currentPlayer || !currentPlayer.currency) return;
+
+  // Update currency amounts
+  const goldElement = document.getElementById("currency-gold");
+  const silverElement = document.getElementById("currency-silver");
+  const copperElement = document.getElementById("currency-copper");
+
+  if (goldElement) goldElement.textContent = currentPlayer.currency.gold.toString();
+  if (silverElement) silverElement.textContent = currentPlayer.currency.silver.toString();
+  if (copperElement) copperElement.textContent = currentPlayer.currency.copper.toString();
+}
 
 // Function to setup inventory slot drag and drop handlers
 function setupInventorySlotHandlers() {
