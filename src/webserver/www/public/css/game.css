@@ -133,7 +133,7 @@ body {
   bottom: 25px;
   right: -350px;
   z-index: 100;
-  background: url("../img/ui/ui-inventory-container.png");
+  background: url("../img/ui/ui-book.png");
   background-repeat: no-repeat;
   background-size: 100% 100%;
   transition: right ease-in-out 1s;
@@ -165,7 +165,7 @@ body {
   word-wrap: break-word;
   overflow: hidden;
   color: #bdbdbd;
-  background: url("../img/ui/ui-inventory-slot.png");
+  background: url("../img/ui/ui-slot-light.png");
   background-repeat: no-repeat;
   background-size: 100% 100%;
   user-select: none;
@@ -182,10 +182,10 @@ body {
 
 #guild-container {
   position: fixed;
-  top: 25px;
+  top: 100px;
   right: -425;
   z-index: 100;
-  background: url("../img/ui/ui-guild-container.png");
+  background: url("../img/ui/ui-book.png");
   background-repeat: no-repeat;
   background-size: 100% 100%;
   width: 404px;
@@ -241,10 +241,10 @@ body {
 
 #friends-list-container {
   position: fixed;
-  top: 25px;
+  top: 100px;
   right: -425;
   z-index: 100;
-  background: url("../img/ui/ui-friendslist.png");
+  background: url("../img/ui/ui-book.png");
   background-repeat: no-repeat;
   background-size: 100% 100%;
   width: 404px;
@@ -337,10 +337,10 @@ body {
 
 #spell-book-container, #collectables-container {
   position: fixed;
-  top: 25px;
+  top: 100px;
   right: -425;
   z-index: 100;
-  background: url("../img/ui/ui-spellbook2.png");
+  background: url("../img/ui/ui-book.png");
   background-repeat: no-repeat;
   background-size: 100% 100%;
   width: 404px;
@@ -378,7 +378,7 @@ body {
   word-wrap: break-word;
   overflow: hidden;
   color: #bdbdbd;
-  background: url("../img/ui/ui-spellbook-slot.png");
+  background: url("../img/ui/ui-slot-light.png");
   background-repeat: no-repeat;
   background-size: 100% 100%;
   user-select: none;
@@ -410,7 +410,7 @@ body {
   word-wrap: break-word;
   overflow: hidden;
   color: #bdbdbd;
-  background: url("../img/ui/ui-inventory-slot.png");
+  background: url("../img/ui/ui-slot-dark.png");
   background-repeat: no-repeat;
   background-size: 100% 100%;
   user-select: none;
@@ -1115,34 +1115,104 @@ input::placeholder(:not(#chat-container input)) {
   position: fixed;
   width: 542px;
   height: 466px;
-  top: 150;
+  top: 25px;
   left: -570;
   z-index: 100;
   transition: bottom ease-in-out 1s;
-  background: url("../img/ui/ui-stats-sheet.png");
+  background: url("../img/ui/ui-stats-sheet.png") center center;
   background-repeat: no-repeat;
   will-change: left;
+}
+
+#stats-screen-username-container {
+  position: absolute;
+  top: 36px;
+  left: 44px;
+  width: auto;
+  height: auto;
+  z-index: 101;
+}
+
+#stats-screen-username-label {
+  color: #FFF1DA;
+  font-size: 1em;
+  font-weight: 700;
+  text-shadow: 2px 2px 5px rgba(0,0,0,0.8);
+  letter-spacing: 0.5px;
 }
 
 #stats-screen-player-info {
   position: absolute;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-start;
+  padding-left: 10px;
+  padding-top: 5px;
   width: 125px;
-  height: 300;
+  height: 300px;
   left: 373px;
   top: 120px;
   z-index: 100;
   will-change: left;
 }
 
-#stats-screen-health-label, #stats-screen-mana-label {
+#stats-screen-level-label,
+#stats-screen-health-label,
+#stats-screen-mana-label,
+#stats-screen-damage-label,
+#stats-screen-armor-label,
+#stats-screen-crit-chance-label,
+#stats-screen-crit-damage-label,
+#stats-screen-avoidance-label {
   padding-top: 15px;
+  text-align: left;
   color: #FFF1DA;
-  font-size: 0.8em;
+  font-size: 0.7em;
   font-weight: 600;
   text-shadow: 2px 2px 5px rgba(0,0,0,0.8);
+}
+
+#equipment-left-column {
+  position: absolute;
+  display: flex;
+  z-index: 101;
+  flex-direction: column;
+  top: 116px;
+  left: 26px;
+}
+
+#equipment-right-column {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  top: 116px;
+  right: 196px;
+  z-index: 101;
+}
+
+#equipment-bottom-center {
+  position: absolute;
+  display: flex;
+  gap: 4px;
+  z-index: 101;
+  bottom: 30px;
+  left: 148px;
+}
+
+#equipment-left-column .slot,
+#equipment-right-column .slot,
+#equipment-bottom-center .slot {
+  width: 36px;
+  height: 36px;
+  border-radius: 0%;
+  cursor: pointer;
+  margin-bottom: 4px;
+}
+
+#equipment-left-column .empty,
+#equipment-right-column .empty,
+#equipment-bottom-center .empty {
+  background-color: transparent;
 }
 
 #start-game-button {
@@ -1479,7 +1549,7 @@ input[type=range]:disabled {
   align-items: flex-start;
   width: 100px;
   height: auto;
-  bottom: 50%;
+  bottom: 46%;
   transform: translateY(50%);
   left: 25px;
 }
@@ -2103,11 +2173,10 @@ body.mobile-landscape {
 
   /* Stat screen */
   #stat-screen {
-    width: 434px;
-    height: 373px;
+    width: 542px;
+    height: 466px;
     top: 100px;
     left: -455px;
-    transform: scale(0.7);
     transform-origin: top left;
   }
 
@@ -2432,6 +2501,92 @@ body.tiny-landscape .notification {
 }
 
 /* iOS safe areas handled per element, not on body to avoid centering issues */
+
+/* ===============================================
+   Item Tooltip
+   =============================================== */
+
+#item-tooltip {
+  position: fixed;
+  z-index: 10000;
+  background: linear-gradient(135deg, rgba(20, 15, 30, 0.98), rgba(30, 20, 40, 0.98));
+  border: 2px solid rgba(255, 215, 0, 0.4);
+  border-radius: 8px;
+  padding: 12px;
+  min-width: 200px;
+  max-width: 300px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.8), 0 0 20px rgba(255, 215, 0, 0.2);
+  pointer-events: none;
+  font-family: 'Comic Relief';
+}
+
+#tooltip-name {
+  font-size: 1.1em;
+  font-weight: 700;
+  margin-bottom: 6px;
+  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.9);
+  letter-spacing: 0.5px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 0;
+}
+
+#tooltip-type {
+  font-size: 0.85em;
+  color: #b8b8b8;
+  margin-bottom: 8px;
+  font-style: italic;
+  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+#tooltip-stats {
+  font-size: 0.9em;
+  line-height: 1.6;
+  margin-bottom: 8px;
+  border-top: 1px solid rgba(255, 215, 0, 0.2);
+  border-bottom: 1px solid rgba(255, 215, 0, 0.2);
+  padding: 8px 0;
+}
+
+#tooltip-stats div {
+  color: #4ade80;
+  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
+  margin: 2px 0;
+}
+
+#tooltip-description {
+  font-size: 0.85em;
+  color: #d4af37;
+  font-style: italic;
+  line-height: 1.4;
+  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+/* Quality-based name colors with gradient backgrounds */
+#tooltip-name.common {
+  color: #ffffff;
+  background: linear-gradient(to left, transparent 0%, rgba(255, 255, 255, 0.15) 100%);
+}
+
+#tooltip-name.uncommon {
+  color: #34eb49;
+  background: linear-gradient(to left, transparent 0%, rgba(52, 235, 73, 0.15) 100%);
+}
+
+#tooltip-name.rare {
+  color: #347aeb;
+  background: linear-gradient(to left, transparent 0%, rgba(52, 122, 235, 0.15) 100%);
+}
+
+#tooltip-name.epic {
+  color: #bd34eb;
+  background: linear-gradient(to left, transparent 0%, rgba(189, 52, 235, 0.15) 100%);
+}
+
+#tooltip-name.legendary {
+  color: #eb9c34;
+  background: linear-gradient(to left, transparent 0%, rgba(235, 156, 52, 0.15) 100%);
+}
 
 /* ===============================================
    Virtual Joystick for Mobile Touch Controls

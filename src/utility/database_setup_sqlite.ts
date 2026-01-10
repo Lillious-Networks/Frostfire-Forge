@@ -249,7 +249,8 @@ const createClientConfig = async () => {
         music_volume INTEGER NOT NULL DEFAULT 100,
         effects_volume INTEGER NOT NULL DEFAULT 100,
         muted INTEGER NOT NULL DEFAULT 0,
-        hotbar_config TEXT DEFAULT NULL
+        hotbar_config TEXT DEFAULT NULL,
+        inventory_config TEXT DEFAULT NULL
     );
   `;
   await query(sql);
@@ -587,7 +588,7 @@ const createEquipmentTable = async () => {
         username TEXT NOT NULL,
         head TEXT DEFAULT NULL,
         necklace TEXT DEFAULT NULL,
-        shoulders TEXT DEFAULT NULL,
+        shoulder TEXT DEFAULT NULL,
         back TEXT DEFAULT NULL,
         chest TEXT DEFAULT NULL,
         wrists TEXT DEFAULT NULL,
@@ -599,7 +600,8 @@ const createEquipmentTable = async () => {
         ring_2 TEXT DEFAULT NULL,
         trinket_1 TEXT DEFAULT NULL,
         trinket_2 TEXT DEFAULT NULL,
-        weapon TEXT DEFAULT NULL
+        weapon TEXT DEFAULT NULL,
+        off_hand_weapon TEXT DEFAULT NULL
     );
   `;
   await query(sql);

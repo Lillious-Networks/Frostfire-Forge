@@ -156,7 +156,8 @@ const createClientConfig = async () => {
         music_volume INT NOT NULL DEFAULT 100,
         effects_volume INT NOT NULL DEFAULT 100,
         muted INT NOT NULL DEFAULT 0,
-        hotbar_config JSON DEFAULT NULL
+        hotbar_config JSON DEFAULT NULL,
+        inventory_config JSON DEFAULT NULL
     )
   `;
   await query(sql);
@@ -489,7 +490,8 @@ const createEquipmentTable = async () => {
       ring_2 VARCHAR(255) DEFAULT NULL,
       trinket_1 VARCHAR(255) DEFAULT NULL,
       trinket_2 VARCHAR(255) DEFAULT NULL,
-      weapon VARCHAR(255) DEFAULT NULL
+      weapon VARCHAR(255) DEFAULT NULL,
+      off_hand_weapon VARCHAR(255) DEFAULT NULL
     )
   `;
   await query(sql);

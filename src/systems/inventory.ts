@@ -77,7 +77,7 @@ const inventory = {
     if (!name) return [];
 
     // Fetch items for the user
-    const _items = await query("SELECT item, quantity FROM inventory WHERE username = ?", [name]) as any[];
+    const _items = await query("SELECT item, quantity, equipped FROM inventory WHERE username = ?", [name]) as any[];
 
     if (!_items || _items.length === 0) return []; // Return if no items found
 
@@ -89,8 +89,8 @@ const inventory = {
         const itemDetails = (items as any).find((i: any) => i.name === item.item);
         if (itemDetails) {
           return {
-            ...item, // Inventory item details
             ...itemDetails, // Item details from cache
+            ...item, // Inventory item details (includes equipped and quantity)
           };
         } else {
           // If item details are not found, return the item with blank details

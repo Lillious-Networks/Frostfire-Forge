@@ -257,6 +257,7 @@ function loadAllMaps() {
         tileWidth: map.data.tilewidth,
         tileHeight: map.data.tileheight,
         warps: null, // Will be set later
+        graveyards: null // Will be set later
       });
       extractAndCompressLayers(map);
     }
@@ -301,6 +302,7 @@ function extractAndCompressLayers(map: MapData) {
   const collisions: number[][] = [];
   const noPvpZones: number[][] = [];
   const warps: any[] = [];
+  const graveyards: any[] = [];
 
   map.data.layers.forEach((layer: any) => {
     // Skip object groups
@@ -337,15 +339,9 @@ function extractAndCompressLayers(map: MapData) {
         switch (type) {
           // Warp objects
           case "warp": {
-                        const _map = obj.properties?.find((p: any) => p.name === "map")?.value;
+            const _map = obj.properties?.find((p: any) => p.name === "map")?.value;
             const x = obj.properties?.find((p: any) => p.name === "x")?.value;
             const y = obj.properties?.find((p: any) => p.name === "y")?.value;
-
-            // Warp position in world coordinates (0,0) = top-left of map
-            const posX = Math.floor(obj.x);
-            const posY = Math.floor(obj.y);
-            const width = Math.floor(obj.width);
-            const height = Math.floor(obj.height);
 
             if (_map && x !== undefined && y !== undefined) {
               warps.push({
@@ -354,19 +350,30 @@ function extractAndCompressLayers(map: MapData) {
                 x: x,
                 y: y,
                 position: {
-                  x: posX,
-                  y: posY,
+                  x: Math.floor(obj.x),
+                  y: Math.floor(obj.y),
                 },
                 size: {
-                  width: width,
-                  height: height,
+                  width: Math.floor(obj.width),
+                  height: Math.floor(obj.height),
                 },
               });
             } else {
               log.warn(`Invalid warp object in map ${map.name}: ${JSON.stringify(obj)}`);
             }
+            break;
           }
-          break;
+          // Graveyard objects (point)
+          case "graveyard": {
+            graveyards.push({
+              name: obj.name,
+              position: {
+                x: Math.floor(obj.x),
+                y: Math.floor(obj.y),
+              }
+            });
+            break;
+          }
           default:
             log.warn(`Unknown object or object type in map ${map.name}: ${JSON.stringify(obj)}`);
         }
@@ -391,7 +398,18 @@ function extractAndCompressLayers(map: MapData) {
         }, {} as { [key: string]: { map: string; position: any; x: number; y: number; size: { width: number; height: number; }; } });
         log.debug(`Extracted ${warps.length} warp(s) from map ${map.name}`);
       }
-    }    
+
+      if (graveyards.length > 0) {
+        log.debug(`Found ${graveyards.length} graveyard(s) in map ${map.name}`);
+        const _map = mapProperties.find(m => m.name.replace(".json", "") === map.name.replace(".json", "")) as MapProperties | undefined;
+        if (!_map) {
+          log.error(`Map properties not found for ${map.name}`);
+          return;
+        }
+        _map.graveyards = graveyards;
+        log.debug(`Extracted ${graveyards.length} graveyard(s) from map ${map.name}`);
+      }
+    }
   });
 
   let width: number | null = null;
@@ -637,6 +655,7 @@ export async function reloadMap(mapName: string): Promise<MapData> {
       tileWidth: newMap.data.tilewidth,
       tileHeight: newMap.data.tileheight,
       warps: null, // Will be set later
+      graveyards: null, // Will be set later
     };
 
     if (index >= 0) {

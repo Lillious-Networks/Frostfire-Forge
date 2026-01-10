@@ -70,12 +70,6 @@ function handleTouchStart(event: TouchEvent): void {
 
     // Visual feedback
     stick.classList.add('active');
-
-    console.log('[VirtualJoystick] Touch start:', {
-        touchId: state.touchId,
-        x: touch.clientX,
-        y: touch.clientY
-    });
 }
 
 /**
@@ -120,7 +114,6 @@ function handleTouchEnd(event: TouchEvent): void {
     );
 
     if (!touchStillActive) {
-        console.log('[VirtualJoystick] Touch end');
         resetJoystick();
     }
 }
@@ -129,7 +122,6 @@ function handleTouchEnd(event: TouchEvent): void {
  * Handles touch cancellation (e.g., phone call, notification)
  */
 function handleTouchCancel(event: TouchEvent): void {
-    console.log('[VirtualJoystick] Touch cancel');
     handleTouchEnd(event);
 }
 
@@ -271,18 +263,10 @@ function startUpdateLoop(): void {
  */
 function initialize(): void {
     // Check if elements exist
-    if (!container || !stick) {
-        console.error('[VirtualJoystick] Required DOM elements not found');
-        return;
-    }
+    if (!container || !stick) return;
 
     // Only initialize on touch-capable devices
-    if (!('ontouchstart' in window)) {
-        console.log('[VirtualJoystick] Not a touch device, skipping initialization');
-        return;
-    }
-
-    console.log('[VirtualJoystick] Initializing on touch device');
+    if (!('ontouchstart' in window)) return;
 
     // Register touch event listeners with { passive: false } to allow preventDefault
     container.addEventListener('touchstart', handleTouchStart, { passive: false });
@@ -292,8 +276,6 @@ function initialize(): void {
 
     // Start the update loop
     startUpdateLoop();
-
-    console.log('[VirtualJoystick] Initialization complete');
 }
 
 // ============================================
@@ -306,10 +288,7 @@ function initialize(): void {
 function initializeMountButton(): void {
     const mountButton = document.getElementById('virtual-mount-button') as HTMLElement;
 
-    if (!mountButton) {
-        console.log('[VirtualJoystick] Mount button not found');
-        return;
-    }
+    if (!mountButton) return;
 
     // Only initialize on touch-capable devices
     if (!('ontouchstart' in window)) {
@@ -319,13 +298,10 @@ function initializeMountButton(): void {
     // Handle button click/tap
     mountButton.addEventListener('click', (event) => {
         event.preventDefault();
-        console.log('[VirtualJoystick] Mount button clicked');
-
         // Call the mount function directly
         mount();
     });
 
-    console.log('[VirtualJoystick] Mount button initialized');
 }
 
 // Auto-initialize when module loads

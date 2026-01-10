@@ -293,6 +293,10 @@ Bun.serve({
     }
     const ip = address.address;
     log.debug(`Received request: ${req.method} ${req.url} from ${ip}`);
+    // Block potentially dangerous HTTP methods
+    if (req.method === "CONNECT" || req.method === "TRACE" || req.method === "TRACK" || req.method === "OPTIONS") {
+      return new Response("Forbidden", { status: 403 });
+    }
     // Check if the ip is blacklisted
     if (b_ips.includes(ip)) {
       return new Response(JSON.stringify({ message: "Invalid request" }), { status: 403 });

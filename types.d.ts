@@ -145,6 +145,7 @@ declare interface Equipment {
   trinket_1: Nullable<string>;
   trinket_2: Nullable<string>;
   weapon: Nullable<string>;
+  off_hand_weapon: Nullable<string>;
 }
 
 // Define icon data
@@ -340,6 +341,7 @@ declare interface MapProperties {
   tileWidth: number;
   tileHeight: number;
   warps?: Nullable<WarpObject[]>;
+  graveyards?: Nullable<GraveyardObject[]>;
 }
 
 declare interface PlayerProperties {
@@ -359,6 +361,14 @@ declare interface WarpObject {
   size: {
     width: number;
     height: number;
+  };
+}
+
+declare interface GraveyardObject {
+  name: string;
+  position: {
+    x: number;
+    y: number;
   };
 }
 
