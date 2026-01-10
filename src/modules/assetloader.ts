@@ -153,11 +153,12 @@ if (!world.find((w) => w.name === worldName)) {
 // Load item data
 const itemnow = performance.now();
 const itemList = await item.list();
+const missingIcon = await assetCache.get("missing_icon");
 // For each item, find the icon data and add the compressed data to the item object
 await Promise.all(itemList.map(async (item: any) => {
   if (item.icon) {
     const iconData = await assetCache.get(item.icon);
-    item.icon = iconData || null; // Replace the icon with the compressed data if it exists
+    item.icon = iconData || missingIcon || null; // Use missing_icon as fallback
   }
 }));
 await assetCache.add("items", itemList);
@@ -182,7 +183,7 @@ const filteredMounts = unfilteredMounts.filter((m) => {{
 await Promise.all(filteredMounts.map(async (mount: any) => {
   if (mount.icon) {
     const iconData = await assetCache.get(mount.icon);
-    mount.icon = iconData || null; // Replace the icon with the compressed data if it exists
+    mount.icon = iconData || missingIcon || null; // Use missing_icon as fallback
   }
 }));
 
@@ -199,8 +200,8 @@ await Promise.all(spellList.map(async (spell: any) => {
   if (spell.icon) {
     const iconData = await assetCache.get(spell.icon);
     const spriteData = await assetCache.get(`sprite_${spell.icon}`);
-    spell.icon = iconData || null; // Replace the icon with the compressed data if it exists
-    spell.sprite = spriteData || null;
+    spell.icon = iconData || missingIcon || null; // Use missing_icon as fallback
+    spell.sprite = spriteData || missingIcon || null; // Use missing_icon as fallback for sprite too
   }
 }));
 await assetCache.add("spells", spellList);
