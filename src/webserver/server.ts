@@ -313,13 +313,12 @@ Bun.serve({
 
     // Restrict direct ip access to the webserver
     if (process.env.DOMAIN?.replace(/https?:\/\//, "") !== url.host) {
+      log.debug(`Domain mismatch: expected "${process.env.DOMAIN?.replace(/https?:\/\//, "")}", got "${url.host}"`);
       return new Response(JSON.stringify({ message: "Invalid request" }), { status: 403 });
     }
 
     const route = routes[url.pathname as keyof typeof routes];
-    if (!route) {
-      return Response.redirect("/", 301);
-    }
+    if (!route) return Response.redirect("/", 301);
     return route[req.method as keyof typeof route]?.(req);
   },
   ...(_https ? {

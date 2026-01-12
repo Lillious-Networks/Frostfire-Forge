@@ -375,6 +375,96 @@ socket.onmessage = async (event) => {
       }
       break;
     }
+    case "SPRITE_SHEET_ANIMATION": {
+      try {
+        // At least one sprite layer must be present to render
+        if (!data?.bodySprite && !data?.headSprite && !data?.bodyArmorSprite && !data?.headArmorSprite) {
+          console.warn("Sprite sheet animation data has no layers to render");
+          return;
+        }
+
+        const findPlayer = async () => {
+          const player = cache.players.size
+            ? Array.from(cache.players).find((p) => p.id === data.id)
+            : null;
+
+          if (player) {
+            // Import layered animation system dynamically
+            const { initializeLayeredAnimation, changeLayeredAnimation } = await import('./layeredAnimation.js');
+
+            // Process animation state and direction
+            let animationState = data.animationState || 'idle';
+            const originalAnimationState = animationState;
+
+            // If animation state includes direction, extract and store it
+            if (animationState.includes('_')) {
+              const direction = animationState.split('_')[1];
+              player.lastDirection = direction;
+            } else {
+              // No direction in animation state, append last known direction
+              animationState = `${animationState}_${player.lastDirection}`;
+            }
+
+            // Check if player already has a layered animation with the same sprite sheets
+            const hasExisting = player.layeredAnimation;
+            const spriteSheetsChanged = hasExisting ? (
+              player.layeredAnimation.layers.mount?.spriteSheet?.name !== data.mountSprite?.name ||
+              player.layeredAnimation.layers.body?.spriteSheet?.name !== data.bodySprite?.name ||
+              player.layeredAnimation.layers.head?.spriteSheet?.name !== data.headSprite?.name ||
+              player.layeredAnimation.layers.body_armor?.spriteSheet?.name !== data.bodyArmorSprite?.name ||
+              player.layeredAnimation.layers.head_armor?.spriteSheet?.name !== data.headArmorSprite?.name
+            ) : true;
+
+            if (!hasExisting || spriteSheetsChanged) {
+              // Initialize new layered animation if none exists or sprite sheets changed
+              player.layeredAnimation = await initializeLayeredAnimation(
+                data.mountSprite || null,
+                data.bodySprite || null,
+                data.headSprite || null,
+                data.bodyArmorSprite || null,
+                data.headArmorSprite || null,
+                animationState
+              );
+            } else {
+              // Sprite sheet names haven't changed, but update templates in case JSON content changed
+              if (data.mountSprite && player.layeredAnimation.layers.mount) {
+                player.layeredAnimation.layers.mount.spriteSheet = data.mountSprite;
+              }
+              if (data.bodySprite && player.layeredAnimation.layers.body) {
+                player.layeredAnimation.layers.body.spriteSheet = data.bodySprite;
+              }
+              if (data.headSprite && player.layeredAnimation.layers.head) {
+                player.layeredAnimation.layers.head.spriteSheet = data.headSprite;
+              }
+              if (data.bodyArmorSprite && player.layeredAnimation.layers.body_armor) {
+                player.layeredAnimation.layers.body_armor.spriteSheet = data.bodyArmorSprite;
+              }
+              if (data.headArmorSprite && player.layeredAnimation.layers.head_armor) {
+                player.layeredAnimation.layers.head_armor.spriteSheet = data.headArmorSprite;
+              }
+
+              if (player.layeredAnimation.currentAnimationName !== animationState) {
+                // Change animation state if needed
+                await changeLayeredAnimation(player.layeredAnimation, animationState);
+              }
+            }
+
+            // Clear old APNG animation if present
+            player.animation = null;
+          } else {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            await findPlayer();
+          }
+        };
+
+        findPlayer().catch((err) =>
+          console.error("Error in findPlayer (sprite sheet):", err)
+        );
+      } catch (error) {
+        console.error("Failed to process sprite sheet animation data:", error);
+      }
+      break;
+    }
     case "PONG":
       sendRequest({
         type: "LOGIN",
@@ -860,6 +950,9 @@ socket.onmessage = async (event) => {
       // Populate equipment slots with equipped items
       for (const [slotName, itemName] of Object.entries(data)) {
         if (!itemName) continue; // Skip empty slots
+
+        // Skip body and head - these are sprite sheet template names, not UI equipment slots
+        if (slotName === 'body' || slotName === 'head') continue;
 
         // Find the slot element by data-slot attribute
         const slotElement = document.querySelector(`.slot[data-slot="${slotName}"]`) as HTMLDivElement;
@@ -1526,6 +1619,9 @@ socket.onmessage = async (event) => {
 
         for (const [slotName, itemName] of Object.entries(data.equipment)) {
           if (!itemName) continue;
+
+          // Skip body and head - these are sprite sheet template names, not UI equipment slots
+          if (slotName === 'body' || slotName === 'head') continue;
 
           const slotElement = document.querySelector(`.slot[data-slot="${slotName}"]`) as HTMLDivElement;
           if (!slotElement) continue;
