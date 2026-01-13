@@ -5,10 +5,11 @@
  */
 
 /**
- * Extracts individual frames from a sprite sheet grid
- * @param image - Loaded sprite sheet image
- * @param template - Sprite sheet template with frame dimensions
- * @returns Map of frame index to extracted frame images
+ * Extracts individual frames from a sprite sheet grid.
+ *
+ * @param image - The loaded sprite sheet image.
+ * @param template - Sprite sheet template specifying `frameWidth`, `frameHeight`, `columns`, and `rows`.
+ * @returns A map from frame index to the extracted `HTMLImageElement` for that frame.
  */
 export async function extractFramesFromSpriteSheet(
   image: HTMLImageElement,
@@ -73,11 +74,12 @@ export async function extractFramesFromSpriteSheet(
 }
 
 /**
- * Builds animation frames for a specific animation from sprite sheet
- * @param spriteSheet - The sprite sheet template
- * @param animationName - Name of the animation to build
- * @param extractedFrames - Map of already extracted frame images
- * @returns Array of animation frames ready for rendering
+ * Constructs animation frames for a named animation using previously extracted sprite images.
+ *
+ * @param spriteSheet - The sprite sheet template containing frame dimensions and animation configurations
+ * @param animationName - Animation identifier; may include a direction suffix (e.g., "idle_down", "mount_idle_down")
+ * @param extractedFrames - Map from frame index to the corresponding loaded `HTMLImageElement`
+ * @returns An array of `AnimationFrame` objects, each containing `imageElement`, `width`, `height`, `delay`, and `offset`
  */
 export async function buildAnimationFrames(
   spriteSheet: SpriteSheetTemplate,
@@ -166,9 +168,14 @@ export async function buildAnimationFrames(
 }
 
 /**
- * Loads sprite sheet template from compressed data
- * @param templateData - Compressed or raw template data
- * @returns Parsed sprite sheet template
+ * Parse and normalize a sprite sheet template from raw or JSON string input.
+ *
+ * Accepts either a template object or a JSON string and returns a normalized
+ * SpriteSheetTemplate with the expected fields.
+ *
+ * @param templateData - The sprite sheet template as an object or a JSON string
+ * @returns The normalized SpriteSheetTemplate containing `name`, `imageSource`,
+ * `frameWidth`, `frameHeight`, `columns`, `rows`, and `animations`
  */
 export function loadSpriteSheetTemplate(
   templateData: any
@@ -190,9 +197,15 @@ export function loadSpriteSheetTemplate(
 }
 
 /**
- * Validates a sprite sheet template structure
- * @param template - Template to validate
- * @returns True if valid, false otherwise
+ * Validate the structure and semantic correctness of a sprite sheet template.
+ *
+ * Checks presence of required fields, positive frame dimensions and grid sizes,
+ * that `animations` is an object, and that every referenced frame index lies
+ * within the sprite sheet bounds. Also validates per-animation properties such
+ * as `frames`, `frameDuration`, and `loop`, including directional animation formats.
+ *
+ * @param template - The sprite sheet template object to validate
+ * @returns `true` if the template is valid, `false` otherwise
  */
 export function validateSpriteSheetTemplate(template: any): boolean {
   if (!template) return false;
@@ -296,9 +309,10 @@ export function validateSpriteSheetTemplate(template: any): boolean {
 }
 
 /**
- * Preloads a sprite sheet image
- * @param imageSource - Path to the sprite sheet image
- * @returns Promise that resolves with the loaded image
+ * Loads a sprite sheet image from a data URL or a base64-encoded string.
+ *
+ * @param imageSource - A data URL (starting with `data:image/`) or a base64-encoded PNG string (without the data URL prefix)
+ * @returns The loaded HTMLImageElement
  */
 export async function preloadSpriteSheetImage(imageSource: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {

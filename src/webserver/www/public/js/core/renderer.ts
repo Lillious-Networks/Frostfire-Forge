@@ -309,6 +309,13 @@ function renderMap(layer: 'lower' | 'upper' = 'lower') {
   }
 }
 
+/**
+ * Drives the game's per-frame update and rendering, and schedules the next animation frame.
+ *
+ * Performs input handling and movement requests, advances layered animations, updates the camera and HUD,
+ * loads visible map chunks, culls and renders entities (players, NPCs, projectiles, particles, dialogues),
+ * draws map layers and debug overlays, and maintains frame timing and performance history.
+ */
 function animationLoop() {
   if (!ctx) return;
   // Pixel perfect

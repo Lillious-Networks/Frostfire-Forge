@@ -76,9 +76,10 @@ export async function getSpriteSheetImage(name: string): Promise<string | null> 
 }
 
 /**
- * Maps old APNG animation names to new sprite sheet system
- * Format: "direction_state" or "mount_name_direction_state"
- * Examples: "down_idle", "horse_left_walking", "right_walking"
+ * Resolve sprite sheet templates for a player from an APNG animation name and optional equipment, and derive the normalized animation state.
+ *
+ * @param equipment - Optional equipment object whose fields (e.g., `body`, `head`, `chest`, `helmet`) that are `null` or the string `"null"` are treated as absent and produce a `null` sprite layer.
+ * @returns An object containing `bodySprite`, `headSprite`, `bodyArmorSprite`, and `headArmorSprite` (each a `SpriteSheetTemplate` or `null`) and `animationState`, a normalized `action_direction` string derived from `animationName`.
  */
 export async function getPlayerSpriteSheetData(
   animationName: string,
@@ -132,12 +133,10 @@ export async function getPlayerSpriteSheetData(
 }
 
 /**
- * Parses APNG animation name to determine sprite sheet animation state with direction
- * Examples:
- * - "player_idle_down.png" -> "idle_down"
- * - "player_walk_up.png" -> "walk_up"
- * - "mount_base_idle_left.png" -> "idle_left"
- * - "mount_base_walk_down.png" -> "walk_down"
+ * Normalize an APNG animation filename into a direction-aware action state.
+ *
+ * @param animationName - The APNG animation filename or identifier (e.g., "player_idle_down.png").
+ * @returns The normalized animation state in "action_direction" form (e.g., "idle_down").
  */
 function parseAnimationState(animationName: string): string {
   const lower = animationName.toLowerCase();
@@ -157,7 +156,9 @@ function parseAnimationState(animationName: string): string {
 }
 
 /**
- * Checks if sprite sheet system is available
+ * Determine whether the sprite sheet system has any templates available.
+ *
+ * @returns `true` if at least one sprite sheet template exists, `false` otherwise.
  */
 export async function isSpriteSheetSystemAvailable(): Promise<boolean> {
   const spriteSheetTemplates = await assetCache.get('spriteSheetTemplates') as any[];

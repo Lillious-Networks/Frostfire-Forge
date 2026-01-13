@@ -17,14 +17,15 @@ import {
 const spriteSheetCache: SpriteSheetCache = {};
 
 /**
- * Initializes a layered animation system for a character
- * @param mountSprite - Optional mount sprite sheet
- * @param bodySprite - Base body sprite sheet template
- * @param headSprite - Base head sprite sheet template
- * @param bodyArmorSprite - Optional body armor sprite sheet
- * @param headArmorSprite - Optional head armor sprite sheet
- * @param initialAnimation - Starting animation name (default: 'idle')
- * @returns Complete layered animation structure
+ * Create a layered character animation state with optional mount and armor layers.
+ *
+ * @param mountSprite - Optional mount sprite sheet template; when provided the mount layer is created behind other layers
+ * @param bodySprite - Base body sprite sheet template; when provided the body layer is created
+ * @param headSprite - Base head sprite sheet template; when provided the head layer is created
+ * @param bodyArmorSprite - Optional body armor sprite sheet template; when provided the body_armor layer is created
+ * @param headArmorSprite - Optional head armor sprite sheet template; when provided the head_armor layer is created
+ * @param initialAnimation - Starting animation name (default: `idle`)
+ * @returns A LayeredAnimation containing the initialized layers (null for absent layers), `currentAnimationName` set to `initialAnimation`, and `syncFrames` enabled
  */
 export async function initializeLayeredAnimation(
   mountSprite: Nullable<SpriteSheetTemplate>,
@@ -93,13 +94,13 @@ export async function initializeLayeredAnimation(
 }
 
 /**
- * Creates a single animation layer
- * @param type - Layer type (mount, body, body_armor, head, head_armor)
- * @param spriteSheet - Sprite sheet template for this layer
- * @param animationName - Initial animation to load
- * @param zIndex - Render order (-1 = mount behind, 0 = back, higher = front)
- * @param isMounted - Whether the player is mounted (for body/head layers)
- * @returns Initialized animation layer
+ * Create and initialize an animation layer for a given sprite sheet and animation.
+ *
+ * This will load and cache the sprite sheet image and extracted frames if not already cached, build the requested animation frames (adjusting body/head animation names when `isMounted` is true), and return a ready-to-use AnimationLayer.
+ *
+ * @param zIndex - Render order for the layer (e.g., -1 = mount behind, 0 = back, higher values render in front)
+ * @param isMounted - When true and `type` is `body` or `head`, map `idle_`/`walk_` animations to their `mount_` equivalents before loading frames
+ * @returns An initialized AnimationLayer containing the built frames, `currentFrame` set to 0, `lastFrameTime` set to the current time, the provided `zIndex`, and `visible: true`
  */
 async function createAnimationLayer(
   type: 'mount' | 'body' | 'body_armor' | 'head' | 'head_armor',
@@ -166,10 +167,15 @@ async function createAnimationLayer(
 }
 
 /**
- * Updates animation frames for all layers
- * Should be called every render frame
- * @param layeredAnim - The layered animation to update
- * @param deltaTime - Time since last update (not currently used, kept for future frame-independent timing)
+ * Advances animation frames for all non-null layers according to the layered animation's timing mode.
+ *
+ * In synchronized mode, the body layer is used as the timing source (or the first available layer if body is absent)
+ * and all layers advance together when the timing layer's current frame delay elapses. In independent mode,
+ * each layer advances based on its own current frame delay. When a layer advances, its `currentFrame` and
+ * `lastFrameTime` are updated.
+ *
+ * @param layeredAnim - The layered animation whose layers will be advanced
+ * @param deltaTime - Time since last update; currently unused and retained for potential future frame-independent timing
  */
 export function updateLayeredAnimation(
   layeredAnim: LayeredAnimation,
@@ -218,9 +224,12 @@ export function updateLayeredAnimation(
 }
 
 /**
- * Changes the current animation for all layers
- * @param layeredAnim - The layered animation to update
- * @param newAnimationName - Name of the new animation
+ * Switches the layered animation to a new animation name and rebuilds frames for each layer.
+ *
+ * Recomputes and applies the frames for all non-null layers, resetting each layer's current frame to 0 and updating its lastFrameTime. When a mount is present, body and head layers map `idle_`/`walk_` animations to `mount_idle_`/`mount_walk_` variants; the mount layer always uses the player's animation name as-is. Layers whose sprite sheet is not cached or that do not contain the target animation are skipped and a console message is emitted.
+ *
+ * @param layeredAnim - The layered animation state to update
+ * @param newAnimationName - The base animation name to switch to (e.g., `idle_down`, `walk_left`)
  */
 export async function changeLayeredAnimation(
   layeredAnim: LayeredAnimation,
@@ -334,9 +343,14 @@ export async function updateArmorLayer(
 }
 
 /**
- * Mounts or unmounts a mount
- * @param layeredAnim - The layered animation to update
- * @param mountSprite - Sprite sheet for the mount (null to unmount)
+ * Attach or detach the mount layer and update dependent layers to reflect the mounted state.
+ *
+ * If `mountSprite` is provided, the function validates it and creates a mount layer; if `null`, it removes the mount layer.
+ * When the mounted state changes it rebuilds the body and head layers' frames to use mounted (e.g., `mount_idle_*`, `mount_walk_*`)
+ * or unmounted animations as appropriate, then resets all layers' current frame indices and timestamps so animations remain synchronized.
+ *
+ * @param layeredAnim - The layered animation object to update
+ * @param mountSprite - Sprite sheet template for the mount; pass `null` to unmount. If the template is invalid, no changes are applied.
  */
 export async function updateMountLayer(
   layeredAnim: LayeredAnimation,
@@ -438,7 +452,9 @@ export function getVisibleLayersSorted(layeredAnim: LayeredAnimation): Animation
 }
 
 /**
- * Clears the sprite sheet cache (useful for memory management)
+ * Remove all entries from the internal sprite sheet cache.
+ *
+ * This clears cached images, templates, and extracted frames used by the layered animation system.
  */
 export function clearSpriteSheetCache(): void {
   for (const key in spriteSheetCache) {
@@ -447,10 +463,11 @@ export function clearSpriteSheetCache(): void {
 }
 
 /**
- * Gets a specific layer from the layered animation
- * @param layeredAnim - The layered animation
- * @param layerType - Which layer to get
- * @returns The layer or null if not present
+ * Retrieve a specific animation layer from the layered animation by type.
+ *
+ * @param layeredAnim - The layered animation container
+ * @param layerType - The layer key to retrieve (`mount`, `body`, `body_armor`, `head`, or `head_armor`)
+ * @returns The requested AnimationLayer, or `null` if that layer is not present
  */
 export function getLayer(
   layeredAnim: LayeredAnimation,

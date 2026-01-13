@@ -56,6 +56,13 @@ function loadAnimations() {
 }
 loadAnimations();
 
+/**
+ * Loads PNG sprites from the configured sprites directory, compresses their encoded data, and caches the results.
+ *
+ * For each PNG file the function encodes the image to base64, compresses that data, stores the compressed blob in the asset cache under `sprite_<name>`, and adds an entry { name, data } to the cached "sprites" list.
+ *
+ * @throws Error If the configured sprites directory does not exist
+ */
 function loadSprites() {
   const now = performance.now();
   const sprites = [] as any[];
@@ -96,6 +103,11 @@ function loadSprites() {
 }
 loadSprites();
 
+/**
+ * Loads sprite sheet templates from the assets spritesheets directory, validates and compresses each template and its image, and caches the results.
+ *
+ * Reads JSON template files from the spritesheets folder, ensures the referenced PNG exists, base64-encodes and compresses the image, compresses the template JSON, and stores an array of objects (each with `name`, compressed `template`, and compressed `image`) in `assetCache` under the `spriteSheetTemplates` key. If the spritesheets directory is missing or contains no templates, an empty array is cached and a warning is logged. Individual templates whose referenced image is missing are skipped and logged as errors.
+ */
 function loadSpriteSheetTemplates() {
   const now = performance.now();
   const templates = [] as any[];
@@ -166,6 +178,13 @@ function loadSpriteSheetTemplates() {
 }
 loadSpriteSheetTemplates();
 
+/**
+ * Loads PNG icon files from the configured asset icons directory and caches their compressed data.
+ *
+ * Reads all `.png` files from the icons asset directory, encodes and compresses each icon, stores each compressed icon in the asset cache under its filename (without extension) and stores the full icons list under the "icons" cache key. This function throws if the configured icons directory does not exist.
+ *
+ * @throws If the icons directory is not found at the configured asset path
+ */
 function loadIcons() {
   const now = performance.now();
   const icons = [] as any[];

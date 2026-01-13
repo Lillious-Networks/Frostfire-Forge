@@ -437,6 +437,19 @@ authWorker.on("message", async (result: any) => {
   }
 });
 
+/**
+ * Process an incoming WebSocket packet and route it to the appropriate game handler.
+ *
+ * Validates and parses the raw `message`, enforces payload limits and packet structure,
+ * resolves the current player from the session, and dispatches processing for supported
+ * packet types (authentication, movement, chat, commands, inventory/equipment, combat, map
+ * management, party/friend actions, etc.). Handles state mutations, cache updates and
+ * broadcasts to affected clients as required by each packet's semantics.
+ *
+ * @param server - The server instance hosting the WebSocket (used for contextual operations).
+ * @param ws - The client's WebSocket connection object; expected to contain session metadata on `ws.data`.
+ * @param message - Raw JSON string received from the client representing a packet with `type` and `data`.
+ */
 export default async function packetReceiver(
   server: any,
   ws: any,
@@ -4102,6 +4115,15 @@ function sendPacket(ws: any, packets: any[]) {
   });
 }
 
+/**
+ * Broadcasts a player's updated stats to their online party members (excluding the player).
+ *
+ * Looks up the player's party and sends an `updateStats` packet to each party member who is currently connected.
+ *
+ * @param playerUsername - Username of the player whose stats changed; used to identify and exclude the sender.
+ * @param playerId - Unique identifier of the player used as the packet target.
+ * @param stats - Object containing the player's updated stat values to include in the packet.
+ */
 async function sendStatsToPartyMembers(playerUsername: string, playerId: string, stats: any) {
   // Get the player's party ID first
   const partyId = await parties.getPartyId(playerUsername);
@@ -4131,6 +4153,18 @@ async function sendStatsToPartyMembers(playerUsername: string, playerId: string,
   }
 }
 
+/**
+ * Builds and broadcasts a sprite-sheet-based animation for a player to other players on the same map.
+ *
+ * Retrieves per-layer sprite-sheet templates and image data (body, head, body armor, head armor, and mount),
+ * assembles a spriteSheetAnimation packet, and sends it to all players on the player's map. If the player is
+ * stealthed, the packet is sent only to admins on that map. Logs a warning and aborts if no renderable layers are available.
+ *
+ * @param ws - The requester's websocket; used to resolve the target player when `playerId` is not provided
+ * @param name - The animation name/template to render
+ * @param playerId - Optional player id to target a player other than the websocket owner
+ * @param revision - Optional animation revision number to include in the packet
+ */
 async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string, revision?: number) {
   const currentPlayer = playerCache.get(playerId || ws.data.id);
   if (!currentPlayer) return;
@@ -4192,6 +4226,15 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
   }
 }
 
+/**
+ * Broadcasts a sprite-sheet-based animation for the specified player to relevant clients.
+ *
+ * If sprite-sheet usage is disabled in config or the sprite-sheet system is unavailable, the function logs a warning and does nothing.
+ *
+ * @param name - The animation identifier to play (sprite-sheet template name)
+ * @param playerId - Optional target player id; defaults to the player associated with `ws`
+ * @param revision - Optional animation revision or sequence number to include with the broadcast
+ */
 async function sendAnimation(ws: any, name: string, playerId?: string, revision?: number) {
   const currentPlayer = playerCache.get(playerId || ws.data.id);
   if (!currentPlayer) return;
@@ -4211,6 +4254,15 @@ async function sendAnimation(ws: any, name: string, playerId?: string, revision?
   await sendSpriteSheetAnimation(ws, name, playerId, revision);
 }
 
+/**
+ * Resolve the correct sprite filename for a player's animation based on orientation and state.
+ *
+ * @param direction - The desired facing direction (any string; will be normalized to a valid direction)
+ * @param walking - Whether the player is walking (`true`) or idle (`false`)
+ * @param mounted - Whether the player is mounted; defaults to `false`
+ * @param mount_type - Optional mount identifier; when omitted and `mounted` is `true`, `"horse"` is used
+ * @returns The filename of the sprite image (e.g., `player_walk_down.png` or `mount_horse_idle_up-right.png`)
+ */
 function getAnimationNameForDirection(
   direction: string,
   walking: boolean,
@@ -4226,6 +4278,17 @@ function getAnimationNameForDirection(
   return `player_${action}_${normalized}.png`;
 }
 
+/**
+ * Trigger a position-based animation for a player based on direction, movement, and mount state.
+ *
+ * @param ws - The WebSocket of the source or target connection for the animation broadcast.
+ * @param direction - Direction to display (one of the eight cardinal/diagonal directions).
+ * @param walking - Whether the player is moving (affects walk vs. idle frame selection).
+ * @param mounted - Whether the player is mounted, enabling mount-specific animation layers.
+ * @param mount_type - Identifier for the mount type to select mount-specific animation assets when mounted.
+ * @param playerId - Optional player identifier to target the animation to a specific player instance.
+ * @param revision - Optional animation revision number used to version or invalidate prior animations.
+ */
 async function sendPositionAnimation(
   ws: WebSocket,
   direction: string,
@@ -4239,6 +4302,11 @@ async function sendPositionAnimation(
   await sendAnimation(ws, animation, playerId, revision);
 }
 
+/**
+ * Normalize a direction string to one of the eight supported directions.
+ *
+ * @returns The original `direction` when it is one of "down", "up", "left", "right", "downleft", "downright", "upleft", or "upright"; otherwise `"down"`.
+ */
 function normalizeDirection(direction: string): string {
   // Return all 8 directions as-is for proper directional animations
   const validDirections = ["down", "up", "left", "right", "downleft", "downright", "upleft", "upright"];
@@ -4248,6 +4316,17 @@ function normalizeDirection(direction: string): string {
   return "down"; // safe fallback for invalid directions
 }
 
+/**
+ * Sends a sprite-sheet based animation for a player to a specific websocket client.
+ *
+ * If the sprite-sheet system is unavailable or no renderable sprite layers exist for the requested
+ * animation, the function returns without sending a packet.
+ *
+ * @param targetWs - The websocket to which the animation packet will be sent.
+ * @param name - The animation template name to render.
+ * @param playerId - Optional player id to target instead of inferring from `targetWs`.
+ * @param revision - Optional animation revision used by clients to ignore stale animations.
+ */
 async function sendAnimationTo(targetWs: any, name: string, playerId?: string, revision?: number) {
   const targetPlayer = playerCache.get(playerId || targetWs.data.id);
   if (!targetPlayer) return;

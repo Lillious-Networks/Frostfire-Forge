@@ -10,6 +10,13 @@ import { getLines } from "./chat.js";
 import { initializeLayeredAnimation } from "./layeredAnimation.js";
 import { getVisibleLayersSorted } from "./layeredAnimation.js";
 
+/**
+ * Create and register a player in the client, optionally initialize its layered sprite animation, and perform one-time local-player UI/camera updates.
+ *
+ * Creates a player object from the provided server data, adds it to the client cache, and sets up rendering state (including layered animation when body/head sprites are present). Also marks the player as online to friends and, if the player is the local cached player, recenters the camera and updates friends, party UI, and XP display.
+ *
+ * @param data - Server-provided player payload containing identity, location, sprites, stats, friends, party, and related visual/state properties (e.g., `id`, `username`, `location`, `bodySprite`, `headSprite`, `stats`, `friends`, `party`, etc.).
+ */
 async function createPlayer(data: any) {
   if (data.id === cachedPlayerId) {
     positionText.innerText = `Position: ${data.location.x}, ${data.location.y}`;
