@@ -21,14 +21,17 @@ import equipment from "../systems/equipment.ts";
 import inventory from "../systems/inventory";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
-const animationsCache = await assetCache.get("animations");
 const mapPropertiesCache = await assetCache.get("mapProperties");
 import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 // Load settings
 import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks } from "../modules/assetloader";
+import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable } from "../modules/spriteSheetManager";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
+
+// Animation system configuration
+const useSpriteSheets = settings.animation_system?.use_sprite_sheets ?? true;
 
 let restartScheduled: boolean;
 let restartTimers: ReturnType<typeof setTimeout>[];
@@ -225,7 +228,7 @@ authWorker.on("message", async (result: any) => {
 
     sendPacket(ws, packetManager.loadMap(mapData));
 
-    setImmediate(() => {
+    setImmediate(async () => {
       const snapshotRevision = globalStateRevision;
 
       const currentPlayersOnMap = filterPlayersByMap(spawnLocation.map);
@@ -306,10 +309,10 @@ authWorker.on("message", async (result: any) => {
       sendPacket(ws, packetManager.loadPlayers(loadPlayersData));
 
       if (playerDataForLoad.length > 0) {
-        playerDataForLoad.forEach((pl) => {
+        playerDataForLoad.forEach(async (pl) => {
           if (pl.id !== ws.data.id && pl.location.direction) {
             const pcache = playerCache.get(pl.id);
-            sendAnimationTo(
+            await sendAnimationTo(
               ws,
               getAnimationNameForDirection(pl.location.direction, !!pcache?.moving),
               pl.id
@@ -320,14 +323,14 @@ authWorker.on("message", async (result: any) => {
       }
 
       if (position?.direction) {
-        sendAnimationTo(
+        await sendAnimationTo(
           ws,
           getAnimationNameForDirection(position.direction, false),
           ws.data.id
         );
         for (const other of currentPlayersOnMap) {
           if (other.id !== ws.data.id && other.ws) {
-            sendAnimationTo(
+            await sendAnimationTo(
               other.ws,
               getAnimationNameForDirection(position.direction, false),
               ws.data.id
@@ -581,7 +584,7 @@ export default async function packetReceiver(
             playerCache.set(currentPlayer.id, currentPlayer);
 
             globalStateRevision++;
-            sendPositionAnimation(
+            await sendPositionAnimation(
               ws,
               lastDirection,
               false,
@@ -614,7 +617,7 @@ export default async function packetReceiver(
         playerCache.set(currentPlayer.id, currentPlayer);
 
         globalStateRevision++;
-        sendPositionAnimation(
+        await sendPositionAnimation(
           ws,
           direction,
           true,
@@ -698,7 +701,7 @@ export default async function packetReceiver(
             playerCache.set(currentPlayer.id, currentPlayer);
 
             globalStateRevision++;
-            sendPositionAnimation(
+            await sendPositionAnimation(
               ws,
               direction,
               false,
@@ -1043,7 +1046,7 @@ export default async function packetReceiver(
         });
         if (!isStealth) {
           globalStateRevision++;
-          playersInMap.forEach((player) => {
+          playersInMap.forEach(async (player) => {
             const moveXYData = {
               id: ws.data.id,
               _data: currentPlayer.location.position,
@@ -1051,7 +1054,7 @@ export default async function packetReceiver(
             };
 
             if (currentPlayer.location.position?.direction) {
-              sendPositionAnimation(
+              await sendPositionAnimation(
                 ws,
                 currentPlayer.location.position?.direction,
                 false,
@@ -3765,7 +3768,7 @@ export default async function packetReceiver(
 
         globalStateRevision++;
 
-        sendPositionAnimation(
+        await sendPositionAnimation(
           ws,
           direction,
           walking,
@@ -4128,49 +4131,84 @@ async function sendStatsToPartyMembers(playerUsername: string, playerId: string,
   }
 }
 
-function sendAnimation(ws: any, name: string, playerId?: string, revision?: number) {
+async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string, revision?: number) {
   const currentPlayer = playerCache.get(playerId || ws.data.id);
   if (!currentPlayer) return;
 
-  const animationData = getAnimation(name);
-  if (!animationData) return;
+  // Get player equipment for armor layers
+  const playerEquipment = currentPlayer.equipment || null;
 
-  currentPlayer.animation = {
-    frames: animationData?.data,
-    currentFrame: 0,
-    lastFrameTime: performance?.now(),
-  };
+  // Get sprite sheet data for this animation
+  const spriteSheetData = await getPlayerSpriteSheetData(name, playerEquipment);
 
-  const animationPacketData = {
-    id: currentPlayer?.id,
-    name: name,
-    data: animationData?.data,
+  // Check if at least one layer is available to render
+  if (!spriteSheetData.bodySprite && !spriteSheetData.headSprite && !spriteSheetData.bodyArmorSprite && !spriteSheetData.headArmorSprite) {
+    log.warn(`No sprite sheet layers available for animation "${name}", player ${currentPlayer.id}`);
+    return;
+  }
+
+  // Import getSpriteSheetImage and getSpriteSheetTemplate
+  const { getSpriteSheetImage, getSpriteSheetTemplate } = await import("../modules/spriteSheetManager");
+
+  // Get base64 image data for each sprite sheet (only if sprite exists)
+  const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
+  const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
+  const bodyArmorImageData = spriteSheetData.bodyArmorSprite ? await getSpriteSheetImage(spriteSheetData.bodyArmorSprite.name) : null;
+  const headArmorImageData = spriteSheetData.headArmorSprite ? await getSpriteSheetImage(spriteSheetData.headArmorSprite.name) : null;
+
+  // Get mount sprite sheet if player is mounted (based on cache mount_type)
+  let mountSprite = null;
+  let mountImageData = null;
+  if (currentPlayer.mounted && currentPlayer.mount_type) {
+    const mountTemplateName = `mount_${currentPlayer.mount_type}`;
+    mountSprite = await getSpriteSheetTemplate(mountTemplateName);
+    if (mountSprite) {
+      mountImageData = await getSpriteSheetImage(mountSprite.name);
+    }
+  }
+
+  const spriteSheetPacketData = {
+    id: currentPlayer.id,
+    mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
+    bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
+    headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
+    bodyArmorSprite: spriteSheetData.bodyArmorSprite ? { ...spriteSheetData.bodyArmorSprite, imageData: bodyArmorImageData } : null,
+    headArmorSprite: spriteSheetData.headArmorSprite ? { ...spriteSheetData.headArmorSprite, imageData: headArmorImageData } : null,
+    animationState: spriteSheetData.animationState,
     revision: revision,
   };
-
-  playerCache.set(currentPlayer.id, currentPlayer);
 
   const playersInMap = filterPlayersByMap(currentPlayer.location.map);
   const playersInMapAdmins = playersInMap.filter((p) => p.isAdmin);
 
   if (currentPlayer.isStealth) {
     playersInMapAdmins.forEach((player) => {
-      sendPacket(player.ws, packetManager.animation(animationPacketData));
+      sendPacket(player.ws, packetManager.spriteSheetAnimation(spriteSheetPacketData));
     });
   } else {
     playersInMap.forEach((player) => {
-      sendPacket(player.ws, packetManager.animation(animationPacketData));
+      sendPacket(player.ws, packetManager.spriteSheetAnimation(spriteSheetPacketData));
     });
   }
 }
 
-function getAnimation(name: string) {
-  // Use cached animations instead of Redis call to prevent blocking during player spawn
-  const animationData = animationsCache.find((a: any) => a.name === name);
-  if (!animationData) {
+async function sendAnimation(ws: any, name: string, playerId?: string, revision?: number) {
+  const currentPlayer = playerCache.get(playerId || ws.data.id);
+  if (!currentPlayer) return;
+
+  // Use sprite sheet system only
+
+  if (!useSpriteSheets) {
+    log.warn(`Sprite sheet system disabled in config for player ${currentPlayer.id}`);
     return;
   }
-  return animationData;
+
+  if (!(await isSpriteSheetSystemAvailable())) {
+    log.warn(`Sprite sheet system not available for player ${currentPlayer.id}`);
+    return;
+  }
+
+  await sendSpriteSheetAnimation(ws, name, playerId, revision);
 }
 
 function getAnimationNameForDirection(
@@ -4188,7 +4226,7 @@ function getAnimationNameForDirection(
   return `player_${action}_${normalized}.png`;
 }
 
-function sendPositionAnimation(
+async function sendPositionAnimation(
   ws: WebSocket,
   direction: string,
   walking: boolean,
@@ -4198,41 +4236,68 @@ function sendPositionAnimation(
   revision?: number
 ) {
   const animation = getAnimationNameForDirection(direction, walking, mounted, mount_type);
-  sendAnimation(ws, animation, playerId, revision);
+  await sendAnimation(ws, animation, playerId, revision);
 }
 
 function normalizeDirection(direction: string): string {
-  switch (direction) {
-    case "down":
-    case "downleft":
-    case "downright":
-      return "down";
-    case "up":
-    case "upleft":
-    case "upright":
-      return "up";
-    case "left":
-      return "left";
-    case "right":
-      return "right";
-    default:
-      return "down"; // safe fallback
+  // Return all 8 directions as-is for proper directional animations
+  const validDirections = ["down", "up", "left", "right", "downleft", "downright", "upleft", "upright"];
+  if (validDirections.includes(direction)) {
+    return direction;
   }
+  return "down"; // safe fallback for invalid directions
 }
 
-function sendAnimationTo(targetWs: any, name: string, playerId?: string, revision?: number) {
+async function sendAnimationTo(targetWs: any, name: string, playerId?: string, revision?: number) {
   const targetPlayer = playerCache.get(playerId || targetWs.data.id);
   if (!targetPlayer) return;
 
-  const animationData = getAnimation(name);
-  if (!animationData) return;
+  // Use sprite sheet system only
+  if (!useSpriteSheets || !(await isSpriteSheetSystemAvailable())) {
+    log.warn(`Sprite sheet system not available for player ${targetPlayer.id}`);
+    return;
+  }
 
-  const animationPacketData = {
+  const playerEquipment = targetPlayer.equipment || null;
+
+  const spriteSheetData = await getPlayerSpriteSheetData(name, playerEquipment);
+
+  // Check if at least one layer is available to render
+  if (!spriteSheetData.bodySprite && !spriteSheetData.headSprite && !spriteSheetData.bodyArmorSprite && !spriteSheetData.headArmorSprite) {
+    log.warn(`No sprite sheet layers available for animation "${name}", player ${targetPlayer.id}`);
+    return;
+  }
+
+  // Import getSpriteSheetImage and getSpriteSheetTemplate
+  const { getSpriteSheetImage, getSpriteSheetTemplate } = await import("../modules/spriteSheetManager");
+
+  // Get base64 image data for each sprite sheet (only if sprite exists)
+  const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
+  const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
+  const bodyArmorImageData = spriteSheetData.bodyArmorSprite ? await getSpriteSheetImage(spriteSheetData.bodyArmorSprite.name) : null;
+  const headArmorImageData = spriteSheetData.headArmorSprite ? await getSpriteSheetImage(spriteSheetData.headArmorSprite.name) : null;
+
+  // Get mount sprite sheet if player is mounted (based on cache mount_type)
+  let mountSprite = null;
+  let mountImageData = null;
+  if (targetPlayer.mounted && targetPlayer.mount_type) {
+    const mountTemplateName = `mount_${targetPlayer.mount_type}`;
+    mountSprite = await getSpriteSheetTemplate(mountTemplateName);
+    if (mountSprite) {
+      mountImageData = await getSpriteSheetImage(mountSprite.name);
+    }
+  }
+
+  const spriteSheetPacketData = {
     id: targetPlayer.id,
-    name,
-    data: animationData.data,
+    mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
+    bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
+    headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
+    bodyArmorSprite: spriteSheetData.bodyArmorSprite ? { ...spriteSheetData.bodyArmorSprite, imageData: bodyArmorImageData } : null,
+    headArmorSprite: spriteSheetData.headArmorSprite ? { ...spriteSheetData.headArmorSprite, imageData: headArmorImageData } : null,
+    animationState: spriteSheetData.animationState,
     revision: revision,
   };
 
-  sendPacket(targetWs, packetManager.animation(animationPacketData));
+  sendPacket(targetWs, packetManager.spriteSheetAnimation(spriteSheetPacketData));
 }
