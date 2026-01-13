@@ -96,6 +96,76 @@ function loadSprites() {
 }
 loadSprites();
 
+function loadSpriteSheetTemplates() {
+  const now = performance.now();
+  const templates = [] as any[];
+
+  const spriteSheetDir = path.join(assetPath, 'spritesheets');
+
+  if (!fs.existsSync(spriteSheetDir)) {
+    log.warn('Sprite sheets directory not found at ' + spriteSheetDir + ', skipping sprite sheet loading');
+    assetCache.add('spriteSheetTemplates', []);
+    return;
+  }
+
+  // Load JSON template files
+  const templateFiles = fs.readdirSync(spriteSheetDir)
+    .filter(file => file.endsWith('.json'));
+
+  if (templateFiles.length === 0) {
+    log.warn('No sprite sheet templates found in ' + spriteSheetDir);
+    assetCache.add('spriteSheetTemplates', []);
+    return;
+  }
+
+  templateFiles.forEach(file => {
+    const templatePath = path.join(spriteSheetDir, file);
+    const templateData = JSON.parse(fs.readFileSync(templatePath, 'utf-8'));
+
+    // Validate corresponding PNG exists
+    const pngFile = templateData.imageSource;
+    const pngPath = path.join(spriteSheetDir, pngFile);
+
+    if (!fs.existsSync(pngPath)) {
+      log.error(`Sprite sheet image not found: ${pngFile} for template ${file}`);
+      return;
+    }
+
+    // Load and compress PNG
+    const imageBuffer = fs.readFileSync(pngPath);
+    const base64Image = imageBuffer.toString('base64');
+    const compressedImage = zlib.deflateSync(base64Image);
+
+    // Compress template JSON
+    const templateJson = JSON.stringify(templateData);
+    const compressedTemplate = zlib.deflateSync(templateJson);
+
+    const originalTemplateSize = templateJson.length;
+    const compressedTemplateSize = compressedTemplate.length;
+    const originalImageSize = base64Image.length;
+    const compressedImageSize = compressedImage.length;
+
+    log.debug(`Compressed sprite sheet template: ${file}
+  - Template Original: ${originalTemplateSize} bytes
+  - Template Compressed: ${compressedTemplateSize} bytes
+  - Image Original: ${originalImageSize} bytes
+  - Image Compressed: ${compressedImageSize} bytes
+  - Total Compression Ratio: ${((originalTemplateSize + originalImageSize) / (compressedTemplateSize + compressedImageSize)).toFixed(2)}x`);
+
+    templates.push({
+      name: file.replace('.json', ''),
+      template: compressedTemplate,
+      image: compressedImage
+    });
+
+    log.debug(`Loaded sprite sheet template: ${file}`);
+  });
+
+  assetCache.add('spriteSheetTemplates', templates);
+  log.success(`Loaded ${templates.length} sprite sheet template(s) in ${(performance.now() - now).toFixed(2)}ms`);
+}
+loadSpriteSheetTemplates();
+
 function loadIcons() {
   const now = performance.now();
   const icons = [] as any[];

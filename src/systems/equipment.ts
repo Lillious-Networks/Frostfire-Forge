@@ -12,7 +12,7 @@ const equipment = {
     },
     async equipItem(username: string, slot: string, item: string | null) {
         if (!username || !slot) return false;
-        if (slot !== "head" && slot !== "necklace" && slot !== "shoulder" && slot !== "back" && slot !== "chest" && slot !== "wrists" && slot !== "hands" && slot !== "waist" && slot !== "legs" && slot !== "feet" && slot !== "ring_1" && slot !== "ring_2" && slot !== "trinket_1" && slot !== "trinket_2" && slot !== "weapon" && slot !== "off_hand_weapon") {
+        if (slot !== "helmet" && slot !== "necklace" && slot !== "shoulder" && slot !== "back" && slot !== "chest" && slot !== "wrists" && slot !== "hands" && slot !== "waist" && slot !== "legs" && slot !== "feet" && slot !== "ring_1" && slot !== "ring_2" && slot !== "trinket_1" && slot !== "trinket_2" && slot !== "weapon" && slot !== "off_hand_weapon") {
             log.error(`Invalid equipment slot: ${slot}`);
             return false;
         }
@@ -48,7 +48,7 @@ const equipment = {
     },
     unEquipItem: async (username: string, slot: string, item: string) => {
         if (!username || !slot) return false;
-        if (slot !== "head" && slot !== "necklace" && slot !== "shoulder" && slot !== "back" && slot !== "chest" && slot !== "wrists" && slot !== "hands" && slot !== "waist" && slot !== "legs" && slot !== "feet" && slot !== "ring_1" && slot !== "ring_2" && slot !== "trinket_1" && slot !== "trinket_2" && slot !== "weapon" && slot !== "off_hand_weapon") {
+        if (slot !== "helmet" && slot !== "necklace" && slot !== "shoulder" && slot !== "back" && slot !== "chest" && slot !== "wrists" && slot !== "hands" && slot !== "waist" && slot !== "legs" && slot !== "feet" && slot !== "ring_1" && slot !== "ring_2" && slot !== "trinket_1" && slot !== "trinket_2" && slot !== "weapon" && slot !== "off_hand_weapon") {
             log.error(`Invalid equipment slot: ${slot}`);
             return false;
         }

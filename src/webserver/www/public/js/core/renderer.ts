@@ -7,6 +7,7 @@ import { updateHealthBar, updateStaminaBar } from "./ui.js";
 import { updateWeatherCanvas, weather } from './weather.ts';
 import { chatInput } from "./chat.js";
 import { friendsListSearch } from "./friends.js";
+import { animationManager } from "./animationStateManager.js";
 const times = [] as number[];
 let lastDirection = "";
 let pendingRequest = false;
@@ -328,6 +329,9 @@ function animationLoop() {
     requestAnimationFrame(animationLoop);
     return;
   }
+
+  // Update layered animations for all players
+  animationManager.updateAllPlayers(cache.players, deltaTime);
 
   // Initialize camera to spawn position on first frame (before any smoothing)
   if (!cameraInitialized && window.mapData) {

@@ -1,0 +1,64 @@
+{
+  "name": "armor_iron_helmet",
+  "imageSource": "armor_iron_helmet.png",
+  "frameWidth": 64,
+  "frameHeight": 64,
+  "columns": 8,
+  "rows": 4,
+  "animations": {
+    "idle": {
+      "frames": [0, 1, 2, 3],
+      "frameDuration": 200,
+      "loop": true,
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    "walk": {
+      "frames": [8, 9, 10, 11, 12, 13],
+      "frameDuration": 100,
+      "loop": true,
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    "run": {
+      "frames": [16, 17, 18, 19, 20, 21],
+      "frameDuration": 80,
+      "loop": true,
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    "attack": {
+      "frames": [24, 25, 26, 27, 28],
+      "frameDuration": 80,
+      "loop": false,
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    "cast": {
+      "frames": [24, 25, 26, 27],
+      "frameDuration": 100,
+      "loop": false,
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    "death": {
+      "frames": [24, 25, 26, 27, 28, 29],
+      "frameDuration": 150,
+      "loop": false,
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    }
+  }
+}
