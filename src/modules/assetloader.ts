@@ -270,7 +270,7 @@ await Promise.all(spellList.map(async (spell: any) => {
   if (spell.icon) {
     const iconData = await assetCache.get(spell.icon);
     const spriteData = await assetCache.get(`sprite_${spell.icon}`);
-    spell.icon = iconData || missingIcon || null; // Use missing_icon as fallback
+    spell.icon = iconData || null; // Use missing_icon as fallback
     spell.sprite = spriteData || missingIcon || null; // Use missing_icon as fallback for sprite too
   }
 }));
