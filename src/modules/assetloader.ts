@@ -100,69 +100,106 @@ function loadSpriteSheetTemplates() {
   const now = performance.now();
   const templates = [] as any[];
 
+  // Animation templates (.json) are stored in animations folder
+  const animationsDir = path.join(assetPath, 'animations');
+  // Sprite sheet images (.png) are stored in spritesheets folder
   const spriteSheetDir = path.join(assetPath, 'spritesheets');
 
-  if (!fs.existsSync(spriteSheetDir)) {
-    log.warn('Sprite sheets directory not found at ' + spriteSheetDir + ', skipping sprite sheet loading');
+  if (!fs.existsSync(animationsDir)) {
+    log.warn('Animations directory not found at ' + animationsDir + ', skipping animation template loading');
     assetCache.add('spriteSheetTemplates', []);
     return;
   }
 
-  // Load JSON template files
-  const templateFiles = fs.readdirSync(spriteSheetDir)
+  if (!fs.existsSync(spriteSheetDir)) {
+    log.warn('Sprite sheets directory not found at ' + spriteSheetDir + ', skipping sprite sheet image loading');
+    assetCache.add('spriteSheetTemplates', []);
+    return;
+  }
+
+  // Load JSON template files from animations folder
+  const templateFiles = fs.readdirSync(animationsDir)
     .filter(file => file.endsWith('.json'));
 
   if (templateFiles.length === 0) {
-    log.warn('No sprite sheet templates found in ' + spriteSheetDir);
+    log.warn('No animation templates found in ' + animationsDir);
     assetCache.add('spriteSheetTemplates', []);
     return;
   }
 
   templateFiles.forEach(file => {
-    const templatePath = path.join(spriteSheetDir, file);
+    const templatePath = path.join(animationsDir, file);
     const templateData = JSON.parse(fs.readFileSync(templatePath, 'utf-8'));
 
-    // Validate corresponding PNG exists
-    const pngFile = templateData.imageSource;
-    const pngPath = path.join(spriteSheetDir, pngFile);
-
-    if (!fs.existsSync(pngPath)) {
-      log.error(`Sprite sheet image not found: ${pngFile} for template ${file}`);
-      return;
-    }
-
-    // Load and compress PNG
-    const imageBuffer = fs.readFileSync(pngPath);
-    const base64Image = imageBuffer.toString('base64');
-    const compressedImage = zlib.deflateSync(base64Image);
-
-    // Compress template JSON
+    // Compress template JSON (always load the template)
     const templateJson = JSON.stringify(templateData);
     const compressedTemplate = zlib.deflateSync(templateJson);
 
-    const originalTemplateSize = templateJson.length;
-    const compressedTemplateSize = compressedTemplate.length;
-    const originalImageSize = base64Image.length;
-    const compressedImageSize = compressedImage.length;
+    // Try to load corresponding PNG (optional - base templates may not have images)
+    const pngFile = templateData.imageSource;
+    const pngPath = path.join(spriteSheetDir, pngFile);
+    let compressedImage = null;
 
-    log.debug(`Compressed sprite sheet template: ${file}
-  - Template Original: ${originalTemplateSize} bytes
-  - Template Compressed: ${compressedTemplateSize} bytes
-  - Image Original: ${originalImageSize} bytes
-  - Image Compressed: ${compressedImageSize} bytes
+    if (fs.existsSync(pngPath)) {
+      // Load and compress PNG
+      const imageBuffer = fs.readFileSync(pngPath);
+      const base64Image = imageBuffer.toString('base64');
+      compressedImage = zlib.deflateSync(base64Image);
+
+      const originalTemplateSize = templateJson.length;
+      const compressedTemplateSize = compressedTemplate.length;
+      const originalImageSize = base64Image.length;
+      const compressedImageSize = compressedImage.length;
+
+      log.debug(`Loaded animation template: ${file} with image ${pngFile}
+  - Template Original: ${originalTemplateSize} bytes, Compressed: ${compressedTemplateSize} bytes
+  - Image Original: ${originalImageSize} bytes, Compressed: ${compressedImageSize} bytes
   - Total Compression Ratio: ${((originalTemplateSize + originalImageSize) / (compressedTemplateSize + compressedImageSize)).toFixed(2)}x`);
+    } else {
+      log.debug(`Loaded animation template: ${file} (no image - template only, imageSource "${pngFile}" not found)`);
+    }
 
     templates.push({
       name: file.replace('.json', ''),
       template: compressedTemplate,
+      image: compressedImage // null if image doesn't exist
+    });
+  });
+
+  // Also load individual sprite sheet images (without templates) for variant bodies/heads/mounts
+  // These are images that don't have corresponding .json templates in animations folder
+  const allPngFiles = fs.readdirSync(spriteSheetDir)
+    .filter(file => file.endsWith('.png'));
+
+  const templatePngFiles = new Set(templateFiles.map(f => {
+    const templatePath = path.join(animationsDir, f);
+    const templateData = JSON.parse(fs.readFileSync(templatePath, 'utf-8'));
+    return templateData.imageSource;
+  }));
+
+  allPngFiles.forEach(pngFile => {
+    // Skip if this PNG already has a template
+    if (templatePngFiles.has(pngFile)) {
+      return;
+    }
+
+    const pngPath = path.join(spriteSheetDir, pngFile);
+    const imageBuffer = fs.readFileSync(pngPath);
+    const base64Image = imageBuffer.toString('base64');
+    const compressedImage = zlib.deflateSync(base64Image);
+
+    // Add as a template entry with null template (image only)
+    templates.push({
+      name: pngFile.replace('.png', ''),
+      template: null, // No template, just the image
       image: compressedImage
     });
 
-    log.debug(`Loaded sprite sheet template: ${file}`);
+    log.debug(`Loaded sprite sheet image only: ${pngFile}`);
   });
 
   assetCache.add('spriteSheetTemplates', templates);
-  log.success(`Loaded ${templates.length} sprite sheet template(s) in ${(performance.now() - now).toFixed(2)}ms`);
+  log.success(`Loaded ${templates.length} sprite sheet(s) (${templateFiles.length} with templates, ${templates.length - templateFiles.length} images only) in ${(performance.now() - now).toFixed(2)}ms`);
 }
 loadSpriteSheetTemplates();
 
@@ -239,16 +276,18 @@ log.success(`Loaded ${items.length} item(s) from the database in ${(performance.
 // Load mount data
 const mountNow = performance.now();
 const unfilteredMounts = await mounts.list();
-// Filter out mounts that have no animation file
-const filteredMounts = unfilteredMounts.filter((m) => {{
-  const animations = fs.readdirSync(path.join(assetPath, assetData.animations.path));
-  const prefix = `mount_${m.name.toLowerCase()}_`;
-  const result = animations.some((a) => a.startsWith(prefix));
+// Filter out mounts that have no sprite sheet image file
+// Mounts now use player_mount_base.json template with individual mount images
+const filteredMounts = unfilteredMounts.filter((m) => {
+  const spriteSheetDir = path.join(assetPath, 'spritesheets');
+  const mountImageName = `mount_${m.name.toLowerCase()}.png`;
+  const mountImagePath = path.join(spriteSheetDir, mountImageName);
+  const result = fs.existsSync(mountImagePath);
   if (!result) {
-    log.warn(`Mount ${m.name} has no corresponding animation files and will be skipped`);
+    log.warn(`Mount ${m.name} has no corresponding sprite sheet image (${mountImageName}) and will be skipped`);
   }
   return result;
-}});
+});
 
 await Promise.all(filteredMounts.map(async (mount: any) => {
   if (mount.icon) {

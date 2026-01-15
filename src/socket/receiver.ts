@@ -589,7 +589,7 @@ export default async function packetReceiver(
               lastDirection,
               false,
               currentPlayer.mounted,
-              currentPlayer.mount_type || "horse",
+              currentPlayer.mount_type || "unicorn",
               undefined,
               globalStateRevision
             );
@@ -622,7 +622,7 @@ export default async function packetReceiver(
           direction,
           true,
           currentPlayer.mounted,
-          currentPlayer.mount_type || "horse",
+          currentPlayer.mount_type || "unicorn",
           undefined,
           globalStateRevision
         );
@@ -706,7 +706,7 @@ export default async function packetReceiver(
               direction,
               false,
               currentPlayer.mounted,
-              currentPlayer.mount_type || "horse",
+              currentPlayer.mount_type || "unicorn",
               undefined,
               globalStateRevision
             );
@@ -1059,7 +1059,7 @@ export default async function packetReceiver(
                 currentPlayer.location.position?.direction,
                 false,
                 currentPlayer.mounted,
-                currentPlayer.mount_type || "horse",
+                currentPlayer.mount_type || "unicorn",
                 undefined,
                 globalStateRevision
               );
@@ -4157,13 +4157,19 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
   const headArmorImageData = spriteSheetData.headArmorSprite ? await getSpriteSheetImage(spriteSheetData.headArmorSprite.name) : null;
 
   // Get mount sprite sheet if player is mounted (based on cache mount_type)
+  // Always use player_mount_base template with custom mount image
   let mountSprite = null;
   let mountImageData = null;
   if (currentPlayer.mounted && currentPlayer.mount_type) {
-    const mountTemplateName = `mount_${currentPlayer.mount_type}`;
-    mountSprite = await getSpriteSheetTemplate(mountTemplateName);
+    // Get the base template (animation data)
+    mountSprite = await getSpriteSheetTemplate('player_mount_base');
     if (mountSprite) {
-      mountImageData = await getSpriteSheetImage(mountSprite.name);
+      // Override the name to reference the custom mount image source
+      const mountImageName = `mount_${currentPlayer.mount_type}`;
+      mountSprite.name = mountImageName;
+      mountSprite.imageSource = `${mountImageName}.png`;
+      // Get the image data for this specific mount type
+      mountImageData = await getSpriteSheetImage(mountImageName);
     }
   }
 
@@ -4220,7 +4226,7 @@ function getAnimationNameForDirection(
   const normalized = normalizeDirection(direction);
   const action = walking ? "walk" : "idle";
   if (mounted) {
-    mount_type = mount_type || "horse";
+    mount_type = mount_type || "unicorn";
     return `mount_${mount_type}_${action}_${normalized}.png`;
   }
   return `player_${action}_${normalized}.png`;
@@ -4278,13 +4284,19 @@ async function sendAnimationTo(targetWs: any, name: string, playerId?: string, r
   const headArmorImageData = spriteSheetData.headArmorSprite ? await getSpriteSheetImage(spriteSheetData.headArmorSprite.name) : null;
 
   // Get mount sprite sheet if player is mounted (based on cache mount_type)
+  // Always use player_mount_base template with custom mount image
   let mountSprite = null;
   let mountImageData = null;
   if (targetPlayer.mounted && targetPlayer.mount_type) {
-    const mountTemplateName = `mount_${targetPlayer.mount_type}`;
-    mountSprite = await getSpriteSheetTemplate(mountTemplateName);
+    // Get the base template (animation data)
+    mountSprite = await getSpriteSheetTemplate('player_mount_base');
     if (mountSprite) {
-      mountImageData = await getSpriteSheetImage(mountSprite.name);
+      // Override the name to reference the custom mount image source
+      const mountImageName = `mount_${targetPlayer.mount_type}`;
+      mountSprite.name = mountImageName;
+      mountSprite.imageSource = `${mountImageName}.png`;
+      // Get the image data for this specific mount type
+      mountImageData = await getSpriteSheetImage(mountImageName);
     }
   }
 
