@@ -238,7 +238,7 @@
       "directions": {
         "down": {
           "frames": [13, 17],
-          "frameDuration": 150,
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,
@@ -247,7 +247,7 @@
         },
         "up": {
           "frames": [12, 16],
-          "frameDuration": 150,
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,
@@ -256,7 +256,7 @@
         },
         "left": {
           "frames": [14, 18],
-          "frameDuration": 150,
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,
@@ -265,7 +265,7 @@
         },
         "right": {
           "frames": [15, 19],
-          "frameDuration": 150,
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,
@@ -274,7 +274,7 @@
         },
         "downleft": {
           "frames": [13, 17],
-          "frameDuration": 150,
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,
@@ -283,7 +283,7 @@
         },
         "downright": {
           "frames": [13, 17],
-          "frameDuration": 150,
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,
@@ -292,7 +292,7 @@
         },
         "upleft": {
           "frames": [12, 16],
-          "frameDuration": 150,
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,
@@ -301,7 +301,7 @@
         },
         "upright": {
           "frames": [12, 16],
-          "frameDuration": 150,
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,

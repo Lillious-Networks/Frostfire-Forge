@@ -180,41 +180,19 @@ export function updateLayeredAnimation(
 
   if (layers.length === 0) return;
 
-  if (layeredAnim.syncFrames) {
-    // Synchronized mode: all layers advance frames together
-    // Use body layer for timing if available, otherwise use first available layer
-    const timingLayer = layeredAnim.layers.body || layers[0];
+  // Each layer advances independently based on its own frame delays
+  layers.forEach(layer => {
+    if (layer.frames.length === 0) return;
 
-    if (!timingLayer || timingLayer.frames.length === 0) return;
-
-    const currentFrame = timingLayer.frames[timingLayer.currentFrame];
+    const currentFrame = layer.frames[layer.currentFrame];
 
     if (!currentFrame) return;
 
-    if (now - timingLayer.lastFrameTime >= currentFrame.delay) {
-      // Advance all layers simultaneously
-      layers.forEach(layer => {
-        if (layer.frames.length > 0) {
-          layer.currentFrame = (layer.currentFrame + 1) % layer.frames.length;
-          layer.lastFrameTime = now;
-        }
-      });
+    if (now - layer.lastFrameTime >= currentFrame.delay) {
+      layer.currentFrame = (layer.currentFrame + 1) % layer.frames.length;
+      layer.lastFrameTime += currentFrame.delay;
     }
-  } else {
-    // Independent mode: each layer advances at its own pace
-    layers.forEach(layer => {
-      if (layer.frames.length === 0) return;
-
-      const currentFrame = layer.frames[layer.currentFrame];
-
-      if (!currentFrame) return;
-
-      if (now - layer.lastFrameTime >= currentFrame.delay) {
-        layer.currentFrame = (layer.currentFrame + 1) % layer.frames.length;
-        layer.lastFrameTime = now;
-      }
-    });
-  }
+  });
 }
 
 /**

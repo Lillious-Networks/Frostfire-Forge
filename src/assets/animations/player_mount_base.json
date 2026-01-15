@@ -1,6 +1,6 @@
 {
-  "name": "mount_unicorn",
-  "imageSource": "mount_unicorn.png",
+  "name": "player_mount_base",
+  "imageSource": "player_mount_base.png",
   "frameWidth": 64,
   "frameHeight": 64,
   "columns": 12,
@@ -86,7 +86,7 @@
       "directions": {
         "down": {
           "frames": [1, 2, 1, 0],
-          "frameDuration": 50,
+          "frameDuration": 125,
           "loop": true,
           "offset": {
             "x": 0,
@@ -95,7 +95,7 @@
         },
         "up": {
           "frames": [10, 11, 10, 9],
-          "frameDuration": 50,
+          "frameDuration": 125,
           "loop": true,
           "offset": {
             "x": 0,
@@ -104,7 +104,7 @@
         },
         "left": {
           "frames": [7, 8, 7, 6],
-          "frameDuration": 50,
+          "frameDuration": 125,
           "loop": true,
           "offset": {
             "x": 0,
@@ -113,7 +113,7 @@
         },
         "right": {
           "frames": [4, 5, 4, 3],
-          "frameDuration": 50,
+          "frameDuration": 125,
           "loop": true,
           "offset": {
             "x": 0,
@@ -122,7 +122,7 @@
         },
         "downleft": {
           "frames": [1, 2, 1, 0],
-          "frameDuration": 50,
+          "frameDuration": 125,
           "loop": true,
           "offset": {
             "x": 0,
@@ -131,7 +131,7 @@
         },
         "downright": {
           "frames": [1, 2, 1, 0],
-          "frameDuration": 50,
+          "frameDuration": 125,
           "loop": true,
           "offset": {
             "x": 0,
@@ -140,7 +140,7 @@
         },
         "upleft": {
           "frames": [10, 11, 10, 9],
-          "frameDuration": 50,
+          "frameDuration": 125,
           "loop": true,
           "offset": {
             "x": 0,
@@ -149,7 +149,7 @@
         },
         "upright": {
           "frames": [10, 11, 10, 9],
-          "frameDuration": 50,
+          "frameDuration": 125,
           "loop": true,
           "offset": {
             "x": 0,

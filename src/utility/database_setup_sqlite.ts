@@ -525,7 +525,7 @@ const createMountsTable = async () => {
 const insertDefaultMount = async () => {
   log.info("Inserting default mount...");
   const sql = `
-    INSERT OR IGNORE INTO mounts (name, description, particles, icon) VALUES ('horse', 'A sturdy horse for traveling.', NULL, 'mount_horse');
+    INSERT OR IGNORE INTO mounts (name, description, particles, icon) VALUES ('unicorn', 'A sturdy unicorn for traveling.', NULL, 'mount_unicorn');
   `;
   await query(sql);
 }
@@ -546,7 +546,7 @@ const createCollectablesTable = async () => {
 const insertDemoMount = async () => {
   log.info("Inserting demo mount collectable...");
   const sql = `
-    INSERT OR IGNORE INTO collectables (type, item, username) VALUES ('mount', 'horse', 'demo_user');
+    INSERT OR IGNORE INTO collectables (type, item, username) VALUES ('mount', 'unicorn', 'demo_user');
   `;
   await query(sql);
 }
@@ -569,8 +569,8 @@ const createEquipmentTable = async () => {
     CREATE TABLE IF NOT EXISTS equipment (
         id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
         username TEXT NOT NULL,
-        head TEXT DEFAULT 'player_head_base',
-        body TEXT DEFAULT 'player_body_base',
+        head TEXT DEFAULT 'player_head_default',
+        body TEXT DEFAULT 'player_body_default',
         helmet TEXT DEFAULT NULL,
         necklace TEXT DEFAULT NULL,
         shoulder TEXT DEFAULT NULL,

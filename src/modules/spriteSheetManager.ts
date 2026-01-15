@@ -93,33 +93,43 @@ export async function getPlayerSpriteSheetData(
   // Parse animation name to determine state
   const animationState = parseAnimationState(animationName);
 
-  // Get base character sprites from equipment.body and equipment.head
-  // If not provided or null, return null for that layer (don't render)
+  // ALWAYS use base templates for body and head animation data
+  // The image will be swapped based on equipment.body and equipment.head values
   let bodySprite: SpriteSheetTemplate | null = null;
   let headSprite: SpriteSheetTemplate | null = null;
   let bodyArmorSprite: SpriteSheetTemplate | null = null;
   let headArmorSprite: SpriteSheetTemplate | null = null;
 
-  if (equipment) {
-    // Get body sprite from equipment.body field (check for both null and string "null")
-    if (equipment.body && equipment.body !== 'null') {
-      bodySprite = await getSpriteSheetTemplate(equipment.body);
-    }
+  // Determine body image name (default to player_body_base if not specified)
+  const bodyImageName = equipment?.body && equipment.body !== 'null' ? equipment.body : 'player_body_base';
 
-    // Get head sprite from equipment.head field (check for both null and string "null")
-    if (equipment.head && equipment.head !== 'null') {
-      headSprite = await getSpriteSheetTemplate(equipment.head);
-    }
+  // Body: ALWAYS use player_body_base template with image from equipment
+  bodySprite = await getSpriteSheetTemplate('player_body_base');
+  if (bodySprite) {
+    // Override the name to reference the custom image source
+    bodySprite.name = bodyImageName;
+    bodySprite.imageSource = `${bodyImageName}.png`;
+  }
 
-    // Get body armor sprite from equipment.chest field (check for both null and string "null")
-    if (equipment.chest && equipment.chest !== 'null') {
-      bodyArmorSprite = await getSpriteSheetTemplate(equipment.chest);
-    }
+  // Determine head image name (default to player_head_base if not specified)
+  const headImageName = equipment?.head && equipment.head !== 'null' ? equipment.head : 'player_head_base';
 
-    // Get head armor sprite from equipment.helmet field (check for both null and string "null")
-    if ((equipment as any).helmet && (equipment as any).helmet !== 'null') {
-      headArmorSprite = await getSpriteSheetTemplate((equipment as any).helmet);
-    }
+  // Head: ALWAYS use player_head_base template with image from equipment
+  headSprite = await getSpriteSheetTemplate('player_head_base');
+  if (headSprite) {
+    // Override the name to reference the custom image source
+    headSprite.name = headImageName;
+    headSprite.imageSource = `${headImageName}.png`;
+  }
+
+  // Get body armor sprite from equipment.chest field (check for both null and string "null")
+  if (equipment?.chest && equipment.chest !== 'null') {
+    bodyArmorSprite = await getSpriteSheetTemplate(equipment.chest);
+  }
+
+  // Get head armor sprite from equipment.helmet field (check for both null and string "null")
+  if (equipment && (equipment as any).helmet && (equipment as any).helmet !== 'null') {
+    headArmorSprite = await getSpriteSheetTemplate((equipment as any).helmet);
   }
 
   return {

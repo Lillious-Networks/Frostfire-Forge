@@ -10,7 +10,7 @@
       "directions": {
         "down": {
           "frames": [2, 3],
-          "frameDuration": 150,
+          "frameDuration": 1000,
           "loop": true,
           "offset": {
             "x": 0,
@@ -19,7 +19,7 @@
         },
         "up": {
           "frames": [0, 1],
-          "frameDuration": 150,
+          "frameDuration": 1000,
           "loop": true,
           "offset": {
             "x": 0,
@@ -28,7 +28,7 @@
         },
         "left": {
           "frames": [4, 5],
-          "frameDuration": 150,
+          "frameDuration": 1000,
           "loop": true,
           "offset": {
             "x": 0,
@@ -37,7 +37,7 @@
         },
         "right": {
           "frames": [6, 7],
-          "frameDuration": 150,
+          "frameDuration": 1000,
           "loop": true,
           "offset": {
             "x": 0,
@@ -46,7 +46,7 @@
         },
         "downleft": {
           "frames": [2, 3],
-          "frameDuration": 150,
+          "frameDuration": 1000,
           "loop": true,
           "offset": {
             "x": 0,
@@ -55,7 +55,7 @@
         },
         "downright": {
           "frames": [2, 3],
-          "frameDuration": 150,
+          "frameDuration": 1000,
           "loop": true,
           "offset": {
             "x": 0,
@@ -64,7 +64,7 @@
         },
         "upleft": {
           "frames": [0, 1],
-          "frameDuration": 150,
+          "frameDuration": 1000,
           "loop": true,
           "offset": {
             "x": 0,
@@ -73,7 +73,7 @@
         },
         "upright": {
           "frames": [0, 1],
-          "frameDuration": 150,
+          "frameDuration": 1000,
           "loop": true,
           "offset": {
             "x": 0,
@@ -161,72 +161,72 @@
     "mount_idle": {
       "directions": {
         "down": {
-          "frames": [2],
+          "frames": [2, 3],
           "frameDuration": 1000,
-          "loop": false,
+          "loop": true,
           "offset": {
             "x": 0,
             "y": -14
           }
         },
         "up": {
-          "frames": [0],
+          "frames": [0, 1],
           "frameDuration": 1000,
-          "loop": false,
+          "loop": true,
           "offset": {
             "x": 0,
             "y": -14
           }
         },
         "left": {
-          "frames": [4],
+          "frames": [4, 5],
           "frameDuration": 1000,
-          "loop": false,
+          "loop": true,
           "offset": {
             "x": 0,
             "y": -15
           }
         },
         "right": {
-          "frames": [6],
+          "frames": [6, 7],
           "frameDuration": 1000,
-          "loop": false,
+          "loop": true,
           "offset": {
             "x": 0,
             "y": -15
           }
         },
         "downleft": {
-          "frames": [2],
+          "frames": [2, 3],
           "frameDuration": 1000,
-          "loop": false,
+          "loop": true,
           "offset": {
             "x": 0,
             "y": -14
           }
         },
         "downright": {
-          "frames": [2],
+          "frames": [2, 3],
           "frameDuration": 1000,
-          "loop": false,
+          "loop": true,
           "offset": {
             "x": 0,
             "y": -14
           }
         },
         "upleft": {
-          "frames": [0],
+          "frames": [0, 1],
           "frameDuration": 1000,
-          "loop": false,
+          "loop": true,
           "offset": {
             "x": 0,
             "y": -14
           }
         },
         "upright": {
-          "frames": [0],
+          "frames": [0, 1],
           "frameDuration": 1000,
-          "loop": false,
+          "loop": true,
           "offset": {
             "x": 0,
             "y": -14
