@@ -33,10 +33,11 @@ const authentication = {
             const equipmentItems = items.filter((i: Item) => i.type === "equipment" && i.equipment_slot && i.name);
 
             // Remove invalid equipment items that do not exist in items cache
-            // BUT: Skip body and head fields - these are sprite sheet template names, not item names
+            // BUT: Skip armor sprite fields - these are sprite sheet template names, not item names
             for (const slot in playerData.equipment) {
-                // Skip validation for body and head - they're sprite sheet templates, not items
-                if (slot === 'body' || slot === 'head') {
+                // Skip validation for sprite sheet template fields - they're not item names
+                if (slot === 'body' || slot === 'head' || slot === 'helmet' || slot === 'necklace' ||
+                    slot === 'gloves' || slot === 'chestplate' || slot === 'boots' || slot === 'pants' || slot === 'weapon') {
                     continue;
                 }
 

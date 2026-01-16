@@ -11,15 +11,18 @@ import log from "./logger";
 const templateCache = new Map<string, SpriteSheetTemplate>();
 
 /**
- * Gets sprite sheet template by name
+ * Gets sprite sheet template by name (case-insensitive)
  * @param name - Sprite sheet template name
  * @returns Decompressed sprite sheet template or null
  */
 export async function getSpriteSheetTemplate(name: string): Promise<SpriteSheetTemplate | null> {
+  // Normalize name to lowercase for case-insensitive lookup
+  const normalizedName = name.toLowerCase();
+
   // Check memory cache first
-  if (templateCache.has(name)) {
+  if (templateCache.has(normalizedName)) {
     // Return a deep clone to prevent mutations from affecting the cached version
-    const cached = templateCache.get(name)!;
+    const cached = templateCache.get(normalizedName)!;
     return JSON.parse(JSON.stringify(cached)) as SpriteSheetTemplate;
   }
 
@@ -30,7 +33,8 @@ export async function getSpriteSheetTemplate(name: string): Promise<SpriteSheetT
     return null;
   }
 
-  const templateData = spriteSheetTemplates.find(t => t.name === name);
+  // Case-insensitive lookup
+  const templateData = spriteSheetTemplates.find(t => t.name.toLowerCase() === normalizedName);
   if (!templateData) return null;
 
   try {
@@ -38,8 +42,8 @@ export async function getSpriteSheetTemplate(name: string): Promise<SpriteSheetT
     const decompressed = zlib.inflateSync(templateData.template).toString();
     const template = JSON.parse(decompressed) as SpriteSheetTemplate;
 
-    // Cache for future use
-    templateCache.set(name, template);
+    // Cache for future use with normalized name
+    templateCache.set(normalizedName, template);
 
     // Return a deep clone to prevent mutations from affecting the cached version
     return JSON.parse(JSON.stringify(template)) as SpriteSheetTemplate;
@@ -50,17 +54,21 @@ export async function getSpriteSheetTemplate(name: string): Promise<SpriteSheetT
 }
 
 /**
- * Gets sprite sheet image data (base64)
+ * Gets sprite sheet image data (base64) (case-insensitive)
  * @param name - Sprite sheet template name
  * @returns Base64 encoded image data or null
  */
 export async function getSpriteSheetImage(name: string): Promise<string | null> {
+  // Normalize name to lowercase for case-insensitive lookup
+  const normalizedName = name.toLowerCase();
+
   const spriteSheetTemplates = await assetCache.get('spriteSheetTemplates') as any[];
   if (!spriteSheetTemplates) {
     return null;
   }
 
-  const templateData = spriteSheetTemplates.find(t => t.name === name);
+  // Case-insensitive lookup
+  const templateData = spriteSheetTemplates.find(t => t.name.toLowerCase() === normalizedName);
   if (!templateData) {
     return null;
   }
@@ -86,57 +94,140 @@ export async function getPlayerSpriteSheetData(
 ): Promise<{
   bodySprite: SpriteSheetTemplate | null;
   headSprite: SpriteSheetTemplate | null;
-  bodyArmorSprite: SpriteSheetTemplate | null;
-  headArmorSprite: SpriteSheetTemplate | null;
+  armorHelmetSprite: SpriteSheetTemplate | null;
+  armorNeckSprite: SpriteSheetTemplate | null;
+  armorHandsSprite: SpriteSheetTemplate | null;
+  armorChestSprite: SpriteSheetTemplate | null;
+  armorFeetSprite: SpriteSheetTemplate | null;
+  armorLegsSprite: SpriteSheetTemplate | null;
+  armorWeaponSprite: SpriteSheetTemplate | null;
   animationState: string;
 }> {
   // Parse animation name to determine state
   const animationState = parseAnimationState(animationName);
 
-  // ALWAYS use base templates for body and head animation data
-  // The image will be swapped based on equipment.body and equipment.head values
+  // ALWAYS use base templates for body, head, and armor animation data
+  // The image will be swapped based on equipment values
   let bodySprite: SpriteSheetTemplate | null = null;
   let headSprite: SpriteSheetTemplate | null = null;
-  let bodyArmorSprite: SpriteSheetTemplate | null = null;
-  let headArmorSprite: SpriteSheetTemplate | null = null;
+  let armorHelmetSprite: SpriteSheetTemplate | null = null;
+  let armorNeckSprite: SpriteSheetTemplate | null = null;
+  let armorHandsSprite: SpriteSheetTemplate | null = null;
+  let armorChestSprite: SpriteSheetTemplate | null = null;
+  let armorFeetSprite: SpriteSheetTemplate | null = null;
+  let armorLegsSprite: SpriteSheetTemplate | null = null;
+  let armorWeaponSprite: SpriteSheetTemplate | null = null;
 
-  // Determine body image name (default to player_body_base if not specified)
-  const bodyImageName = equipment?.body && equipment.body !== 'null' ? equipment.body : 'player_body_base';
+  // Determine body image name (default to player_body_default if not specified)
+  const bodyImageName = equipment?.body && equipment.body !== 'null' ? equipment.body : 'player_body_default';
 
   // Body: ALWAYS use player_body_base template with image from equipment
   bodySprite = await getSpriteSheetTemplate('player_body_base');
   if (bodySprite) {
-    // Override the name to reference the custom image source
+    // Override the name and path to reference armor directory structure
     bodySprite.name = bodyImageName;
-    bodySprite.imageSource = `${bodyImageName}.png`;
+    bodySprite.imageSource = `armor/player/bodies/${bodyImageName}.png`;
   }
 
-  // Determine head image name (default to player_head_base if not specified)
-  const headImageName = equipment?.head && equipment.head !== 'null' ? equipment.head : 'player_head_base';
+  // Determine head image name (default to player_head_default if not specified)
+  const headImageName = equipment?.head && equipment.head !== 'null' ? equipment.head : 'player_head_default';
 
   // Head: ALWAYS use player_head_base template with image from equipment
   headSprite = await getSpriteSheetTemplate('player_head_base');
   if (headSprite) {
-    // Override the name to reference the custom image source
+    // Override the name and path to reference armor directory structure
     headSprite.name = headImageName;
-    headSprite.imageSource = `${headImageName}.png`;
+    headSprite.imageSource = `armor/player/heads/${headImageName}.png`;
   }
 
-  // Get body armor sprite from equipment.chest field (check for both null and string "null")
-  if (equipment?.chest && equipment.chest !== 'null') {
-    bodyArmorSprite = await getSpriteSheetTemplate(equipment.chest);
+  // Armor Helmet: Only load if equipment.helmet is set
+  // Helmet uses armor_head_base template (follows head animations)
+  if (equipment?.helmet && equipment.helmet !== 'null') {
+    armorHelmetSprite = await getSpriteSheetTemplate('armor_head_base');
+    if (armorHelmetSprite) {
+      // Use unique name combining layer type and equipment value for client-side caching
+      // This prevents conflicts when multiple layers use the same base template
+      armorHelmetSprite.name = `helmet_${equipment.helmet}`;
+      armorHelmetSprite.imageSource = `armor/helmet/${equipment.helmet}.png`;
+    }
   }
 
-  // Get head armor sprite from equipment.helmet field (check for both null and string "null")
-  if (equipment && (equipment as any).helmet && (equipment as any).helmet !== 'null') {
-    headArmorSprite = await getSpriteSheetTemplate((equipment as any).helmet);
+  // Armor Neck: Only load if equipment.necklace is set
+  // Uses armor_body_base template (follows body animations)
+  if (equipment?.necklace && equipment.necklace !== 'null') {
+    armorNeckSprite = await getSpriteSheetTemplate('armor_body_base');
+    if (armorNeckSprite) {
+      // Use unique name combining layer type and equipment value
+      armorNeckSprite.name = `neck_${equipment.necklace}`;
+      armorNeckSprite.imageSource = `armor/neck/${equipment.necklace}.png`;
+    }
+  }
+
+  // Armor Gloves: Only load if equipment.gloves is set
+  // Uses armor_body_base template (follows body animations)
+  if (equipment?.gloves && equipment.gloves !== 'null') {
+    armorHandsSprite = await getSpriteSheetTemplate('armor_body_base');
+    if (armorHandsSprite) {
+      // Use unique name combining layer type and equipment value
+      armorHandsSprite.name = `hands_${equipment.gloves}`;
+      armorHandsSprite.imageSource = `armor/gloves/${equipment.gloves}.png`;
+    }
+  }
+
+  // Armor Chestplate: Only load if equipment.chestplate is set
+  // Uses armor_body_base template (follows body animations)
+  if (equipment?.chestplate && equipment.chestplate !== 'null') {
+    armorChestSprite = await getSpriteSheetTemplate('armor_body_base');
+    if (armorChestSprite) {
+      // Use unique name combining layer type and equipment value
+      armorChestSprite.name = `chest_${equipment.chestplate}`;
+      armorChestSprite.imageSource = `armor/chestplate/${equipment.chestplate}.png`;
+    }
+  }
+
+  // Armor Boots: Only load if equipment.boots is set
+  // Uses armor_body_base template (follows body animations)
+  if (equipment?.boots && equipment.boots !== 'null') {
+    armorFeetSprite = await getSpriteSheetTemplate('armor_body_base');
+    if (armorFeetSprite) {
+      // Use unique name combining layer type and equipment value
+      armorFeetSprite.name = `feet_${equipment.boots}`;
+      armorFeetSprite.imageSource = `armor/boots/${equipment.boots}.png`;
+    }
+  }
+
+  // Armor Pants: Only load if equipment.pants is set
+  // Uses armor_body_base template (follows body animations)
+  if (equipment?.pants && equipment.pants !== 'null') {
+    armorLegsSprite = await getSpriteSheetTemplate('armor_body_base');
+    if (armorLegsSprite) {
+      // Use unique name combining layer type and equipment value
+      armorLegsSprite.name = `legs_${equipment.pants}`;
+      armorLegsSprite.imageSource = `armor/pants/${equipment.pants}.png`;
+    }
+  }
+
+  // Armor Weapon: Only load if equipment.weapon is set
+  // Uses armor_body_base template (follows body animations)
+  if (equipment?.weapon && equipment.weapon !== 'null') {
+    armorWeaponSprite = await getSpriteSheetTemplate('armor_body_base');
+    if (armorWeaponSprite) {
+      // Use unique name combining layer type and equipment value
+      armorWeaponSprite.name = `weapon_${equipment.weapon}`;
+      armorWeaponSprite.imageSource = `armor/weapon/${equipment.weapon}.png`;
+    }
   }
 
   return {
     bodySprite,
     headSprite,
-    bodyArmorSprite,
-    headArmorSprite,
+    armorHelmetSprite,
+    armorNeckSprite,
+    armorHandsSprite,
+    armorChestSprite,
+    armorFeetSprite,
+    armorLegsSprite,
+    armorWeaponSprite,
     animationState
   };
 }

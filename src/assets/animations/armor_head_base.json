@@ -1,6 +1,6 @@
 {
-  "name": "player_head_base",
-  "imageSource": "player_head_base.png",
+  "name": "armor_head_base",
+  "imageSource": "armor_head_base.png",
   "frameWidth": 64,
   "frameHeight": 64,
   "columns": 8,

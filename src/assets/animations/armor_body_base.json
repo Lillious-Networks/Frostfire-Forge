@@ -1,83 +1,83 @@
 {
-  "name": "player_head_base",
-  "imageSource": "player_head_base.png",
+  "name": "armor_body_base",
+  "imageSource": "armor_body_base.png",
   "frameWidth": 64,
   "frameHeight": 64,
-  "columns": 8,
+  "columns": 20,
   "rows": 1,
   "animations": {
     "idle": {
       "directions": {
         "down": {
-          "frames": [2, 3],
+          "frames": [4],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         },
         "up": {
-          "frames": [0, 1],
+          "frames": [1],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         },
         "left": {
-          "frames": [4, 5],
+          "frames": [7],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         },
         "right": {
-          "frames": [6, 7],
+          "frames": [10],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         },
         "downleft": {
-          "frames": [2, 3],
+          "frames": [4],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         },
         "downright": {
-          "frames": [2, 3],
+          "frames": [4],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         },
         "upleft": {
-          "frames": [0, 1],
+          "frames": [1],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         },
         "upright": {
-          "frames": [0, 1],
+          "frames": [1],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         }
       }
@@ -85,75 +85,75 @@
     "walk": {
       "directions": {
         "down": {
-          "frames": [2, 3],
+          "frames": [3, 4, 5],
           "frameDuration": 150,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         },
         "up": {
-          "frames": [0, 1],
+          "frames": [0, 1, 2],
           "frameDuration": 150,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         },
         "left": {
-          "frames": [4, 5],
+          "frames": [6, 7, 8],
           "frameDuration": 150,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         },
         "right": {
-          "frames": [6, 7],
+          "frames": [9, 10, 11],
           "frameDuration": 150,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         },
         "downleft": {
-          "frames": [2, 3],
+          "frames": [3, 4, 5],
           "frameDuration": 150,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         },
         "downright": {
-          "frames": [2, 3],
+          "frames": [3, 4, 5],
           "frameDuration": 150,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         },
         "upleft": {
-          "frames": [0, 1],
+          "frames": [0, 1, 2],
           "frameDuration": 150,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         },
         "upright": {
-          "frames": [0, 1],
+          "frames": [0, 1, 2],
           "frameDuration": 150,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -6
+            "y": 10
           }
         }
       }
@@ -161,75 +161,75 @@
     "mount_idle": {
       "directions": {
         "down": {
-          "frames": [2, 3],
+          "frames": [13],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -20
+            "y": 0
           }
         },
         "up": {
-          "frames": [0, 1],
+          "frames": [12],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -14
+            "y": 0
           }
         },
         "left": {
-          "frames": [4, 5],
+          "frames": [14],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -15
+            "y": 0
           }
         },
         "right": {
-          "frames": [6, 7],
+          "frames": [15],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -15
+            "y": 0
           }
         },
         "downleft": {
-          "frames": [2, 3],
+          "frames": [13],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -20
+            "y": 0
           }
         },
         "downright": {
-          "frames": [2, 3],
+          "frames": [13],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -20
+            "y": 0
           }
         },
         "upleft": {
-          "frames": [0, 1],
+          "frames": [12],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -14
+            "y": 0
           }
         },
         "upright": {
-          "frames": [0, 1],
+          "frames": [12],
           "frameDuration": 1000,
-          "loop": true,
+          "loop": false,
           "offset": {
             "x": 0,
-            "y": -14
+            "y": 0
           }
         }
       }
@@ -237,75 +237,75 @@
     "mount_walk": {
       "directions": {
         "down": {
-          "frames": [2, 3],
-          "frameDuration": 150,
+          "frames": [13, 17],
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -20
+            "y": 0
           }
         },
         "up": {
-          "frames": [0, 1],
-          "frameDuration": 150,
+          "frames": [12, 16],
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -14
+            "y": 0
           }
         },
         "left": {
-          "frames": [4, 5],
-          "frameDuration": 150,
+          "frames": [14, 18],
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -15
+            "y": 0
           }
         },
         "right": {
-          "frames": [6, 7],
-          "frameDuration": 150,
+          "frames": [15, 19],
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -15
+            "y": 0
           }
         },
         "downleft": {
-          "frames": [2, 3],
-          "frameDuration": 150,
+          "frames": [13, 17],
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -20
+            "y": 0
           }
         },
         "downright": {
-          "frames": [2, 3],
-          "frameDuration": 150,
+          "frames": [13, 17],
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -20
+            "y": 0
           }
         },
         "upleft": {
-          "frames": [0, 1],
-          "frameDuration": 150,
+          "frames": [12, 16],
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -14
+            "y": 0
           }
         },
         "upright": {
-          "frames": [0, 1],
-          "frameDuration": 150,
+          "frames": [12, 16],
+          "frameDuration": 200,
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -14
+            "y": 0
           }
         }
       }

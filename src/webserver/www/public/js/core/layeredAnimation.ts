@@ -1,7 +1,7 @@
 /**
  * Layered Animation System
- * Manages 4-layer character animations: body, body_armor, head, head_armor
- * Supports synchronized frame updates and dynamic armor equipping
+ * Manages multi-layer character animations: mount, body, head, and armor layers
+ * Supports synchronized frame updates
  */
 
 import {
@@ -21,8 +21,13 @@ const spriteSheetCache: SpriteSheetCache = {};
  * @param mountSprite - Optional mount sprite sheet
  * @param bodySprite - Base body sprite sheet template
  * @param headSprite - Base head sprite sheet template
- * @param bodyArmorSprite - Optional body armor sprite sheet
- * @param headArmorSprite - Optional head armor sprite sheet
+ * @param armorHelmetSprite - Optional armor helmet sprite sheet template
+ * @param armorNeckSprite - Optional armor neck sprite sheet template
+ * @param armorHandsSprite - Optional armor hands sprite sheet template
+ * @param armorChestSprite - Optional armor chest sprite sheet template
+ * @param armorFeetSprite - Optional armor feet sprite sheet template
+ * @param armorLegsSprite - Optional armor legs sprite sheet template
+ * @param armorWeaponSprite - Optional armor weapon sprite sheet template
  * @param initialAnimation - Starting animation name (default: 'idle')
  * @returns Complete layered animation structure
  */
@@ -30,8 +35,13 @@ export async function initializeLayeredAnimation(
   mountSprite: Nullable<SpriteSheetTemplate>,
   bodySprite: Nullable<SpriteSheetTemplate>,
   headSprite: Nullable<SpriteSheetTemplate>,
-  bodyArmorSprite: Nullable<SpriteSheetTemplate>,
-  headArmorSprite: Nullable<SpriteSheetTemplate>,
+  armorHelmetSprite: Nullable<SpriteSheetTemplate>,
+  armorNeckSprite: Nullable<SpriteSheetTemplate>,
+  armorHandsSprite: Nullable<SpriteSheetTemplate>,
+  armorChestSprite: Nullable<SpriteSheetTemplate>,
+  armorFeetSprite: Nullable<SpriteSheetTemplate>,
+  armorLegsSprite: Nullable<SpriteSheetTemplate>,
+  armorWeaponSprite: Nullable<SpriteSheetTemplate>,
   initialAnimation: string = 'idle'
 ): Promise<LayeredAnimation> {
 
@@ -45,11 +55,26 @@ export async function initializeLayeredAnimation(
   if (headSprite && !validateSpriteSheetTemplate(headSprite)) {
     throw new Error('Invalid head sprite sheet template');
   }
-  if (bodyArmorSprite && !validateSpriteSheetTemplate(bodyArmorSprite)) {
-    throw new Error('Invalid body armor sprite sheet template');
+  if (armorHelmetSprite && !validateSpriteSheetTemplate(armorHelmetSprite)) {
+    throw new Error('Invalid armor helmet sprite sheet template');
   }
-  if (headArmorSprite && !validateSpriteSheetTemplate(headArmorSprite)) {
-    throw new Error('Invalid head armor sprite sheet template');
+  if (armorNeckSprite && !validateSpriteSheetTemplate(armorNeckSprite)) {
+    throw new Error('Invalid armor neck sprite sheet template');
+  }
+  if (armorHandsSprite && !validateSpriteSheetTemplate(armorHandsSprite)) {
+    throw new Error('Invalid armor hands sprite sheet template');
+  }
+  if (armorChestSprite && !validateSpriteSheetTemplate(armorChestSprite)) {
+    throw new Error('Invalid armor chest sprite sheet template');
+  }
+  if (armorFeetSprite && !validateSpriteSheetTemplate(armorFeetSprite)) {
+    throw new Error('Invalid armor feet sprite sheet template');
+  }
+  if (armorLegsSprite && !validateSpriteSheetTemplate(armorLegsSprite)) {
+    throw new Error('Invalid armor legs sprite sheet template');
+  }
+  if (armorWeaponSprite && !validateSpriteSheetTemplate(armorWeaponSprite)) {
+    throw new Error('Invalid armor weapon sprite sheet template');
   }
 
   const isMounted = mountSprite !== null;
@@ -64,28 +89,52 @@ export async function initializeLayeredAnimation(
     ? await createAnimationLayer('body', bodySprite, initialAnimation, 0, isMounted)
     : null;
 
-  // Load head layer if provided (zIndex: 2)
+  // Load head layer if provided (zIndex: 1)
   const headLayer = headSprite
-    ? await createAnimationLayer('head', headSprite, initialAnimation, 2, isMounted)
+    ? await createAnimationLayer('head', headSprite, initialAnimation, 1, isMounted)
     : null;
 
-  // Load body armor layer if equipped (zIndex: 1)
-  const bodyArmorLayer = bodyArmorSprite
-    ? await createAnimationLayer('body_armor', bodyArmorSprite, initialAnimation, 1, false)
+  // Load armor layers with ascending z-indexes (render order: helmet, neck, hands, chest, feet, legs, weapon)
+  const armorHelmetLayer = armorHelmetSprite
+    ? await createAnimationLayer('armor_helmet', armorHelmetSprite, initialAnimation, 2, isMounted)
     : null;
 
-  // Load head armor layer if equipped (zIndex: 3)
-  const headArmorLayer = headArmorSprite
-    ? await createAnimationLayer('head_armor', headArmorSprite, initialAnimation, 3, false)
+  const armorNeckLayer = armorNeckSprite
+    ? await createAnimationLayer('armor_neck', armorNeckSprite, initialAnimation, 3, isMounted)
+    : null;
+
+  const armorHandsLayer = armorHandsSprite
+    ? await createAnimationLayer('armor_hands', armorHandsSprite, initialAnimation, 4, isMounted)
+    : null;
+
+  const armorChestLayer = armorChestSprite
+    ? await createAnimationLayer('armor_chest', armorChestSprite, initialAnimation, 5, isMounted)
+    : null;
+
+  const armorFeetLayer = armorFeetSprite
+    ? await createAnimationLayer('armor_feet', armorFeetSprite, initialAnimation, 6, isMounted)
+    : null;
+
+  const armorLegsLayer = armorLegsSprite
+    ? await createAnimationLayer('armor_legs', armorLegsSprite, initialAnimation, 7, isMounted)
+    : null;
+
+  const armorWeaponLayer = armorWeaponSprite
+    ? await createAnimationLayer('armor_weapon', armorWeaponSprite, initialAnimation, 8, isMounted)
     : null;
 
   return {
     layers: {
       mount: mountLayer,
       body: bodyLayer,
-      body_armor: bodyArmorLayer,
       head: headLayer,
-      head_armor: headArmorLayer
+      armor_helmet: armorHelmetLayer,
+      armor_neck: armorNeckLayer,
+      armor_hands: armorHandsLayer,
+      armor_chest: armorChestLayer,
+      armor_feet: armorFeetLayer,
+      armor_legs: armorLegsLayer,
+      armor_weapon: armorWeaponLayer
     },
     currentAnimationName: initialAnimation,
     syncFrames: true
@@ -94,23 +143,26 @@ export async function initializeLayeredAnimation(
 
 /**
  * Creates a single animation layer
- * @param type - Layer type (mount, body, body_armor, head, head_armor)
+ * @param type - Layer type
  * @param spriteSheet - Sprite sheet template for this layer
  * @param animationName - Initial animation to load
  * @param zIndex - Render order (-1 = mount behind, 0 = back, higher = front)
- * @param isMounted - Whether the player is mounted (for body/head layers)
+ * @param isMounted - Whether the player is mounted (for body/head/armor layers)
  * @returns Initialized animation layer
  */
 async function createAnimationLayer(
-  type: 'mount' | 'body' | 'body_armor' | 'head' | 'head_armor',
+  type: 'mount' | 'body' | 'head' | 'armor_helmet' | 'armor_neck' | 'armor_hands' | 'armor_chest' | 'armor_feet' | 'armor_legs' | 'armor_weapon',
   spriteSheet: SpriteSheetTemplate,
   animationName: string,
   zIndex: number,
   isMounted: boolean = false
 ): Promise<AnimationLayer> {
 
+  // Normalize sprite sheet name to lowercase for case-insensitive caching
+  const normalizedName = spriteSheet.name.toLowerCase();
+
   // Check if sprite sheet is already cached
-  if (!spriteSheetCache[spriteSheet.name]) {
+  if (!spriteSheetCache[normalizedName]) {
     // Load sprite sheet image - use imageData from server if available, otherwise imageSource
     const imageSource = (spriteSheet as any).imageData || spriteSheet.imageSource;
     const image = await preloadSpriteSheetImage(imageSource);
@@ -121,19 +173,20 @@ async function createAnimationLayer(
     // Deep clone the sprite sheet template to prevent mutations to the original from affecting the cache
     const clonedTemplate = JSON.parse(JSON.stringify(spriteSheet));
 
-    // Cache for reuse
-    spriteSheetCache[spriteSheet.name] = {
+    // Cache for reuse with normalized name
+    spriteSheetCache[normalizedName] = {
       imageElement: image,
       template: clonedTemplate,
       extractedFrames
     };
   }
 
-  const cached = spriteSheetCache[spriteSheet.name];
+  const cached = spriteSheetCache[normalizedName];
 
-  // For body/head layers: if mounted, convert idle/walk animations to mount_idle/mount_walk
+  // For body/head/armor layers: if mounted, convert idle/walk animations to mount_idle/mount_walk
   let actualAnimationName = animationName;
-  if (isMounted && (type === 'body' || type === 'head')) {
+  const isArmorLayer = type.startsWith('armor_');
+  if (isMounted && (type === 'body' || type === 'head' || isArmorLayer)) {
     if (animationName.startsWith('idle_')) {
       // idle_down -> mount_idle_down
       actualAnimationName = animationName.replace('idle_', 'mount_idle_');
@@ -215,7 +268,9 @@ export async function changeLayeredAnimation(
     .filter(l => l !== null)
     .map(async (layer) => {
       if (layer && layer.spriteSheet) {
-        const cached = spriteSheetCache[layer.spriteSheet.name];
+        // Normalize sprite sheet name to lowercase for case-insensitive lookup
+        const normalizedName = layer.spriteSheet.name.toLowerCase();
+        const cached = spriteSheetCache[normalizedName];
 
         if (!cached) {
           console.error(`Sprite sheet "${layer.spriteSheet.name}" not found in cache`);
@@ -225,8 +280,9 @@ export async function changeLayeredAnimation(
         // Determine the actual animation name for this layer
         let actualAnimationName = newAnimationName;
 
-        // For body/head layers: if mounted, convert idle/walk animations to mount_idle/mount_walk
-        if (isMounted && (layer.type === 'body' || layer.type === 'head')) {
+        const isArmorLayer = layer.type.startsWith('armor_');
+        // For body/head/armor layers: if mounted, convert idle/walk animations to mount_idle/mount_walk
+        if (isMounted && (layer.type === 'body' || layer.type === 'head' || isArmorLayer)) {
           if (newAnimationName.startsWith('idle_')) {
             // idle_down -> mount_idle_down
             actualAnimationName = newAnimationName.replace('idle_', 'mount_idle_');
@@ -278,38 +334,6 @@ export async function changeLayeredAnimation(
   await Promise.all(layerUpdates);
 }
 
-/**
- * Equips or unequips armor on a specific layer
- * @param layeredAnim - The layered animation to update
- * @param layerType - Which armor layer to update (body_armor or head_armor)
- * @param armorSprite - Sprite sheet for the armor (null to unequip)
- */
-export async function updateArmorLayer(
-  layeredAnim: LayeredAnimation,
-  layerType: 'body_armor' | 'head_armor',
-  armorSprite: Nullable<SpriteSheetTemplate>
-): Promise<void> {
-  if (armorSprite) {
-    // Validate armor sprite
-    if (!validateSpriteSheetTemplate(armorSprite)) {
-      console.error(`Invalid ${layerType} sprite sheet template`);
-      return;
-    }
-
-    // Equip armor
-    const zIndex = layerType === 'body_armor' ? 1 : 3;
-    layeredAnim.layers[layerType] = await createAnimationLayer(
-      layerType,
-      armorSprite,
-      layeredAnim.currentAnimationName,
-      zIndex,
-      false
-    );
-  } else {
-    // Unequip armor
-    layeredAnim.layers[layerType] = null;
-  }
-}
 
 /**
  * Mounts or unmounts a mount
@@ -350,12 +374,26 @@ export async function updateMountLayer(
     const isMounted = isNowMounted;
     const currentAnim = layeredAnim.currentAnimationName;
 
-    // Build new frames for body and head first (async operations)
+    // Build new frames for body, head, and all armor layers (async operations)
     const frameUpdates: Array<{ layer: AnimationLayer, frames: AnimationFrame[] }> = [];
 
-    for (const layer of [layeredAnim.layers.body, layeredAnim.layers.head]) {
+    const layersToUpdate = [
+      layeredAnim.layers.body,
+      layeredAnim.layers.head,
+      layeredAnim.layers.armor_helmet,
+      layeredAnim.layers.armor_neck,
+      layeredAnim.layers.armor_hands,
+      layeredAnim.layers.armor_chest,
+      layeredAnim.layers.armor_feet,
+      layeredAnim.layers.armor_legs,
+      layeredAnim.layers.armor_weapon
+    ];
+
+    for (const layer of layersToUpdate) {
       if (layer && layer.spriteSheet) {
-        const cached = spriteSheetCache[layer.spriteSheet.name];
+        // Normalize sprite sheet name to lowercase for case-insensitive lookup
+        const normalizedName = layer.spriteSheet.name.toLowerCase();
+        const cached = spriteSheetCache[normalizedName];
         if (!cached) continue;
 
         // Convert animation name based on mounted status
@@ -432,7 +470,7 @@ export function clearSpriteSheetCache(): void {
  */
 export function getLayer(
   layeredAnim: LayeredAnimation,
-  layerType: 'mount' | 'body' | 'body_armor' | 'head' | 'head_armor'
+  layerType: 'mount' | 'body' | 'head' | 'armor_helmet' | 'armor_neck' | 'armor_hands' | 'armor_chest' | 'armor_feet' | 'armor_legs' | 'armor_weapon'
 ): Nullable<AnimationLayer> {
   return layeredAnim.layers[layerType];
 }
@@ -445,7 +483,7 @@ export function getLayer(
  */
 export function setLayerVisibility(
   layeredAnim: LayeredAnimation,
-  layerType: 'mount' | 'body' | 'body_armor' | 'head' | 'head_armor',
+  layerType: 'mount' | 'body' | 'head' | 'armor_helmet' | 'armor_neck' | 'armor_hands' | 'armor_chest' | 'armor_feet' | 'armor_legs' | 'armor_weapon',
   visible: boolean
 ): void {
   const layer = layeredAnim.layers[layerType];

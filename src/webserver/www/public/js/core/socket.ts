@@ -411,8 +411,13 @@ socket.onmessage = async (event) => {
               player.layeredAnimation.layers.mount?.spriteSheet?.name !== data.mountSprite?.name ||
               player.layeredAnimation.layers.body?.spriteSheet?.name !== data.bodySprite?.name ||
               player.layeredAnimation.layers.head?.spriteSheet?.name !== data.headSprite?.name ||
-              player.layeredAnimation.layers.body_armor?.spriteSheet?.name !== data.bodyArmorSprite?.name ||
-              player.layeredAnimation.layers.head_armor?.spriteSheet?.name !== data.headArmorSprite?.name
+              player.layeredAnimation.layers.armor_helmet?.spriteSheet?.name !== data.armorHelmetSprite?.name ||
+              player.layeredAnimation.layers.armor_neck?.spriteSheet?.name !== data.armorNeckSprite?.name ||
+              player.layeredAnimation.layers.armor_hands?.spriteSheet?.name !== data.armorHandsSprite?.name ||
+              player.layeredAnimation.layers.armor_chest?.spriteSheet?.name !== data.armorChestSprite?.name ||
+              player.layeredAnimation.layers.armor_feet?.spriteSheet?.name !== data.armorFeetSprite?.name ||
+              player.layeredAnimation.layers.armor_legs?.spriteSheet?.name !== data.armorLegsSprite?.name ||
+              player.layeredAnimation.layers.armor_weapon?.spriteSheet?.name !== data.armorWeaponSprite?.name
             ) : true;
 
             if (!hasExisting || spriteSheetsChanged) {
@@ -421,8 +426,13 @@ socket.onmessage = async (event) => {
                 data.mountSprite || null,
                 data.bodySprite || null,
                 data.headSprite || null,
-                data.bodyArmorSprite || null,
-                data.headArmorSprite || null,
+                data.armorHelmetSprite || null,
+                data.armorNeckSprite || null,
+                data.armorHandsSprite || null,
+                data.armorChestSprite || null,
+                data.armorFeetSprite || null,
+                data.armorLegsSprite || null,
+                data.armorWeaponSprite || null,
                 animationState
               );
             } else {
@@ -436,11 +446,26 @@ socket.onmessage = async (event) => {
               if (data.headSprite && player.layeredAnimation.layers.head) {
                 player.layeredAnimation.layers.head.spriteSheet = data.headSprite;
               }
-              if (data.bodyArmorSprite && player.layeredAnimation.layers.body_armor) {
-                player.layeredAnimation.layers.body_armor.spriteSheet = data.bodyArmorSprite;
+              if (data.armorHelmetSprite && player.layeredAnimation.layers.armor_helmet) {
+                player.layeredAnimation.layers.armor_helmet.spriteSheet = data.armorHelmetSprite;
               }
-              if (data.headArmorSprite && player.layeredAnimation.layers.head_armor) {
-                player.layeredAnimation.layers.head_armor.spriteSheet = data.headArmorSprite;
+              if (data.armorNeckSprite && player.layeredAnimation.layers.armor_neck) {
+                player.layeredAnimation.layers.armor_neck.spriteSheet = data.armorNeckSprite;
+              }
+              if (data.armorHandsSprite && player.layeredAnimation.layers.armor_hands) {
+                player.layeredAnimation.layers.armor_hands.spriteSheet = data.armorHandsSprite;
+              }
+              if (data.armorChestSprite && player.layeredAnimation.layers.armor_chest) {
+                player.layeredAnimation.layers.armor_chest.spriteSheet = data.armorChestSprite;
+              }
+              if (data.armorFeetSprite && player.layeredAnimation.layers.armor_feet) {
+                player.layeredAnimation.layers.armor_feet.spriteSheet = data.armorFeetSprite;
+              }
+              if (data.armorLegsSprite && player.layeredAnimation.layers.armor_legs) {
+                player.layeredAnimation.layers.armor_legs.spriteSheet = data.armorLegsSprite;
+              }
+              if (data.armorWeaponSprite && player.layeredAnimation.layers.armor_weapon) {
+                player.layeredAnimation.layers.armor_weapon.spriteSheet = data.armorWeaponSprite;
               }
 
               if (player.layeredAnimation.currentAnimationName !== animationState) {
@@ -945,6 +970,8 @@ socket.onmessage = async (event) => {
         if (slotType) {
           slot.setAttribute("data-slot", slotType);
         }
+        // Add a unique update ID to prevent stale image loads from appending
+        (slot as any)._updateId = Date.now() + Math.random();
       });
 
       // Populate equipment slots with equipped items
@@ -983,8 +1010,13 @@ socket.onmessage = async (event) => {
           iconImage.draggable = false;
           iconImage.width = 32;
           iconImage.height = 32;
+          // Capture the current update ID to prevent race conditions
+          const currentUpdateId = (slotElement as any)._updateId;
           iconImage.onload = () => {
-            slotElement.appendChild(iconImage);
+            // Only append if this is still the current update (prevents stale loads)
+            if ((slotElement as any)._updateId === currentUpdateId) {
+              slotElement.appendChild(iconImage);
+            }
           };
 
           // Add double-click to unequip
@@ -1611,6 +1643,8 @@ socket.onmessage = async (event) => {
           if (slotType) {
             slot.setAttribute("data-slot", slotType);
           }
+          // Add a unique update ID to prevent stale image loads from appending
+          (slot as any)._updateId = Date.now() + Math.random();
         });
 
         // Populate equipment slots - simplified version without event handlers for inspecting
@@ -1645,8 +1679,13 @@ socket.onmessage = async (event) => {
             iconImage.draggable = false;
             iconImage.width = 32;
             iconImage.height = 32;
+            // Capture the current update ID to prevent race conditions
+            const currentUpdateId = (slotElement as any)._updateId;
             iconImage.onload = () => {
-              slotElement.appendChild(iconImage);
+              // Only append if this is still the current update (prevents stale loads)
+              if ((slotElement as any)._updateId === currentUpdateId) {
+                slotElement.appendChild(iconImage);
+              }
             };
 
             // Setup tooltip for inspected player's equipment
