@@ -22,6 +22,9 @@ if (!assetConfig.getAssetConfig()) {
   throw new Error("Asset path not found");
 }
 
+// Start total asset loading timer
+const assetLoadingStartTime = performance.now();
+
 function loadAnimations() {
   const now = performance.now();
 
@@ -895,3 +898,8 @@ function validateAnimationFile(file: string) {
   }
   return true;
 }
+
+// Log total asset loading time
+const assetLoadingEndTime = performance.now();
+const totalAssetLoadingTime = (assetLoadingEndTime - assetLoadingStartTime).toFixed(2);
+log.success(`✔ All assets loaded successfully in ${totalAssetLoadingTime}ms`);

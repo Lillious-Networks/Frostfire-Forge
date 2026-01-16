@@ -47,7 +47,7 @@ async function createSQLController(): Promise<any> {
         });
 
         return db;
-    } 
+    }
     // default to SQLite for local development and testing
     else if (_databaseEngine === "sqlite") {
         const db = new SQL({
@@ -58,7 +58,49 @@ async function createSQLController(): Promise<any> {
     }
 }
 
-const sqlController = await createSQLController();
+async function createSQLControllerWithRetry(): Promise<any> {
+    const maxRetryTime = 5000; // 5 seconds total retry time
+    const retryDelay = 1000; // 1 second between retries
+    const startTime = Date.now();
+    let lastError: Error | null = null;
+
+    while (Date.now() - startTime < maxRetryTime) {
+        try {
+            log.info("Attempting to connect to database...");
+            const controller = await createSQLController();
+
+            // Test the connection with a simple query with timeout
+            const testPromise = controller.unsafe("SELECT 1 AS test");
+            const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error("Connection test query timeout")), 3000)
+            );
+
+            const result = await Promise.race([testPromise, timeoutPromise]);
+
+            // Verify we got a valid result
+            if (!result || (Array.isArray(result) && result.length === 0)) {
+                throw new Error("Connection test returned invalid result");
+            }
+
+            log.success("Database connection established and verified!");
+            return controller;
+        } catch (error: any) {
+            lastError = error;
+            const elapsed = Date.now() - startTime;
+            const remaining = maxRetryTime - elapsed;
+
+            if (remaining > 0) {
+                log.warn(`Database connection failed: ${error.message}. Retrying in ${retryDelay}ms... (${Math.ceil(remaining / 1000)}s remaining)`);
+                await new Promise(resolve => setTimeout(resolve, Math.min(retryDelay, remaining)));
+            }
+        }
+    }
+
+    log.error(`Failed to connect to database after ${maxRetryTime}ms. Last error: ${lastError?.message}`);
+    throw new Error(`Database connection timeout: ${lastError?.message}`);
+}
+
+const sqlController = await createSQLControllerWithRetry();
 
 function sqlWrapper(query: string, params: any[]): string {
   const parts = query.split("?");
@@ -103,11 +145,46 @@ function escapeValue(param: any): string {
 
 
 export default async function query<T>(sql: string, values?: any[]): Promise<T[]> {
-  try {
-    const result = await sqlController.unsafe(sqlWrapper(sql, values || []));
-    return result as T[];
-  } catch (error) {
-    log.error(`SQL Error: ${(error as Error).message}`);
-    throw error;
+  const maxRetries = 3;
+  const retryDelay = 1000; // 1 second between retries
+  const queryTimeout = 5000; // 5 second timeout per query
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      // Add timeout to the query
+      const queryPromise = sqlController.unsafe(sqlWrapper(sql, values || []));
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`Query timeout after ${queryTimeout}ms`)), queryTimeout)
+      );
+
+      const result = await Promise.race([queryPromise, timeoutPromise]);
+      return result as T[];
+    } catch (error: any) {
+      lastError = error;
+      const isConnectionError =
+        error.message?.includes("Connection") ||
+        error.message?.includes("connection") ||
+        error.message?.includes("timeout") ||
+        error.message?.includes("ECONNREFUSED") ||
+        error.message?.includes("ETIMEDOUT") ||
+        error.message?.includes("closed") ||
+        error.message?.includes("Query timeout") ||
+        error.code === "ECONNREFUSED" ||
+        error.code === "ETIMEDOUT";
+
+      if (isConnectionError && attempt < maxRetries) {
+        log.warn(`SQL connection error (attempt ${attempt}/${maxRetries}): ${error.message}. Retrying in ${retryDelay}ms...`);
+        log.debug(`Failed query: ${sql.substring(0, 100)}...`);
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+      } else {
+        log.error(`SQL Error: ${error.message}`);
+        log.debug(`Failed query: ${sql.substring(0, 100)}...`);
+        throw error;
+      }
+    }
   }
+
+  log.error(`SQL Error after ${maxRetries} attempts: ${lastError?.message}`);
+  throw lastError;
 }
