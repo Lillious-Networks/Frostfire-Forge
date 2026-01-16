@@ -3933,6 +3933,15 @@ export default async function packetReceiver(
               ws,
               packetManager.equipment(currentPlayer.equipment)
             );
+
+            // Update sprite sheet animation to reflect new armor layers
+            const currentAnimationName = getAnimationNameForDirection(
+              currentPlayer.location.position?.direction || "down",
+              !!currentPlayer.moving,
+              !!currentPlayer.mounted,
+              currentPlayer.mount_type || undefined
+            );
+            await sendSpriteSheetAnimation(ws, currentAnimationName, currentPlayer.id);
           }
         }
         break;
@@ -4051,6 +4060,15 @@ export default async function packetReceiver(
               ws,
               packetManager.equipment(currentPlayer.equipment)
             );
+
+            // Update sprite sheet animation to reflect removed armor layers
+            const currentAnimationName = getAnimationNameForDirection(
+              currentPlayer.location.position?.direction || "down",
+              !!currentPlayer.moving,
+              !!currentPlayer.mounted,
+              currentPlayer.mount_type || undefined
+            );
+            await sendSpriteSheetAnimation(ws, currentAnimationName, currentPlayer.id);
           }
         }
         break;
@@ -4150,9 +4168,22 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
   // Import getSpriteSheetImage and getSpriteSheetTemplate
   const { getSpriteSheetImage, getSpriteSheetTemplate } = await import("../modules/spriteSheetManager");
 
+  // Helper to extract equipment name from prefixed name (e.g., "helmet_iron_helmet" -> "iron_helmet")
+  const extractEquipmentName = (prefixedName: string) => {
+    const firstUnderscore = prefixedName.indexOf('_');
+    return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
+  };
+
   // Get base64 image data for each sprite sheet (only if sprite exists)
   const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
   const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
+  const armorHelmetImageData = spriteSheetData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHelmetSprite.name)) : null;
+  const armorNeckImageData = spriteSheetData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorNeckSprite.name)) : null;
+  const armorHandsImageData = spriteSheetData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHandsSprite.name)) : null;
+  const armorChestImageData = spriteSheetData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorChestSprite.name)) : null;
+  const armorFeetImageData = spriteSheetData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorFeetSprite.name)) : null;
+  const armorLegsImageData = spriteSheetData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorLegsSprite.name)) : null;
+  const armorWeaponImageData = spriteSheetData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorWeaponSprite.name)) : null;
 
   // Get mount sprite sheet if player is mounted (based on cache mount_type)
   // Always use player_mount_base template with custom mount image
@@ -4162,10 +4193,11 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
     // Get the base template (animation data)
     mountSprite = await getSpriteSheetTemplate('player_mount_base');
     if (mountSprite) {
-      // Override the name to reference the custom mount image source
-      const mountImageName = `mount_${currentPlayer.mount_type}`;
+      // Keep the name as the mount type for database lookup
+      // The imageSource is just metadata for file organization reference
+      const mountImageName = currentPlayer.mount_type;
       mountSprite.name = mountImageName;
-      mountSprite.imageSource = `${mountImageName}.png`;
+      mountSprite.imageSource = `mounts/${mountImageName}.png`;
       // Get the image data for this specific mount type
       mountImageData = await getSpriteSheetImage(mountImageName);
     }
@@ -4176,6 +4208,14 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
     mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
     bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
     headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
+    // Only include armor sprites if their image data exists
+    armorHelmetSprite: (spriteSheetData.armorHelmetSprite && armorHelmetImageData) ? { ...spriteSheetData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
+    armorNeckSprite: (spriteSheetData.armorNeckSprite && armorNeckImageData) ? { ...spriteSheetData.armorNeckSprite, imageData: armorNeckImageData } : null,
+    armorHandsSprite: (spriteSheetData.armorHandsSprite && armorHandsImageData) ? { ...spriteSheetData.armorHandsSprite, imageData: armorHandsImageData } : null,
+    armorChestSprite: (spriteSheetData.armorChestSprite && armorChestImageData) ? { ...spriteSheetData.armorChestSprite, imageData: armorChestImageData } : null,
+    armorFeetSprite: (spriteSheetData.armorFeetSprite && armorFeetImageData) ? { ...spriteSheetData.armorFeetSprite, imageData: armorFeetImageData } : null,
+    armorLegsSprite: (spriteSheetData.armorLegsSprite && armorLegsImageData) ? { ...spriteSheetData.armorLegsSprite, imageData: armorLegsImageData } : null,
+    armorWeaponSprite: (spriteSheetData.armorWeaponSprite && armorWeaponImageData) ? { ...spriteSheetData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
     animationState: spriteSheetData.animationState,
     revision: revision,
   };
@@ -4273,9 +4313,22 @@ async function sendAnimationTo(targetWs: any, name: string, playerId?: string, r
   // Import getSpriteSheetImage and getSpriteSheetTemplate
   const { getSpriteSheetImage, getSpriteSheetTemplate } = await import("../modules/spriteSheetManager");
 
+  // Helper to extract equipment name from prefixed name (e.g., "helmet_iron_helmet" -> "iron_helmet")
+  const extractEquipmentName = (prefixedName: string) => {
+    const firstUnderscore = prefixedName.indexOf('_');
+    return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
+  };
+
   // Get base64 image data for each sprite sheet (only if sprite exists)
   const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
   const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
+  const armorHelmetImageData = spriteSheetData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHelmetSprite.name)) : null;
+  const armorNeckImageData = spriteSheetData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorNeckSprite.name)) : null;
+  const armorHandsImageData = spriteSheetData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHandsSprite.name)) : null;
+  const armorChestImageData = spriteSheetData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorChestSprite.name)) : null;
+  const armorFeetImageData = spriteSheetData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorFeetSprite.name)) : null;
+  const armorLegsImageData = spriteSheetData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorLegsSprite.name)) : null;
+  const armorWeaponImageData = spriteSheetData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorWeaponSprite.name)) : null;
 
   // Get mount sprite sheet if player is mounted (based on cache mount_type)
   // Always use player_mount_base template with custom mount image
@@ -4285,10 +4338,11 @@ async function sendAnimationTo(targetWs: any, name: string, playerId?: string, r
     // Get the base template (animation data)
     mountSprite = await getSpriteSheetTemplate('player_mount_base');
     if (mountSprite) {
-      // Override the name to reference the custom mount image source
-      const mountImageName = `mount_${targetPlayer.mount_type}`;
+      // Keep the name as the mount type for database lookup
+      // The imageSource is just metadata for file organization reference
+      const mountImageName = targetPlayer.mount_type;
       mountSprite.name = mountImageName;
-      mountSprite.imageSource = `${mountImageName}.png`;
+      mountSprite.imageSource = `mounts/${mountImageName}.png`;
       // Get the image data for this specific mount type
       mountImageData = await getSpriteSheetImage(mountImageName);
     }
@@ -4299,6 +4353,14 @@ async function sendAnimationTo(targetWs: any, name: string, playerId?: string, r
     mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
     bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
     headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
+    // Only include armor sprites if their image data exists
+    armorHelmetSprite: (spriteSheetData.armorHelmetSprite && armorHelmetImageData) ? { ...spriteSheetData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
+    armorNeckSprite: (spriteSheetData.armorNeckSprite && armorNeckImageData) ? { ...spriteSheetData.armorNeckSprite, imageData: armorNeckImageData } : null,
+    armorHandsSprite: (spriteSheetData.armorHandsSprite && armorHandsImageData) ? { ...spriteSheetData.armorHandsSprite, imageData: armorHandsImageData } : null,
+    armorChestSprite: (spriteSheetData.armorChestSprite && armorChestImageData) ? { ...spriteSheetData.armorChestSprite, imageData: armorChestImageData } : null,
+    armorFeetSprite: (spriteSheetData.armorFeetSprite && armorFeetImageData) ? { ...spriteSheetData.armorFeetSprite, imageData: armorFeetImageData } : null,
+    armorLegsSprite: (spriteSheetData.armorLegsSprite && armorLegsImageData) ? { ...spriteSheetData.armorLegsSprite, imageData: armorLegsImageData } : null,
+    armorWeaponSprite: (spriteSheetData.armorWeaponSprite && armorWeaponImageData) ? { ...spriteSheetData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
     animationState: spriteSheetData.animationState,
     revision: revision,
   };

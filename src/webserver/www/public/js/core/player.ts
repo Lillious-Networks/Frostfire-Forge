@@ -25,6 +25,13 @@ async function createPlayer(data: any) {
       data.mountSprite || null,
       data.bodySprite,
       data.headSprite,
+      data.armorHelmetSprite || null,
+      data.armorNeckSprite || null,
+      data.armorHandsSprite || null,
+      data.armorChestSprite || null,
+      data.armorFeetSprite || null,
+      data.armorLegsSprite || null,
+      data.armorWeaponSprite || null,
       data.animationState || 'idle'
     );
   }

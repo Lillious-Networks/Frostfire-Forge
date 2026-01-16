@@ -1,0 +1,314 @@
+{
+  "name": "armor_head_base",
+  "imageSource": "armor_head_base.png",
+  "frameWidth": 64,
+  "frameHeight": 64,
+  "columns": 8,
+  "rows": 1,
+  "animations": {
+    "idle": {
+      "directions": {
+        "down": {
+          "frames": [2, 3],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        },
+        "up": {
+          "frames": [0, 1],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        },
+        "left": {
+          "frames": [4, 5],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        },
+        "right": {
+          "frames": [6, 7],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        },
+        "downleft": {
+          "frames": [2, 3],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        },
+        "downright": {
+          "frames": [2, 3],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        },
+        "upleft": {
+          "frames": [0, 1],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        },
+        "upright": {
+          "frames": [0, 1],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        }
+      }
+    },
+    "walk": {
+      "directions": {
+        "down": {
+          "frames": [2, 3],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        },
+        "up": {
+          "frames": [0, 1],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        },
+        "left": {
+          "frames": [4, 5],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        },
+        "right": {
+          "frames": [6, 7],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        },
+        "downleft": {
+          "frames": [2, 3],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        },
+        "downright": {
+          "frames": [2, 3],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        },
+        "upleft": {
+          "frames": [0, 1],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        },
+        "upright": {
+          "frames": [0, 1],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -6
+          }
+        }
+      }
+    },
+    "mount_idle": {
+      "directions": {
+        "down": {
+          "frames": [2, 3],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -20
+          }
+        },
+        "up": {
+          "frames": [0, 1],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -14
+          }
+        },
+        "left": {
+          "frames": [4, 5],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -15
+          }
+        },
+        "right": {
+          "frames": [6, 7],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -15
+          }
+        },
+        "downleft": {
+          "frames": [2, 3],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -20
+          }
+        },
+        "downright": {
+          "frames": [2, 3],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -20
+          }
+        },
+        "upleft": {
+          "frames": [0, 1],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -14
+          }
+        },
+        "upright": {
+          "frames": [0, 1],
+          "frameDuration": 1000,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -14
+          }
+        }
+      }
+    },
+    "mount_walk": {
+      "directions": {
+        "down": {
+          "frames": [2, 3],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -20
+          }
+        },
+        "up": {
+          "frames": [0, 1],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -14
+          }
+        },
+        "left": {
+          "frames": [4, 5],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -15
+          }
+        },
+        "right": {
+          "frames": [6, 7],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -15
+          }
+        },
+        "downleft": {
+          "frames": [2, 3],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -20
+          }
+        },
+        "downright": {
+          "frames": [2, 3],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -20
+          }
+        },
+        "upleft": {
+          "frames": [0, 1],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -14
+          }
+        },
+        "upright": {
+          "frames": [0, 1],
+          "frameDuration": 150,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": -14
+          }
+        }
+      }
+    }
+  }
+}
