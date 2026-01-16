@@ -481,7 +481,7 @@ declare interface AnimationFrame {
 }
 
 declare interface AnimationLayer {
-  type: 'mount' | 'body' | 'body_armor' | 'head' | 'head_armor';
+  type: 'mount' | 'body' | 'head';
   spriteSheet: Nullable<SpriteSheetTemplate>;
   frames: AnimationFrame[];
   currentFrame: number;
@@ -494,9 +494,7 @@ declare interface LayeredAnimation {
   layers: {
     mount: Nullable<AnimationLayer>;
     body: AnimationLayer;
-    body_armor: Nullable<AnimationLayer>;
     head: AnimationLayer;
-    head_armor: Nullable<AnimationLayer>;
   };
   currentAnimationName: string;  // Current animation state (idle, walk, attack, etc.)
   syncFrames: boolean;           // Whether all layers advance frames together

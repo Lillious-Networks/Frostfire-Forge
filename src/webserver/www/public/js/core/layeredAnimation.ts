@@ -1,7 +1,7 @@
 /**
  * Layered Animation System
- * Manages 4-layer character animations: body, body_armor, head, head_armor
- * Supports synchronized frame updates and dynamic armor equipping
+ * Manages 3-layer character animations: mount, body, head
+ * Supports synchronized frame updates
  */
 
 import {
@@ -21,8 +21,6 @@ const spriteSheetCache: SpriteSheetCache = {};
  * @param mountSprite - Optional mount sprite sheet
  * @param bodySprite - Base body sprite sheet template
  * @param headSprite - Base head sprite sheet template
- * @param bodyArmorSprite - Optional body armor sprite sheet
- * @param headArmorSprite - Optional head armor sprite sheet
  * @param initialAnimation - Starting animation name (default: 'idle')
  * @returns Complete layered animation structure
  */
@@ -30,8 +28,6 @@ export async function initializeLayeredAnimation(
   mountSprite: Nullable<SpriteSheetTemplate>,
   bodySprite: Nullable<SpriteSheetTemplate>,
   headSprite: Nullable<SpriteSheetTemplate>,
-  bodyArmorSprite: Nullable<SpriteSheetTemplate>,
-  headArmorSprite: Nullable<SpriteSheetTemplate>,
   initialAnimation: string = 'idle'
 ): Promise<LayeredAnimation> {
 
@@ -44,12 +40,6 @@ export async function initializeLayeredAnimation(
   }
   if (headSprite && !validateSpriteSheetTemplate(headSprite)) {
     throw new Error('Invalid head sprite sheet template');
-  }
-  if (bodyArmorSprite && !validateSpriteSheetTemplate(bodyArmorSprite)) {
-    throw new Error('Invalid body armor sprite sheet template');
-  }
-  if (headArmorSprite && !validateSpriteSheetTemplate(headArmorSprite)) {
-    throw new Error('Invalid head armor sprite sheet template');
   }
 
   const isMounted = mountSprite !== null;
@@ -64,28 +54,16 @@ export async function initializeLayeredAnimation(
     ? await createAnimationLayer('body', bodySprite, initialAnimation, 0, isMounted)
     : null;
 
-  // Load head layer if provided (zIndex: 2)
+  // Load head layer if provided (zIndex: 1)
   const headLayer = headSprite
-    ? await createAnimationLayer('head', headSprite, initialAnimation, 2, isMounted)
-    : null;
-
-  // Load body armor layer if equipped (zIndex: 1)
-  const bodyArmorLayer = bodyArmorSprite
-    ? await createAnimationLayer('body_armor', bodyArmorSprite, initialAnimation, 1, false)
-    : null;
-
-  // Load head armor layer if equipped (zIndex: 3)
-  const headArmorLayer = headArmorSprite
-    ? await createAnimationLayer('head_armor', headArmorSprite, initialAnimation, 3, false)
+    ? await createAnimationLayer('head', headSprite, initialAnimation, 1, isMounted)
     : null;
 
   return {
     layers: {
       mount: mountLayer,
       body: bodyLayer,
-      body_armor: bodyArmorLayer,
-      head: headLayer,
-      head_armor: headArmorLayer
+      head: headLayer
     },
     currentAnimationName: initialAnimation,
     syncFrames: true
@@ -94,7 +72,7 @@ export async function initializeLayeredAnimation(
 
 /**
  * Creates a single animation layer
- * @param type - Layer type (mount, body, body_armor, head, head_armor)
+ * @param type - Layer type (mount, body, head)
  * @param spriteSheet - Sprite sheet template for this layer
  * @param animationName - Initial animation to load
  * @param zIndex - Render order (-1 = mount behind, 0 = back, higher = front)
@@ -102,7 +80,7 @@ export async function initializeLayeredAnimation(
  * @returns Initialized animation layer
  */
 async function createAnimationLayer(
-  type: 'mount' | 'body' | 'body_armor' | 'head' | 'head_armor',
+  type: 'mount' | 'body' | 'head',
   spriteSheet: SpriteSheetTemplate,
   animationName: string,
   zIndex: number,
@@ -278,38 +256,6 @@ export async function changeLayeredAnimation(
   await Promise.all(layerUpdates);
 }
 
-/**
- * Equips or unequips armor on a specific layer
- * @param layeredAnim - The layered animation to update
- * @param layerType - Which armor layer to update (body_armor or head_armor)
- * @param armorSprite - Sprite sheet for the armor (null to unequip)
- */
-export async function updateArmorLayer(
-  layeredAnim: LayeredAnimation,
-  layerType: 'body_armor' | 'head_armor',
-  armorSprite: Nullable<SpriteSheetTemplate>
-): Promise<void> {
-  if (armorSprite) {
-    // Validate armor sprite
-    if (!validateSpriteSheetTemplate(armorSprite)) {
-      console.error(`Invalid ${layerType} sprite sheet template`);
-      return;
-    }
-
-    // Equip armor
-    const zIndex = layerType === 'body_armor' ? 1 : 3;
-    layeredAnim.layers[layerType] = await createAnimationLayer(
-      layerType,
-      armorSprite,
-      layeredAnim.currentAnimationName,
-      zIndex,
-      false
-    );
-  } else {
-    // Unequip armor
-    layeredAnim.layers[layerType] = null;
-  }
-}
 
 /**
  * Mounts or unmounts a mount
@@ -432,7 +378,7 @@ export function clearSpriteSheetCache(): void {
  */
 export function getLayer(
   layeredAnim: LayeredAnimation,
-  layerType: 'mount' | 'body' | 'body_armor' | 'head' | 'head_armor'
+  layerType: 'mount' | 'body' | 'head'
 ): Nullable<AnimationLayer> {
   return layeredAnim.layers[layerType];
 }
@@ -445,7 +391,7 @@ export function getLayer(
  */
 export function setLayerVisibility(
   layeredAnim: LayeredAnimation,
-  layerType: 'mount' | 'body' | 'body_armor' | 'head' | 'head_armor',
+  layerType: 'mount' | 'body' | 'head',
   visible: boolean
 ): void {
   const layer = layeredAnim.layers[layerType];

@@ -410,9 +410,7 @@ socket.onmessage = async (event) => {
             const spriteSheetsChanged = hasExisting ? (
               player.layeredAnimation.layers.mount?.spriteSheet?.name !== data.mountSprite?.name ||
               player.layeredAnimation.layers.body?.spriteSheet?.name !== data.bodySprite?.name ||
-              player.layeredAnimation.layers.head?.spriteSheet?.name !== data.headSprite?.name ||
-              player.layeredAnimation.layers.body_armor?.spriteSheet?.name !== data.bodyArmorSprite?.name ||
-              player.layeredAnimation.layers.head_armor?.spriteSheet?.name !== data.headArmorSprite?.name
+              player.layeredAnimation.layers.head?.spriteSheet?.name !== data.headSprite?.name
             ) : true;
 
             if (!hasExisting || spriteSheetsChanged) {
@@ -421,8 +419,6 @@ socket.onmessage = async (event) => {
                 data.mountSprite || null,
                 data.bodySprite || null,
                 data.headSprite || null,
-                data.bodyArmorSprite || null,
-                data.headArmorSprite || null,
                 animationState
               );
             } else {
@@ -435,12 +431,6 @@ socket.onmessage = async (event) => {
               }
               if (data.headSprite && player.layeredAnimation.layers.head) {
                 player.layeredAnimation.layers.head.spriteSheet = data.headSprite;
-              }
-              if (data.bodyArmorSprite && player.layeredAnimation.layers.body_armor) {
-                player.layeredAnimation.layers.body_armor.spriteSheet = data.bodyArmorSprite;
-              }
-              if (data.headArmorSprite && player.layeredAnimation.layers.head_armor) {
-                player.layeredAnimation.layers.head_armor.spriteSheet = data.headArmorSprite;
               }
 
               if (player.layeredAnimation.currentAnimationName !== animationState) {

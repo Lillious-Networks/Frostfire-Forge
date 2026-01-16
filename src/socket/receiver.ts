@@ -4142,7 +4142,7 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
   const spriteSheetData = await getPlayerSpriteSheetData(name, playerEquipment);
 
   // Check if at least one layer is available to render
-  if (!spriteSheetData.bodySprite && !spriteSheetData.headSprite && !spriteSheetData.bodyArmorSprite && !spriteSheetData.headArmorSprite) {
+  if (!spriteSheetData.bodySprite && !spriteSheetData.headSprite) {
     log.warn(`No sprite sheet layers available for animation "${name}", player ${currentPlayer.id}`);
     return;
   }
@@ -4153,8 +4153,6 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
   // Get base64 image data for each sprite sheet (only if sprite exists)
   const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
   const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
-  const bodyArmorImageData = spriteSheetData.bodyArmorSprite ? await getSpriteSheetImage(spriteSheetData.bodyArmorSprite.name) : null;
-  const headArmorImageData = spriteSheetData.headArmorSprite ? await getSpriteSheetImage(spriteSheetData.headArmorSprite.name) : null;
 
   // Get mount sprite sheet if player is mounted (based on cache mount_type)
   // Always use player_mount_base template with custom mount image
@@ -4178,8 +4176,6 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
     mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
     bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
     headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
-    bodyArmorSprite: spriteSheetData.bodyArmorSprite ? { ...spriteSheetData.bodyArmorSprite, imageData: bodyArmorImageData } : null,
-    headArmorSprite: spriteSheetData.headArmorSprite ? { ...spriteSheetData.headArmorSprite, imageData: headArmorImageData } : null,
     animationState: spriteSheetData.animationState,
     revision: revision,
   };
@@ -4269,7 +4265,7 @@ async function sendAnimationTo(targetWs: any, name: string, playerId?: string, r
   const spriteSheetData = await getPlayerSpriteSheetData(name, playerEquipment);
 
   // Check if at least one layer is available to render
-  if (!spriteSheetData.bodySprite && !spriteSheetData.headSprite && !spriteSheetData.bodyArmorSprite && !spriteSheetData.headArmorSprite) {
+  if (!spriteSheetData.bodySprite && !spriteSheetData.headSprite) {
     log.warn(`No sprite sheet layers available for animation "${name}", player ${targetPlayer.id}`);
     return;
   }
@@ -4280,8 +4276,6 @@ async function sendAnimationTo(targetWs: any, name: string, playerId?: string, r
   // Get base64 image data for each sprite sheet (only if sprite exists)
   const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
   const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
-  const bodyArmorImageData = spriteSheetData.bodyArmorSprite ? await getSpriteSheetImage(spriteSheetData.bodyArmorSprite.name) : null;
-  const headArmorImageData = spriteSheetData.headArmorSprite ? await getSpriteSheetImage(spriteSheetData.headArmorSprite.name) : null;
 
   // Get mount sprite sheet if player is mounted (based on cache mount_type)
   // Always use player_mount_base template with custom mount image
@@ -4305,8 +4299,6 @@ async function sendAnimationTo(targetWs: any, name: string, playerId?: string, r
     mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
     bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
     headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
-    bodyArmorSprite: spriteSheetData.bodyArmorSprite ? { ...spriteSheetData.bodyArmorSprite, imageData: bodyArmorImageData } : null,
-    headArmorSprite: spriteSheetData.headArmorSprite ? { ...spriteSheetData.headArmorSprite, imageData: headArmorImageData } : null,
     animationState: spriteSheetData.animationState,
     revision: revision,
   };

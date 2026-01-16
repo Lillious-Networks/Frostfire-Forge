@@ -86,8 +86,6 @@ export async function getPlayerSpriteSheetData(
 ): Promise<{
   bodySprite: SpriteSheetTemplate | null;
   headSprite: SpriteSheetTemplate | null;
-  bodyArmorSprite: SpriteSheetTemplate | null;
-  headArmorSprite: SpriteSheetTemplate | null;
   animationState: string;
 }> {
   // Parse animation name to determine state
@@ -97,8 +95,6 @@ export async function getPlayerSpriteSheetData(
   // The image will be swapped based on equipment.body and equipment.head values
   let bodySprite: SpriteSheetTemplate | null = null;
   let headSprite: SpriteSheetTemplate | null = null;
-  let bodyArmorSprite: SpriteSheetTemplate | null = null;
-  let headArmorSprite: SpriteSheetTemplate | null = null;
 
   // Determine body image name (default to player_body_base if not specified)
   const bodyImageName = equipment?.body && equipment.body !== 'null' ? equipment.body : 'player_body_base';
@@ -122,21 +118,9 @@ export async function getPlayerSpriteSheetData(
     headSprite.imageSource = `${headImageName}.png`;
   }
 
-  // Get body armor sprite from equipment.chest field (check for both null and string "null")
-  if (equipment?.chest && equipment.chest !== 'null') {
-    bodyArmorSprite = await getSpriteSheetTemplate(equipment.chest);
-  }
-
-  // Get head armor sprite from equipment.helmet field (check for both null and string "null")
-  if (equipment && (equipment as any).helmet && (equipment as any).helmet !== 'null') {
-    headArmorSprite = await getSpriteSheetTemplate((equipment as any).helmet);
-  }
-
   return {
     bodySprite,
     headSprite,
-    bodyArmorSprite,
-    headArmorSprite,
     animationState
   };
 }

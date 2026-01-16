@@ -25,8 +25,6 @@ async function createPlayer(data: any) {
       data.mountSprite || null,
       data.bodySprite,
       data.headSprite,
-      data.bodyArmorSprite || null,
-      data.headArmorSprite || null,
       data.animationState || 'idle'
     );
   }
