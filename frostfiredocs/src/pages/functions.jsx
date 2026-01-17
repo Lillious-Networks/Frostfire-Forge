@@ -146,53 +146,55 @@ export default function Functions() {
 
   return (
     <div className="functions-container">
-      <div className="functions-header">
-        <h1>
-          <span className="header-icon">⚡</span>
+      <div className="functions-header bertui-animated bertui-fadeInDown">
+        <h1 className="bertui-animated bertui-fadeIn">
+          <span className="header-icon bertui-animated bertui-tada bertui-delay-1s">
+            ⚡
+          </span>
           API Functions
         </h1>
-        <p className="header-subtitle">
+        <p className="header-subtitle bertui-animated bertui-fadeIn bertui-delay-2s">
           Complete reference for all system functions
         </p>
       </div>
 
-      <div className="functions-controls">
+      <div className="functions-controls bertui-animated bertui-fadeInUp bertui-delay-1s">
         <div className="search-box">
-          <span className="search-icon">🔍</span>
+          <span className="search-icon bertui-animated bertui-pulse bertui-infinite bertui-slow">🔍</span>
           <input
             type="text"
             placeholder="Search functions... (e.g., player.login, currency.add)"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="search-input"
+            className="search-input bertui-animated bertui-fadeInLeft"
           />
         </div>
 
-        <div className="filter-box">
+        <div className="filter-box bertui-animated bertui-fadeInUp bertui-delay-2s">
           <label>System:</label>
           <select 
             value={selectedSystem} 
             onChange={(e) => setSelectedSystem(e.target.value)}
-            className="system-select"
+            className="system-select bertui-animated bertui-fadeInRight"
           >
             {systems.map(sys => (
-              <option key={sys} value={sys}>
+              <option key={sys} value={sys} className="bertui-animated bertui-fadeInUp">
                 {sys === 'all' ? 'All Systems' : sys}
               </option>
             ))}
           </select>
         </div>
 
-        <div className="results-count">
+        <div className="results-count bertui-animated bertui-fadeInUp bertui-delay-3s">
           {filteredFunctions.length} function{filteredFunctions.length !== 1 ? 's' : ''}
         </div>
       </div>
 
       <div className="functions-content">
-        {Object.entries(groupedFunctions).map(([system, functions]) => (
-          <div key={system} className="system-group">
-            <h2 className="system-name">
-              <span className="system-icon">📦</span>
+        {Object.entries(groupedFunctions).map(([system, functions], systemIndex) => (
+          <div key={system} className="system-group bertui-animated bertui-fadeInUp" style={{ animationDelay: `${systemIndex * 0.2}s` }}>
+            <h2 className="system-name bertui-animated bertui-fadeIn">
+              <span className="system-icon bertui-animated bertui-wobble">📦</span>
               {system}
             </h2>
             
@@ -200,22 +202,25 @@ export default function Functions() {
               {functions.map((func, idx) => (
                 <div 
                   key={`${func.system}-${func.function}-${idx}`}
-                  className="function-card"
+                  className="function-card bertui-animated bertui-fadeInUp bertui-slow"
+                  style={{ animationDelay: `${idx * 0.1}s` }}
                   onClick={() => setSelectedFunction(func)}
                 >
                   <div className="function-header">
-                    <span className="function-name">
+                    <span className="function-name bertui-animated bertui-fadeInLeft">
                       {func.system}.<span className="method-name">{func.function}</span>
                     </span>
-                    {func.async && <span className="async-badge">async</span>}
+                    {func.async && <span className="async-badge bertui-animated bertui-pulse bertui-infinite bertui-slow">async</span>}
                   </div>
                   
-                  <div className="function-signature">
+                  <div className="function-signature bertui-animated bertui-fadeIn bertui-delay-1s">
                     ({func.params})
                     {func.returnType && <span className="return-type">: {func.returnType}</span>}
                   </div>
                   
-                  <div className="function-hint">👁️ Click to view code</div>
+                  <div className="function-hint bertui-animated bertui-pulse bertui-infinite bertui-slow">
+                    👁️ Click to view code
+                  </div>
                 </div>
               ))}
             </div>
@@ -223,40 +228,43 @@ export default function Functions() {
         ))}
 
         {filteredFunctions.length === 0 && (
-          <div className="no-results">
-            <span className="no-results-icon">🔍</span>
-            <p>No functions found</p>
-            <p className="no-results-hint">Try adjusting your search or filter</p>
+          <div className="no-results bertui-animated bertui-fadeInUp bertui-delay-1s">
+            <span className="no-results-icon bertui-animated bertui-tada">🔍</span>
+            <p className="bertui-animated bertui-fadeIn bertui-delay-2s">No functions found</p>
+            <p className="no-results-hint bertui-animated bertui-fadeIn bertui-delay-3s">Try adjusting your search or filter</p>
           </div>
         )}
       </div>
 
       {selectedFunction && (
-        <div className="modal-overlay" onClick={() => setSelectedFunction(null)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-overlay bertui-animated bertui-fadeIn" onClick={() => setSelectedFunction(null)}>
+          <div className="modal-content bertui-animated bertui-zoomIn" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <div className="modal-title">
-                {selectedFunction.async && <span className="async-badge">async</span>}
-                <span className="function-full-name">
+                {selectedFunction.async && <span className="async-badge bertui-animated bertui-pulse bertui-infinite bertui-slow">async</span>}
+                <span className="function-full-name bertui-animated bertui-fadeInLeft">
                   {selectedFunction.system}.{selectedFunction.function}
                 </span>
-                <span className="function-params">
+                <span className="function-params bertui-animated bertui-fadeInRight">
                   ({selectedFunction.params})
                   {selectedFunction.returnType && `: ${selectedFunction.returnType}`}
                 </span>
               </div>
-              <button className="modal-close" onClick={() => setSelectedFunction(null)}>
+              <button 
+                className="modal-close bertui-animated bertui-pulse bertui-infinite bertui-slow" 
+                onClick={() => setSelectedFunction(null)}
+              >
                 ×
               </button>
             </div>
             
             <div className="modal-body">
-              <pre className="code-block">
+              <pre className="code-block bertui-animated bertui-fadeIn bertui-delay-1s">
                 <code>{selectedFunction.implementation}</code>
               </pre>
               
               <button 
-                className="copy-button"
+                className="copy-button bertui-animated bertui-pulse bertui-infinite bertui-slow"
                 onClick={() => copyCode(selectedFunction.implementation)}
               >
                 📋 Copy Code

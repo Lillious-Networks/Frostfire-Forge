@@ -9,10 +9,12 @@
     "preview": "bunx serve dist -p 5000"
   },
   "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "bertui-animate": "^1.0.0",
+    "bertui-icons": "^1.0.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "bertui": "latest"
+    "bertui": "1.1.5"
   }
 }
