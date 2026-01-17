@@ -1,0 +1,162 @@
+{
+  "name": "player_mount_base",
+  "imageSource": "player_mount_base.png",
+  "frameWidth": 64,
+  "frameHeight": 64,
+  "columns": 12,
+  "rows": 1,
+  "animations": {
+    "idle": {
+      "directions": {
+        "down": {
+          "frames": [1],
+          "frameDuration": 1000,
+          "loop": false,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "up": {
+          "frames": [10],
+          "frameDuration": 1000,
+          "loop": false,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "left": {
+          "frames": [6],
+          "frameDuration": 1000,
+          "loop": false,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "right": {
+          "frames": [5],
+          "frameDuration": 1000,
+          "loop": false,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "downleft": {
+          "frames": [1],
+          "frameDuration": 1000,
+          "loop": false,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "downright": {
+          "frames": [1],
+          "frameDuration": 1000,
+          "loop": false,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "upleft": {
+          "frames": [10],
+          "frameDuration": 1000,
+          "loop": false,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "upright": {
+          "frames": [10],
+          "frameDuration": 1000,
+          "loop": false,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        }
+      }
+    },
+    "walk": {
+      "directions": {
+        "down": {
+          "frames": [1, 2, 1, 0],
+          "frameDuration": 125,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "up": {
+          "frames": [10, 11, 10, 9],
+          "frameDuration": 125,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "left": {
+          "frames": [7, 8, 7, 6],
+          "frameDuration": 125,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "right": {
+          "frames": [4, 5, 4, 3],
+          "frameDuration": 125,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "downleft": {
+          "frames": [1, 2, 1, 0],
+          "frameDuration": 125,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "downright": {
+          "frames": [1, 2, 1, 0],
+          "frameDuration": 125,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "upleft": {
+          "frames": [10, 11, 10, 9],
+          "frameDuration": 125,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "upright": {
+          "frames": [10, 11, 10, 9],
+          "frameDuration": 125,
+          "loop": true,
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        }
+      }
+    }
+  }
+}

@@ -107,7 +107,7 @@ declare interface InventoryItem {
 
 type ItemType = "consumable" | "equipment" | "material" | "quest" | "miscellaneous";
 type ItemQuality = "common" | "uncommon" | "rare" | "epic" | "legendary";
-type ItemSlot = "head" | "necklace" | "shoulder" | "back" | "chest" | "wrists" | "hands" | "waist" | "legs" | "feet" | "ring_1" | "ring_2" | "trinket_1" | "trinket_2" | "weapon";
+type ItemSlot = "helmet" | "necklace" | "shoulderguards" | "cape" | "chestplate" | "wristguards" | "gloves" | "belt" | "pants" | "boots" | "ring_1" | "ring_2" | "trinket_1" | "trinket_2" | "weapon";
 
 // Define item data
 declare interface Item {
@@ -130,16 +130,18 @@ declare interface Item {
 
 declare interface Equipment {
   username: string;
+  helmet: Nullable<string>;
   head: Nullable<string>;
+  body: Nullable<string>;
   necklace: Nullable<string>;
-  shoulder: Nullable<string>;
-  back: Nullable<string>;
-  chest: Nullable<string>;
-  wrists: Nullable<string>;
-  hands: Nullable<string>;
-  waist: Nullable<string>;
-  legs: Nullable<string>;
-  feet: Nullable<string>;
+  shoulderguards: Nullable<string>;
+  cape: Nullable<string>;
+  chestplate: Nullable<string>;
+  wristguards: Nullable<string>;
+  gloves: Nullable<string>;
+  belt: Nullable<string>;
+  pants: Nullable<string>;
+  boots: Nullable<string>;
   ring_1: Nullable<string>;
   ring_2: Nullable<string>;
   trinket_1: Nullable<string>;
@@ -441,4 +443,76 @@ declare interface Collectable {
   item: string;
   username: string;
   icon?: string | null | Buffer<any>;
+}
+
+// Sprite Sheet Animation System Types
+
+declare interface SpriteSheetTemplate {
+  name: string;
+  imageSource: string;        // Path to sprite sheet PNG
+  frameWidth: number;          // Width of each frame in pixels
+  frameHeight: number;         // Height of each frame in pixels
+  columns: number;             // Number of columns in sprite sheet
+  rows: number;                // Number of rows in sprite sheet
+  animations: {
+    [animationName: string]: SpriteSheetAnimation;
+  };
+}
+
+declare interface SpriteSheetAnimation {
+  frames: number[];            // Array of frame indices (e.g., [0, 1, 2, 3] for walk cycle)
+  frameDuration: number;       // Duration per frame in milliseconds
+  loop: boolean;               // Whether animation should loop
+  offset?: {                   // Optional pixel offset for layer positioning
+    x: number;
+    y: number;
+  };
+}
+
+declare interface AnimationFrame {
+  imageElement: HTMLImageElement;
+  width: number;
+  height: number;
+  delay: number;               // Frame duration in ms
+  offset?: {                   // Layer-specific offset
+    x: number;
+    y: number;
+  };
+}
+
+declare interface AnimationLayer {
+  type: 'mount' | 'body' | 'head' | 'armor_helmet' | 'armor_neck' | 'armor_hands' | 'armor_chest' | 'armor_feet' | 'armor_legs' | 'armor_weapon';
+  spriteSheet: Nullable<SpriteSheetTemplate>;
+  frames: AnimationFrame[];
+  currentFrame: number;
+  lastFrameTime: number;
+  zIndex: number;              // Render order
+  visible: boolean;            // Whether to render this layer
+}
+
+declare interface LayeredAnimation {
+  layers: {
+    mount: Nullable<AnimationLayer>;
+    body: AnimationLayer;
+    head: AnimationLayer;
+    armor_helmet: Nullable<AnimationLayer>;
+    armor_neck: Nullable<AnimationLayer>;
+    armor_hands: Nullable<AnimationLayer>;
+    armor_chest: Nullable<AnimationLayer>;
+    armor_feet: Nullable<AnimationLayer>;
+    armor_legs: Nullable<AnimationLayer>;
+    armor_weapon: Nullable<AnimationLayer>;
+  };
+  currentAnimationName: string;  // Current animation state (idle, walk, attack, etc.)
+  syncFrames: boolean;           // Whether all layers advance frames together
+}
+
+declare interface SpriteSheetCache {
+  [spriteSheetName: string]: {
+    imageElement: HTMLImageElement;
+    template: SpriteSheetTemplate;
+    extractedFrames: {
+      [frameIndex: number]: HTMLImageElement;
+    };
+  };
 }

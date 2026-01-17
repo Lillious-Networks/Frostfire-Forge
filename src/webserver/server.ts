@@ -10,7 +10,7 @@ import query from "../controllers/sqldatabase";
 import * as settings from "../config/settings.json";
 import path from "path";
 import fs from "fs";
-import editor_html from "./www/public/editor.html";
+import animator_html from "./www/public/animator.html";
 import benchmark_html from "./www/public/benchmark.html";
 import connectiontest_html from "./www/public/connection-test.html";
 import login_html from "./www/public/index.html";
@@ -71,7 +71,7 @@ const routes = {
   "/": login_html,
   "/registration": register_html,
   "/game": game_html,
-  "/editor": editor_html,
+  "/animator": animator_html,
   "/login": (req: Request, server: any) => login(req, server),
   "/verify": (req: Request, server: any) => authenticate(req, server),
   "/register": (req: Request, server: any) => register(req, server),
@@ -275,7 +275,7 @@ Bun.serve({
       "/reset-password": routes["/reset-password"],
       "/update-password": routes["/update-password"],
       "/game": routes["/game"],
-      "/editor": routes["/editor"],
+      "/animator": routes["/animator"],
       "/login": routes["/login"],
       "/verify": routes["/verify"],
       "/tileset": routes["/tileset"],
@@ -313,13 +313,12 @@ Bun.serve({
 
     // Restrict direct ip access to the webserver
     if (process.env.DOMAIN?.replace(/https?:\/\//, "") !== url.host) {
+      log.debug(`Domain mismatch: expected "${process.env.DOMAIN?.replace(/https?:\/\//, "")}", got "${url.host}"`);
       return new Response(JSON.stringify({ message: "Invalid request" }), { status: 403 });
     }
 
     const route = routes[url.pathname as keyof typeof routes];
-    if (!route) {
-      return Response.redirect("/", 301);
-    }
+    if (!route) return Response.redirect("/", 301);
     return route[req.method as keyof typeof route]?.(req);
   },
   ...(_https ? {

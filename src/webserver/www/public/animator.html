@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/ico" href="./img/icons/favicon.ico">
+    <title>Frostfire Forge - Animation Metadata Tool</title>
+    <link rel="stylesheet" href="./css/animator.css">
+    <script defer src="./js/web/animator.js"></script>
+</head>
+<body>
+    <div class="home-button" onclick="location.href='/'"></div>
+
+    <div class="container">
+        <div class="header">
+            <h1>Animation Editor</h1>
+            <p>Create and edit sprite animations with frame-by-frame timeline control</p>
+        </div>
+
+        <div id="animator">
+            <!-- Top Actions Bar -->
+            <div id="animator-toolbar">
+                <div class="toolbar-section">
+                    <button id="new-metadata-btn" class="btn btn-primary">New</button>
+                    <label for="import-json-input" class="btn btn-secondary">Import</label>
+                    <input type="file" id="import-json-input" accept=".json" style="display: none;">
+                </div>
+                <div class="toolbar-section">
+                    <label style="display: flex; align-items: center; gap: 8px; color: #c4b5fd; font-size: 0.9em;">
+                        <input type="checkbox" id="autosave-checkbox" autocomplete="off">
+                        Autosave
+                    </label>
+                    <button id="export-json-btn" class="btn btn-success">Export</button>
+                </div>
+            </div>
+
+            <!-- Main Content Area -->
+            <div id="animator-content">
+                <!-- Left Section: Settings and Preview -->
+                <div id="left-section">
+                    <!-- Grid Settings and Preview -->
+                    <div class="panel-section">
+                        <h3>Spritesheet</h3>
+                        <div id="spritesheet-preview-container">
+                            <div id="spritesheet-preview-placeholder">
+                                <span>No spritesheet loaded</span>
+                                <button id="load-image-btn-alt" class="btn btn-secondary" style="margin-top: 8px;">Load Spritesheet</button>
+                            </div>
+                            <canvas id="spritesheet-preview-canvas"></canvas>
+                        </div>
+
+                        <h3 style="margin-top: 12px;">Settings</h3>
+                        <div class="settings-grid">
+                            <div class="form-group">
+                                <label for="frame-width">Frame Width:</label>
+                                <input type="number" id="frame-width" min="1" value="64" autocomplete="off">
+                            </div>
+                            <div class="form-group">
+                                <label for="frame-height">Frame Height:</label>
+                                <input type="number" id="frame-height" min="1" value="64" autocomplete="off">
+                            </div>
+                            <div class="form-group">
+                                <label for="columns">Columns:</label>
+                                <input type="number" id="columns" min="1" placeholder="Auto" autocomplete="off">
+                            </div>
+                            <div class="form-group">
+                                <label for="rows">Rows:</label>
+                                <input type="number" id="rows" min="1" placeholder="Auto" autocomplete="off">
+                            </div>
+                        </div>
+                        <button id="split-frames-btn" class="btn btn-primary">Split Frames</button>
+                    </div>
+
+                    <!-- Metadata Info -->
+                    <div id="info-panel" class="panel-section" style="display: none;">
+                        <h3>Info</h3>
+                        <div class="form-group">
+                            <label for="metadata-name">Name:</label>
+                            <input type="text" id="metadata-name" placeholder="e.g., player_body_base" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label for="image-source">Image Source:</label>
+                            <input type="text" id="image-source" placeholder="e.g., player_body_base.png" autocomplete="off">
+                        </div>
+                        <div class="section-header" style="margin-top: 12px;">
+                            <h4>Animation</h4>
+                            <div style="display: flex; gap: 6px;">
+                                <button id="add-animation-btn" class="btn btn-icon btn-secondary" title="Add Animation">+</button>
+                                <button id="edit-animation-btn" class="btn btn-icon btn-secondary" title="Edit Animation">✎</button>
+                                <button id="delete-animation-btn" class="btn btn-icon btn-danger" title="Delete Animation">×</button>
+                            </div>
+                        </div>
+                        <select id="animation-select" class="form-control" autocomplete="off">
+                            <option value="">Select animation...</option>
+                        </select>
+                        <div id="direction-select-container" style="margin-top: 12px; display: none;">
+                            <div class="section-header" style="margin-bottom: 6px;">
+                                <h4>Direction</h4>
+                                <div style="display: flex; gap: 6px;">
+                                    <button id="add-direction-btn" class="btn btn-icon btn-secondary" title="Add Direction">+</button>
+                                    <button id="edit-direction-btn" class="btn btn-icon btn-secondary" title="Edit Direction">✎</button>
+                                    <button id="delete-direction-btn" class="btn btn-icon btn-danger" title="Delete Direction">×</button>
+                                </div>
+                            </div>
+                            <div style="display: flex; gap: 6px; align-items: center;">
+                                <select id="direction-select" class="form-control" autocomplete="off" style="flex: 1;">
+                                    <option value="">Select direction...</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right Section: Frames and Timeline -->
+                <div id="right-section">
+                    <!-- Available Frames Grid -->
+                    <div class="panel-section frames-panel">
+                        <h3>Frames</h3>
+                        <div id="frames-grid"></div>
+                    </div>
+
+                    <!-- Timeline -->
+                    <div class="panel-section timeline-panel">
+                        <div class="section-header">
+                            <h3>Timeline</h3>
+                            <div class="timeline-controls">
+                                <button id="reset-position-btn" class="btn btn-small btn-secondary">Reset Position</button>
+                                <button id="clear-timeline-btn" class="btn btn-small btn-danger">Clear</button>
+                            </div>
+                        </div>
+
+                        <!-- Frame Sequence List -->
+                        <div id="frame-sequence-container">
+                            <div id="frame-sequence-list"></div>
+                        </div>
+
+                        <!-- Grid Editor -->
+                        <div id="timeline-grid-container">
+                            <canvas id="timeline-grid-canvas"></canvas>
+                            <div id="grid-frames-container"></div>
+                        </div>
+
+                        <div id="timeline-info">
+                            <span>Drop frames onto grid • Drag frames to adjust offset (centered at 0,0) • Click to select and edit</span>
+                        </div>
+
+                        <!-- Playback Controls -->
+                        <div id="playback-controls">
+                            <button id="play-pause-btn" class="btn btn-play">▶</button>
+                            <button id="stop-btn" class="btn btn-stop">⏹</button>
+                            <label style="margin-left: 8px; font-size: 0.85em;">
+                                <input type="checkbox" id="preview-loop-checkbox" checked>
+                                Loop
+                            </label>
+                            <div id="playback-info">
+                                <span id="current-frame-display">Frame: 0/0</span>
+                                <span id="current-time-display">Time: 0ms</span>
+                            </div>
+                        </div>
+
+                        <!-- Timeline Scrubber -->
+                        <div id="timeline-scrubber-container">
+                            <div id="timeline-scrubber">
+                                <div id="timeline-track"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Animation Modal Template -->
+    <div id="animation-modal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modal-title">Add Animation</h2>
+                <span class="modal-close">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="animation-name">Animation Name:</label>
+                    <input type="text" id="animation-name" placeholder="e.g., idle, walk, attack" autocomplete="off">
+                </div>
+                <button id="save-animation-btn" class="btn btn-primary">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Direction Modal Template -->
+    <div id="direction-modal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Add Direction</h2>
+                <span class="modal-close">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="direction-name">Direction:</label>
+                    <select id="direction-name" autocomplete="off">
+                        <option value="down">Down</option>
+                        <option value="up">Up</option>
+                        <option value="left">Left</option>
+                        <option value="right">Right</option>
+                        <option value="downleft">Down Left</option>
+                        <option value="downright">Down Right</option>
+                        <option value="upleft">Up Left</option>
+                        <option value="upright">Up Right</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Offset:</label>
+                    <div class="offset-inputs">
+                        <div>
+                            <label for="direction-offset-x">X:</label>
+                            <input type="number" id="direction-offset-x" value="0" autocomplete="off">
+                        </div>
+                        <div>
+                            <label for="direction-offset-y">Y:</label>
+                            <input type="number" id="direction-offset-y" value="0" autocomplete="off">
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="loop-checkbox" autocomplete="off">
+                        Loop Animation
+                    </label>
+                </div>
+                <button id="save-direction-btn" class="btn btn-primary">Save Direction</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Timeline Frame Properties Modal -->
+    <div id="frame-duration-modal" class="modal" style="display: none;">
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h2>Frame Properties</h2>
+                <span class="modal-close">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="timeline-frame-duration">Duration (ms):</label>
+                    <input type="number" id="timeline-frame-duration" min="1" value="150" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label>Position (X, Y):</label>
+                    <div class="offset-inputs">
+                        <div>
+                            <label for="timeline-frame-x">X:</label>
+                            <input type="number" id="timeline-frame-x" value="0" autocomplete="off">
+                        </div>
+                        <div>
+                            <label for="timeline-frame-y">Y:</label>
+                            <input type="number" id="timeline-frame-y" value="0" autocomplete="off">
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Offset (X, Y):</label>
+                    <div class="offset-inputs">
+                        <div>
+                            <label for="timeline-frame-offset-x">X:</label>
+                            <input type="number" id="timeline-frame-offset-x" value="0" autocomplete="off">
+                        </div>
+                        <div>
+                            <label for="timeline-frame-offset-y">Y:</label>
+                            <input type="number" id="timeline-frame-offset-y" value="0" autocomplete="off">
+                        </div>
+                    </div>
+                </div>
+                <button id="save-frame-duration-btn" class="btn btn-primary">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirmation Modal -->
+    <div id="confirm-modal" class="modal" style="display: none;">
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h2 id="confirm-title">Confirm</h2>
+                <span class="modal-close">&times;</span>
+            </div>
+            <div class="modal-body">
+                <p id="confirm-message" style="margin-bottom: 20px;"></p>
+                <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                    <button id="confirm-cancel-btn" class="btn btn-secondary">Cancel</button>
+                    <button id="confirm-ok-btn" class="btn btn-primary">Okay</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notification Container -->
+    <div id="notification-container"></div>
+</body>
+</html>

@@ -7,6 +7,7 @@ import { updateHealthBar, updateStaminaBar } from "./ui.js";
 import { updateWeatherCanvas, weather } from './weather.ts';
 import { chatInput } from "./chat.js";
 import { friendsListSearch } from "./friends.js";
+import { animationManager } from "./animationStateManager.js";
 const times = [] as number[];
 let lastDirection = "";
 let pendingRequest = false;
@@ -329,6 +330,9 @@ function animationLoop() {
     return;
   }
 
+  // Update layered animations for all players
+  animationManager.updateAllPlayers(cache.players, deltaTime);
+
   // Initialize camera to spawn position on first frame (before any smoothing)
   if (!cameraInitialized && window.mapData) {
     const initialX = window.mapData.spawnX || currentPlayer.position.x;
@@ -493,16 +497,6 @@ function animationLoop() {
       npc.dialogue(ctx);
     }
 
-    // Render damage numbers for all visible players
-    for (const p of visiblePlayers) p.showDamageNumbers(ctx);
-
-    // Render castbars for all visible players (excluding current player)
-    for (const p of visiblePlayers) {
-      if (p.id !== cachedPlayerId) {
-        p.showCastbar(ctx);
-      }
-    }
-
     // Render projectiles
     const now = performance.now();
     for (let i = cache.projectiles.length - 1; i >= 0; i--) {
@@ -572,7 +566,6 @@ function animationLoop() {
       }
     }
 
-    for (const p of visiblePlayers) p.showChat(ctx, currentPlayer);
   }
 
   // Restore context
@@ -795,6 +788,35 @@ function animationLoop() {
     const offsetY = Math.round(window.innerHeight / 2 - smoothMapY);
     ctx.translate(offsetX, offsetY);
     (window as any).tileEditor.renderPreview();
+    ctx.restore();
+  }
+
+  // Render chat messages, damage numbers, and castbars on top of everything
+  // Order: chat -> damage numbers -> castbars (castbars on top)
+  if (!wireframeDebugCheckbox.checked) {
+    ctx.save();
+    const offsetX = Math.round(window.innerWidth / 2 - smoothMapX);
+    const offsetY = Math.round(window.innerHeight / 2 - smoothMapY);
+    ctx.translate(offsetX, offsetY);
+    ctx.imageSmoothingEnabled = false;
+
+    // Render chat messages (bottom layer of UI elements)
+    for (const p of visiblePlayers) {
+      p.showChat(ctx, currentPlayer);
+    }
+
+    // Render damage numbers (middle layer - above chat)
+    for (const p of visiblePlayers) {
+      p.showDamageNumbers(ctx);
+    }
+
+    // Render castbars (top layer - above everything)
+    for (const p of visiblePlayers) {
+      if (p.id !== cachedPlayerId) {
+        p.showCastbar(ctx);
+      }
+    }
+
     ctx.restore();
   }
 

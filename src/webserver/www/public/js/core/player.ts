@@ -2,12 +2,13 @@ import Cache from "./cache.js";
 const cache = Cache.getInstance();
 import { cachedPlayerId } from "./socket.js";
 import { updateFriendOnlineStatus, updateFriendsList } from "./friends.js";
-import { initializeAnimationWithWorker } from "./animation.js";
 import { getCameraX, getCameraY, setCameraX, setCameraY } from "./renderer.js";
 import { createPartyUI, positionText } from "./ui.js";
 import { updateXp } from "./xp.js";
 import  { typingImage } from "./images.js";
 import { getLines } from "./chat.js";
+import { initializeLayeredAnimation } from "./layeredAnimation.js";
+import { getVisibleLayersSorted } from "./layeredAnimation.js";
 
 async function createPlayer(data: any) {
   if (data.id === cachedPlayerId) {
@@ -15,13 +16,33 @@ async function createPlayer(data: any) {
   }
 
   updateFriendOnlineStatus(data.username, true);
-  const animationPromise = initializeAnimationWithWorker(data.animation);
+
+  // Initialize sprite sheet layered animation system
+  let layeredAnimationPromise = null;
+
+  if (data.bodySprite && data.headSprite) {
+    layeredAnimationPromise = initializeLayeredAnimation(
+      data.mountSprite || null,
+      data.bodySprite,
+      data.headSprite,
+      data.armorHelmetSprite || null,
+      data.armorNeckSprite || null,
+      data.armorHandsSprite || null,
+      data.armorChestSprite || null,
+      data.armorFeetSprite || null,
+      data.armorLegsSprite || null,
+      data.armorWeaponSprite || null,
+      data.animationState || 'idle'
+    );
+  }
 
   const player = {
     id: data.id,
     username: data.username,
     userid: data.userid,
-    animation: null as null | Awaited<ReturnType<typeof initializeAnimationWithWorker>>,
+    layeredAnimation: null as null | LayeredAnimation,
+    _layerCanvases: {} as Record<string, HTMLCanvasElement>,
+    lastDirection: "down" as string,
     friends: data.friends || [],
     position: {
       x: data.location.x,
@@ -324,40 +345,76 @@ async function createPlayer(data: any) {
       }
     },
     renderAnimation: function (context: CanvasRenderingContext2D) {
-      if (!this.animation?.frames?.length) {
+      // Use sprite sheet layered animation system only
+      if (!this.layeredAnimation) {
         return;
       }
 
-      const now = performance.now();
-      const frame = this.animation.frames[this.animation.currentFrame];
+      this.renderLayeredAnimation(context);
+    },
+    renderLayeredAnimation: function (context: CanvasRenderingContext2D) {
+      if (!this.layeredAnimation) return;
 
-      if (now - this.animation.lastFrameTime > frame.delay) {
-        this.animation.currentFrame = (this.animation.currentFrame + 1) % this.animation.frames.length;
-        this.animation.lastFrameTime = now;
+      const layers = getVisibleLayersSorted(this.layeredAnimation);
+      if (layers.length === 0) return;
+
+      // Create offscreen canvases for each layer if needed
+      if (!this._layerCanvases) {
+        this._layerCanvases = {};
       }
 
-      if (frame.imageElement?.complete) {
-        // Only change alpha if needed
-        if (this.isStealth) {
-          context.globalAlpha = 0.5;
-          context.drawImage(
-            frame.imageElement,
-            Math.round(this.position.x - frame.width/2),
-            Math.round(this.position.y - frame.height/2),
-            frame.width,
-            frame.height
-          );
-          context.globalAlpha = 1;
-        } else {
-          context.drawImage(
-            frame.imageElement,
-            Math.round(this.position.x - frame.width/2),
-            Math.round(this.position.y - frame.height/2),
-            frame.width,
-            frame.height
-          );
+      // Save context state
+      context.save();
+
+      // Enable pixel-perfect rendering
+      context.imageSmoothingEnabled = false;
+
+      // Apply stealth opacity if needed
+      if (this.isStealth) {
+        context.globalAlpha = 0.5;
+      }
+
+      // Render each layer separately
+      for (const layer of layers) {
+        if (layer.frames.length === 0) continue;
+
+        const frame = layer.frames[layer.currentFrame];
+        if (!frame || !frame.imageElement?.complete) continue;
+
+        // Create unique canvas for this layer if it doesn't exist
+        // Include animation name and mount status to prevent cache collisions
+        const isMounted = this.layeredAnimation.layers.mount !== null;
+        const layerKey = `${layer.type}_${this.layeredAnimation.currentAnimationName}_${layer.currentFrame}_${isMounted}`;
+        if (!this._layerCanvases[layerKey]) {
+          const layerCanvas = document.createElement('canvas');
+          layerCanvas.width = frame.width;
+          layerCanvas.height = frame.height;
+          const layerCtx = layerCanvas.getContext('2d');
+
+          if (layerCtx) {
+            // Disable image smoothing on layer canvas too
+            layerCtx.imageSmoothingEnabled = false;
+            layerCtx.clearRect(0, 0, layerCanvas.width, layerCanvas.height);
+            layerCtx.drawImage(frame.imageElement, 0, 0);
+          }
+
+          this._layerCanvases[layerKey] = layerCanvas;
         }
+
+        const layerCanvas = this._layerCanvases[layerKey];
+        const offsetX = frame.offset?.x || 0;
+        const offsetY = frame.offset?.y || 0;
+
+        // Draw directly to main canvas with pixel-perfect positioning
+        context.drawImage(
+          layerCanvas,
+          Math.round(this.position.x - frame.width / 2 + offsetX),
+          Math.round(this.position.y - frame.height / 2 + offsetY)
+        );
       }
+
+      // Restore context state
+      context.restore();
     },
     show: function (context: CanvasRenderingContext2D, currentPlayer?: any) {
       // UI offset for all players
@@ -561,7 +618,10 @@ async function createPlayer(data: any) {
 
   cache.players.add(player);
 
-  player.animation = await animationPromise;
+  // Load sprite sheet layered animation system
+  if (layeredAnimationPromise) {
+    player.layeredAnimation = await layeredAnimationPromise;
+  }
 
   if (data.id === cachedPlayerId) {
     setCameraX(player.position.x - window.innerWidth / 2 + 8);

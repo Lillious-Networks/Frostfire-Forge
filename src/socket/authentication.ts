@@ -29,11 +29,18 @@ const authentication = {
 
             const getUsername = (await player.getUsernameBySession(id)) as any[];
             const username = getUsername[0]?.username as string;
-            const playerData = await player.GetPlayerLoginData(username) as PlayerData;
+            const playerData = await player.GetPlayerLoginData(username) as unknown as PlayerData;
             const equipmentItems = items.filter((i: Item) => i.type === "equipment" && i.equipment_slot && i.name);
 
             // Remove invalid equipment items that do not exist in items cache
+            // BUT: Skip armor sprite fields - these are sprite sheet template names, not item names
             for (const slot in playerData.equipment) {
+                // Skip validation for sprite sheet template fields - they're not item names
+                if (slot === 'body' || slot === 'head' || slot === 'helmet' || slot === 'necklace' ||
+                    slot === 'gloves' || slot === 'chestplate' || slot === 'boots' || slot === 'pants' || slot === 'weapon') {
+                    continue;
+                }
+
                 const itemName = playerData.equipment[slot as keyof Equipment];
                 if (itemName) {
                     const exists = equipmentItems.some((item: Item) => item.name.toLowerCase() === itemName.toLowerCase() && item.equipment_slot?.toLowerCase() === slot.toLowerCase());

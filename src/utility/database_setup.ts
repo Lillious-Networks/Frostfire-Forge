@@ -419,11 +419,10 @@ const createMountsTable = async () => {
   await query(sql);
 };
 
-// Insert horse mount as default mount
 const insertDefaultMount = async () => {
   log.info("Inserting default mount...");
   const sql = `
-    INSERT IGNORE INTO mounts (name, description, particles, icon) VALUES ('horse', 'A sturdy horse for traveling.', NULL, 'mount_horse');
+    INSERT IGNORE INTO mounts (name, description, particles, icon) VALUES ('unicorn', 'A sturdy unicorn for traveling.', NULL, 'mount_unicorn');
   `;
   await query(sql);
 };
@@ -459,16 +458,18 @@ const createEquipmentTable = async () => {
     CREATE TABLE IF NOT EXISTS equipment (
       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
       username VARCHAR(255) NOT NULL UNIQUE,
-      head VARCHAR(255) DEFAULT NULL,
+      head VARCHAR(255) DEFAULT 'player_head_default',
+      body VARCHAR(255) DEFAULT 'player_body_default',
+      helmet VARCHAR(255) DEFAULT NULL,
       necklace VARCHAR(255) DEFAULT NULL,
-      shoulder VARCHAR(255) DEFAULT NULL,
-      back VARCHAR(255) DEFAULT NULL,
-      chest VARCHAR(255) DEFAULT NULL,
-      wrists VARCHAR(255) DEFAULT NULL,
-      hands VARCHAR(255) DEFAULT NULL,
-      waist VARCHAR(255) DEFAULT NULL,
-      legs VARCHAR(255) DEFAULT NULL,
-      feet VARCHAR(255) DEFAULT NULL,
+      shoulderguards VARCHAR(255) DEFAULT NULL,
+      cape VARCHAR(255) DEFAULT NULL,
+      chestplate VARCHAR(255) DEFAULT NULL,
+      wristguards VARCHAR(255) DEFAULT NULL,
+      gloves VARCHAR(255) DEFAULT NULL,
+      belt VARCHAR(255) DEFAULT NULL,
+      pants VARCHAR(255) DEFAULT NULL,
+      boots VARCHAR(255) DEFAULT NULL,
       ring_1 VARCHAR(255) DEFAULT NULL,
       ring_2 VARCHAR(255) DEFAULT NULL,
       trinket_1 VARCHAR(255) DEFAULT NULL,

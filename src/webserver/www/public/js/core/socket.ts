@@ -375,6 +375,121 @@ socket.onmessage = async (event) => {
       }
       break;
     }
+    case "SPRITE_SHEET_ANIMATION": {
+      try {
+        // At least one sprite layer must be present to render
+        if (!data?.bodySprite && !data?.headSprite && !data?.bodyArmorSprite && !data?.headArmorSprite) {
+          console.warn("Sprite sheet animation data has no layers to render");
+          return;
+        }
+
+        const findPlayer = async () => {
+          const player = cache.players.size
+            ? Array.from(cache.players).find((p) => p.id === data.id)
+            : null;
+
+          if (player) {
+            // Import layered animation system dynamically
+            const { initializeLayeredAnimation, changeLayeredAnimation } = await import('./layeredAnimation.js');
+
+            // Process animation state and direction
+            let animationState = data.animationState || 'idle';
+            const originalAnimationState = animationState;
+
+            // If animation state includes direction, extract and store it
+            if (animationState.includes('_')) {
+              const direction = animationState.split('_')[1];
+              player.lastDirection = direction;
+            } else {
+              // No direction in animation state, append last known direction
+              animationState = `${animationState}_${player.lastDirection}`;
+            }
+
+            // Check if player already has a layered animation with the same sprite sheets
+            const hasExisting = player.layeredAnimation;
+            const spriteSheetsChanged = hasExisting ? (
+              player.layeredAnimation.layers.mount?.spriteSheet?.name !== data.mountSprite?.name ||
+              player.layeredAnimation.layers.body?.spriteSheet?.name !== data.bodySprite?.name ||
+              player.layeredAnimation.layers.head?.spriteSheet?.name !== data.headSprite?.name ||
+              player.layeredAnimation.layers.armor_helmet?.spriteSheet?.name !== data.armorHelmetSprite?.name ||
+              player.layeredAnimation.layers.armor_neck?.spriteSheet?.name !== data.armorNeckSprite?.name ||
+              player.layeredAnimation.layers.armor_hands?.spriteSheet?.name !== data.armorHandsSprite?.name ||
+              player.layeredAnimation.layers.armor_chest?.spriteSheet?.name !== data.armorChestSprite?.name ||
+              player.layeredAnimation.layers.armor_feet?.spriteSheet?.name !== data.armorFeetSprite?.name ||
+              player.layeredAnimation.layers.armor_legs?.spriteSheet?.name !== data.armorLegsSprite?.name ||
+              player.layeredAnimation.layers.armor_weapon?.spriteSheet?.name !== data.armorWeaponSprite?.name
+            ) : true;
+
+            if (!hasExisting || spriteSheetsChanged) {
+              // Initialize new layered animation if none exists or sprite sheets changed
+              player.layeredAnimation = await initializeLayeredAnimation(
+                data.mountSprite || null,
+                data.bodySprite || null,
+                data.headSprite || null,
+                data.armorHelmetSprite || null,
+                data.armorNeckSprite || null,
+                data.armorHandsSprite || null,
+                data.armorChestSprite || null,
+                data.armorFeetSprite || null,
+                data.armorLegsSprite || null,
+                data.armorWeaponSprite || null,
+                animationState
+              );
+            } else {
+              // Sprite sheet names haven't changed, but update templates in case JSON content changed
+              if (data.mountSprite && player.layeredAnimation.layers.mount) {
+                player.layeredAnimation.layers.mount.spriteSheet = data.mountSprite;
+              }
+              if (data.bodySprite && player.layeredAnimation.layers.body) {
+                player.layeredAnimation.layers.body.spriteSheet = data.bodySprite;
+              }
+              if (data.headSprite && player.layeredAnimation.layers.head) {
+                player.layeredAnimation.layers.head.spriteSheet = data.headSprite;
+              }
+              if (data.armorHelmetSprite && player.layeredAnimation.layers.armor_helmet) {
+                player.layeredAnimation.layers.armor_helmet.spriteSheet = data.armorHelmetSprite;
+              }
+              if (data.armorNeckSprite && player.layeredAnimation.layers.armor_neck) {
+                player.layeredAnimation.layers.armor_neck.spriteSheet = data.armorNeckSprite;
+              }
+              if (data.armorHandsSprite && player.layeredAnimation.layers.armor_hands) {
+                player.layeredAnimation.layers.armor_hands.spriteSheet = data.armorHandsSprite;
+              }
+              if (data.armorChestSprite && player.layeredAnimation.layers.armor_chest) {
+                player.layeredAnimation.layers.armor_chest.spriteSheet = data.armorChestSprite;
+              }
+              if (data.armorFeetSprite && player.layeredAnimation.layers.armor_feet) {
+                player.layeredAnimation.layers.armor_feet.spriteSheet = data.armorFeetSprite;
+              }
+              if (data.armorLegsSprite && player.layeredAnimation.layers.armor_legs) {
+                player.layeredAnimation.layers.armor_legs.spriteSheet = data.armorLegsSprite;
+              }
+              if (data.armorWeaponSprite && player.layeredAnimation.layers.armor_weapon) {
+                player.layeredAnimation.layers.armor_weapon.spriteSheet = data.armorWeaponSprite;
+              }
+
+              if (player.layeredAnimation.currentAnimationName !== animationState) {
+                // Change animation state if needed
+                await changeLayeredAnimation(player.layeredAnimation, animationState);
+              }
+            }
+
+            // Clear old APNG animation if present
+            player.animation = null;
+          } else {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            await findPlayer();
+          }
+        };
+
+        findPlayer().catch((err) =>
+          console.error("Error in findPlayer (sprite sheet):", err)
+        );
+      } catch (error) {
+        console.error("Failed to process sprite sheet animation data:", error);
+      }
+      break;
+    }
     case "PONG":
       sendRequest({
         type: "LOGIN",
@@ -855,11 +970,16 @@ socket.onmessage = async (event) => {
         if (slotType) {
           slot.setAttribute("data-slot", slotType);
         }
+        // Add a unique update ID to prevent stale image loads from appending
+        (slot as any)._updateId = Date.now() + Math.random();
       });
 
       // Populate equipment slots with equipped items
       for (const [slotName, itemName] of Object.entries(data)) {
         if (!itemName) continue; // Skip empty slots
+
+        // Skip body and head - these are sprite sheet template names, not UI equipment slots
+        if (slotName === 'body' || slotName === 'head') continue;
 
         // Find the slot element by data-slot attribute
         const slotElement = document.querySelector(`.slot[data-slot="${slotName}"]`) as HTMLDivElement;
@@ -890,8 +1010,13 @@ socket.onmessage = async (event) => {
           iconImage.draggable = false;
           iconImage.width = 32;
           iconImage.height = 32;
+          // Capture the current update ID to prevent race conditions
+          const currentUpdateId = (slotElement as any)._updateId;
           iconImage.onload = () => {
-            slotElement.appendChild(iconImage);
+            // Only append if this is still the current update (prevents stale loads)
+            if ((slotElement as any)._updateId === currentUpdateId) {
+              slotElement.appendChild(iconImage);
+            }
           };
 
           // Add double-click to unequip
@@ -1518,6 +1643,8 @@ socket.onmessage = async (event) => {
           if (slotType) {
             slot.setAttribute("data-slot", slotType);
           }
+          // Add a unique update ID to prevent stale image loads from appending
+          (slot as any)._updateId = Date.now() + Math.random();
         });
 
         // Populate equipment slots - simplified version without event handlers for inspecting
@@ -1526,6 +1653,9 @@ socket.onmessage = async (event) => {
 
         for (const [slotName, itemName] of Object.entries(data.equipment)) {
           if (!itemName) continue;
+
+          // Skip body and head - these are sprite sheet template names, not UI equipment slots
+          if (slotName === 'body' || slotName === 'head') continue;
 
           const slotElement = document.querySelector(`.slot[data-slot="${slotName}"]`) as HTMLDivElement;
           if (!slotElement) continue;
@@ -1549,8 +1679,13 @@ socket.onmessage = async (event) => {
             iconImage.draggable = false;
             iconImage.width = 32;
             iconImage.height = 32;
+            // Capture the current update ID to prevent race conditions
+            const currentUpdateId = (slotElement as any)._updateId;
             iconImage.onload = () => {
-              slotElement.appendChild(iconImage);
+              // Only append if this is still the current update (prevents stale loads)
+              if ((slotElement as any)._updateId === currentUpdateId) {
+                slotElement.appendChild(iconImage);
+              }
             };
 
             // Setup tooltip for inspected player's equipment
