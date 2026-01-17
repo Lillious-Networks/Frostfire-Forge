@@ -271,13 +271,11 @@ function toggleDebugContainer() {
 }
 
 function handleStatsUI() {
-  const isCurrentPlayerStats = statUI.getAttribute("data-id") === cachedPlayerId;
-
   // If stat sheet is open
   if (statUI.style.left === "10px") {
     // Close it (whether it's showing current player or inspected player)
     statUI.style.transition = "1s";
-    statUI.style.left = "-570";
+    statUI.style.left = "-600";
   } else {
     // If closed, open it with current player's stats
     sendRequest({ type: "INSPECTPLAYER", data: null });
@@ -879,7 +877,6 @@ function setupInventorySlotHandlers() {
         }
 
         const sourceIndex = event.dataTransfer.getData("inventory-rearrange-index");
-        const itemName = event.dataTransfer.getData("inventory-item-name");
 
         if (sourceIndex !== "" && sourceIndex !== index.toString()) {
           const sourceSlot = inventorySlots[parseInt(sourceIndex)];
