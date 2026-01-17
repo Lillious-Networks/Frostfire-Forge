@@ -1,6 +1,14 @@
-// src/pages/index.jsx
 import { Link } from 'bertui/router';
 import '../styles/home.css';
+import * as icons from "bertui-icons";
+
+export const render = "server";
+
+export const meta = {
+  title: "Frostfire Forge - Modern 2D MMO Game Engine",
+  description: "High-performance 2D MMO game engine built with Bun, TypeScript, and modern web technologies",
+  keywords: "mmo, game engine, 2d, bun, typescript, react, multiplayer"
+};
 
 export default function Home() {
   return (
@@ -8,7 +16,7 @@ export default function Home() {
       {/* Hero Section */}
       <div className="ff-hero">
         <div className="ff-hero-content">
-          <div className="ff-hero-left">
+          <div className="ff-hero-left bertui-animated bertui-fadeInLeft">
             <img 
               src="../images/teaser1.png" 
               alt="Game Teaser" 
@@ -16,26 +24,36 @@ export default function Home() {
             />
           </div>
           
-          <div className="ff-hero-center">
-            
-            {/* Logo between title and badges */}
+          <div className="ff-hero-center bertui-animated bertui-zoomIn">
+            {/* Logo */}
             <img 
               src="../images/engine-logo-transparent.png" 
               alt="Frostfire Forge Logo" 
-              className="ff-logo"
+              className="ff-logo bertui-animated bertui-fadeInDown"
             />
             
             {/* Status Badges */}
-            <div className="ff-badges">
-              <span className="ff-badge ff-badge-warning">🚧 Work in Progress</span>
-              <span className="ff-badge ff-badge-success">✓ Production Build</span>
-              <span className="ff-badge ff-badge-info">v1.0.0</span>
+            <div className="ff-badges bertui-animated bertui-fadeIn bertui-delay-1s">
+              <div className="ff-badge ff-badge-warning bertui-animated bertui-pulse bertui-infinite">
+                <icons.Anchor size={16} color="orange" />
+                Work in Progress
+              </div>
+              <div className="ff-badge ff-badge-success">
+                <icons.Sparkle size={16} color="green" />
+                Production Build
+              </div>
+              <div className="ff-badge ff-badge-info">
+                <icons.Info size={16} color="skyblue" />
+                v1.0.0
+              </div>
             </div>
 
             {/* CTA Buttons */}
-            <div className="ff-cta-buttons">
-              <Link to="/getting-started" className="ff-btn ff-btn-primary">
-                Get Started →
+            <div className="ff-cta-buttons bertui-animated bertui-fadeInUp bertui-delay-1s">
+              <Link to="/getting-started" className="ff-btn ff-btn-primary bertui-animated bertui-pulse bertui-infinite">
+                <icons.Rocket size={24} />
+                Get Started
+                <icons.ArrowRight size={24} />
               </Link>
               <a 
                 href="https://github.com/Lillious-Networks/Frostfire-Forge" 
@@ -43,12 +61,13 @@ export default function Home() {
                 rel="noopener noreferrer"
                 className="ff-btn ff-btn-secondary"
               >
+                <icons.GitBranch size={24} />
                 View on GitHub
               </a>
             </div>
           </div>
           
-          <div className="ff-hero-right">
+          <div className="ff-hero-right bertui-animated bertui-fadeInRight">
             <img 
               src="../images/teaser1.png" 
               alt="Game Teaser" 
@@ -58,157 +77,148 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Rest of your components remain the same */}
       {/* Features Grid */}
-      <div className="ff-features">
-        <h2 className="ff-section-title">Why Frostfire Forge?</h2>
+      <div className="ff-features bertui-animated bertui-fadeInUp">
+        <h2 className="ff-section-title">
+          <icons.Star size={32} color="orange" className="bertui-animated bertui-tada bertui-infinite bertui-slow" />
+          Why Frostfire Forge?
+        </h2>
         
         <div className="ff-features-grid">
           <FeatureCard
-            icon="⚡"
+            Icon={icons.Zap}
             title="High Performance"
             description="Built on Bun runtime for lightning-fast execution and minimal overhead"
+            animClass="bertui-animated bertui-fadeInUp bertui-delay-1s"
           />
           <FeatureCard
-            icon="🌐"
+            Icon={icons.Globe}
             title="Real-time Multiplayer"
             description="WebSocket server with optimized packet handling for seamless gameplay"
+            animClass="bertui-animated bertui-fadeInUp bertui-delay-2s"
           />
           <FeatureCard
-            icon="💾"
+            Icon={icons.Database}
             title="Flexible Database"
             description="Support for MySQL and SQLite with Redis caching for optimal performance"
+            animClass="bertui-animated bertui-fadeInUp bertui-delay-3s"
           />
           <FeatureCard
-            icon="🔒"
+            Icon={icons.Shield}
             title="Secure by Design"
             description="Built-in authentication, rate limiting, and permission systems"
+            animClass="bertui-animated bertui-fadeInUp bertui-delay-4s"
           />
           <FeatureCard
-            icon="🎮"
+            Icon={icons.Gamepad}
             title="Complete Game Systems"
             description="Player management, combat, quests, guilds, parties, and more"
+            animClass="bertui-animated bertui-fadeInUp bertui-delay-5s"
           />
           <FeatureCard
-            icon="🐳"
-            title="Docker Ready"
-            description="Pre-configured containers for development and production deployment"
+            Icon={icons.Package}
+            title="Deployment Ready"
+            description="Pre-configured setups for development and production deployment"
+            animClass="bertui-animated bertui-fadeInUp bertui-fast"
           />
         </div>
       </div>
 
       {/* Tech Stack */}
-      <div className="ff-tech-stack">
-        <h2 className="ff-section-title">Built With Modern Technologies</h2>
+      <div className="ff-tech-stack bertui-animated bertui-fadeIn">
+        <h2 className="ff-section-title">
+          <icons.Cpu size={32} color="skyblue" />
+          Built With Modern Technologies
+        </h2>
         <div className="ff-tech-grid">
-          <TechBadge name="Bun" />
-          <TechBadge name="TypeScript" />
-          <TechBadge name="MySQL" />
-          <TechBadge name="Redis" />
-          <TechBadge name="WebSockets" />
-          <TechBadge name="Docker" />
-          <TechBadge name="React" />
-          <TechBadge name="OpenAI" />
+          <TechBadge name="Bun" Icon={icons.Server} delay="bertui-delay-1s" />
+          <TechBadge name="TypeScript" Icon={icons.FileCode} delay="bertui-delay-2s" />
+          <TechBadge name="MySQL" Icon={icons.Database} delay="bertui-delay-3s" />
+          <TechBadge name="Redis" Icon={icons.HardDrive} delay="bertui-delay-4s" />
+          <TechBadge name="WebSockets" Icon={icons.Network} delay="bertui-delay-5s" />
+          <TechBadge name="Docker" Icon={icons.Package} delay="bertui-fast" />
+          <TechBadge name="React" Icon={icons.Code} delay="bertui-slow" />
+          <TechBadge name="OpenAI" Icon={icons.Cloud} delay="bertui-slower" />
         </div>
       </div>
 
       {/* Quick Links */}
       <div className="ff-quick-links">
-        <h2 className="ff-section-title">Documentation</h2>
+        <h2 className="ff-section-title bertui-animated bertui-fadeIn">
+          <icons.Book size={32} color="royalblue" />
+          Documentation
+        </h2>
         <div className="ff-links-grid">
-          <QuickLink
-            to="/getting-started"
-            icon="🚀"
-            title="Getting Started"
-            description="Quick setup guide for development and production"
-          />
-          <QuickLink
-            to="/api"
-            icon="📚"
-            title="API Reference"
-            description="Complete system API documentation"
-          />
-          <QuickLink
-            to="/commands"
-            icon="⌨️"
-            title="Commands"
-            description="Admin and player command reference"
-          />
-          <QuickLink
-            to="/events"
-            icon="⚡"
-            title="Event System"
-            description="Server lifecycle and event hooks"
-          />
-          <QuickLink
-            to="/docker"
-            icon="🐳"
-            title="Docker Setup"
-            description="Container deployment guide"
-          />
-          <QuickLink
-            to="/environment"
-            icon="⚙️"
-            title="Environment Variables"
-            description="Configuration options"
-          />
-          <QuickLink
-            to="/functions"
-            icon="X"
-            title="Types of functions"
-            description="Functions "
-          />
+          <QuickLink to="/getting-started" Icon={icons.Rocket} title="Getting Started" description="Quick setup guide" anim="bertui-animated bertui-fadeInLeft" />
+          <QuickLink to="/api" Icon={icons.Book} title="API Reference" description="System documentation" anim="bertui-animated bertui-fadeInRight" />
+          <QuickLink to="/commands" Icon={icons.Terminal} title="Commands" description="Command reference" anim="bertui-animated bertui-fadeInLeft" />
+          <QuickLink to="/events" Icon={icons.Zap} title="Event System" description="Server lifecycle hooks" anim="bertui-animated bertui-fadeInRight" />
+          <QuickLink to="/docker" Icon={icons.Package} title="Docker Setup" description="Deployment guide" anim="bertui-animated bertui-fadeInLeft" />
+          <QuickLink to="/environment" Icon={icons.Settings} title="Environment" description="Config options" anim="bertui-animated bertui-fadeInRight" />
+          <QuickLink to="/functions" Icon={icons.Code} title="System Functions" description="Core API reference" anim="bertui-animated bertui-fadeInUp" />
         </div>
       </div>
 
       {/* Footer */}
-      <footer className="ff-footer">
-        <p>Built with ❤️ by the Frostfire Forge Team</p>
+      <footer className="ff-footer bertui-animated bertui-fadeIn">
+        <p>
+          <icons.Heart size={24} color="red" className="bertui-animated bertui-heartBeat bertui-infinite" />
+          Built by the Frostfire Forge Team
+        </p>
         <p className="ff-footer-links">
           <a href="https://github.com/Lillious-Networks/Frostfire-Forge" target="_blank" rel="noopener noreferrer">
-            GitHub
+            <icons.GitBranch size={16} /> GitHub
           </a>
           <span>•</span>
           <a href="https://discord.gg/4spUbuXBvZ" target="_blank" rel="noopener noreferrer">
-            Discord
+            <icons.User size={16} /> Discord
           </a>
-          <p>
-            Built for speed using <a href="https://bertui-docswebsite.vercel.app/" target="_blank" rel="noopener        noreferrer">BertUI</a>, the world's fastest ui Library.
-          </p>
-          
-
           <span>•</span>
-          <span>MIT License</span>
+          <span>
+            <icons.Zap size={16} /> Built with <a href="https://bertui-docswebsite.vercel.app/">BertUI</a>
+          </span>
+          <span>•</span>
+          <span>
+            <icons.ShieldCheck size={16} /> MIT License
+          </span>
         </p>
       </footer>
     </div>
   );
 }
 
-// Helper Components remain the same
-function FeatureCard({ icon, title, description }) {
+function FeatureCard({ Icon, title, description, animClass }) {
   return (
-    <div className="ff-feature-card">
-      <div className="ff-feature-icon">{icon}</div>
-      <h3 className="ff-feature-title">{title}</h3>
-      <p className="ff-feature-desc">{description}</p>
+    <div className={`ff-feature-card ${animClass}`}>
+      <Icon size={32} className="bertui-animated bertui-pulse bertui-infinite bertui-slow" />
+      <h3>{title}</h3>
+      <p>{description}</p>
     </div>
   );
 }
 
-function TechBadge({ name }) {
-  return <div className="ff-tech-badge">{name}</div>;
+function TechBadge({ name, Icon, delay }) {
+  return (
+    <div className={`ff-tech-badge bertui-animated bertui-zoomIn ${delay}`}>
+      <Icon size={16} />
+      {name}
+    </div>
+  );
 }
 
-function QuickLink({ to, icon, title, description }) {
+function QuickLink({ to, Icon, title, description, anim }) {
   return (
-    <Link to={to} className="ff-quick-link">
-      <div className="ff-quick-link-icon">{icon}</div>
+    <Link to={to} className={`ff-quick-link ${anim}`}>
+      <div className="ff-quick-link-icon">
+        <Icon size={32} />
+      </div>
       <div className="ff-quick-link-content">
         <h3 className="ff-quick-link-title">{title}</h3>
         <p className="ff-quick-link-desc">{description}</p>
       </div>
-      <div className="ff-quick-link-arrow">→</div>
+      <div className="ff-quick-link-arrow">
+        <icons.ChevronRight size={24} />
+      </div>
     </Link>
   );
 }

@@ -5,45 +5,65 @@ import '../styles/events.css';
 export default function Events() {
   return (
     <div className="events-container">
-      <header className="events-header">
-        <h1>
-          <span className="events-icon">⚡</span>
+      <header className="events-header bertui-animated bertui-fadeInDown">
+        <h1 className="bertui-animated bertui-fadeIn">
+          <span className="events-icon bertui-animated bertui-tada bertui-delay-1s">
+            ⚡
+          </span>
           Event System
         </h1>
-        <p className="events-subtitle">
+        <p className="events-subtitle bertui-animated bertui-fadeIn bertui-delay-2s">
           Complete guide to server lifecycle events and hooks in Frostfire Forge
         </p>
         
         <div className="events-badges">
-          <span className="events-badge events-badge-hook">🪝 Lifecycle Hooks</span>
-          <span className="events-badge events-badge-real">🔄 Real-time Events</span>
-          <span className="events-badge events-badge-api">📡 Event API</span>
+          <span className="events-badge events-badge-hook bertui-animated bertui-pulse bertui-infinite bertui-slow">
+            🪝 Lifecycle Hooks
+          </span>
+          <span className="events-badge events-badge-real bertui-animated bertui-pulse bertui-infinite bertui-slow bertui-delay-1s">
+            🔄 Real-time Events
+          </span>
+          <span className="events-badge events-badge-api bertui-animated bertui-pulse bertui-infinite bertui-slow bertui-delay-2s">
+            📡 Event API
+          </span>
         </div>
       </header>
 
       <div className="events-content">
         {/* Quick Navigation */}
-        <div className="events-quick-nav">
-          <a href="#overview" className="events-quick-link">📋 Overview</a>
-          <a href="#lifecycle" className="events-quick-link">🔄 Lifecycle</a>
-          <a href="#realtime" className="events-quick-link">⚡ Real-time</a>
-          <a href="#api" className="events-quick-link">📡 API Reference</a>
-          <a href="#examples" className="events-quick-link">💡 Examples</a>
+        <div className="events-quick-nav bertui-animated bertui-fadeInUp">
+          <a href="#overview" className="events-quick-link bertui-animated bertui-fadeInLeft">
+            📋 Overview
+          </a>
+          <a href="#lifecycle" className="events-quick-link bertui-animated bertui-fadeInLeft bertui-delay-1s">
+            🔄 Lifecycle
+          </a>
+          <a href="#realtime" className="events-quick-link bertui-animated bertui-fadeInLeft bertui-delay-2s">
+            ⚡ Real-time
+          </a>
+          <a href="#api" className="events-quick-link bertui-animated bertui-fadeInLeft bertui-delay-3s">
+            📡 API Reference
+          </a>
+          <a href="#examples" className="events-quick-link bertui-animated bertui-fadeInLeft bertui-delay-4s">
+            💡 Examples
+          </a>
         </div>
 
         {/* Overview */}
-        <section id="overview" className="events-section">
-          <h2>
-            <span className="section-icon">📋</span>
+        <section id="overview" className="events-section bertui-animated bertui-fadeInUp bertui-delay-1s">
+          <h2 className="bertui-animated bertui-fadeIn">
+            <span className="section-icon bertui-animated bertui-wobble">
+              📋
+            </span>
             Overview
           </h2>
           
-          <p>
+          <p className="bertui-animated bertui-fadeIn bertui-delay-2s">
             Frostfire Forge features a powerful event system that allows you to hook into server lifecycle events,
             monitor real-time activities, and extend functionality through custom event listeners.
           </p>
           
-          <div className="events-note events-note-info">
+          <div className="events-note events-note-info bertui-animated bertui-pulse">
             <h3>Event System Architecture</h3>
             <p>
               The event system uses a pub/sub pattern where events are emitted by the server core
@@ -53,23 +73,31 @@ export default function Events() {
           </div>
 
           <div className="events-features">
-            <div className="events-feature">
-              <div className="events-feature-icon">🔄</div>
+            <div className="events-feature bertui-animated bertui-fadeInUp bertui-delay-3s">
+              <div className="events-feature-icon bertui-animated bertui-pulse bertui-infinite bertui-slow">
+                🔄
+              </div>
               <h3>Lifecycle Events</h3>
               <p>Hook into server startup, updates, and shutdown sequences</p>
             </div>
-            <div className="events-feature">
-              <div className="events-feature-icon">👥</div>
+            <div className="events-feature bertui-animated bertui-fadeInUp bertui-delay-4s">
+              <div className="events-feature-icon bertui-animated bertui-pulse bertui-infinite bertui-slow bertui-delay-1s">
+                👥
+              </div>
               <h3>Player Events</h3>
               <p>Monitor player connections, disconnections, and activities</p>
             </div>
-            <div className="events-feature">
-              <div className="events-feature-icon">⚡</div>
+            <div className="events-feature bertui-animated bertui-fadeInUp bertui-delay-5s">
+              <div className="events-feature-icon bertui-animated bertui-pulse bertui-infinite bertui-slow bertui-delay-2s">
+                ⚡
+              </div>
               <h3>Real-time Events</h3>
               <p>Receive events at fixed intervals for game logic updates</p>
             </div>
-            <div className="events-feature">
-              <div className="events-feature-icon">🔧</div>
+            <div className="events-feature bertui-animated bertui-fadeInUp bertui-fast">
+              <div className="events-feature-icon bertui-animated bertui-pulse bertui-infinite bertui-slow bertui-delay-3s">
+                🔧
+              </div>
               <h3>Custom Events</h3>
               <p>Create and emit your own custom events for plugins</p>
             </div>
@@ -77,22 +105,25 @@ export default function Events() {
         </section>
 
         {/* Lifecycle Events */}
-        <section id="lifecycle" className="events-section">
-          <h2>
-            <span className="section-icon">🔄</span>
+        <section id="lifecycle" className="events-section bertui-animated bertui-fadeInUp bertui-delay-2s">
+          <h2 className="bertui-animated bertui-fadeIn">
+            <span className="section-icon bertui-animated bertui-bounce">
+              🔄
+            </span>
             Lifecycle Events
           </h2>
           
-          <div className="events-note events-note-important">
+          <div className="events-note events-note-important bertui-animated bertui-pulse">
             <p>
+              ⚠️
               <strong>Important:</strong> Lifecycle events follow a specific order during server startup and shutdown.
               Understanding this order is crucial for proper plugin initialization.
             </p>
           </div>
 
           <div className="events-lifecycle">
-            <div className="events-lifecycle-step">
-              <div className="events-step-number">1</div>
+            <div className="events-lifecycle-step bertui-animated bertui-fadeInLeft bertui-delay-3s">
+              <div className="events-step-number bertui-animated bertui-pulse bertui-infinite bertui-slow">1</div>
               <div className="events-step-content">
                 <h3>onAwake</h3>
                 <div className="events-code-block">
@@ -107,8 +138,8 @@ export default function Events() {
               </div>
             </div>
 
-            <div className="events-lifecycle-step">
-              <div className="events-step-number">2</div>
+            <div className="events-lifecycle-step bertui-animated bertui-fadeInRight bertui-delay-4s">
+              <div className="events-step-number bertui-animated bertui-pulse bertui-infinite bertui-slow bertui-delay-1s">2</div>
               <div className="events-step-content">
                 <h3>onStart</h3>
                 <div className="events-code-block">
@@ -123,8 +154,8 @@ export default function Events() {
               </div>
             </div>
 
-            <div className="events-lifecycle-step">
-              <div className="events-step-number">3</div>
+            <div className="events-lifecycle-step bertui-animated bertui-fadeInLeft bertui-delay-5s">
+              <div className="events-step-number bertui-animated bertui-pulse bertui-infinite bertui-slow bertui-delay-2s">3</div>
               <div className="events-step-content">
                 <h3>onUpdate</h3>
                 <div className="events-code-block">
@@ -147,8 +178,8 @@ export default function Events() {
               </div>
             </div>
 
-            <div className="events-lifecycle-step">
-              <div className="events-step-number">4</div>
+            <div className="events-lifecycle-step bertui-animated bertui-fadeInRight bertui-fast">
+              <div className="events-step-number bertui-animated bertui-pulse bertui-infinite bertui-slow bertui-delay-3s">4</div>
               <div className="events-step-content">
                 <h3>onFixedUpdate</h3>
                 <div className="events-code-block">
@@ -171,8 +202,8 @@ export default function Events() {
               </div>
             </div>
 
-            <div className="events-lifecycle-step">
-              <div className="events-step-number">5</div>
+            <div className="events-lifecycle-step bertui-animated bertui-fadeInLeft bertui-fast bertui-delay-1s">
+              <div className="events-step-number bertui-animated bertui-pulse bertui-infinite bertui-slow bertui-delay-4s">5</div>
               <div className="events-step-content">
                 <h3>onSave</h3>
                 <div className="events-code-block">
@@ -198,18 +229,20 @@ export default function Events() {
         </section>
 
         {/* Real-time Events */}
-        <section id="realtime" className="events-section">
-          <h2>
-            <span className="section-icon">⚡</span>
+        <section id="realtime" className="events-section bertui-animated bertui-fadeInUp bertui-delay-3s">
+          <h2 className="bertui-animated bertui-fadeIn">
+            <span className="section-icon bertui-animated bertui-flash bertui-infinite">
+              ⚡
+            </span>
             Real-time Events
           </h2>
           
-          <p>
+          <p className="bertui-animated bertui-fadeIn bertui-delay-4s">
             These events provide real-time monitoring of server activities and player interactions.
           </p>
 
           <div className="events-grid">
-            <div className="events-card">
+            <div className="events-card bertui-animated bertui-fadeInUp bertui-fast">
               <div className="events-card-header">
                 <h3>onConnection</h3>
               </div>
@@ -231,7 +264,7 @@ export default function Events() {
               </div>
             </div>
 
-            <div className="events-card">
+            <div className="events-card bertui-animated bertui-fadeInUp bertui-fast bertui-delay-1s">
               <div className="events-card-header">
                 <h3>onDisconnect</h3>
               </div>
@@ -253,7 +286,7 @@ export default function Events() {
               </div>
             </div>
 
-            <div className="events-card">
+            <div className="events-card bertui-animated bertui-fadeInUp bertui-slow">
               <div className="events-card-header">
                 <h3>onServerTick</h3>
               </div>
@@ -278,21 +311,25 @@ export default function Events() {
         </section>
 
         {/* API Reference */}
-        <section id="api" className="events-section">
-          <h2>
-            <span className="section-icon">📡</span>
+        <section id="api" className="events-section bertui-animated bertui-fadeInUp bertui-delay-4s">
+          <h2 className="bertui-animated bertui-fadeIn">
+            <span className="section-icon bertui-animated bertui-bounceIn">
+              📡
+            </span>
             API Reference
           </h2>
           
-          <div className="events-note events-note-info">
+          <div className="events-note events-note-info bertui-animated bertui-pulse">
             <p>
-              The Events API provides methods to interact with the event system, emit custom events,
+              ℹ️ The Events API provides methods to interact with the event system, emit custom events,
               and manage event listeners programmatically.
             </p>
           </div>
 
-          <h3>Importing the Event System</h3>
-          <div className="events-code-block">
+          <h3 className="bertui-animated bertui-fadeIn bertui-delay-5s">
+            Importing the Event System
+          </h3>
+          <div className="events-code-block bertui-animated bertui-fadeIn bertui-fast">
             <pre><code>{`// Import the Listener module
 import { Listener } from "../socket/server";
 
@@ -300,9 +337,11 @@ import { Listener } from "../socket/server";
 import { Events } from "../socket/server";`}</code></pre>
           </div>
 
-          <h3>Event Methods</h3>
+          <h3 className="bertui-animated bertui-fadeIn bertui-fast bertui-delay-1s">
+            Event Methods
+          </h3>
           <div className="events-methods">
-            <div className="events-method-card">
+            <div className="events-method-card bertui-animated bertui-fadeInUp bertui-fast bertui-delay-1s">
               <div className="events-method-header">
                 <h4>Listener.on()</h4>
                 <span className="events-method-signature">on(event: string, callback: Function)</span>
@@ -317,7 +356,7 @@ import { Events } from "../socket/server";`}</code></pre>
               </div>
             </div>
 
-            <div className="events-method-card">
+            <div className="events-method-card bertui-animated bertui-fadeInUp bertui-fast bertui-delay-2s">
               <div className="events-method-header">
                 <h4>Listener.off()</h4>
                 <span className="events-method-signature">off(event: string, callback: Function)</span>
@@ -333,7 +372,7 @@ Listener.off("onUpdate", handler);`}</code></pre>
               </div>
             </div>
 
-            <div className="events-method-card">
+            <div className="events-method-card bertui-animated bertui-fadeInUp bertui-slow">
               <div className="events-method-header">
                 <h4>Listener.emit()</h4>
                 <span className="events-method-signature">emit(event: string, data?: any)</span>
@@ -351,7 +390,7 @@ Listener.emit("playerLevelUp", {
               </div>
             </div>
 
-            <div className="events-method-card">
+            <div className="events-method-card bertui-animated bertui-fadeInUp bertui-slow bertui-delay-1s">
               <div className="events-method-header">
                 <h4>Listener.removeAll()</h4>
                 <span className="events-method-signature">removeAll(event: string)</span>
@@ -366,8 +405,10 @@ Listener.removeAll("onUpdate");`}</code></pre>
             </div>
           </div>
 
-          <h3>Events Utility Methods</h3>
-          <div className="events-code-block">
+          <h3 className="bertui-animated bertui-fadeIn bertui-slow bertui-delay-2s">
+            Events Utility Methods
+          </h3>
+          <div className="events-code-block bertui-animated bertui-fadeIn bertui-slow bertui-delay-3s">
             <pre><code>{`// Import Events utility
 import { Events } from "../socket/server";
 
@@ -392,14 +433,16 @@ const limitedClients = Events.GetRateLimitedClients();`}</code></pre>
         </section>
 
         {/* Examples */}
-        <section id="examples" className="events-section">
-          <h2>
-            <span className="section-icon">💡</span>
+        <section id="examples" className="events-section bertui-animated bertui-fadeInUp bertui-delay-5s">
+          <h2 className="bertui-animated bertui-fadeIn">
+            <span className="section-icon bertui-animated bertui-wiggle">
+              💡
+            </span>
             Examples
           </h2>
 
           <div className="events-examples">
-            <div className="events-example-card">
+            <div className="events-example-card bertui-animated bertui-fadeInLeft bertui-fast">
               <h3>Example 1: Welcome Message</h3>
               <p>Send a welcome message to players when they connect.</p>
               <div className="events-code-block">
@@ -419,7 +462,7 @@ const limitedClients = Events.GetRateLimitedClients();`}</code></pre>
               </div>
             </div>
 
-            <div className="events-example-card">
+            <div className="events-example-card bertui-animated bertui-fadeInRight bertui-fast bertui-delay-1s">
               <h3>Example 2: Auto-save System</h3>
               <p>Implement an auto-save system using the onSave event.</p>
               <div className="events-code-block">
@@ -446,7 +489,7 @@ async function savePlayerData(playerId, data) {
               </div>
             </div>
 
-            <div className="events-example-card">
+            <div className="events-example-card bertui-animated bertui-fadeInLeft bertui-slow">
               <h3>Example 3: Custom Event System</h3>
               <p>Create and use custom events for game mechanics.</p>
               <div className="events-code-block">
@@ -477,7 +520,7 @@ function onPlayerLevelUp(playerId, newLevel, oldLevel) {
               </div>
             </div>
 
-            <div className="events-example-card">
+            <div className="events-example-card bertui-animated bertui-fadeInRight bertui-slow bertui-delay-1s">
               <h3>Example 4: Server Monitoring</h3>
               <p>Monitor server health and performance.</p>
               <div className="events-code-block">
@@ -499,55 +542,71 @@ function onPlayerLevelUp(playerId, newLevel, oldLevel) {
             </div>
           </div>
 
-          <h3>Best Practices</h3>
+          <h3 className="bertui-animated bertui-fadeIn bertui-slow bertui-delay-2s">
+            Best Practices
+          </h3>
           <div className="events-best-practices">
-            <div className="events-practice">
-              <h4>📝 Use Descriptive Event Names</h4>
-              <p>Use clear, descriptive names for custom events (e.g., <code>playerQuestCompleted</code> instead of <code>questDone</code>).</p>
+            <div className="events-practice bertui-animated bertui-fadeInUp bertui-slow">
+              <div className="events-practice-icon">📝</div>
+              <div className="events-practice-content">
+                <h4>Use Descriptive Event Names</h4>
+                <p>Use clear, descriptive names for custom events (e.g., <code>playerQuestCompleted</code> instead of <code>questDone</code>).</p>
+              </div>
             </div>
-            <div className="events-practice">
-              <h4>⚡ Keep Event Handlers Lightweight</h4>
-              <p>Event handlers should execute quickly. Defer heavy operations to background tasks.</p>
+            <div className="events-practice bertui-animated bertui-fadeInUp bertui-slow bertui-delay-1s">
+              <div className="events-practice-icon">⚡</div>
+              <div className="events-practice-content">
+                <h4>Keep Event Handlers Lightweight</h4>
+                <p>Event handlers should execute quickly. Defer heavy operations to background tasks.</p>
+              </div>
             </div>
-            <div className="events-practice">
-              <h4>🔧 Clean Up Listeners</h4>
-              <p>Always remove event listeners when they're no longer needed to prevent memory leaks.</p>
+            <div className="events-practice bertui-animated bertui-fadeInUp bertui-slow bertui-delay-2s">
+              <div className="events-practice-icon">🔧</div>
+              <div className="events-practice-content">
+                <h4>Clean Up Listeners</h4>
+                <p>Always remove event listeners when they're no longer needed to prevent memory leaks.</p>
+              </div>
             </div>
-            <div className="events-practice">
-              <h4>📊 Use Event Data Wisely</h4>
-              <p>Include only necessary data in event payloads to minimize network and memory usage.</p>
+            <div className="events-practice bertui-animated bertui-fadeInUp bertui-slower">
+              <div className="events-practice-icon">📊</div>
+              <div className="events-practice-content">
+                <h4>Use Event Data Wisely</h4>
+                <p>Include only necessary data in event payloads to minimize network and memory usage.</p>
+              </div>
             </div>
           </div>
         </section>
 
         {/* Next Steps */}
-        <section className="events-section">
-          <h2>
-            <span className="section-icon">🎯</span>
+        <section className="events-section bertui-animated bertui-fadeInUp bertui-slowest">
+          <h2 className="bertui-animated bertui-fadeIn">
+            <span className="section-icon bertui-animated bertui-tada bertui-infinite">
+              🎯
+            </span>
             Next Steps
           </h2>
           
           <div className="events-next-steps">
-            <div className="events-next-step">
+            <div className="events-next-step bertui-animated bertui-fadeInLeft">
               <h3>API Documentation</h3>
               <p>Explore the complete system API for advanced customization.</p>
-              <Link to="/api" className="events-next-link">
+              <Link to="/api" className="events-next-link bertui-animated bertui-pulse bertui-infinite bertui-slow">
                 API Documentation →
               </Link>
             </div>
             
-            <div className="events-next-step">
+            <div className="events-next-step bertui-animated bertui-fadeInUp">
               <h3>Packet Types</h3>
               <p>Learn about authorized packet types for client-server communication.</p>
-              <Link to="/api#packets" className="events-next-link">
+              <Link to="/api#packets" className="events-next-link bertui-animated bertui-pulse bertui-infinite bertui-slow bertui-delay-1s">
                 Packet Types →
               </Link>
             </div>
             
-            <div className="events-next-step">
+            <div className="events-next-step bertui-animated bertui-fadeInRight">
               <h3>Caching System</h3>
               <p>Understand how to use the caching system for optimal performance.</p>
-              <Link to="/api#caching" className="events-next-link">
+              <Link to="/api#caching" className="events-next-link bertui-animated bertui-pulse bertui-infinite bertui-slow bertui-delay-2s">
                 Caching System →
               </Link>
             </div>
@@ -557,10 +616,10 @@ function onPlayerLevelUp(playerId, newLevel, oldLevel) {
 
       {/* Navigation */}
       <div className="events-navigation">
-        <Link to="/commands" className="events-nav-link events-nav-prev">
+        <Link to="/commands" className="events-nav-link events-nav-prev bertui-animated bertui-fadeInLeft">
           ← Commands Reference
         </Link>
-        <Link to="/api" className="events-nav-link events-nav-next">
+        <Link to="/api" className="events-nav-link events-nav-next bertui-animated bertui-fadeInRight">
           API Documentation →
         </Link>
       </div>
