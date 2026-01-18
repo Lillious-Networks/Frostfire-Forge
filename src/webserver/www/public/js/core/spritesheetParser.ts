@@ -170,25 +170,6 @@ export async function buildAnimationFrames(
  * @param templateData - Compressed or raw template data
  * @returns Parsed sprite sheet template
  */
-export function loadSpriteSheetTemplate(
-  templateData: any
-): SpriteSheetTemplate {
-  // If templateData is a string, parse it as JSON
-  if (typeof templateData === 'string') {
-    templateData = JSON.parse(templateData);
-  }
-
-  return {
-    name: templateData.name,
-    imageSource: templateData.imageSource,
-    frameWidth: templateData.frameWidth,
-    frameHeight: templateData.frameHeight,
-    columns: templateData.columns,
-    rows: templateData.rows,
-    animations: templateData.animations
-  };
-}
-
 /**
  * Validates a sprite sheet template structure
  * @param template - Template to validate

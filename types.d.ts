@@ -129,6 +129,9 @@ declare interface Item {
 }
 
 declare interface Equipment {
+  chest_sprite: any;
+  legs_sprite: any;
+  head_sprite: any;
   username: string;
   helmet: Nullable<string>;
   head: Nullable<string>;
@@ -460,6 +463,7 @@ declare interface SpriteSheetTemplate {
 }
 
 declare interface SpriteSheetAnimation {
+  directions: any;
   frames: number[];            // Array of frame indices (e.g., [0, 1, 2, 3] for walk cycle)
   frameDuration: number;       // Duration per frame in milliseconds
   loop: boolean;               // Whether animation should loop

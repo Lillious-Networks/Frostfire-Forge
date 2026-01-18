@@ -323,7 +323,7 @@ function animationLoop() {
   lastFrameTime = now;
 
   // Cache players array to avoid repeated Array.from() calls
-  const playersArray = Array.from(cache.players);
+  const playersArray = Array.from(cache.players instanceof Map ? cache.players.values() : cache.players);
   const currentPlayer = playersArray.find(player => player.id === cachedPlayerId);
   if (!currentPlayer) {
     requestAnimationFrame(animationLoop);
@@ -331,7 +331,18 @@ function animationLoop() {
   }
 
   // Update layered animations for all players
-  animationManager.updateAllPlayers(cache.players, deltaTime);
+  if (cache.players instanceof Map) {
+    animationManager.updateAllPlayers(cache.players, deltaTime);
+  } else if (cache.players instanceof Set) {
+    // Convert Set to Map using player.id as key if possible
+    const playersMap = new Map<string, any>();
+    for (const player of cache.players) {
+      if (player && player.id) {
+        playersMap.set(player.id, player);
+      }
+    }
+    animationManager.updateAllPlayers(playersMap, deltaTime);
+  }
 
   // Initialize camera to spawn position on first frame (before any smoothing)
   if (!cameraInitialized && window.mapData) {
