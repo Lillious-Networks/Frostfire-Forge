@@ -166,7 +166,7 @@
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -20
+            "y": -30
           }
         },
         "up": {
@@ -202,7 +202,7 @@
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -20
+            "y": -30
           }
         },
         "downright": {
@@ -211,7 +211,7 @@
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -20
+            "y": -30
           }
         },
         "upleft": {
@@ -242,7 +242,7 @@
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -20
+            "y": -30
           }
         },
         "up": {
@@ -278,7 +278,7 @@
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -20
+            "y": -30
           }
         },
         "downright": {
@@ -287,7 +287,7 @@
           "loop": true,
           "offset": {
             "x": 0,
-            "y": -20
+            "y": -30
           }
         },
         "upleft": {

@@ -95,6 +95,7 @@ export async function getPlayerSpriteSheetData(
   bodySprite: SpriteSheetTemplate | null;
   headSprite: SpriteSheetTemplate | null;
   armorHelmetSprite: SpriteSheetTemplate | null;
+  armorShoulderguardsSprite: SpriteSheetTemplate | null;
   armorNeckSprite: SpriteSheetTemplate | null;
   armorHandsSprite: SpriteSheetTemplate | null;
   armorChestSprite: SpriteSheetTemplate | null;
@@ -111,6 +112,7 @@ export async function getPlayerSpriteSheetData(
   let bodySprite: SpriteSheetTemplate | null = null;
   let headSprite: SpriteSheetTemplate | null = null;
   let armorHelmetSprite: SpriteSheetTemplate | null = null;
+  let armorShoulderguardsSprite: SpriteSheetTemplate | null = null;
   let armorNeckSprite: SpriteSheetTemplate | null = null;
   let armorHandsSprite: SpriteSheetTemplate | null = null;
   let armorChestSprite: SpriteSheetTemplate | null = null;
@@ -149,6 +151,17 @@ export async function getPlayerSpriteSheetData(
       // This prevents conflicts when multiple layers use the same base template
       armorHelmetSprite.name = `helmet_${equipment.helmet}`;
       armorHelmetSprite.imageSource = `armor/helmet/${equipment.helmet}.png`;
+    }
+  }
+
+  // Armor Shoulderguards: Only load if equipment.shoulderguards is set
+  // Uses armor_body_base template (follows body animations)
+  if (equipment?.shoulderguards && equipment.shoulderguards !== 'null') {
+    armorShoulderguardsSprite = await getSpriteSheetTemplate('armor_body_base');
+    if (armorShoulderguardsSprite) {
+      // Use unique name combining layer type and equipment value
+      armorShoulderguardsSprite.name = `shoulderguards_${equipment.shoulderguards}`;
+      armorShoulderguardsSprite.imageSource = `armor/shoulderguards/${equipment.shoulderguards}.png`;
     }
   }
 
@@ -222,6 +235,7 @@ export async function getPlayerSpriteSheetData(
     bodySprite,
     headSprite,
     armorHelmetSprite,
+    armorShoulderguardsSprite,
     armorNeckSprite,
     armorHandsSprite,
     armorChestSprite,

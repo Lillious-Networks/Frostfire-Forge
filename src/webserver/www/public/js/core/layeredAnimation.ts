@@ -22,6 +22,7 @@ const spriteSheetCache: SpriteSheetCache = {};
  * @param bodySprite - Base body sprite sheet template
  * @param headSprite - Base head sprite sheet template
  * @param armorHelmetSprite - Optional armor helmet sprite sheet template
+ * @param armorShoulderguardsSprite - Optional armor shoulderguards sprite sheet template
  * @param armorNeckSprite - Optional armor neck sprite sheet template
  * @param armorHandsSprite - Optional armor hands sprite sheet template
  * @param armorChestSprite - Optional armor chest sprite sheet template
@@ -36,6 +37,7 @@ export async function initializeLayeredAnimation(
   bodySprite: Nullable<SpriteSheetTemplate>,
   headSprite: Nullable<SpriteSheetTemplate>,
   armorHelmetSprite: Nullable<SpriteSheetTemplate>,
+  armorShoulderguardsSprite: Nullable<SpriteSheetTemplate>,
   armorNeckSprite: Nullable<SpriteSheetTemplate>,
   armorHandsSprite: Nullable<SpriteSheetTemplate>,
   armorChestSprite: Nullable<SpriteSheetTemplate>,
@@ -57,6 +59,9 @@ export async function initializeLayeredAnimation(
   }
   if (armorHelmetSprite && !validateSpriteSheetTemplate(armorHelmetSprite)) {
     throw new Error('Invalid armor helmet sprite sheet template');
+  }
+  if (armorShoulderguardsSprite && !validateSpriteSheetTemplate(armorShoulderguardsSprite)) {
+    throw new Error('Invalid armor shoulderguards sprite sheet template');
   }
   if (armorNeckSprite && !validateSpriteSheetTemplate(armorNeckSprite)) {
     throw new Error('Invalid armor neck sprite sheet template');
@@ -89,38 +94,45 @@ export async function initializeLayeredAnimation(
     ? await createAnimationLayer('body', bodySprite, initialAnimation, 0, isMounted)
     : null;
 
-  // Load head layer if provided (zIndex: 1)
-  const headLayer = headSprite
-    ? await createAnimationLayer('head', headSprite, initialAnimation, 1, isMounted)
-    : null;
-
-  // Load armor layers with ascending z-indexes (render order: helmet, neck, hands, chest, feet, legs, weapon)
-  const armorHelmetLayer = armorHelmetSprite
-    ? await createAnimationLayer('armor_helmet', armorHelmetSprite, initialAnimation, 2, isMounted)
-    : null;
-
+  // Load armor body layers (render order: neck, hands, chest, feet, legs, weapon - all below head)
   const armorNeckLayer = armorNeckSprite
-    ? await createAnimationLayer('armor_neck', armorNeckSprite, initialAnimation, 3, isMounted)
+    ? await createAnimationLayer('armor_neck', armorNeckSprite, initialAnimation, 1, isMounted)
     : null;
 
   const armorHandsLayer = armorHandsSprite
-    ? await createAnimationLayer('armor_hands', armorHandsSprite, initialAnimation, 4, isMounted)
+    ? await createAnimationLayer('armor_hands', armorHandsSprite, initialAnimation, 2, isMounted)
     : null;
 
   const armorChestLayer = armorChestSprite
-    ? await createAnimationLayer('armor_chest', armorChestSprite, initialAnimation, 5, isMounted)
+    ? await createAnimationLayer('armor_chest', armorChestSprite, initialAnimation, 3, isMounted)
     : null;
 
   const armorFeetLayer = armorFeetSprite
-    ? await createAnimationLayer('armor_feet', armorFeetSprite, initialAnimation, 6, isMounted)
+    ? await createAnimationLayer('armor_feet', armorFeetSprite, initialAnimation, 4, isMounted)
     : null;
 
   const armorLegsLayer = armorLegsSprite
-    ? await createAnimationLayer('armor_legs', armorLegsSprite, initialAnimation, 7, isMounted)
+    ? await createAnimationLayer('armor_legs', armorLegsSprite, initialAnimation, 5, isMounted)
     : null;
 
+  // Load head layer if provided (zIndex: 6, renders above body and body armor)
+  const headLayer = headSprite
+    ? await createAnimationLayer('head', headSprite, initialAnimation, 6, isMounted)
+    : null;
+
+  // Load helmet layer (zIndex: 7, renders above head)
+  const armorHelmetLayer = armorHelmetSprite
+    ? await createAnimationLayer('armor_helmet', armorHelmetSprite, initialAnimation, 7, isMounted)
+    : null;
+
+  // Load shoulderguards layer (zIndex: 8, renders above helmet)
+  const armorShoulderguardsLayer = armorShoulderguardsSprite
+    ? await createAnimationLayer('armor_shoulderguards', armorShoulderguardsSprite, initialAnimation, 8, isMounted)
+    : null;
+
+  // Load weapon layer (zIndex: 9, renders above shoulderguards when not facing up)
   const armorWeaponLayer = armorWeaponSprite
-    ? await createAnimationLayer('armor_weapon', armorWeaponSprite, initialAnimation, 8, isMounted)
+    ? await createAnimationLayer('armor_weapon', armorWeaponSprite, initialAnimation, 9, isMounted)
     : null;
 
   return {
@@ -129,6 +141,7 @@ export async function initializeLayeredAnimation(
       body: bodyLayer,
       head: headLayer,
       armor_helmet: armorHelmetLayer,
+      armor_shoulderguards: armorShoulderguardsLayer,
       armor_neck: armorNeckLayer,
       armor_hands: armorHandsLayer,
       armor_chest: armorChestLayer,
@@ -151,7 +164,7 @@ export async function initializeLayeredAnimation(
  * @returns Initialized animation layer
  */
 async function createAnimationLayer(
-  type: 'mount' | 'body' | 'head' | 'armor_helmet' | 'armor_neck' | 'armor_hands' | 'armor_chest' | 'armor_feet' | 'armor_legs' | 'armor_weapon',
+  type: 'mount' | 'body' | 'head' | 'armor_helmet' | 'armor_shoulderguards' | 'armor_neck' | 'armor_hands' | 'armor_chest' | 'armor_feet' | 'armor_legs' | 'armor_weapon',
   spriteSheet: SpriteSheetTemplate,
   animationName: string,
   zIndex: number,
@@ -381,6 +394,7 @@ export async function updateMountLayer(
       layeredAnim.layers.body,
       layeredAnim.layers.head,
       layeredAnim.layers.armor_helmet,
+      layeredAnim.layers.armor_shoulderguards,
       layeredAnim.layers.armor_neck,
       layeredAnim.layers.armor_hands,
       layeredAnim.layers.armor_chest,
@@ -450,7 +464,26 @@ export function getVisibleLayersSorted(layeredAnim: LayeredAnimation): Animation
   const layers = Object.values(layeredAnim.layers)
     .filter(l => l !== null && l.visible) as AnimationLayer[];
 
-  return layers.sort((a, b) => a.zIndex - b.zIndex);
+  // Determine current direction from animation name
+  const animName = layeredAnim.currentAnimationName;
+  const direction = animName.split('_').pop() || '';
+  const isUpDirection = direction === 'up' || direction === 'upleft' || direction === 'upright';
+
+  // Dynamically adjust layer zIndex based on direction
+  return layers.map(layer => {
+    // When facing up: shoulderguards and weapon should render behind everything
+    if (isUpDirection) {
+      if (layer.type === 'armor_shoulderguards') {
+        // Shoulderguards render below head
+        return { ...layer, zIndex: 5.3 }; // Between legs (5) and head (6)
+      }
+      if (layer.type === 'armor_weapon') {
+        // Weapon renders behind everything (even behind mount)
+        return { ...layer, zIndex: -2 }; // Behind mount (-1)
+      }
+    }
+    return layer;
+  }).sort((a, b) => a.zIndex - b.zIndex);
 }
 
 /**
@@ -470,7 +503,7 @@ export function clearSpriteSheetCache(): void {
  */
 export function getLayer(
   layeredAnim: LayeredAnimation,
-  layerType: 'mount' | 'body' | 'head' | 'armor_helmet' | 'armor_neck' | 'armor_hands' | 'armor_chest' | 'armor_feet' | 'armor_legs' | 'armor_weapon'
+  layerType: 'mount' | 'body' | 'head' | 'armor_helmet' | 'armor_shoulderguards' | 'armor_neck' | 'armor_hands' | 'armor_chest' | 'armor_feet' | 'armor_legs' | 'armor_weapon'
 ): Nullable<AnimationLayer> {
   return layeredAnim.layers[layerType];
 }
@@ -483,7 +516,7 @@ export function getLayer(
  */
 export function setLayerVisibility(
   layeredAnim: LayeredAnimation,
-  layerType: 'mount' | 'body' | 'head' | 'armor_helmet' | 'armor_neck' | 'armor_hands' | 'armor_chest' | 'armor_feet' | 'armor_legs' | 'armor_weapon',
+  layerType: 'mount' | 'body' | 'head' | 'armor_helmet' | 'armor_shoulderguards' | 'armor_neck' | 'armor_hands' | 'armor_chest' | 'armor_feet' | 'armor_legs' | 'armor_weapon',
   visible: boolean
 ): void {
   const layer = layeredAnim.layers[layerType];

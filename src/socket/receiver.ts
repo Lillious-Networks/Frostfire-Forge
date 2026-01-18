@@ -4178,6 +4178,7 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
   const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
   const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
   const armorHelmetImageData = spriteSheetData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHelmetSprite.name)) : null;
+  const armorShoulderguardsImageData = spriteSheetData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorShoulderguardsSprite.name)) : null;
   const armorNeckImageData = spriteSheetData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorNeckSprite.name)) : null;
   const armorHandsImageData = spriteSheetData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHandsSprite.name)) : null;
   const armorChestImageData = spriteSheetData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorChestSprite.name)) : null;
@@ -4210,6 +4211,7 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
     headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
     // Only include armor sprites if their image data exists
     armorHelmetSprite: (spriteSheetData.armorHelmetSprite && armorHelmetImageData) ? { ...spriteSheetData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
+    armorShoulderguardsSprite: (spriteSheetData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...spriteSheetData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
     armorNeckSprite: (spriteSheetData.armorNeckSprite && armorNeckImageData) ? { ...spriteSheetData.armorNeckSprite, imageData: armorNeckImageData } : null,
     armorHandsSprite: (spriteSheetData.armorHandsSprite && armorHandsImageData) ? { ...spriteSheetData.armorHandsSprite, imageData: armorHandsImageData } : null,
     armorChestSprite: (spriteSheetData.armorChestSprite && armorChestImageData) ? { ...spriteSheetData.armorChestSprite, imageData: armorChestImageData } : null,
@@ -4323,6 +4325,7 @@ async function sendAnimationTo(targetWs: any, name: string, playerId?: string, r
   const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
   const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
   const armorHelmetImageData = spriteSheetData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHelmetSprite.name)) : null;
+  const armorShoulderguardsImageData = spriteSheetData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorShoulderguardsSprite.name)) : null;
   const armorNeckImageData = spriteSheetData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorNeckSprite.name)) : null;
   const armorHandsImageData = spriteSheetData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHandsSprite.name)) : null;
   const armorChestImageData = spriteSheetData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorChestSprite.name)) : null;
@@ -4355,6 +4358,7 @@ async function sendAnimationTo(targetWs: any, name: string, playerId?: string, r
     headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
     // Only include armor sprites if their image data exists
     armorHelmetSprite: (spriteSheetData.armorHelmetSprite && armorHelmetImageData) ? { ...spriteSheetData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
+    armorShoulderguardsSprite: (spriteSheetData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...spriteSheetData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
     armorNeckSprite: (spriteSheetData.armorNeckSprite && armorNeckImageData) ? { ...spriteSheetData.armorNeckSprite, imageData: armorNeckImageData } : null,
     armorHandsSprite: (spriteSheetData.armorHandsSprite && armorHandsImageData) ? { ...spriteSheetData.armorHandsSprite, imageData: armorHandsImageData } : null,
     armorChestSprite: (spriteSheetData.armorChestSprite && armorChestImageData) ? { ...spriteSheetData.armorChestSprite, imageData: armorChestImageData } : null,
