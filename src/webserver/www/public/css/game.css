@@ -471,7 +471,6 @@ body {
   height: 32px !important;
   object-fit: contain;
   display: block;
-  pointer-events: none;
 }
 
 #hotbar #grid .slot:focus,

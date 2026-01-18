@@ -26,6 +26,7 @@ async function createPlayer(data: any) {
       data.bodySprite,
       data.headSprite,
       data.armorHelmetSprite || null,
+      data.armorShoulderguardsSprite || null,
       data.armorNeckSprite || null,
       data.armorHandsSprite || null,
       data.armorChestSprite || null,

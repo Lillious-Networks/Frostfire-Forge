@@ -1,0 +1,6 @@
+# BertUI Generated robots.txt
+User-agent: *
+Allow: /
+
+# Sitemap
+Sitemap: http://localhost:3000/sitemap.xml

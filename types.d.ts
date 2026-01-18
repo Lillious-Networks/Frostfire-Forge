@@ -481,7 +481,7 @@ declare interface AnimationFrame {
 }
 
 declare interface AnimationLayer {
-  type: 'mount' | 'body' | 'head' | 'armor_helmet' | 'armor_neck' | 'armor_hands' | 'armor_chest' | 'armor_feet' | 'armor_legs' | 'armor_weapon';
+  type: 'mount' | 'body' | 'head' | 'armor_helmet' | 'armor_shoulderguards' | 'armor_neck' | 'armor_hands' | 'armor_chest' | 'armor_feet' | 'armor_legs' | 'armor_weapon';
   spriteSheet: Nullable<SpriteSheetTemplate>;
   frames: AnimationFrame[];
   currentFrame: number;
@@ -496,6 +496,7 @@ declare interface LayeredAnimation {
     body: AnimationLayer;
     head: AnimationLayer;
     armor_helmet: Nullable<AnimationLayer>;
+    armor_shoulderguards: Nullable<AnimationLayer>;
     armor_neck: Nullable<AnimationLayer>;
     armor_hands: Nullable<AnimationLayer>;
     armor_chest: Nullable<AnimationLayer>;
