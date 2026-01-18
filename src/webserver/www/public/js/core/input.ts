@@ -193,7 +193,7 @@ function cast(hotbar_index: number) {
 function mount() {
     if (isKeyOnCooldown("Mount")) return;
     putKeyOnCooldown("Mount");
-    sendRequest({ type: "MOUNT", data: { mount: cache.mount || "horse" } });
+    sendRequest({ type: "MOUNT", data: { mount: cache.mount || "unicorn" } });
 }
 
 function selectHotbarSlot(index: number) {

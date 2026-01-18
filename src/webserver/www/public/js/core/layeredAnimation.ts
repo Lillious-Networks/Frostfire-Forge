@@ -137,17 +137,17 @@ export async function initializeLayeredAnimation(
 
   return {
     layers: {
-      mount: mountLayer,
-      body: bodyLayer,
-      head: headLayer,
-      armor_helmet: armorHelmetLayer,
-      armor_shoulderguards: armorShoulderguardsLayer,
-      armor_neck: armorNeckLayer,
-      armor_hands: armorHandsLayer,
-      armor_chest: armorChestLayer,
-      armor_feet: armorFeetLayer,
-      armor_legs: armorLegsLayer,
-      armor_weapon: armorWeaponLayer
+      mount: mountLayer as AnimationLayer,
+      body: bodyLayer as AnimationLayer,
+      head: headLayer as AnimationLayer,
+      armor_helmet: armorHelmetLayer as AnimationLayer,
+      armor_shoulderguards: armorShoulderguardsLayer as AnimationLayer,
+      armor_neck: armorNeckLayer as AnimationLayer,
+      armor_hands: armorHandsLayer as AnimationLayer,
+      armor_chest: armorChestLayer as AnimationLayer,
+      armor_feet: armorFeetLayer as AnimationLayer,
+      armor_legs: armorLegsLayer as AnimationLayer,
+      armor_weapon: armorWeaponLayer as AnimationLayer
     },
     currentAnimationName: initialAnimation,
     syncFrames: true
@@ -181,7 +181,17 @@ async function createAnimationLayer(
     const image = await preloadSpriteSheetImage(imageSource);
 
     // Extract all frames from the sprite sheet (now async - waits for all frames to load)
-    const extractedFrames = await extractFramesFromSpriteSheet(image, spriteSheet);
+    const extractedFramesMap = await extractFramesFromSpriteSheet(image, spriteSheet);
+
+    // Convert Map<number, HTMLImageElement> to { [frameIndex: number]: HTMLImageElement }
+    const extractedFrames: { [frameIndex: number]: HTMLImageElement } = {};
+    if (extractedFramesMap instanceof Map) {
+      extractedFramesMap.forEach((value, key) => {
+        extractedFrames[key] = value;
+      });
+    } else {
+      Object.assign(extractedFrames, extractedFramesMap);
+    }
 
     // Deep clone the sprite sheet template to prevent mutations to the original from affecting the cache
     const clonedTemplate = JSON.parse(JSON.stringify(spriteSheet));
@@ -213,7 +223,7 @@ async function createAnimationLayer(
   const frames = await buildAnimationFrames(
     spriteSheet,
     actualAnimationName,
-    cached.extractedFrames
+    new Map<number, HTMLImageElement>(Object.entries(cached.extractedFrames).map(([k, v]) => [Number(k), v]))
   );
 
   if (frames.length === 0) {
@@ -337,7 +347,7 @@ export async function changeLayeredAnimation(
         layer.frames = await buildAnimationFrames(
           cached.template,
           actualAnimationName,
-          cached.extractedFrames
+          new Map<number, HTMLImageElement>(Object.entries(cached.extractedFrames).map(([k, v]) => [Number(k), v]))
         );
         layer.currentFrame = 0;
         layer.lastFrameTime = performance.now();
@@ -347,113 +357,6 @@ export async function changeLayeredAnimation(
   await Promise.all(layerUpdates);
 }
 
-
-/**
- * Mounts or unmounts a mount
- * @param layeredAnim - The layered animation to update
- * @param mountSprite - Sprite sheet for the mount (null to unmount)
- */
-export async function updateMountLayer(
-  layeredAnim: LayeredAnimation,
-  mountSprite: Nullable<SpriteSheetTemplate>
-): Promise<void> {
-  const wasMounted = layeredAnim.layers.mount !== null;
-
-  if (mountSprite) {
-    // Validate mount sprite
-    if (!validateSpriteSheetTemplate(mountSprite)) {
-      console.error('Invalid mount sprite sheet template');
-      return;
-    }
-
-    // Mount
-    layeredAnim.layers.mount = await createAnimationLayer(
-      'mount',
-      mountSprite,
-      layeredAnim.currentAnimationName,
-      -1,
-      false
-    );
-  } else {
-    // Unmount
-    layeredAnim.layers.mount = null;
-  }
-
-  const isNowMounted = layeredAnim.layers.mount !== null;
-
-  // If mount status changed, update body/head layers and reset all layers to sync
-  if (wasMounted !== isNowMounted) {
-    // Manually update body and head layers to switch animation
-    const isMounted = isNowMounted;
-    const currentAnim = layeredAnim.currentAnimationName;
-
-    // Build new frames for body, head, and all armor layers (async operations)
-    const frameUpdates: Array<{ layer: AnimationLayer, frames: AnimationFrame[] }> = [];
-
-    const layersToUpdate = [
-      layeredAnim.layers.body,
-      layeredAnim.layers.head,
-      layeredAnim.layers.armor_helmet,
-      layeredAnim.layers.armor_shoulderguards,
-      layeredAnim.layers.armor_neck,
-      layeredAnim.layers.armor_hands,
-      layeredAnim.layers.armor_chest,
-      layeredAnim.layers.armor_feet,
-      layeredAnim.layers.armor_legs,
-      layeredAnim.layers.armor_weapon
-    ];
-
-    for (const layer of layersToUpdate) {
-      if (layer && layer.spriteSheet) {
-        // Normalize sprite sheet name to lowercase for case-insensitive lookup
-        const normalizedName = layer.spriteSheet.name.toLowerCase();
-        const cached = spriteSheetCache[normalizedName];
-        if (!cached) continue;
-
-        // Convert animation name based on mounted status
-        let actualAnimationName = currentAnim;
-        if (isMounted) {
-          if (currentAnim.startsWith('idle_')) {
-            // idle_down -> mount_idle_down
-            actualAnimationName = currentAnim.replace('idle_', 'mount_idle_');
-          } else if (currentAnim.startsWith('walk_')) {
-            // walk_down -> mount_walk_down
-            actualAnimationName = currentAnim.replace('walk_', 'mount_walk_');
-          }
-        }
-        // When unmounting, just use the stored animation name (idle/walk)
-
-        // Use the cached template instead of layer.spriteSheet to avoid mutations
-        const newFrames = await buildAnimationFrames(
-          cached.template,
-          actualAnimationName,
-          cached.extractedFrames
-        );
-
-        frameUpdates.push({ layer, frames: newFrames });
-      }
-    }
-
-    // Now apply all updates atomically to avoid race conditions
-    const now = performance.now();
-
-    // Apply frame updates
-    for (const update of frameUpdates) {
-      update.layer.frames = update.frames;
-      update.layer.currentFrame = 0;
-      update.layer.lastFrameTime = now;
-    }
-
-    // Reset all layers to frame 0 to keep them in perfect sync
-    const allLayers = Object.values(layeredAnim.layers).filter(l => l !== null) as AnimationLayer[];
-    for (const layer of allLayers) {
-      if (layer && layer.frames.length > 0) {
-        layer.currentFrame = 0;
-        layer.lastFrameTime = now;
-      }
-    }
-  }
-}
 
 /**
  * Gets all visible layers sorted by z-index for rendering
@@ -486,41 +389,3 @@ export function getVisibleLayersSorted(layeredAnim: LayeredAnimation): Animation
   }).sort((a, b) => a.zIndex - b.zIndex);
 }
 
-/**
- * Clears the sprite sheet cache (useful for memory management)
- */
-export function clearSpriteSheetCache(): void {
-  for (const key in spriteSheetCache) {
-    delete spriteSheetCache[key];
-  }
-}
-
-/**
- * Gets a specific layer from the layered animation
- * @param layeredAnim - The layered animation
- * @param layerType - Which layer to get
- * @returns The layer or null if not present
- */
-export function getLayer(
-  layeredAnim: LayeredAnimation,
-  layerType: 'mount' | 'body' | 'head' | 'armor_helmet' | 'armor_shoulderguards' | 'armor_neck' | 'armor_hands' | 'armor_chest' | 'armor_feet' | 'armor_legs' | 'armor_weapon'
-): Nullable<AnimationLayer> {
-  return layeredAnim.layers[layerType];
-}
-
-/**
- * Sets visibility of a specific layer
- * @param layeredAnim - The layered animation
- * @param layerType - Which layer to modify
- * @param visible - Whether the layer should be visible
- */
-export function setLayerVisibility(
-  layeredAnim: LayeredAnimation,
-  layerType: 'mount' | 'body' | 'head' | 'armor_helmet' | 'armor_shoulderguards' | 'armor_neck' | 'armor_hands' | 'armor_chest' | 'armor_feet' | 'armor_legs' | 'armor_weapon',
-  visible: boolean
-): void {
-  const layer = layeredAnim.layers[layerType];
-  if (layer) {
-    layer.visible = visible;
-  }
-}

@@ -384,7 +384,7 @@ async function createPlayer(data: any) {
 
         // Create unique canvas for this layer if it doesn't exist
         // Include animation name and mount status to prevent cache collisions
-        const isMounted = this.layeredAnimation.layers.mount !== null;
+        const isMounted: boolean = this.layeredAnimation.layers.mount !== null;
         const layerKey = `${layer.type}_${this.layeredAnimation.currentAnimationName}_${layer.currentFrame}_${isMounted}`;
         if (!this._layerCanvases[layerKey]) {
           const layerCanvas = document.createElement('canvas');

@@ -22,13 +22,6 @@ interface TileChangeGroup {
   changes: TileChange[];
 }
 
-interface CopiedRegion {
-  startX: number;
-  startY: number;
-  width: number;
-  height: number;
-  tiles: Map<string, number>; // key: "layerName:x:y", value: tileId
-}
 
 interface PanelDragState {
   panel: HTMLElement;
@@ -82,8 +75,6 @@ class TileEditor {
   private toolbarPanel: HTMLElement;
   private layersPanel: HTMLElement;
   private tilesetPanel: HTMLElement;
-  private toolbarHeader: HTMLElement;
-  private layersHeader: HTMLElement;
   private tilesetHeader: HTMLElement;
   private paintBtn: HTMLElement;
   private eraseBtn: HTMLElement;
@@ -110,8 +101,6 @@ class TileEditor {
     this.tilesetPanel = document.getElementById('tile-editor-tileset-panel') as HTMLElement;
 
     // Toolbar and layers don't have headers, so use the panels themselves as draggable elements
-    this.toolbarHeader = this.toolbarPanel;
-    this.layersHeader = this.layersPanel;
     this.tilesetHeader = this.tilesetPanel.querySelector('.te-panel-header') as HTMLElement;
     this.resizeHandle = this.tilesetPanel.querySelector('.te-resize-handle') as HTMLElement;
 
@@ -1406,11 +1395,11 @@ class TileEditor {
   private updatePasteButtonState() {
     // Disable paste button if nothing is copied
     if (this.copiedTile === null) {
-      this.pasteBtn.disabled = true;
+      (this.pasteBtn as HTMLButtonElement).disabled = true;
       this.pasteBtn.style.opacity = '0.5';
       this.pasteBtn.style.cursor = 'not-allowed';
     } else {
-      this.pasteBtn.disabled = false;
+      (this.pasteBtn as HTMLButtonElement).disabled = false;
       this.pasteBtn.style.opacity = '1';
       this.pasteBtn.style.cursor = 'pointer';
     }
@@ -1453,7 +1442,7 @@ class TileEditor {
   }
 
   public renderPreview() {
-    if (!this.isActive || !this.previewTilePos || !window.mapData) return;
+    if (!this.isActive || !this.previewTilePos || !window.mapData || !ctx) return;
 
     ctx.save();
     ctx.globalAlpha = 0.6;
