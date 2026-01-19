@@ -371,6 +371,7 @@ export function getVisibleLayersSorted(layeredAnim: LayeredAnimation): Animation
   const animName = layeredAnim.currentAnimationName;
   const direction = animName.split('_').pop() || '';
   const isUpDirection = direction === 'up' || direction === 'upleft' || direction === 'upright';
+  const isLeftDirection = direction === 'left' || direction === 'downleft' || direction === 'upleft';
 
   // Dynamically adjust layer zIndex based on direction
   return layers.map(layer => {
@@ -380,6 +381,13 @@ export function getVisibleLayersSorted(layeredAnim: LayeredAnimation): Animation
         // Shoulderguards render below head
         return { ...layer, zIndex: 5.3 }; // Between legs (5) and head (6)
       }
+      if (layer.type === 'armor_weapon') {
+        // Weapon renders behind everything (even behind mount)
+        return { ...layer, zIndex: -2 }; // Behind mount (-1)
+      }
+    }
+    // When facing left: weapon should render behind all layers
+    if (isLeftDirection) {
       if (layer.type === 'armor_weapon') {
         // Weapon renders behind everything (even behind mount)
         return { ...layer, zIndex: -2 }; // Behind mount (-1)
