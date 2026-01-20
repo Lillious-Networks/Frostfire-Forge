@@ -39,6 +39,11 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "PONG", data: data })),
     ] as any[];
   },
+  timeSync: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "TIME_SYNC", data: data })),
+    ] as any[];
+  },
   benchmark: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "BENCHMARK", data: data })),

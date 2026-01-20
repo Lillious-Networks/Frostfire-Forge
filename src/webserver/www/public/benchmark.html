@@ -27,27 +27,11 @@
             </div>
 
             <div class="control-group">
-                <label for="interval" id="interval-label" class="control-label">
-                    <span class="label-text">Interval</span>
+                <label for="duration" id="duration-label" class="control-label">
+                    <span class="label-text">Duration</span>
                     <span class="label-value">1</span>
                 </label>
-                <input type="range" id="interval" class="slider" min="1" max="100" step="1" value="1">
-            </div>
-
-            <div class="control-group">
-                <label for="iterations" id="iterations-label" class="control-label">
-                    <span class="label-text">Iterations</span>
-                    <span class="label-value">1</span>
-                </label>
-                <input type="range" id="iterations" class="slider" min="1" max="10000" value="1">
-            </div>
-
-            <div class="control-group">
-                <label for="data" id="data-label" class="control-label">
-                    <span class="label-text">Data Size</span>
-                    <span class="label-value">0.00001</span>
-                </label>
-                <input type="range" id="data" class="slider" min="0.00001" max="0.001" step="0.000001" value="0.00001">
+                <input type="range" id="duration" class="slider" min="10" max="300" step="10" value="60">
             </div>
 
             <div class="button-container">
@@ -57,7 +41,7 @@
 
             <div id="progress-wrapper" class="progress-wrapper">
                 <div class="progress-info">
-                    <span id="progress-text" class="progress-text">0 / 0 messages</span>
+                    <span id="progress-text" class="progress-text">Preparing...</span>
                     <span id="progress-percentage" class="progress-percentage">0%</span>
                 </div>
                 <div class="progress-bar-container">

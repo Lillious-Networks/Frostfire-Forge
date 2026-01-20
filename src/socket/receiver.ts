@@ -314,7 +314,7 @@ authWorker.on("message", async (result: any) => {
             const pcache = playerCache.get(pl.id);
             await sendAnimationTo(
               ws,
-              getAnimationNameForDirection(pl.location.direction, !!pcache?.moving),
+              getAnimationNameForDirection(pl.location.direction, !!pcache?.moving, false, undefined, !!pcache?.casting),
               pl.id
               // Don't pass snapshotRevision - animations should be applied immediately, not buffered
             );
@@ -325,14 +325,14 @@ authWorker.on("message", async (result: any) => {
       if (position?.direction) {
         await sendAnimationTo(
           ws,
-          getAnimationNameForDirection(position.direction, false),
+          getAnimationNameForDirection(position.direction, false, false, undefined, false),
           ws.data.id
         );
         for (const other of currentPlayersOnMap) {
           if (other.id !== ws.data.id && other.ws) {
             await sendAnimationTo(
               other.ws,
-              getAnimationNameForDirection(position.direction, false),
+              getAnimationNameForDirection(position.direction, false, false, undefined, false),
               ws.data.id
             );
           }
@@ -494,6 +494,8 @@ export default async function packetReceiver(
       case "TIME_SYNC": {
         if (!currentPlayer) return;
         currentPlayer.lastUpdated = performance.now();
+        // Echo back TIME_SYNC for latency measurement
+        sendPacket(ws, packetManager.timeSync(data));
         break;
       }
       case "AUTH": {
@@ -591,7 +593,8 @@ export default async function packetReceiver(
               currentPlayer.mounted,
               currentPlayer.mount_type || "unicorn",
               undefined,
-              globalStateRevision
+              globalStateRevision,
+              currentPlayer.casting || false
             );
           }
           return;
@@ -608,6 +611,19 @@ export default async function packetReceiver(
               packetManager.castSpell({ id: currentPlayer.id, spell: 'interrupted', time: 1 })
             );
           });
+
+          // Update animation to revert from casting immediately
+          globalStateRevision++;
+          await sendPositionAnimation(
+            ws,
+            currentPlayer.location.position?.direction || direction,
+            false,
+            currentPlayer.mounted,
+            currentPlayer.mount_type || "unicorn",
+            undefined,
+            globalStateRevision,
+            false
+          );
         }
 
         if (!directions.includes(direction)) return;
@@ -624,7 +640,8 @@ export default async function packetReceiver(
           currentPlayer.mounted,
           currentPlayer.mount_type || "unicorn",
           undefined,
-          globalStateRevision
+          globalStateRevision,
+          currentPlayer.casting || false
         );
 
         if (currentPlayer.movementInterval) {
@@ -708,7 +725,8 @@ export default async function packetReceiver(
               currentPlayer.mounted,
               currentPlayer.mount_type || "unicorn",
               undefined,
-              globalStateRevision
+              globalStateRevision,
+              currentPlayer.casting || false
             );
 
             const reason = collision.reason;
@@ -1061,7 +1079,8 @@ export default async function packetReceiver(
                 currentPlayer.mounted,
                 currentPlayer.mount_type || "unicorn",
                 undefined,
-                globalStateRevision
+                globalStateRevision,
+                currentPlayer.casting || false
               );
               sendPacket(player.ws, packetManager.moveXY(moveXYData));
             }
@@ -1295,6 +1314,20 @@ export default async function packetReceiver(
         // Set an async timeout to simulate spell casting time
         currentPlayer.casting = true;
         playerCache.set(currentPlayer.id, currentPlayer);
+
+        // Update animation to show casting
+        globalStateRevision++;
+        await sendPositionAnimation(
+          ws,
+          currentPlayer.location.position?.direction || "down",
+          currentPlayer.moving || false,
+          currentPlayer.mounted,
+          currentPlayer.mount_type || "unicorn",
+          undefined,
+          globalStateRevision,
+          true
+        );
+
         playersInMap.forEach((player) => {
           sendPacket(
             player.ws,
@@ -1313,6 +1346,19 @@ export default async function packetReceiver(
         }
         currentPlayer.casting = false;
         playerCache.set(currentPlayer.id, currentPlayer);
+
+        // Update animation to revert from casting
+        globalStateRevision++;
+        await sendPositionAnimation(
+          ws,
+          currentPlayer.location.position?.direction || "down",
+          currentPlayer.moving || false,
+          currentPlayer.mounted,
+          currentPlayer.mount_type || "unicorn",
+          undefined,
+          globalStateRevision,
+          false
+        );
 
         const canAttack2 = await player.canAttack(currentPlayer, target,
           {
@@ -3775,7 +3821,8 @@ export default async function packetReceiver(
           mounted,
           currentPlayer.mount_type,
           currentPlayer.id,
-          globalStateRevision
+          globalStateRevision,
+          currentPlayer.casting || false
         );
 
         // If player is currently moving, restart the movement with new speed
@@ -3939,7 +3986,8 @@ export default async function packetReceiver(
               currentPlayer.location.position?.direction || "down",
               !!currentPlayer.moving,
               !!currentPlayer.mounted,
-              currentPlayer.mount_type || undefined
+              currentPlayer.mount_type || undefined,
+              !!currentPlayer.casting
             );
             await sendSpriteSheetAnimation(ws, currentAnimationName, currentPlayer.id);
           }
@@ -4066,7 +4114,8 @@ export default async function packetReceiver(
               currentPlayer.location.position?.direction || "down",
               !!currentPlayer.moving,
               !!currentPlayer.mounted,
-              currentPlayer.mount_type || undefined
+              currentPlayer.mount_type || undefined,
+              !!currentPlayer.casting
             );
             await sendSpriteSheetAnimation(ws, currentAnimationName, currentPlayer.id);
           }
@@ -4259,9 +4308,17 @@ function getAnimationNameForDirection(
   direction: string,
   walking: boolean,
   mounted: boolean = false,
-  mount_type?: string
+  mount_type?: string,
+  casting: boolean = false
 ): string {
   const normalized = normalizeDirection(direction);
+
+  // If casting, use cast_idle (stationary) or cast_walk (moving)
+  if (casting) {
+    const castAction = walking ? "cast_walk" : "cast_idle";
+    return `player_${castAction}_${normalized}.png`;
+  }
+
   const action = walking ? "walk" : "idle";
   if (mounted) {
     mount_type = mount_type || "unicorn";
@@ -4277,9 +4334,10 @@ async function sendPositionAnimation(
   mounted: boolean = false,
   mount_type: string = "",
   playerId?: string,
-  revision?: number
+  revision?: number,
+  casting: boolean = false
 ) {
-  const animation = getAnimationNameForDirection(direction, walking, mounted, mount_type);
+  const animation = getAnimationNameForDirection(direction, walking, mounted, mount_type, casting);
   await sendAnimation(ws, animation, playerId, revision);
 }
 

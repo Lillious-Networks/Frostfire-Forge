@@ -141,11 +141,6 @@ export const keyHandlers = {
     if (isKeyOnCooldown("Enter")) return;
     putKeyOnCooldown("Enter");
     handleEnterKey();
-  },
-  Space: () => {
-    if (isKeyOnCooldown("Space")) return;
-    putKeyOnCooldown("Space");
-    handleSpaceKey();
   }
 } as const;
 
@@ -318,13 +313,6 @@ async function handleEnterKey() {
     await handleCommand(message);
   } else {
     await handleChatMessage(message);
-  }
-}
-
-function handleSpaceKey() {
-  const target = Array.from(cache.players).find(p => p.targeted);
-  if (target) {
-    sendRequest({ type: "ATTACK", data: target });
   }
 }
 

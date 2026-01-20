@@ -198,7 +198,7 @@ const player = {
       [
         email,
         username,
-        "", // empty token
+        null, // token will be set during login
         password_hash,
         req.ip,
         req.headers["cf-ipcountry"],
