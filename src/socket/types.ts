@@ -9,6 +9,7 @@ export const packetTypes: PacketType = {
   LOAD_MAP: "LOAD_MAP",
   TIME_SYNC: "TIME_SYNC",
   MOVEXY: "MOVEXY",
+  BATCH_MOVEXY: "BATCH_MOVEXY",
   AUTH: "AUTH",
   LOGOUT: "LOGOUT",
   DISCONNECT: "DISCONNECT",

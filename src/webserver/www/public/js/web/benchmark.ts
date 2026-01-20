@@ -402,6 +402,10 @@ start.addEventListener('click', async () => {
                             latencyStats.samples.shift();
                         }
                     }
+                } else if (message.type === "BATCH_MOVEXY") {
+                    // Handle batched movement updates - just acknowledge receipt
+                } else if (message.type === "MOVEXY") {
+                    // Handle individual movement updates
                 }
             } catch (e) {
                 // Ignore parse errors

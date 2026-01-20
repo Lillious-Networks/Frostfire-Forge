@@ -757,6 +757,28 @@ socket.onmessage = async (event) => {
       }
       break;
     }
+    case "BATCH_MOVEXY": {
+      // Handle batched movement updates - data is an array of movements
+      if (!Array.isArray(data)) break;
+
+      for (const movement of data) {
+        if (movement._data === "abort") continue;
+
+        const player = Array.from(cache.players).find(
+          (p) => p.id === movement.id
+        );
+        if (!player) continue;
+
+        player.typing = false;
+        player.position.x = movement._data.x;
+        player.position.y = movement._data.y;
+
+        if (movement.id === cachedPlayerId) {
+          positionText.innerText = `Position: ${movement._data.x}, ${movement._data.y}`;
+        }
+      }
+      break;
+    }
     case "CREATE_NPC": {
       await isLoaded();
       if (!data) return;
