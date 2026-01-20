@@ -494,6 +494,8 @@ export default async function packetReceiver(
       case "TIME_SYNC": {
         if (!currentPlayer) return;
         currentPlayer.lastUpdated = performance.now();
+        // Echo back TIME_SYNC for latency measurement
+        sendPacket(ws, packetManager.timeSync(data));
         break;
       }
       case "AUTH": {
