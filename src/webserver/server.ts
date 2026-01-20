@@ -407,7 +407,7 @@ async function createGuestAccount(req: Request, server: any) {
 
     log.debug(`Guest account created: ${guest_username} (${ip})`);
 
-    return new Response(JSON.stringify({ message: "Logged in successfully"}), { status: 301, headers: { "Set-Cookie": `token=${token}; Path=/;` } });
+    return new Response(JSON.stringify({ message: "Logged in successfully", token: token }), { status: 301, headers: { "Set-Cookie": `token=${token}; Path=/;` } });
 
   } catch (error) {
     log.error(`Failed to create guest account: ${error}`);
