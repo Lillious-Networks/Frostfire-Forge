@@ -235,6 +235,16 @@ export const packetManager = {
       )
     ] as any[];
   },
+  batchMoveXY: (movements: any[]) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "BATCH_MOVEXY",
+          data: movements,
+        })
+      )
+    ] as any[];
+  },
   chat: (data: any) => {
     return [
       packet.encode(

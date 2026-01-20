@@ -38,6 +38,50 @@ let restartTimers: ReturnType<typeof setTimeout>[];
 
 let globalStateRevision: number = 0;
 
+// Movement batching system
+const movementBatchQueue = new Map<string, Map<string, any>>(); // Map of map -> Map of playerId -> movement
+const BATCH_INTERVAL_MS = 16; // Send batched movements every 16ms (60 Hz)
+
+// Flush and send batched movements
+function flushMovementBatches() {
+  for (const [mapName, playerMovements] of movementBatchQueue.entries()) {
+    if (playerMovements.size === 0) continue;
+
+    // Convert Map to array of latest movements per player
+    const movements = Array.from(playerMovements.values());
+
+    // Get all players in this map
+    const playersInMap = filterPlayersByMap(mapName);
+
+    // Group movements by visibility (stealth vs normal)
+    const normalMovements = movements.filter(m => !m.isStealth);
+    const stealthMovements = movements.filter(m => m.isStealth);
+
+    // Send normal movements to all players
+    if (normalMovements.length > 0) {
+      const batchPacket = packetManager.batchMoveXY(normalMovements);
+      playersInMap.forEach((player) => {
+        sendPacket(player.ws, batchPacket);
+      });
+    }
+
+    // Send stealth movements only to admins
+    if (stealthMovements.length > 0) {
+      const stealthPacket = packetManager.batchMoveXY(stealthMovements);
+      const adminPlayers = playersInMap.filter((p) => p.isAdmin);
+      adminPlayers.forEach((player) => {
+        sendPacket(player.ws, stealthPacket);
+      });
+    }
+  }
+
+  // Clear all batches
+  movementBatchQueue.clear();
+}
+
+// Start the batching timer
+setInterval(flushMovementBatches, BATCH_INTERVAL_MS);
+
 const npcs = await assetCache.get("npcs");
 const particles = await assetCache.get("particles");
 
@@ -788,22 +832,22 @@ export default async function packetReceiver(
             return;
           }
 
-          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-          const targetPlayers = currentPlayer.isStealth
-            ? playersInMap.filter((p) => p.isAdmin)
-            : playersInMap;
-
           globalStateRevision++;
 
           const movementData = {
             id: ws.data.id,
             _data: currentPlayer.location.position,
-            revision: globalStateRevision
+            revision: globalStateRevision,
+            isStealth: currentPlayer.isStealth
           };
 
-          targetPlayers.forEach((player) => {
-            sendPacket(player.ws, packetManager.moveXY(movementData));
-          });
+          // Add movement to batch queue (deduplicated by player ID)
+          const mapName = currentPlayer.location.map;
+          if (!movementBatchQueue.has(mapName)) {
+            movementBatchQueue.set(mapName, new Map());
+          }
+          // This will overwrite previous positions, ensuring only latest position is sent
+          movementBatchQueue.get(mapName)!.set(ws.data.id, movementData);
 
           running = false;
         };

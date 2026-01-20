@@ -71,7 +71,7 @@ export default async function loadMap(data: any): Promise<boolean> {
     progressBar.style.width = "30%";
 
     // Initialize map metadata
-    const CHUNK_SIZE = 25;
+    const CHUNK_SIZE = mapData.tilewidth;
     const chunksX = Math.ceil(mapData.width / CHUNK_SIZE);
     const chunksY = Math.ceil(mapData.height / CHUNK_SIZE);
 
@@ -122,7 +122,7 @@ export default async function loadMap(data: any): Promise<boolean> {
     // Calculate chunks needed to cover viewport + padding
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
-    const padding = chunkPixelSize * 2; // Extra padding for safety
+    const padding = chunkPixelSize; // Extra padding if needed
 
     // Calculate how many chunks we need in each direction
     const chunksNeededX = Math.ceil((viewportWidth + padding * 2) / chunkPixelSize / 2);
