@@ -427,7 +427,7 @@ async function createPlayer(data: any) {
           width: 18,
           height: 7,
           fillStyle: "rgba(255, 0, 0, 0.35)",
-          borderColor: "rgba(255, 0, 0, 1)"
+          borderColor: "rgba(255, 0, 0, 0.8)"
         };
       } else {
         shadow = {
