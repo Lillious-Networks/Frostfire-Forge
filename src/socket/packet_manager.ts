@@ -431,5 +431,18 @@ export const packetManager = {
     return [
       packet.encode(JSON.stringify({ type: "PROJECTILE", data })),
     ] as any[];
+  },
+  despawnPlayer: (playerId: string, reason?: string) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "DESPAWN_PLAYER",
+          data: {
+            id: playerId,
+            reason: reason
+          }
+        })
+      )
+    ] as any[];
   }
 };

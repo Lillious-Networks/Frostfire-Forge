@@ -728,6 +728,18 @@ socket.onmessage = async (event) => {
       // }
       break;
     }
+    case "DESPAWN_PLAYER": {
+      if (!data || !data.id) return;
+
+      // Remove player from the local cache (they left AOI)
+      const player = Array.from(cache.players).find(
+        (player) => player.id === data.id
+      );
+      if (player) {
+        cache.players.delete(player);
+      }
+      break;
+    }
     case "MOVEXY": {
       if (data._data === "abort") {
         break;

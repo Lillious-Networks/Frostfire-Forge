@@ -14,6 +14,7 @@ import packet from "../modules/packet.ts";
 import path from "node:path";
 import fs from "node:fs";
 import { generateKeyPair } from "../modules/cipher.ts";
+import { despawnPlayerFromAllAOI } from "./aoi.ts";
 
 // Load settings
 import * as settings from "../config/settings.json";
@@ -428,6 +429,9 @@ listener.on("onDisconnect", async (data) => {
         thisWorld?.players || 0
       } players.`
     );
+
+    // Despawn player from all other players' AOI
+    despawnPlayerFromAllAOI(playerData, "disconnect");
 
     if (!playerData.isGuest) {
       if (playerData?.stats) {
