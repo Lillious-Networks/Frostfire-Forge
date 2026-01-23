@@ -1,4 +1,4 @@
-import { canvas, ctx, progressBar, loadingScreen, progressBarContainer } from "../core/ui";
+import { canvas, ctx, progressBar, loadingScreen } from "../core/ui";
 import pako from "../libs/pako.js";
 
 declare global {
@@ -223,21 +223,11 @@ export default async function loadMap(data: any): Promise<boolean> {
 
     }
 
-    // Wait to ensure 100% progress is visible, then hide loading screen
+    // Wait to ensure 100% progress is visible
     await new Promise(resolve => setTimeout(resolve, 1500));
 
-    // Hide loading screen after chunks are loaded
-    if (loadingScreen) {
-      loadingScreen.style.transition = "1s";
-      loadingScreen.style.opacity = "0";
-      setTimeout(() => {
-        if (loadingScreen) {
-          loadingScreen.style.display = "none";
-          progressBar.style.width = "0%";
-          progressBarContainer.style.display = "block";
-        }
-      }, 1000);
-    }
+    // Don't hide loading screen here - let socket.ts handle it after self-player sprite loads
+    // Loading screen will be hidden by checkAndHideLoadingScreen() when ready
 
     return true;
   } catch (error) {

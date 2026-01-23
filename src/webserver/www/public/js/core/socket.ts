@@ -442,9 +442,15 @@ socket.onmessage = async (event) => {
         }
 
         const findPlayer = async () => {
-          const player = cache.players.size
+          // Check both active players and pending players
+          let player = cache.players.size
             ? Array.from(cache.players).find((p) => p.id === data.id)
             : null;
+
+          // Check pending players if not found in active
+          if (!player && cache.pendingPlayers && cache.pendingPlayers.has(data.id)) {
+            player = cache.pendingPlayers.get(data.id);
+          }
 
           if (player) {
             // Import layered animation system dynamically
@@ -538,6 +544,17 @@ socket.onmessage = async (event) => {
 
             // Clear old APNG animation if present
             player.animation = null;
+
+            // If this is the self-player, mark sprite as loaded
+            if (data.id === cachedPlayerId) {
+              setSelfPlayerSpriteLoaded(true);
+            }
+
+            // If player was pending, move to active cache now that animation is loaded
+            if (cache.pendingPlayers && cache.pendingPlayers.has(data.id)) {
+              cache.pendingPlayers.delete(data.id);
+              cache.players.add(player);
+            }
           } else {
             await new Promise((resolve) => setTimeout(resolve, 100));
             await findPlayer();
@@ -800,6 +817,12 @@ socket.onmessage = async (event) => {
     case "LOAD_MAP":
       {
         loaded = await loadMap(data);
+        console.log(`[LOAD_MAP] Map loaded, loaded=${loaded}, selfPlayerSpriteLoaded=${selfPlayerSpriteLoaded}`);
+
+        // Check if we should hide loading screen now (in case sprite loaded first)
+        if (loaded && selfPlayerSpriteLoaded) {
+          hideLoadingScreen();
+        }
       }
       break;
     case "LOGIN_SUCCESS":
@@ -2157,18 +2180,46 @@ function showNotification(
 }
 
 let loaded: boolean = false;
+export let selfPlayerSpriteLoaded: boolean = false;
+
+export function setSelfPlayerSpriteLoaded(value: boolean) {
+  console.log(`[setSelfPlayerSpriteLoaded] Setting to: ${value}`);
+  selfPlayerSpriteLoaded = value;
+
+  // Check if we should hide loading screen now
+  if (value && loaded) {
+    hideLoadingScreen();
+  }
+}
+
+async function hideLoadingScreen() {
+  console.log('[hideLoadingScreen] Hiding loading screen');
+  const { loadingScreen, progressBar, progressBarContainer } = await import('./ui.js');
+
+  if (loadingScreen) {
+    loadingScreen.style.transition = "1s";
+    loadingScreen.style.opacity = "0";
+    setTimeout(() => {
+      if (loadingScreen) {
+        loadingScreen.style.display = "none";
+        if (progressBar) progressBar.style.width = "0%";
+        if (progressBarContainer) progressBarContainer.style.display = "block";
+      }
+    }, 1000);
+  }
+}
 
 function getIsLoaded() {
   return loaded;
 }
 
 async function isLoaded() {
-  // Check every second if the map is loaded
+  // Just wait for map to be loaded
+  // Loading screen hiding is now handled separately by hideLoadingScreen()
   await new Promise<void>((resolve) => {
     const interval = setInterval(() => {
       if (loaded) {
         clearInterval(interval);
-
         resolve();
       }
     }, 10);
