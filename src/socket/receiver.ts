@@ -43,37 +43,47 @@ let globalStateRevision: number = 0;
 const movementBatchQueue = new Map<string, Map<string, any>>(); // Map of map -> Map of playerId -> movement
 const BATCH_INTERVAL_MS = 16; // Send batched movements every 16ms (60 Hz)
 
-// Flush and send batched movements
+// Flush and send batched movements with AOI filtering
 function flushMovementBatches() {
   for (const [mapName, playerMovements] of movementBatchQueue.entries()) {
     if (playerMovements.size === 0) continue;
 
-    // Convert Map to array of latest movements per player
-    const movements = Array.from(playerMovements.values());
-
     // Get all players in this map
     const playersInMap = filterPlayersByMap(mapName);
 
-    // Group movements by visibility (stealth vs normal)
-    const normalMovements = movements.filter(m => !m.isStealth);
-    const stealthMovements = movements.filter(m => m.isStealth);
+    // For each player, filter movements to only those in their AOI
+    playersInMap.forEach((receivingPlayer) => {
+      if (!receivingPlayer.aoi) return;
 
-    // Send normal movements to all players
-    if (normalMovements.length > 0) {
-      const batchPacket = packetManager.batchMoveXY(normalMovements);
-      playersInMap.forEach((player) => {
-        sendPacket(player.ws, batchPacket);
-      });
-    }
+      const movementsForThisPlayer: any[] = [];
 
-    // Send stealth movements only to admins
-    if (stealthMovements.length > 0) {
-      const stealthPacket = packetManager.batchMoveXY(stealthMovements);
-      const adminPlayers = playersInMap.filter((p) => p.isAdmin);
-      adminPlayers.forEach((player) => {
-        sendPacket(player.ws, stealthPacket);
-      });
-    }
+      // Check each movement to see if it should be sent to this player
+      for (const [movingPlayerId, movementData] of playerMovements.entries()) {
+        // Always include self movement
+        if (movingPlayerId === receivingPlayer.id) {
+          movementsForThisPlayer.push(movementData);
+          continue;
+        }
+
+        // Check if moving player is in receiving player's AOI
+        if (!receivingPlayer.aoi.playersInAOI.has(movingPlayerId)) {
+          continue;
+        }
+
+        // Apply stealth visibility rules
+        if (movementData.isStealth && !receivingPlayer.isAdmin) {
+          continue; // Only admins can see stealth movements
+        }
+
+        movementsForThisPlayer.push(movementData);
+      }
+
+      // Send batched movements if any qualify
+      if (movementsForThisPlayer.length > 0) {
+        const batchPacket = packetManager.batchMoveXY(movementsForThisPlayer);
+        sendPacket(receivingPlayer.ws, batchPacket);
+      }
+    });
   }
 
   // Clear all batches
@@ -841,8 +851,12 @@ export default async function packetReceiver(
             isStealth: currentPlayer.isStealth
           };
 
-          // Broadcast movement to AOI instead of entire map
-          broadcastToAOI(currentPlayer, packetManager.moveXY(movementData), true);
+          // Add movement to batch queue for AOI-filtered broadcasting
+          const mapName = currentPlayer.location.map;
+          if (!movementBatchQueue.has(mapName)) {
+            movementBatchQueue.set(mapName, new Map());
+          }
+          movementBatchQueue.get(mapName)!.set(currentPlayer.id, movementData);
 
           running = false;
         };
