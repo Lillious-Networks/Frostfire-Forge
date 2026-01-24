@@ -41,13 +41,27 @@ let globalStateRevision: number = 0;
 
 // Movement batching system
 export const movementBatchQueue = new Map<string, Map<string, any>>(); // Map of map -> Map of playerId -> movement
-const BATCH_INTERVAL_MS = 33; // Send batched movements every 33ms (30 Hz) - reduces load by 50%
+const BATCH_INTERVAL_MS = 40; // Send batched movements every 40ms (25 Hz) - balanced for smoothness and load
 
-// Maximum buffered bytes before skipping updates (2MB - more aggressive)
-const MAX_BUFFER_BACKPRESSURE = 1024 * 1024 * 2;
+// Maximum buffered bytes before skipping updates (512KB - very aggressive)
+const MAX_BUFFER_BACKPRESSURE = 1024 * 512;
+
+// Adaptive load tracking
+let lastFlushTime = Date.now();
+let flushCount = 0;
 
 // Flush and send batched movements with AOI filtering
 function flushMovementBatches() {
+  const startTime = Date.now();
+
+  // Adaptive rate limiting based on flush performance
+  const timeSinceLastFlush = startTime - lastFlushTime;
+  lastFlushTime = startTime;
+
+  // If previous flush took >30ms, we're overloaded - skip some receivers
+  const isOverloaded = timeSinceLastFlush > 30;
+  let skippedDueToLoad = 0;
+
   for (const [_mapName, playerMovements] of movementBatchQueue.entries()) {
     if (playerMovements.size === 0) continue;
 
@@ -63,7 +77,7 @@ function flushMovementBatches() {
       const movingPlayer = allPlayers[movingPlayerId];
       if (!movingPlayer || !movingPlayer.aoi) continue;
 
-      // Send to self
+      // Send to self (always, for client prediction)
       if (!receiverMovements.has(movingPlayerId)) {
         receiverMovements.set(movingPlayerId, []);
       }
@@ -85,20 +99,43 @@ function flushMovementBatches() {
     }
 
     // Send batched movements to each receiver with backpressure check
-    for (const [receiverId, movements] of receiverMovements.entries()) {
+    let sentCount = 0;
+    const receiverArray = Array.from(receiverMovements.entries());
+
+    // Prioritize: send to fewer receivers first (they're less loaded)
+    // This ensures at least some players get smooth updates
+    receiverArray.sort((a, b) => a[1].length - b[1].length);
+
+    for (const [receiverId, movements] of receiverArray) {
       const receiver = allPlayers[receiverId];
       if (!receiver || !receiver.ws || receiver.ws.readyState !== 1) continue;
 
       // Skip if too much backpressure (prevents buffer overflow and latency spikes)
-      if (receiver.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) continue;
+      if (receiver.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
+        skippedDueToLoad++;
+        continue;
+      }
 
       const batchPacket = packetManager.batchMoveXY(movements);
       sendPacket(receiver.ws, batchPacket);
+      sentCount++;
+
+      // Adaptive throttling: if overloaded and taking too long, stop processing
+      // But ensure we send to at least 100 receivers for minimum service level
+      if (isOverloaded && sentCount > 100 && Date.now() - startTime > 25) {
+        skippedDueToLoad += receiverArray.length - sentCount;
+        break;
+      }
     }
   }
 
   // Clear all batches
   movementBatchQueue.clear();
+
+  flushCount++;
+  if (flushCount % 100 === 0 && skippedDueToLoad > 0) {
+    log.debug(`[MOVEMENT] Skipped ${skippedDueToLoad} updates due to load (flush took ${Date.now() - startTime}ms)`);
+  }
 }
 
 // Spawn player batching system
@@ -754,7 +791,7 @@ export default async function packetReceiver(
       case "MOVEXY": {
         if (!currentPlayer) return;
 
-        const baseSpeed = 6; // Doubled from 2 to compensate for 30Hz update rate
+        const baseSpeed = 6; // Balanced for 30Hz update rate (6 * 30 = 180 pixels/sec)
         const mountSpeedMultiplier = 1.35;
         const speed = currentPlayer.mounted ? baseSpeed * mountSpeedMultiplier : baseSpeed;
         const targetFPS = 30; // Matches 33ms broadcast interval
@@ -847,10 +884,12 @@ export default async function packetReceiver(
 
         let lastTime = performance.now();
         let running = false;
+        let aoiUpdateCounter = 0; // Rate-limit expensive AOI updates
 
         const movePlayer = async () => {
           if (running) return;
           running = true;
+          aoiUpdateCounter++;
 
           // Stop movement if websocket closed
           if (!ws || ws.readyState !== 1) {
@@ -898,6 +937,7 @@ export default async function packetReceiver(
           tempPosition.x = Math.round(tempPosition.x + offset.dx);
           tempPosition.y = Math.round(tempPosition.y + offset.dy);
 
+          // Always check collision to prevent getting stuck in walls
           const collision = await player.checkIfWouldCollide(
             currentPlayer.location.map,
             {
@@ -936,17 +976,17 @@ export default async function packetReceiver(
               currentPlayer.casting || false
             );
 
-            const reason = collision.reason;
+            const reason = collision?.reason;
 
             // Send collision tile for debugging
-            if (reason === "tile_collision" && collision.tile) {
+            if (reason === "tile_collision" && collision?.tile) {
               sendPacket(ws, packetManager.collisionDebug({
                 tileX: collision.tile.x,
                 tileY: collision.tile.y
               }));
             }
 
-            if (reason === "warp_collision" && collision.warp) {
+            if (reason === "warp_collision" && collision?.warp) {
               const currentMap = currentPlayer.location.map;
               const warp = collision.warp as {
                 map: string;
@@ -1001,8 +1041,9 @@ export default async function packetReceiver(
 
           globalStateRevision++;
 
-          // Check if AOI needs updating based on distance threshold
-          if (shouldUpdateAOI(currentPlayer)) {
+          // Rate-limit AOI updates to every 10 frames (every 500ms at 20 FPS)
+          // This reduces load dramatically with high player counts
+          if (aoiUpdateCounter % 10 === 0 && shouldUpdateAOI(currentPlayer)) {
             await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
           }
 

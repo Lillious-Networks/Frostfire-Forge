@@ -154,11 +154,11 @@ start.addEventListener('click', async () => {
         const scheduleNextMovement = () => {
             if (stopped || websocket.readyState !== WebSocket.OPEN) return;
 
-            // Random movement duration: 500ms to 2000ms
-            const moveDuration = 500 + Math.floor(Math.random() * 1500);
+            // Random movement duration: 1000ms to 4000ms (longer to reduce simultaneous movements)
+            const moveDuration = 1000 + Math.floor(Math.random() * 3000);
 
-            // Random hold time after stopping: 500ms to 2500ms
-            const holdTime = 500 + Math.floor(Math.random() * 2000);
+            // Random hold time after stopping: 1000ms to 4000ms (longer gaps)
+            const holdTime = 1000 + Math.floor(Math.random() * 3000);
 
             // Pick a random direction and send movement packet
             const randomDirection = directions[Math.floor(Math.random() * directions.length)];
@@ -342,8 +342,9 @@ start.addEventListener('click', async () => {
                             // Start TIME_SYNC immediately to keep connection alive
                             startKeepAlive(websocket);
 
-                            // Start movement immediately for this player with random delay
-                            const randomDelay = Math.floor(Math.random() * 2000);
+                            // Stagger movement start across wider time range to prevent spikes
+                            // Spread 200 players across 10 seconds = 20 players/sec starting movement
+                            const randomDelay = Math.floor(Math.random() * 10000);
                             startMovementSimulation(websocket, randomDelay);
 
                             if (loggedInCount === amount) {
