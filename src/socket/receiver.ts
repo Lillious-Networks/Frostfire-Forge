@@ -40,7 +40,7 @@ let restartTimers: ReturnType<typeof setTimeout>[];
 let globalStateRevision: number = 0;
 
 // Movement batching system
-const movementBatchQueue = new Map<string, Map<string, any>>(); // Map of map -> Map of playerId -> movement
+export const movementBatchQueue = new Map<string, Map<string, any>>(); // Map of map -> Map of playerId -> movement
 const BATCH_INTERVAL_MS = 16; // Send batched movements every 16ms (60 Hz)
 
 // Flush and send batched movements with AOI filtering
@@ -53,7 +53,8 @@ function flushMovementBatches() {
 
     // For each player, filter movements to only those in their AOI
     playersInMap.forEach((receivingPlayer) => {
-      if (!receivingPlayer.aoi) return;
+      // Skip if player has no AOI or websocket is closed/missing
+      if (!receivingPlayer.aoi || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) return;
 
       const movementsForThisPlayer: any[] = [];
 
@@ -92,6 +93,123 @@ function flushMovementBatches() {
 
 // Start the batching timer
 setInterval(flushMovementBatches, BATCH_INTERVAL_MS);
+
+// Spawn player batching system
+export const spawnBatchQueue = new Map<string, Map<string, any>>(); // Map of receivingPlayerId -> Map of spawnedPlayerId -> spawnData
+
+// Flush and send batched spawn packets
+function flushSpawnBatches() {
+  for (const [receivingPlayerId, spawnedPlayers] of spawnBatchQueue.entries()) {
+    if (spawnedPlayers.size === 0) continue;
+
+    const receivingPlayer = playerCache.get(receivingPlayerId);
+    // Skip if player or websocket is missing/closed
+    if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
+
+    const spawnsForThisPlayer = Array.from(spawnedPlayers.values());
+
+    if (spawnsForThisPlayer.length > 0) {
+      // Send as LOAD_PLAYERS packet format (array of player data)
+      const loadPlayersData = {
+        players: spawnsForThisPlayer,
+        snapshotRevision: globalStateRevision
+      };
+      sendPacket(receivingPlayer.ws, packetManager.loadPlayers(loadPlayersData));
+
+      // Send animations for each spawned player
+      spawnsForThisPlayer.forEach(async (spawnData) => {
+        const spawnedPlayer = playerCache.get(spawnData.id);
+        if (!spawnedPlayer) return;
+
+        const animationName = getAnimationNameForDirection(
+          spawnedPlayer.location.position.direction,
+          spawnedPlayer.moving,
+          spawnedPlayer.mounted,
+          spawnedPlayer.mount_type,
+          spawnedPlayer.casting || false
+        );
+
+        await sendAnimationTo(receivingPlayer.ws, animationName, spawnData.id);
+      });
+    }
+  }
+
+  // Clear all batches
+  spawnBatchQueue.clear();
+}
+
+// Start the spawn batching timer
+setInterval(flushSpawnBatches, BATCH_INTERVAL_MS);
+
+// Despawn/disconnect batching system
+export const despawnBatchQueue = new Map<string, Set<string>>(); // Map of receivingPlayerId -> Set of despawnedPlayerIds
+
+// Flush and send batched despawn packets
+function flushDespawnBatches() {
+  for (const [receivingPlayerId, despawnedPlayerIds] of despawnBatchQueue.entries()) {
+    if (despawnedPlayerIds.size === 0) continue;
+
+    const receivingPlayer = playerCache.get(receivingPlayerId);
+    // Skip if player or websocket is missing/closed
+    if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
+
+    const despawnsArray = Array.from(despawnedPlayerIds);
+
+    if (despawnsArray.length > 0) {
+      // Send as array of disconnect/despawn packets
+      const despawnData = despawnsArray.map(playerId => ({ id: playerId, reason: "disconnect" }));
+      sendPacket(receivingPlayer.ws, packetManager.batchDisconnectPlayer(despawnData));
+    }
+  }
+
+  // Clear all batches
+  despawnBatchQueue.clear();
+}
+
+// Start the despawn batching timer
+setInterval(flushDespawnBatches, BATCH_INTERVAL_MS);
+
+/**
+ * Clear all queued batch data for a disconnecting player
+ * This prevents packets from being sent to/about disconnected players
+ */
+export function clearBatchQueuesForPlayer(playerId: string, mapName: string) {
+  // Clear movement data for this player
+  const mapMovements = movementBatchQueue.get(mapName);
+  if (mapMovements) {
+    mapMovements.delete(playerId);
+    if (mapMovements.size === 0) {
+      movementBatchQueue.delete(mapName);
+    }
+  }
+
+  // Clear any spawns queued TO this player
+  const spawnsToPlayer = spawnBatchQueue.get(playerId);
+  if (spawnsToPlayer && spawnsToPlayer.size > 0) {
+    log.debug(`[CLEAR] Removing ${spawnsToPlayer.size} queued spawns TO ${playerId}`);
+  }
+  spawnBatchQueue.delete(playerId);
+
+  // Clear spawns queued FROM this player (to others)
+  let clearedSpawnsFrom = 0;
+  for (const [receivingPlayerId, spawnedPlayers] of spawnBatchQueue.entries()) {
+    if (spawnedPlayers.has(playerId)) {
+      spawnedPlayers.delete(playerId);
+      clearedSpawnsFrom++;
+    }
+    if (spawnedPlayers.size === 0) {
+      spawnBatchQueue.delete(receivingPlayerId);
+    }
+  }
+  if (clearedSpawnsFrom > 0) {
+    log.debug(`[CLEAR] Removed spawn of ${playerId} FROM ${clearedSpawnsFrom} player queues`);
+  }
+
+  // Clear any despawns queued TO this player
+  despawnBatchQueue.delete(playerId);
+
+  // Clear despawns queued FROM this player (to others) - not needed as despawn already happened
+}
 
 const npcs = await assetCache.get("npcs");
 const particles = await assetCache.get("particles");
@@ -294,8 +412,8 @@ authWorker.on("message", async (result: any) => {
       const currentPlayer = playerCache.get(ws.data.id);
       if (!currentPlayer) return;
 
-      // Update AOI to discover nearby players and send spawn packets bidirectionally
-      await updatePlayerAOI(currentPlayer, sendAnimationTo);
+      // Update AOI to discover nearby players and queue spawn/despawn packets for batching
+      await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
 
       // Send self spawn packet
       const spawnDataForAll = {
@@ -539,6 +657,7 @@ export default async function packetReceiver(
       case "TIME_SYNC": {
         if (!currentPlayer) return;
         currentPlayer.lastUpdated = performance.now();
+        playerCache.set(currentPlayer.id, currentPlayer);
         // Echo back TIME_SYNC for latency measurement
         sendPacket(ws, packetManager.timeSync(data));
         break;
@@ -700,6 +819,16 @@ export default async function packetReceiver(
           if (running) return;
           running = true;
 
+          // Stop movement if websocket closed
+          if (!ws || ws.readyState !== 1) {
+            if (currentPlayer.movementInterval) {
+              clearInterval(currentPlayer.movementInterval);
+              currentPlayer.movementInterval = null;
+            }
+            running = false;
+            return;
+          }
+
           const currentTime = performance.now();
           const deltaTime = currentTime - lastTime;
 
@@ -815,7 +944,7 @@ export default async function packetReceiver(
                 };
 
                 // Handle AOI for map change
-                await handleMapChangeAOI(currentPlayer, newMap, newPosition, sendAnimationTo);
+                await handleMapChangeAOI(currentPlayer, newMap, newPosition, sendAnimationTo, spawnBatchQueue);
 
                 currentPlayer.location.position.direction = currentPlayer.location.position?.direction || "down";
 
@@ -841,7 +970,7 @@ export default async function packetReceiver(
 
           // Check if AOI needs updating based on distance threshold
           if (shouldUpdateAOI(currentPlayer)) {
-            await updatePlayerAOI(currentPlayer, sendAnimationTo);
+            await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
           }
 
           const movementData = {
@@ -852,11 +981,14 @@ export default async function packetReceiver(
           };
 
           // Add movement to batch queue for AOI-filtered broadcasting
-          const mapName = currentPlayer.location.map;
-          if (!movementBatchQueue.has(mapName)) {
-            movementBatchQueue.set(mapName, new Map());
+          // Check websocket is still open before queuing
+          if (ws.readyState === 1) {
+            const mapName = currentPlayer.location.map;
+            if (!movementBatchQueue.has(mapName)) {
+              movementBatchQueue.set(mapName, new Map());
+            }
+            movementBatchQueue.get(mapName)!.set(currentPlayer.id, movementData);
           }
-          movementBatchQueue.get(mapName)!.set(currentPlayer.id, movementData);
 
           running = false;
         };
@@ -881,7 +1013,7 @@ export default async function packetReceiver(
 
         // Update AOI after teleport
         if (shouldUpdateAOI(currentPlayer)) {
-          await updatePlayerAOI(currentPlayer, sendAnimationTo);
+          await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
         }
 
         // Broadcast movement using AOI
@@ -4207,9 +4339,14 @@ function tryParsePacket(data: any) {
 }
 
 function sendPacket(ws: any, packets: any[]) {
-  packets.forEach((packet) => {
-    ws.send(packet);
-  });
+  if (!ws || !ws.send || ws.readyState !== 1) return;
+  try {
+    packets.forEach((packet) => {
+      ws.send(packet);
+    });
+  } catch (error) {
+    // Silently ignore errors when sending to closed websockets
+  }
 }
 
 async function sendStatsToPartyMembers(playerUsername: string, playerId: string, stats: any) {

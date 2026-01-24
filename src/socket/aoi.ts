@@ -87,10 +87,14 @@ function filterPlayersByDistance(
  * Send packet helper
  */
 function sendPacket(ws: any, packets: any[]) {
-  if (!ws || !ws.send) return;
-  packets.forEach((packet) => {
-    ws.send(packet);
-  });
+  if (!ws || !ws.send || ws.readyState !== 1) return;
+  try {
+    packets.forEach((packet) => {
+      ws.send(packet);
+    });
+  } catch (error) {
+    // Silently ignore errors when sending to closed websockets
+  }
 }
 
 /**
@@ -131,26 +135,16 @@ function normalizeDirection(direction: string): string {
 }
 
 /**
- * Send SPAWN_PLAYER packet with all required animation/sprite data
+ * Queue SPAWN_PLAYER data for batching
+ * Returns spawn data to be added to batch queue
  */
-export async function sendSpawnPlayerPacket(
-  targetWs: any,
-  spawnedPlayer: any,
-  sendAnimationToFn: (targetWs: any, name: string, playerId: string) => Promise<void>
-): Promise<void> {
-  if (!targetWs || !spawnedPlayer) return;
+export function queueSpawnPlayerPacket(
+  spawnedPlayer: any
+): any {
+  if (!spawnedPlayer) return null;
 
   try {
-    // Get current animation state
-    const animationName = getAnimationNameForDirection(
-      spawnedPlayer.location.position.direction,
-      spawnedPlayer.moving,
-      spawnedPlayer.mounted,
-      spawnedPlayer.mount_type,
-      spawnedPlayer.casting || false
-    );
-
-    // Send basic SPAWN_PLAYER packet
+    // Build spawn data structure
     const spawnData = {
       id: spawnedPlayer.id,
       userid: spawnedPlayer.userid,
@@ -159,41 +153,37 @@ export async function sendSpawnPlayerPacket(
         x: spawnedPlayer.location.position.x,
         y: spawnedPlayer.location.position.y,
         direction: spawnedPlayer.location.position.direction,
+        moving: spawnedPlayer.moving || false,
       },
       username: spawnedPlayer.username,
       isAdmin: spawnedPlayer.isAdmin,
       isGuest: spawnedPlayer.isGuest,
       isStealth: spawnedPlayer.isStealth,
       stats: spawnedPlayer.stats,
-      sprite: spawnedPlayer.sprite,
       mounted: spawnedPlayer.mounted,
-      ...(spawnedPlayer.friends ? { friends: spawnedPlayer.friends } : {}),
-      ...(spawnedPlayer.party ? { party: spawnedPlayer.party } : {}),
-      ...(spawnedPlayer.currency
-        ? { currency: spawnedPlayer.currency }
-        : { currency: { copper: 0, silver: 0, gold: 0 } }),
+      animation: null,
     };
 
-    sendPacket(targetWs, packetManager.spawnPlayer(spawnData));
-
-    // Send animation packet immediately after spawn
-    await sendAnimationToFn(targetWs, animationName, spawnedPlayer.id);
-
     if (AOI_CONFIG.DEBUG) {
-      log.info(`[AOI] Sent SPAWN_PLAYER and animation for ${spawnedPlayer.id} to client`);
+      log.info(`[AOI] Queued SPAWN_PLAYER for ${spawnedPlayer.id}`);
     }
+
+    return spawnData;
   } catch (error) {
-    log.error(`[AOI] Error sending spawn player packet: ${error}`);
+    log.error(`[AOI] Error queueing spawn player packet: ${error}`);
+    return null;
   }
 }
 
 /**
  * Calculate and update a player's Area of Interest
- * Sends SPAWN_PLAYER and DESPAWN_PLAYER packets based on AOI changes
+ * Queues SPAWN_PLAYER and DESPAWN_PLAYER packets for batching
  */
 export async function updatePlayerAOI(
   player: any,
-  sendAnimationToFn: (targetWs: any, name: string, playerId: string) => Promise<void>
+  sendAnimationToFn: (targetWs: any, name: string, playerId: string) => Promise<void>,
+  spawnBatchQueue?: Map<string, Map<string, any>>,
+  despawnBatchQueue?: Map<string, Set<string>>
 ): Promise<void> {
   if (!player || !player.aoi) {
     if (AOI_CONFIG.DEBUG) {
@@ -248,7 +238,7 @@ export async function updatePlayerAOI(
       );
     }
 
-    // Step 4: Send SPAWN_PLAYER for entries (bidirectional)
+    // Step 4: Queue SPAWN_PLAYER for entries (bidirectional)
     for (const enteredPlayerId of enteredAOI) {
       const enteredPlayer = playerCache.get(enteredPlayerId);
       if (!enteredPlayer) continue;
@@ -257,14 +247,26 @@ export async function updatePlayerAOI(
       const canSeeEntered = !enteredPlayer.isStealth || player.isAdmin;
       const canSeePlayer = !player.isStealth || enteredPlayer.isAdmin;
 
-      // Send entered player's data to current player
-      if (canSeeEntered) {
-        await sendSpawnPlayerPacket(player.ws, enteredPlayer, sendAnimationToFn);
+      // Queue entered player's spawn data to current player
+      if (canSeeEntered && spawnBatchQueue) {
+        const spawnData = queueSpawnPlayerPacket(enteredPlayer);
+        if (spawnData) {
+          if (!spawnBatchQueue.has(player.id)) {
+            spawnBatchQueue.set(player.id, new Map());
+          }
+          spawnBatchQueue.get(player.id)!.set(enteredPlayer.id, spawnData);
+        }
       }
 
-      // Send current player's data to entered player (reciprocal)
-      if (canSeePlayer) {
-        await sendSpawnPlayerPacket(enteredPlayer.ws, player, sendAnimationToFn);
+      // Queue current player's spawn data to entered player (reciprocal)
+      if (canSeePlayer && spawnBatchQueue) {
+        const spawnData = queueSpawnPlayerPacket(player);
+        if (spawnData) {
+          if (!spawnBatchQueue.has(enteredPlayer.id)) {
+            spawnBatchQueue.set(enteredPlayer.id, new Map());
+          }
+          spawnBatchQueue.get(enteredPlayer.id)!.set(player.id, spawnData);
+        }
       }
 
       // Update entered player's AOI tracking (bidirectional)
@@ -275,19 +277,33 @@ export async function updatePlayerAOI(
       playerCache.set(enteredPlayer.id, enteredPlayer);
     }
 
-    // Step 5: Send DESPAWN_PLAYER for exits (bidirectional)
+    // Step 5: Queue DESPAWN_PLAYER for exits (bidirectional)
     for (const exitedPlayerId of exitedAOI) {
       const exitedPlayer = playerCache.get(exitedPlayerId);
 
-      // Send despawn to current player
-      sendPacket(player.ws, packetManager.despawnPlayer(exitedPlayerId, "distance"));
+      // Queue despawn to current player
+      if (despawnBatchQueue) {
+        if (!despawnBatchQueue.has(player.id)) {
+          despawnBatchQueue.set(player.id, new Set());
+        }
+        despawnBatchQueue.get(player.id)!.add(exitedPlayerId);
+      } else {
+        sendPacket(player.ws, packetManager.despawnPlayer(exitedPlayerId, "distance"));
+      }
 
-      // Send despawn to exited player (reciprocal)
+      // Queue despawn to exited player (reciprocal)
       if (exitedPlayer && exitedPlayer.ws) {
-        sendPacket(
-          exitedPlayer.ws,
-          packetManager.despawnPlayer(player.id, "distance")
-        );
+        if (despawnBatchQueue) {
+          if (!despawnBatchQueue.has(exitedPlayer.id)) {
+            despawnBatchQueue.set(exitedPlayer.id, new Set());
+          }
+          despawnBatchQueue.get(exitedPlayer.id)!.add(player.id);
+        } else {
+          sendPacket(
+            exitedPlayer.ws,
+            packetManager.despawnPlayer(player.id, "distance")
+          );
+        }
 
         // Update exited player's AOI tracking
         if (exitedPlayer.aoi) {
@@ -381,10 +397,12 @@ export function findPlayersWithTargetInAOI(targetId: string): any[] {
 
 /**
  * Remove a player from everyone's AOI (used on disconnect/map change)
+ * Queues despawn packets for batching
  */
 export function despawnPlayerFromAllAOI(
   departingPlayer: any,
-  reason: "map_change" | "disconnect" = "map_change"
+  reason: "map_change" | "disconnect" = "map_change",
+  despawnBatchQueue?: Map<string, Set<string>>
 ): void {
   if (!departingPlayer || !departingPlayer.aoi) return;
 
@@ -392,12 +410,24 @@ export function despawnPlayerFromAllAOI(
     // Find all players who have this player in their AOI
     const affectedPlayers = findPlayersWithTargetInAOI(departingPlayer.id);
 
+    if (affectedPlayers.length > 0) {
+      log.debug(`[DESPAWN] Queuing ${departingPlayer.id} to ${affectedPlayers.length} players`);
+    }
+
     affectedPlayers.forEach((player) => {
-      // Send despawn packet
-      sendPacket(
-        player.ws,
-        packetManager.despawnPlayer(departingPlayer.id, reason)
-      );
+      if (despawnBatchQueue && reason === "disconnect") {
+        // Queue despawn for batching (only for disconnects)
+        if (!despawnBatchQueue.has(player.id)) {
+          despawnBatchQueue.set(player.id, new Set());
+        }
+        despawnBatchQueue.get(player.id)!.add(departingPlayer.id);
+      } else {
+        // Send despawn packet immediately (for map changes)
+        sendPacket(
+          player.ws,
+          packetManager.despawnPlayer(departingPlayer.id, reason)
+        );
+      }
 
       // Update AOI tracking
       if (player.aoi) {
@@ -426,7 +456,9 @@ export async function handleMapChangeAOI(
   player: any,
   newMapName: string,
   newPosition: { x: number; y: number },
-  sendAnimationToFn: (targetWs: any, name: string, playerId: string) => Promise<void>
+  sendAnimationToFn: (targetWs: any, name: string, playerId: string) => Promise<void>,
+  spawnBatchQueue?: Map<string, Map<string, any>>,
+  despawnBatchQueue?: Map<string, Set<string>>
 ): Promise<void> {
   if (!player) return;
 
@@ -446,8 +478,8 @@ export async function handleMapChangeAOI(
       // Increment sequence to invalidate any in-flight AOI updates
       player.aoi.mapChangeSequence++;
 
-      // Despawn from all players on old map
-      despawnPlayerFromAllAOI(player, "map_change");
+      // Despawn from all players on old map (map changes send immediately, no batching)
+      despawnPlayerFromAllAOI(player, "map_change", undefined);
 
       if (AOI_CONFIG.DEBUG) {
         log.info(`[AOI] Player ${player.id} changing map from ${oldMap} to ${newMap}`);
@@ -464,7 +496,7 @@ export async function handleMapChangeAOI(
     playerCache.set(player.id, player);
 
     // Discover new AOI on new map
-    await updatePlayerAOI(player, sendAnimationToFn);
+    await updatePlayerAOI(player, sendAnimationToFn, spawnBatchQueue, despawnBatchQueue);
   } catch (error) {
     log.error(`[AOI] Error handling map change: ${error}`);
   }

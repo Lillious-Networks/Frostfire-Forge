@@ -2,6 +2,7 @@ class Cache {
   private static instance: Cache;
 
   players: Set<any> = new Set();
+  pendingPlayers: Map<string, any> = new Map();
   npcs: any[] = [];
   audio: any[] = [];
   animations: Map<string, any> = new Map();

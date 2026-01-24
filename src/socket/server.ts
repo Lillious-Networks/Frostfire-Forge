@@ -3,7 +3,7 @@ const MAX_BUFFER_SIZE = 1024 * 1024 * 16; // 16MB
 const packetQueue = new Map<string, (() => void)[]>();
 import crypto from "crypto";
 import { packetManager } from "./packet_manager.ts";
-import packetReceiver from "./receiver.ts";
+import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer } from "./receiver.ts";
 import eventEmitter from "node:events";
 export const listener = new eventEmitter();
 const event = new eventEmitter();
@@ -185,10 +185,8 @@ const Server = Bun.serve<Packet, any>({
             }
           }
         }
-        ws.publish(
-        "DISCONNECT_PLAYER" as Subscription["event"],
-        packetManager.disconnect(ws.data.id)[0]
-      );
+        // Disconnect notifications are now handled by AOI system with batching
+        // ws.publish("DISCONNECT_PLAYER") removed to avoid duplicate packets
       }
     },
     async message(ws: any, message: any) {
@@ -372,10 +370,23 @@ listener.on("onServerTick", async () => {
   }
   if (inactiveSet.size > 0) {
     for (const id of inactiveSet) {
-      Server.publish(
-        "DISCONNECT_PLAYER" as Subscription["event"],
-        packetManager.disconnect(id)[0]
-      );
+      // Check if player still exists in cache AND connections - they might have been removed by websocket close handler
+      const stillInCache = playerCache.get(id);
+      if (!stillInCache) continue;
+
+      // CRITICAL: Also check if they're still in the connections Set
+      // If not, the websocket close handler already handled their disconnect
+      let stillConnected = false;
+      for (const client of connections) {
+        if (client.id === id) {
+          stillConnected = true;
+          break;
+        }
+      }
+      if (!stillConnected) continue;
+
+      // Disconnect notifications are now handled by AOI system with batching
+      // Server.publish("DISCONNECT_PLAYER") removed to avoid duplicate packets
 
       listener.emit("onDisconnect", { id, reason: "inactive" });
 
@@ -402,6 +413,22 @@ listener.on("onDisconnect", async (data) => {
     const playerData = playerCache.get(data.id);
     if (!playerData) return;
 
+    // CRITICAL: Clear movement interval FIRST to stop queuing new movements
+    if (playerData.movementInterval) {
+      clearInterval(playerData.movementInterval);
+      playerData.movementInterval = null;
+    }
+
+    // CRITICAL: Remove from cache IMMEDIATELY to prevent batch timers from processing this player
+    playerCache.remove(playerData.id);
+
+    // Clear all batch queue entries for this player
+    clearBatchQueuesForPlayer(playerData.id, playerData.location.map);
+
+    // Despawn player from all other players' AOI with batching
+    despawnPlayerFromAllAOI(playerData, "disconnect", despawnBatchQueue);
+
+    // Now do async cleanup operations (player already removed from cache, so no batch packets sent)
     let _worlds: WorldData[] = [];
     try {
       const cachedWorlds = await assetCache.get("worlds");
@@ -419,19 +446,16 @@ listener.on("onDisconnect", async (data) => {
       (w) => w.name === playerData?.location?.map?.replace(".json", "")
     ) || null;
 
-    if (thisWorld && typeof thisWorld.players === "number" && thisWorld.players > 0) {
-      thisWorld.players -= 1;
+    if (thisWorld) {
+      // Decrement player count, ensuring it never goes below 0
+      thisWorld.players = Math.max(0, (thisWorld.players || 0) - 1);
       await assetCache.set("worlds", JSON.stringify(_worlds));
+      log.info(
+        `World: ${playerData.location.map.replace(".json", "")} now has ${
+          thisWorld.players
+        } players. (${data.reason})`
+      );
     }
-
-    log.info(
-      `World: ${playerData.location.map.replace(".json", "")} now has ${
-        thisWorld?.players || 0
-      } players.`
-    );
-
-    // Despawn player from all other players' AOI
-    despawnPlayerFromAllAOI(playerData, "disconnect");
 
     if (!playerData.isGuest) {
       if (playerData?.stats) {
@@ -448,7 +472,6 @@ listener.on("onDisconnect", async (data) => {
     }
 
     await player.clearSessionId(playerData.id);
-    playerCache.remove(playerData.id);
 
     log.debug(`Disconnected: ${playerData.username} Reason: ${data.reason}`);
   } catch (e) {

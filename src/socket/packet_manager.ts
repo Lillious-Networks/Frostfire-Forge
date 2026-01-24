@@ -444,5 +444,15 @@ export const packetManager = {
         })
       )
     ] as any[];
+  },
+  batchDisconnectPlayer: (despawnData: Array<{ id: string; reason: string }>) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "BATCH_DISCONNECT_PLAYER",
+          data: despawnData
+        })
+      )
+    ] as any[];
   }
 };

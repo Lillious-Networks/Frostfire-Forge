@@ -448,8 +448,8 @@ socket.onmessage = async (event) => {
             : null;
 
           // Check pending players if not found in active
-          if (!player && cache.pendingPlayers && cache.pendingPlayers.has(data.id)) {
-            player = cache.pendingPlayers.get(data.id);
+          if (!player && cache.pendingPlayers) {
+            player = cache.pendingPlayers.get(data.id) || null;
           }
 
           if (player) {
@@ -757,6 +757,23 @@ socket.onmessage = async (event) => {
       }
       break;
     }
+    case "BATCH_DISCONNECT_PLAYER": {
+      // Handle batched disconnect/despawn packets
+      if (!Array.isArray(data)) return;
+
+      data.forEach((despawnData: { id: string; reason: string }) => {
+        if (!despawnData.id) return;
+
+        // Remove player from the local cache
+        const player = Array.from(cache.players).find(
+          (p) => p.id === despawnData.id
+        );
+        if (player) {
+          cache.players.delete(player);
+        }
+      });
+      break;
+    }
     case "MOVEXY": {
       if (data._data === "abort") {
         break;
@@ -817,7 +834,6 @@ socket.onmessage = async (event) => {
     case "LOAD_MAP":
       {
         loaded = await loadMap(data);
-        console.log(`[LOAD_MAP] Map loaded, loaded=${loaded}, selfPlayerSpriteLoaded=${selfPlayerSpriteLoaded}`);
 
         // Check if we should hide loading screen now (in case sprite loaded first)
         if (loaded && selfPlayerSpriteLoaded) {
@@ -2183,7 +2199,6 @@ let loaded: boolean = false;
 export let selfPlayerSpriteLoaded: boolean = false;
 
 export function setSelfPlayerSpriteLoaded(value: boolean) {
-  console.log(`[setSelfPlayerSpriteLoaded] Setting to: ${value}`);
   selfPlayerSpriteLoaded = value;
 
   // Check if we should hide loading screen now
@@ -2193,7 +2208,6 @@ export function setSelfPlayerSpriteLoaded(value: boolean) {
 }
 
 async function hideLoadingScreen() {
-  console.log('[hideLoadingScreen] Hiding loading screen');
   const { loadingScreen, progressBar, progressBarContainer } = await import('./ui.js');
 
   if (loadingScreen) {
