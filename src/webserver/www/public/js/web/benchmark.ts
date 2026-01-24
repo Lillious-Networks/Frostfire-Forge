@@ -10,7 +10,6 @@ const progressBar = document.getElementById('progress-bar') as HTMLDivElement;
 const progressText = document.getElementById('progress-text') as HTMLSpanElement;
 const progressPercentage = document.getElementById('progress-percentage') as HTMLSpanElement;
 let stopped = false;
-let errored = false;
 
 // Write logs to the logs element
 const logs = document.getElementById('logs') as HTMLParagraphElement;
@@ -228,7 +227,7 @@ start.addEventListener('click', async () => {
         const allWebsockets: WebSocket[] = [];
         const loggedInWebsockets: WebSocket[] = [];
 
-        return new Promise(async (resolve, reject) => {
+        return new Promise(async (resolve) => {
             let openedCount = 0;
             let loggedInCount = 0;
             let loginTimeout: any = null;
@@ -358,7 +357,7 @@ start.addEventListener('click', async () => {
                     };
                     websocket.addEventListener('message', loginHandler);
 
-                    websocket.onerror = (error) => {
+                    websocket.onerror = () => {
                         logMessage(`WebSocket connection error during login`);
                     };
 
@@ -657,5 +656,4 @@ function reset() {
     clients.disabled = false; // Enable the clients input
     duration.disabled = false; // Enable the duration input
     stopped = false;
-    errored = false;
 }
