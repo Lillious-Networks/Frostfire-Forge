@@ -10,7 +10,6 @@ const progressBar = document.getElementById('progress-bar') as HTMLDivElement;
 const progressText = document.getElementById('progress-text') as HTMLSpanElement;
 const progressPercentage = document.getElementById('progress-percentage') as HTMLSpanElement;
 let stopped = false;
-let errored = false;
 
 // Write logs to the logs element
 const logs = document.getElementById('logs') as HTMLParagraphElement;
@@ -20,6 +19,9 @@ function logMessage(message: string) {
     logs.innerHTML += `<p>[${timestamp}] ${message}</p>`;
     logs.scrollTop = logs.scrollHeight; // Auto-scroll to the bottom
 }
+
+// Track pending setTimeout IDs for movement abort packets
+const pendingTimeouts = new Map<WebSocket, Set<any>>();
 
 console.error = (message?: any, ...optionalParams: any[]) => {
     logMessage(typeof message === 'string' ? message : JSON.stringify(message));
@@ -71,7 +73,7 @@ duration.addEventListener('input', () => {
 
 // Start button logic
 const connections = new Map<string, WebSocket[]>();
-const websocketIntervals = new Map<WebSocket, { timeSync: any, movement: any }>();
+const websocketIntervals = new Map<WebSocket, { timeSync: any }>();
 
 // Latency tracking
 const latencyStats = {
@@ -134,22 +136,29 @@ start.addEventListener('click', async () => {
         // Then send TIME_SYNC every 5 seconds
         const timeSyncInterval = setInterval(sendTimeSync, 5000);
 
-        const intervals = websocketIntervals.get(websocket) || { timeSync: null, movement: null };
+        const intervals = websocketIntervals.get(websocket) || { timeSync: null };
         intervals.timeSync = timeSyncInterval;
         websocketIntervals.set(websocket, intervals);
     }
 
-    // Function to start movement simulation
-    // Pattern: Move for 1 second, abort, wait 1 second, repeat (2 second cycle)
-    function startMovementSimulation(websocket: WebSocket) {
+    // Function to start movement simulation with randomized timing
+    // Pattern: Move for random duration, abort, wait random time, repeat
+    function startMovementSimulation(websocket: WebSocket, initialDelay: number = 0) {
         const directions = ['up', 'down', 'left', 'right', 'upleft', 'upright', 'downleft', 'downright'];
-        let movementInterval: any = null;
 
-        const movementCycle = () => {
-            if (stopped || websocket.readyState !== WebSocket.OPEN) {
-                if (movementInterval) clearInterval(movementInterval);
-                return;
-            }
+        // Initialize timeout tracking for this websocket
+        if (!pendingTimeouts.has(websocket)) {
+            pendingTimeouts.set(websocket, new Set());
+        }
+
+        const scheduleNextMovement = () => {
+            if (stopped || websocket.readyState !== WebSocket.OPEN) return;
+
+            // Random movement duration: 500ms to 2000ms
+            const moveDuration = 500 + Math.floor(Math.random() * 1500);
+
+            // Random hold time after stopping: 500ms to 2500ms
+            const holdTime = 500 + Math.floor(Math.random() * 2000);
 
             // Pick a random direction and send movement packet
             const randomDirection = directions[Math.floor(Math.random() * directions.length)];
@@ -162,9 +171,12 @@ start.addEventListener('click', async () => {
                 )
             );
 
-            // After 1 second, send ABORT packet
-            setTimeout(() => {
-                if (stopped || websocket.readyState !== WebSocket.OPEN) return;
+            // After random duration, send ABORT packet
+            const abortTimeout = setTimeout(() => {
+                if (stopped || websocket.readyState !== WebSocket.OPEN) {
+                    pendingTimeouts.get(websocket)?.delete(abortTimeout);
+                    return;
+                }
 
                 websocket.send(
                     packet.encode(
@@ -174,25 +186,48 @@ start.addEventListener('click', async () => {
                         })
                     )
                 );
-            }, 1000);
+
+                // Remove from pending timeouts after execution
+                pendingTimeouts.get(websocket)?.delete(abortTimeout);
+
+                // After random hold time, schedule next movement
+                const nextMoveTimeout = setTimeout(() => {
+                    if (stopped || websocket.readyState !== WebSocket.OPEN) {
+                        pendingTimeouts.get(websocket)?.delete(nextMoveTimeout);
+                        return;
+                    }
+
+                    pendingTimeouts.get(websocket)?.delete(nextMoveTimeout);
+                    scheduleNextMovement();
+                }, holdTime);
+
+                pendingTimeouts.get(websocket)?.add(nextMoveTimeout);
+            }, moveDuration);
+
+            // Track this timeout so we can clear it if needed
+            pendingTimeouts.get(websocket)?.add(abortTimeout);
         };
 
-        // Start the first cycle immediately
-        movementCycle();
+        // Start the first cycle after initial delay
+        const startTimeout = setTimeout(() => {
+            if (stopped || websocket.readyState !== WebSocket.OPEN) {
+                pendingTimeouts.get(websocket)?.delete(startTimeout);
+                return;
+            }
 
-        // Repeat every 2 seconds
-        movementInterval = setInterval(movementCycle, 2000);
+            pendingTimeouts.get(websocket)?.delete(startTimeout);
+            scheduleNextMovement();
+        }, initialDelay);
 
-        const intervals = websocketIntervals.get(websocket) || { timeSync: null, movement: null };
-        intervals.movement = movementInterval;
-        websocketIntervals.set(websocket, intervals);
+        // Track the initial delay timeout
+        pendingTimeouts.get(websocket)?.add(startTimeout);
     }
 
     async function createClients(amount: number): Promise<WebSocket[]> {
         const allWebsockets: WebSocket[] = [];
         const loggedInWebsockets: WebSocket[] = [];
 
-        return new Promise((resolve, reject) => {
+        return new Promise(async (resolve) => {
             let openedCount = 0;
             let loggedInCount = 0;
             let loginTimeout: any = null;
@@ -207,17 +242,17 @@ start.addEventListener('click', async () => {
                 if (stopped) {
                     result.innerHTML = 'Stopping benchmark...';
                 } else if (openedCount < amount) {
-                    result.innerText = `Connecting: ${openedCount} / ${amount} clients`;
+                    result.innerText = `Connecting (staggered): ${openedCount} / ${amount} clients`;
                 } else if (loggedInCount < amount) {
-                    result.innerText = `Connected ${openedCount} clients | Logging in: ${loggedInCount} / ${amount}`;
+                    result.innerText = `Connected ${openedCount} | Logging in & starting movement: ${loggedInCount} / ${amount}`;
                 }
             };
 
-            // Timeout after 30 seconds - proceed with whoever logged in
+            // Timeout after 30 seconds - proceed with whoever logged in (already moving)
             const startLoginTimeout = () => {
                 loginTimeout = setTimeout(() => {
                     if (loggedInCount < amount) {
-                        logMessage(`Login timeout: Only ${loggedInCount}/${amount} clients logged in successfully`);
+                        logMessage(`Login timeout: Only ${loggedInCount}/${amount} clients logged in (others already moving)`);
 
                         // Close websockets that didn't log in
                         allWebsockets.forEach(ws => {
@@ -228,13 +263,21 @@ start.addEventListener('click', async () => {
 
                         // Force final update
                         lastUpdateTime = 0;
-                        updateConnectionStatus();
+                        result.innerText = `${loggedInCount}/${amount} clients logged in and moving - proceeding`;
                         resolve(loggedInWebsockets);
                     }
                 }, 30000); // 30 second timeout
             };
 
+            // Stagger client creation with minimal delays for faster login
+            if (amount > 10) {
+                logMessage(`Creating ${amount} clients with 10ms stagger delay for faster login`);
+            }
+
             for (let i = 0; i < amount; i++) {
+                // Add minimal delay between each client creation (10ms per client)
+                await new Promise(resolve => setTimeout(resolve, i * 10));
+
                 // Create a guest account first
                 fetch('/guest-login', {
                     method: 'POST',
@@ -299,18 +342,22 @@ start.addEventListener('click', async () => {
                             // Start TIME_SYNC immediately to keep connection alive
                             startKeepAlive(websocket);
 
+                            // Start movement immediately for this player with random delay
+                            const randomDelay = Math.floor(Math.random() * 2000);
+                            startMovementSimulation(websocket, randomDelay);
+
                             if (loggedInCount === amount) {
                                 clearTimeout(loginTimeout);
                                 // Force final update to show completion
                                 lastUpdateTime = 0;
-                                result.innerText = `All ${amount} clients logged in successfully`;
+                                result.innerText = `All ${amount} clients logged in and moving`;
                                 resolve(loggedInWebsockets);
                             }
                         }
                     };
                     websocket.addEventListener('message', loginHandler);
 
-                    websocket.onerror = (error) => {
+                    websocket.onerror = () => {
                         logMessage(`WebSocket connection error during login`);
                     };
 
@@ -330,7 +377,15 @@ start.addEventListener('click', async () => {
     const actualClientCount = websockets.length;
 
     if (stopped) {
-        websockets.forEach(ws => ws.close());
+        websockets.forEach(ws => {
+            // Clear pending timeouts before closing
+            const timeouts = pendingTimeouts.get(ws);
+            if (timeouts) {
+                timeouts.forEach(timeoutId => clearTimeout(timeoutId));
+                pendingTimeouts.delete(ws);
+            }
+            ws.close();
+        });
         progressWrapper.classList.remove('active');
         result.innerHTML = 'Benchmark aborted';
         setTimeout(() => {
@@ -352,19 +407,27 @@ start.addEventListener('click', async () => {
         return;
     }
 
-    // All clients are now logged in, wait a moment before starting movement
+    // All clients are now logged in and already moving
     if (actualClientCount < clientsValue) {
-        result.innerText = `${actualClientCount} guests logged in (${clientsValue - actualClientCount} failed). Starting benchmark in 3 seconds...`;
-        logMessage(`Starting benchmark with ${actualClientCount}/${clientsValue} clients`);
+        result.innerText = `${actualClientCount} guests logged in and moving (${clientsValue - actualClientCount} failed). Starting timer in 3 seconds...`;
+        logMessage(`Starting benchmark timer with ${actualClientCount}/${clientsValue} clients (already moving)`);
     } else {
-        result.innerText = `All ${actualClientCount} guests logged in. Starting benchmark in 3 seconds...`;
+        result.innerText = `All ${actualClientCount} guests logged in and moving. Starting timer in 3 seconds...`;
     }
 
-    // Wait 3 seconds to ensure all clients are fully loaded on server side
+    // Wait 3 seconds before starting the benchmark timer (players are already moving)
     await new Promise(resolve => setTimeout(resolve, 3000));
 
     if (stopped) {
-        websockets.forEach(ws => ws.close());
+        websockets.forEach(ws => {
+            // Clear pending timeouts before closing
+            const timeouts = pendingTimeouts.get(ws);
+            if (timeouts) {
+                timeouts.forEach(timeoutId => clearTimeout(timeoutId));
+                pendingTimeouts.delete(ws);
+            }
+            ws.close();
+        });
         progressWrapper.classList.remove('active');
         result.innerHTML = 'Benchmark aborted';
         setTimeout(() => {
@@ -374,11 +437,6 @@ start.addEventListener('click', async () => {
         }, 3000);
         return;
     }
-
-    // Now start movement simulation for all guests
-    websockets.forEach((websocket: WebSocket) => {
-        startMovementSimulation(websocket);
-    });
 
     const startTime = Date.now();
     websockets.forEach((websocket: WebSocket) => {
@@ -420,12 +478,18 @@ start.addEventListener('click', async () => {
 
         websocket.onclose = (event) => {
             connections.delete(id);
-            // Clean up intervals
+            // Clean up intervals (only timeSync uses setInterval now)
             const intervals = websocketIntervals.get(websocket);
             if (intervals?.timeSync) clearInterval(intervals.timeSync);
-            if (intervals?.movement) clearInterval(intervals.movement);
             websocketIntervals.delete(websocket);
             latencyStats.lastSyncTimes.delete(websocket);
+
+            // Clear all pending timeouts for this websocket (includes movement timeouts)
+            const timeouts = pendingTimeouts.get(websocket);
+            if (timeouts) {
+                timeouts.forEach(timeoutId => clearTimeout(timeoutId));
+                pendingTimeouts.delete(websocket);
+            }
 
             if (!stopped) {
                 // Log the disconnection with the reason
@@ -447,7 +511,7 @@ start.addEventListener('click', async () => {
         return { avg, min, max, count: latencyStats.samples.length };
     }
 
-    // Progress timer - updates every second
+    // Progress timer - updates every second (timer started after players began moving)
     let elapsedSeconds = 0;
     const progressInterval = setInterval(() => {
         if (stopped) {
@@ -469,15 +533,19 @@ start.addEventListener('click', async () => {
 
         updateProgress(elapsedSeconds, durationValue);
         if (latency.count > 0) {
-            result.innerText = `Running: ${elapsedSeconds}s / ${durationValue}s - ${activeConnections}/${actualClientCount} clients | Latency: ${latency.avg}ms (min: ${latency.min}ms, max: ${latency.max}ms)`;
+            result.innerText = `Test Timer: ${elapsedSeconds}s / ${durationValue}s - ${activeConnections}/${actualClientCount} clients moving | Latency: ${latency.avg}ms (min: ${latency.min}ms, max: ${latency.max}ms)`;
         } else {
-            result.innerText = `Running: ${elapsedSeconds}s / ${durationValue}s - ${activeConnections}/${actualClientCount} clients | Waiting for latency data...`;
+            result.innerText = `Test Timer: ${elapsedSeconds}s / ${durationValue}s - ${activeConnections}/${actualClientCount} clients moving | Waiting for latency data...`;
         }
     }, 1000);
 
     // End benchmark after duration
     setTimeout(() => {
         if (stopped) return;
+
+        // Set stopped flag BEFORE cleaning up to prevent pending timeouts from firing
+        stopped = true;
+
         clearInterval(progressInterval);
 
         const endTime = Date.now();
@@ -495,8 +563,15 @@ start.addEventListener('click', async () => {
         websockets.forEach(ws => {
             const intervals = websocketIntervals.get(ws);
             if (intervals?.timeSync) clearInterval(intervals.timeSync);
-            if (intervals?.movement) clearInterval(intervals.movement);
             websocketIntervals.delete(ws);
+
+            // Clear all pending timeouts for this websocket (includes movement timeouts)
+            const timeouts = pendingTimeouts.get(ws);
+            if (timeouts) {
+                timeouts.forEach(timeoutId => clearTimeout(timeoutId));
+                pendingTimeouts.delete(ws);
+            }
+
             if (ws.readyState === WebSocket.OPEN) {
                 ws.close();
             }
@@ -526,7 +601,7 @@ start.addEventListener('click', async () => {
 
         result.innerHTML = `
             <p><strong>Benchmark Complete</strong></p>
-            <p>Duration: ${totalTime}s</p>
+            <p>Test Duration: ${totalTime}s (players started moving before timer)</p>
             ${startedWithNote}
             ${connectionStatus}
             ${latencyInfo}
@@ -547,8 +622,15 @@ stop.addEventListener('click', () => {
         websocketArray.forEach((websocket: WebSocket) => {
             const intervals = websocketIntervals.get(websocket);
             if (intervals?.timeSync) clearInterval(intervals.timeSync);
-            if (intervals?.movement) clearInterval(intervals.movement);
             websocketIntervals.delete(websocket);
+
+            // Clear all pending timeouts for this websocket (includes movement timeouts)
+            const timeouts = pendingTimeouts.get(websocket);
+            if (timeouts) {
+                timeouts.forEach(timeoutId => clearTimeout(timeoutId));
+                pendingTimeouts.delete(websocket);
+            }
+
             if (websocket.readyState === WebSocket.OPEN) {
                 websocket.close();
             }
@@ -574,5 +656,4 @@ function reset() {
     clients.disabled = false; // Enable the clients input
     duration.disabled = false; // Enable the duration input
     stopped = false;
-    errored = false;
 }

@@ -1,6 +1,6 @@
 import Cache from "./cache.js";
 const cache = Cache.getInstance();
-import { cachedPlayerId } from "./socket.js";
+import { cachedPlayerId, setSelfPlayerSpriteLoaded } from "./socket.js";
 import { updateFriendOnlineStatus, updateFriendsList } from "./friends.js";
 import { getCameraX, getCameraY, setCameraX, setCameraY } from "./renderer.js";
 import { createPartyUI, positionText } from "./ui.js";
@@ -617,11 +617,22 @@ async function createPlayer(data: any) {
     },
   };
 
-  cache.players.add(player);
-
-  // Load sprite sheet layered animation system
+  // Load sprite sheet layered animation system FIRST
   if (layeredAnimationPromise) {
     player.layeredAnimation = await layeredAnimationPromise;
+    // Only add to cache if animation loaded (player will be visible)
+    cache.players.add(player);
+
+    // If this is the self-player, mark sprite as loaded
+    if (data.id === cachedPlayerId) {
+      setSelfPlayerSpriteLoaded(true);
+    }
+  } else {
+    // No sprite data yet - store in pending list, wait for SPRITE_SHEET_ANIMATION packet
+    if (!cache.pendingPlayers) {
+      cache.pendingPlayers = new Map();
+    }
+    cache.pendingPlayers.set(player.id, player);
   }
 
   if (data.id === cachedPlayerId) {

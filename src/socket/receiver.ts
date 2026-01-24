@@ -28,6 +28,7 @@ import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks } from "../modules/assetloader";
 import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable } from "../modules/spriteSheetManager";
+import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI } from "./aoi";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 
 // Animation system configuration
@@ -39,40 +40,51 @@ let restartTimers: ReturnType<typeof setTimeout>[];
 let globalStateRevision: number = 0;
 
 // Movement batching system
-const movementBatchQueue = new Map<string, Map<string, any>>(); // Map of map -> Map of playerId -> movement
+export const movementBatchQueue = new Map<string, Map<string, any>>(); // Map of map -> Map of playerId -> movement
 const BATCH_INTERVAL_MS = 16; // Send batched movements every 16ms (60 Hz)
 
-// Flush and send batched movements
+// Flush and send batched movements with AOI filtering
 function flushMovementBatches() {
   for (const [mapName, playerMovements] of movementBatchQueue.entries()) {
     if (playerMovements.size === 0) continue;
 
-    // Convert Map to array of latest movements per player
-    const movements = Array.from(playerMovements.values());
-
     // Get all players in this map
     const playersInMap = filterPlayersByMap(mapName);
 
-    // Group movements by visibility (stealth vs normal)
-    const normalMovements = movements.filter(m => !m.isStealth);
-    const stealthMovements = movements.filter(m => m.isStealth);
+    // For each player, filter movements to only those in their AOI
+    playersInMap.forEach((receivingPlayer) => {
+      // Skip if player has no AOI or websocket is closed/missing
+      if (!receivingPlayer.aoi || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) return;
 
-    // Send normal movements to all players
-    if (normalMovements.length > 0) {
-      const batchPacket = packetManager.batchMoveXY(normalMovements);
-      playersInMap.forEach((player) => {
-        sendPacket(player.ws, batchPacket);
-      });
-    }
+      const movementsForThisPlayer: any[] = [];
 
-    // Send stealth movements only to admins
-    if (stealthMovements.length > 0) {
-      const stealthPacket = packetManager.batchMoveXY(stealthMovements);
-      const adminPlayers = playersInMap.filter((p) => p.isAdmin);
-      adminPlayers.forEach((player) => {
-        sendPacket(player.ws, stealthPacket);
-      });
-    }
+      // Check each movement to see if it should be sent to this player
+      for (const [movingPlayerId, movementData] of playerMovements.entries()) {
+        // Always include self movement
+        if (movingPlayerId === receivingPlayer.id) {
+          movementsForThisPlayer.push(movementData);
+          continue;
+        }
+
+        // Check if moving player is in receiving player's AOI
+        if (!receivingPlayer.aoi.playersInAOI.has(movingPlayerId)) {
+          continue;
+        }
+
+        // Apply stealth visibility rules
+        if (movementData.isStealth && !receivingPlayer.isAdmin) {
+          continue; // Only admins can see stealth movements
+        }
+
+        movementsForThisPlayer.push(movementData);
+      }
+
+      // Send batched movements if any qualify
+      if (movementsForThisPlayer.length > 0) {
+        const batchPacket = packetManager.batchMoveXY(movementsForThisPlayer);
+        sendPacket(receivingPlayer.ws, batchPacket);
+      }
+    });
   }
 
   // Clear all batches
@@ -81,6 +93,123 @@ function flushMovementBatches() {
 
 // Start the batching timer
 setInterval(flushMovementBatches, BATCH_INTERVAL_MS);
+
+// Spawn player batching system
+export const spawnBatchQueue = new Map<string, Map<string, any>>(); // Map of receivingPlayerId -> Map of spawnedPlayerId -> spawnData
+
+// Flush and send batched spawn packets
+function flushSpawnBatches() {
+  for (const [receivingPlayerId, spawnedPlayers] of spawnBatchQueue.entries()) {
+    if (spawnedPlayers.size === 0) continue;
+
+    const receivingPlayer = playerCache.get(receivingPlayerId);
+    // Skip if player or websocket is missing/closed
+    if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
+
+    const spawnsForThisPlayer = Array.from(spawnedPlayers.values());
+
+    if (spawnsForThisPlayer.length > 0) {
+      // Send as LOAD_PLAYERS packet format (array of player data)
+      const loadPlayersData = {
+        players: spawnsForThisPlayer,
+        snapshotRevision: globalStateRevision
+      };
+      sendPacket(receivingPlayer.ws, packetManager.loadPlayers(loadPlayersData));
+
+      // Send animations for each spawned player
+      spawnsForThisPlayer.forEach(async (spawnData) => {
+        const spawnedPlayer = playerCache.get(spawnData.id);
+        if (!spawnedPlayer) return;
+
+        const animationName = getAnimationNameForDirection(
+          spawnedPlayer.location.position.direction,
+          spawnedPlayer.moving,
+          spawnedPlayer.mounted,
+          spawnedPlayer.mount_type,
+          spawnedPlayer.casting || false
+        );
+
+        await sendAnimationTo(receivingPlayer.ws, animationName, spawnData.id);
+      });
+    }
+  }
+
+  // Clear all batches
+  spawnBatchQueue.clear();
+}
+
+// Start the spawn batching timer
+setInterval(flushSpawnBatches, BATCH_INTERVAL_MS);
+
+// Despawn/disconnect batching system
+export const despawnBatchQueue = new Map<string, Set<string>>(); // Map of receivingPlayerId -> Set of despawnedPlayerIds
+
+// Flush and send batched despawn packets
+function flushDespawnBatches() {
+  for (const [receivingPlayerId, despawnedPlayerIds] of despawnBatchQueue.entries()) {
+    if (despawnedPlayerIds.size === 0) continue;
+
+    const receivingPlayer = playerCache.get(receivingPlayerId);
+    // Skip if player or websocket is missing/closed
+    if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
+
+    const despawnsArray = Array.from(despawnedPlayerIds);
+
+    if (despawnsArray.length > 0) {
+      // Send as array of disconnect/despawn packets
+      const despawnData = despawnsArray.map(playerId => ({ id: playerId, reason: "disconnect" }));
+      sendPacket(receivingPlayer.ws, packetManager.batchDisconnectPlayer(despawnData));
+    }
+  }
+
+  // Clear all batches
+  despawnBatchQueue.clear();
+}
+
+// Start the despawn batching timer
+setInterval(flushDespawnBatches, BATCH_INTERVAL_MS);
+
+/**
+ * Clear all queued batch data for a disconnecting player
+ * This prevents packets from being sent to/about disconnected players
+ */
+export function clearBatchQueuesForPlayer(playerId: string, mapName: string) {
+  // Clear movement data for this player
+  const mapMovements = movementBatchQueue.get(mapName);
+  if (mapMovements) {
+    mapMovements.delete(playerId);
+    if (mapMovements.size === 0) {
+      movementBatchQueue.delete(mapName);
+    }
+  }
+
+  // Clear any spawns queued TO this player
+  const spawnsToPlayer = spawnBatchQueue.get(playerId);
+  if (spawnsToPlayer && spawnsToPlayer.size > 0) {
+    log.debug(`[CLEAR] Removing ${spawnsToPlayer.size} queued spawns TO ${playerId}`);
+  }
+  spawnBatchQueue.delete(playerId);
+
+  // Clear spawns queued FROM this player (to others)
+  let clearedSpawnsFrom = 0;
+  for (const [receivingPlayerId, spawnedPlayers] of spawnBatchQueue.entries()) {
+    if (spawnedPlayers.has(playerId)) {
+      spawnedPlayers.delete(playerId);
+      clearedSpawnsFrom++;
+    }
+    if (spawnedPlayers.size === 0) {
+      spawnBatchQueue.delete(receivingPlayerId);
+    }
+  }
+  if (clearedSpawnsFrom > 0) {
+    log.debug(`[CLEAR] Removed spawn of ${playerId} FROM ${clearedSpawnsFrom} player queues`);
+  }
+
+  // Clear any despawns queued TO this player
+  despawnBatchQueue.delete(playerId);
+
+  // Clear despawns queued FROM this player (to others) - not needed as despawn already happened
+}
 
 const npcs = await assetCache.get("npcs");
 const particles = await assetCache.get("particles");
@@ -260,6 +389,10 @@ authWorker.on("message", async (result: any) => {
     if (_pcache) {
       _pcache.stats = stats;
       playerCache.set(_pcache.id, _pcache);
+
+      // Initialize AOI state for the player
+      initializePlayerAOI(_pcache);
+      playerCache.set(_pcache.id, _pcache);
     }
 
     const mapData = [
@@ -275,8 +408,14 @@ authWorker.on("message", async (result: any) => {
     setImmediate(async () => {
       const snapshotRevision = globalStateRevision;
 
-      const currentPlayersOnMap = filterPlayersByMap(spawnLocation.map);
+      // Get current player from cache
+      const currentPlayer = playerCache.get(ws.data.id);
+      if (!currentPlayer) return;
 
+      // Update AOI to discover nearby players and queue spawn/despawn packets for batching
+      await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+
+      // Send self spawn packet
       const spawnDataForAll = {
         id: ws.data.id,
         userid: playerData.id,
@@ -297,33 +436,15 @@ authWorker.on("message", async (result: any) => {
         party: playerData.party || [],
         currency: playerData.currency || { copper: 0, silver: 0, gold: 0 },
       };
+      sendPacket(ws, packetManager.spawnPlayer(spawnDataForAll));
 
+      // Build LOAD_PLAYERS data from players in AOI
       const playerDataForLoad: any[] = [];
-      // Send spawn packets to all players (O(N))
-      for (const p of currentPlayersOnMap) {
-        if (!p || !p.ws) continue;
-        if (p.ws === ws) {
-          sendPacket(p.ws, packetManager.spawnPlayer(spawnDataForAll));
-        } else {
-          const spawnForOther = {
-            id: ws.data.id,
-            userid: playerData.id,
-            location: {
-              map: spawnLocation.map,
-              x: spawnLocation.x || 0,
-              y: spawnLocation.y || 0,
-              direction: spawnLocation.direction,
-            },
-            username: playerData.username,
-            isAdmin: playerData.isAdmin,
-            isGuest: playerData.isGuest,
-            isStealth: playerData.isStealth,
-            stats: stats || {},
-            animation: null,
-          };
-          sendPacket(p.ws, packetManager.spawnPlayer(spawnForOther));
-        }
+      const playersInAOI = Array.from(currentPlayer.aoi.playersInAOI)
+        .map(id => playerCache.get(id as string))
+        .filter(p => p && p.ws);
 
+      for (const p of playersInAOI) {
         const loadPlayerData = {
           id: p.id,
           userid: p.userid,
@@ -352,6 +473,7 @@ authWorker.on("message", async (result: any) => {
 
       sendPacket(ws, packetManager.loadPlayers(loadPlayersData));
 
+      // Send animations for players in AOI
       if (playerDataForLoad.length > 0) {
         playerDataForLoad.forEach(async (pl) => {
           if (pl.id !== ws.data.id && pl.location.direction) {
@@ -360,27 +482,24 @@ authWorker.on("message", async (result: any) => {
               ws,
               getAnimationNameForDirection(pl.location.direction, !!pcache?.moving, false, undefined, !!pcache?.casting),
               pl.id
-              // Don't pass snapshotRevision - animations should be applied immediately, not buffered
             );
           }
         });
       }
 
+      // Send initial animation for self
       if (position?.direction) {
         await sendAnimationTo(
           ws,
           getAnimationNameForDirection(position.direction, false, false, undefined, false),
           ws.data.id
         );
-        for (const other of currentPlayersOnMap) {
-          if (other.id !== ws.data.id && other.ws) {
-            await sendAnimationTo(
-              other.ws,
-              getAnimationNameForDirection(position.direction, false, false, undefined, false),
-              ws.data.id
-            );
-          }
-        }
+        // Broadcast to players in AOI using AOI broadcast
+        const animationData = packetManager.animation({
+          id: ws.data.id,
+          name: getAnimationNameForDirection(position.direction, false, false, undefined, false)
+        });
+        broadcastToAOI(currentPlayer, animationData, false);
       }
 
       // Send music
@@ -538,6 +657,7 @@ export default async function packetReceiver(
       case "TIME_SYNC": {
         if (!currentPlayer) return;
         currentPlayer.lastUpdated = performance.now();
+        playerCache.set(currentPlayer.id, currentPlayer);
         // Echo back TIME_SYNC for latency measurement
         sendPacket(ws, packetManager.timeSync(data));
         break;
@@ -699,6 +819,16 @@ export default async function packetReceiver(
           if (running) return;
           running = true;
 
+          // Stop movement if websocket closed
+          if (!ws || ws.readyState !== 1) {
+            if (currentPlayer.movementInterval) {
+              clearInterval(currentPlayer.movementInterval);
+              currentPlayer.movementInterval = null;
+            }
+            running = false;
+            return;
+          }
+
           const currentTime = performance.now();
           const deltaTime = currentTime - lastTime;
 
@@ -807,12 +937,16 @@ export default async function packetReceiver(
                 "affectedRows" in result &&
                 (result as { affectedRows: number }).affectedRows !== 0
               ) {
-                currentPlayer.location = {
-                  map: warp.map.replace(".json", ""),
+                const newMap = warp.map.replace(".json", "");
+                const newPosition = {
                   x: warp.position.x || 0,
-                  y: warp.position.y || 0,
-                  direction: currentPlayer.location.position?.direction || "down",
+                  y: warp.position.y || 0
                 };
+
+                // Handle AOI for map change
+                await handleMapChangeAOI(currentPlayer, newMap, newPosition, sendAnimationTo, spawnBatchQueue);
+
+                currentPlayer.location.position.direction = currentPlayer.location.position?.direction || "down";
 
                 if (currentMap !== warp.map) {
                   sendPacket(ws, packetManager.reconnect());
@@ -834,6 +968,11 @@ export default async function packetReceiver(
 
           globalStateRevision++;
 
+          // Check if AOI needs updating based on distance threshold
+          if (shouldUpdateAOI(currentPlayer)) {
+            await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+          }
+
           const movementData = {
             id: ws.data.id,
             _data: currentPlayer.location.position,
@@ -841,13 +980,15 @@ export default async function packetReceiver(
             isStealth: currentPlayer.isStealth
           };
 
-          // Add movement to batch queue (deduplicated by player ID)
-          const mapName = currentPlayer.location.map;
-          if (!movementBatchQueue.has(mapName)) {
-            movementBatchQueue.set(mapName, new Map());
+          // Add movement to batch queue for AOI-filtered broadcasting
+          // Check websocket is still open before queuing
+          if (ws.readyState === 1) {
+            const mapName = currentPlayer.location.map;
+            if (!movementBatchQueue.has(mapName)) {
+              movementBatchQueue.set(mapName, new Map());
+            }
+            movementBatchQueue.get(mapName)!.set(currentPlayer.id, movementData);
           }
-          // This will overwrite previous positions, ensuring only latest position is sent
-          movementBatchQueue.get(mapName)!.set(ws.data.id, movementData);
 
           running = false;
         };
@@ -870,28 +1011,18 @@ export default async function packetReceiver(
         ) / 10;
         globalStateRevision++;
 
-        if (currentPlayer.isStealth) {
-          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-          const playersInMapAdmin = playersInMap.filter((p) => p.isAdmin);
-          playersInMapAdmin.forEach((player) => {
-            const movementData = {
-              id: ws.data.id,
-              _data: currentPlayer.location.position,
-              revision: globalStateRevision
-            };
-            sendPacket(player.ws, packetManager.moveXY(movementData));
-          });
-        } else {
-          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-          playersInMap.forEach((player) => {
-            const movementData = {
-              id: ws.data.id,
-              _data: currentPlayer.location.position,
-              revision: globalStateRevision
-            };
-            sendPacket(player.ws, packetManager.moveXY(movementData));
-          });
+        // Update AOI after teleport
+        if (shouldUpdateAOI(currentPlayer)) {
+          await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
         }
+
+        // Broadcast movement using AOI
+        const movementData = {
+          id: ws.data.id,
+          _data: currentPlayer.location.position,
+          revision: globalStateRevision
+        };
+        broadcastToAOI(currentPlayer, packetManager.moveXY(movementData), true);
         break;
       }
       case "CHAT": {
@@ -4208,9 +4339,14 @@ function tryParsePacket(data: any) {
 }
 
 function sendPacket(ws: any, packets: any[]) {
-  packets.forEach((packet) => {
-    ws.send(packet);
-  });
+  if (!ws || !ws.send || ws.readyState !== 1) return;
+  try {
+    packets.forEach((packet) => {
+      ws.send(packet);
+    });
+  } catch (error) {
+    // Silently ignore errors when sending to closed websockets
+  }
 }
 
 async function sendStatsToPartyMembers(playerUsername: string, playerId: string, stats: any) {
@@ -4315,18 +4451,8 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
     revision: revision,
   };
 
-  const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-  const playersInMapAdmins = playersInMap.filter((p) => p.isAdmin);
-
-  if (currentPlayer.isStealth) {
-    playersInMapAdmins.forEach((player) => {
-      sendPacket(player.ws, packetManager.spriteSheetAnimation(spriteSheetPacketData));
-    });
-  } else {
-    playersInMap.forEach((player) => {
-      sendPacket(player.ws, packetManager.spriteSheetAnimation(spriteSheetPacketData));
-    });
-  }
+  // Use AOI-based broadcasting instead of map-wide
+  broadcastToAOI(currentPlayer, packetManager.spriteSheetAnimation(spriteSheetPacketData), true);
 }
 
 async function sendAnimation(ws: any, name: string, playerId?: string, revision?: number) {
