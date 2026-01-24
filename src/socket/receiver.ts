@@ -41,70 +41,84 @@ let globalStateRevision: number = 0;
 
 // Movement batching system
 export const movementBatchQueue = new Map<string, Map<string, any>>(); // Map of map -> Map of playerId -> movement
-const BATCH_INTERVAL_MS = 16; // Send batched movements every 16ms (60 Hz)
+const BATCH_INTERVAL_MS = 33; // Send batched movements every 33ms (30 Hz) - reduces load by 50%
+
+// Maximum buffered bytes before skipping updates (2MB - more aggressive)
+const MAX_BUFFER_BACKPRESSURE = 1024 * 1024 * 2;
 
 // Flush and send batched movements with AOI filtering
 function flushMovementBatches() {
-  for (const [mapName, playerMovements] of movementBatchQueue.entries()) {
+  for (const [_mapName, playerMovements] of movementBatchQueue.entries()) {
     if (playerMovements.size === 0) continue;
 
-    // Get all players in this map
-    const playersInMap = filterPlayersByMap(mapName);
+    // Build per-receiver movement lists by iterating movements once
+    // This changes complexity from O(n*m) to O(m*k) where k is average AOI size
+    const receiverMovements = new Map<string, any[]>();
 
-    // For each player, filter movements to only those in their AOI
-    playersInMap.forEach((receivingPlayer) => {
-      // Skip if player has no AOI or websocket is closed/missing
-      if (!receivingPlayer.aoi || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) return;
+    // Direct access to cache object - avoid Map overhead
+    const allPlayers = playerCache.list();
 
-      const movementsForThisPlayer: any[] = [];
+    // For each movement, determine who should receive it
+    for (const [movingPlayerId, movementData] of playerMovements.entries()) {
+      const movingPlayer = allPlayers[movingPlayerId];
+      if (!movingPlayer || !movingPlayer.aoi) continue;
 
-      // Check each movement to see if it should be sent to this player
-      for (const [movingPlayerId, movementData] of playerMovements.entries()) {
-        // Always include self movement
-        if (movingPlayerId === receivingPlayer.id) {
-          movementsForThisPlayer.push(movementData);
-          continue;
-        }
-
-        // Check if moving player is in receiving player's AOI
-        if (!receivingPlayer.aoi.playersInAOI.has(movingPlayerId)) {
-          continue;
-        }
-
-        // Apply stealth visibility rules
-        if (movementData.isStealth && !receivingPlayer.isAdmin) {
-          continue; // Only admins can see stealth movements
-        }
-
-        movementsForThisPlayer.push(movementData);
+      // Send to self
+      if (!receiverMovements.has(movingPlayerId)) {
+        receiverMovements.set(movingPlayerId, []);
       }
+      receiverMovements.get(movingPlayerId)!.push(movementData);
 
-      // Send batched movements if any qualify
-      if (movementsForThisPlayer.length > 0) {
-        const batchPacket = packetManager.batchMoveXY(movementsForThisPlayer);
-        sendPacket(receivingPlayer.ws, batchPacket);
+      // Send to players in mover's AOI (bidirectional - if A sees B, B sees A)
+      for (const receiverId of movingPlayer.aoi.playersInAOI) {
+        // Apply stealth visibility rules early
+        if (movementData.isStealth) {
+          const receiver = allPlayers[receiverId as string];
+          if (!receiver || !receiver.isAdmin) continue;
+        }
+
+        if (!receiverMovements.has(receiverId as string)) {
+          receiverMovements.set(receiverId as string, []);
+        }
+        receiverMovements.get(receiverId as string)!.push(movementData);
       }
-    });
+    }
+
+    // Send batched movements to each receiver with backpressure check
+    for (const [receiverId, movements] of receiverMovements.entries()) {
+      const receiver = allPlayers[receiverId];
+      if (!receiver || !receiver.ws || receiver.ws.readyState !== 1) continue;
+
+      // Skip if too much backpressure (prevents buffer overflow and latency spikes)
+      if (receiver.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) continue;
+
+      const batchPacket = packetManager.batchMoveXY(movements);
+      sendPacket(receiver.ws, batchPacket);
+    }
   }
 
   // Clear all batches
   movementBatchQueue.clear();
 }
 
-// Start the batching timer
-setInterval(flushMovementBatches, BATCH_INTERVAL_MS);
-
 // Spawn player batching system
 export const spawnBatchQueue = new Map<string, Map<string, any>>(); // Map of receivingPlayerId -> Map of spawnedPlayerId -> spawnData
 
 // Flush and send batched spawn packets
 function flushSpawnBatches() {
+  if (spawnBatchQueue.size === 0) return;
+
+  const allPlayers = playerCache.list();
+
   for (const [receivingPlayerId, spawnedPlayers] of spawnBatchQueue.entries()) {
     if (spawnedPlayers.size === 0) continue;
 
-    const receivingPlayer = playerCache.get(receivingPlayerId);
+    const receivingPlayer = allPlayers[receivingPlayerId];
     // Skip if player or websocket is missing/closed
     if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
+
+    // Skip if too much backpressure
+    if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) continue;
 
     const spawnsForThisPlayer = Array.from(spawnedPlayers.values());
 
@@ -118,7 +132,7 @@ function flushSpawnBatches() {
 
       // Send animations for each spawned player
       spawnsForThisPlayer.forEach(async (spawnData) => {
-        const spawnedPlayer = playerCache.get(spawnData.id);
+        const spawnedPlayer = allPlayers[spawnData.id];
         if (!spawnedPlayer) return;
 
         const animationName = getAnimationNameForDirection(
@@ -138,20 +152,24 @@ function flushSpawnBatches() {
   spawnBatchQueue.clear();
 }
 
-// Start the spawn batching timer
-setInterval(flushSpawnBatches, BATCH_INTERVAL_MS);
-
 // Despawn/disconnect batching system
 export const despawnBatchQueue = new Map<string, Set<string>>(); // Map of receivingPlayerId -> Set of despawnedPlayerIds
 
 // Flush and send batched despawn packets
 function flushDespawnBatches() {
+  if (despawnBatchQueue.size === 0) return;
+
+  const allPlayers = playerCache.list();
+
   for (const [receivingPlayerId, despawnedPlayerIds] of despawnBatchQueue.entries()) {
     if (despawnedPlayerIds.size === 0) continue;
 
-    const receivingPlayer = playerCache.get(receivingPlayerId);
+    const receivingPlayer = allPlayers[receivingPlayerId];
     // Skip if player or websocket is missing/closed
     if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
+
+    // Skip if too much backpressure
+    if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) continue;
 
     const despawnsArray = Array.from(despawnedPlayerIds);
 
@@ -166,8 +184,15 @@ function flushDespawnBatches() {
   despawnBatchQueue.clear();
 }
 
-// Start the despawn batching timer
-setInterval(flushDespawnBatches, BATCH_INTERVAL_MS);
+// Master flush function - flushes all batch types
+function flushAllBatches() {
+  flushMovementBatches();
+  flushSpawnBatches();
+  flushDespawnBatches();
+}
+
+// Start the unified batching timer
+setInterval(flushAllBatches, BATCH_INTERVAL_MS);
 
 /**
  * Clear all queued batch data for a disconnecting player
@@ -511,15 +536,23 @@ authWorker.on("message", async (result: any) => {
       const currentPlayerData = playerCache.get(ws.data.id);
       if (!currentPlayerData) return;
 
+      // Build username index for O(1) lookups instead of O(n) find operations
+      // This changes complexity from O(f*n) to O(n + f)
+      const allPlayers = playerCache.list();
+      const usernameIndex = new Map<string, any>();
+
+      for (const player of Object.values(allPlayers)) {
+        if (player.ws && player.username) {
+          usernameIndex.set(player.username.toLowerCase(), player);
+        }
+      }
+
       // Only iterate through the new player's friends list instead of all players
       const newPlayerFriends = currentPlayerData.friends || [];
-      const allPlayers = playerCache.list();
 
       for (const friendUsername of newPlayerFriends) {
-        // Find if this friend is online
-        const onlineFriend = Object.values(allPlayers).find(
-          (p: any) => p.username === friendUsername && p.ws
-        );
+        // O(1) lookup instead of O(n) find
+        const onlineFriend = usernameIndex.get(friendUsername.toLowerCase());
 
         if (onlineFriend) {
           // Notify the friend that the new player is online
@@ -721,10 +754,10 @@ export default async function packetReceiver(
       case "MOVEXY": {
         if (!currentPlayer) return;
 
-        const baseSpeed = 2;
+        const baseSpeed = 6; // Doubled from 2 to compensate for 30Hz update rate
         const mountSpeedMultiplier = 1.35;
         const speed = currentPlayer.mounted ? baseSpeed * mountSpeedMultiplier : baseSpeed;
-        const targetFPS = 60;
+        const targetFPS = 30; // Matches 33ms broadcast interval
         const frameTime = 1000 / targetFPS;
         const lastDirection =
           currentPlayer.location.position?.direction || "down";
@@ -995,7 +1028,9 @@ export default async function packetReceiver(
 
         movePlayer(); // Immediate first step
 
-        currentPlayer.movementInterval = setInterval(movePlayer, 1);
+        // Match movement update rate to batch broadcast rate (33ms = 30 FPS)
+        // Prevents queue buildup with high player counts
+        currentPlayer.movementInterval = setInterval(movePlayer, 33);
         break;
       }
       case "TELEPORTXY": {

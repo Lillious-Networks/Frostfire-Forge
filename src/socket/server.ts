@@ -1,5 +1,5 @@
 const PROCESS_STARTED_AT = Date.now() - performance.now();
-const MAX_BUFFER_SIZE = 1024 * 1024 * 16; // 16MB
+const MAX_BUFFER_SIZE = 1024 * 1024 * 1024; // 1GB
 const packetQueue = new Map<string, (() => void)[]>();
 import crypto from "crypto";
 import { packetManager } from "./packet_manager.ts";
