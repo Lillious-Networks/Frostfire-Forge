@@ -98,43 +98,6 @@ function sendPacket(ws: any, packets: any[]) {
 }
 
 /**
- * Get animation name for direction
- */
-function getAnimationNameForDirection(
-  direction: string,
-  walking: boolean,
-  mounted: boolean = false,
-  mount_type?: string,
-  casting: boolean = false
-): string {
-  const normalized = normalizeDirection(direction);
-
-  // If casting, use cast_idle (stationary) or cast_walk (moving)
-  if (casting) {
-    const castAction = walking ? "cast_walk" : "cast_idle";
-    return `player_${castAction}_${normalized}.png`;
-  }
-
-  const action = walking ? "walk" : "idle";
-  if (mounted) {
-    mount_type = mount_type || "unicorn";
-    return `mount_${mount_type}_${action}_${normalized}.png`;
-  }
-  return `player_${action}_${normalized}.png`;
-}
-
-/**
- * Normalize direction
- */
-function normalizeDirection(direction: string): string {
-  const validDirections = ["down", "up", "left", "right", "downleft", "downright", "upleft", "upright"];
-  if (validDirections.includes(direction)) {
-    return direction;
-  }
-  return "down"; // safe fallback for invalid directions
-}
-
-/**
  * Queue SPAWN_PLAYER data for batching
  * Returns spawn data to be added to batch queue
  */
