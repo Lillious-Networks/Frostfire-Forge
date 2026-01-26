@@ -182,6 +182,21 @@ const parties = {
             log.error(`Error disbanding party: ${error}`);
             return false;
         }
+    },
+    async getAllParties(): Promise<Array<{ id: number; leader: string; members: string[] }>> {
+        try {
+            const result = await query("SELECT id, leader, members FROM parties", []) as any[];
+            if (!result || result.length === 0) return [];
+
+            return result.map((row: any) => ({
+                id: row.id,
+                leader: row.leader,
+                members: row.members ? row.members.split(",").map((m: string) => m.trim()).filter((m: string) => m) : []
+            }));
+        } catch (error) {
+            log.error(`Error getting all parties: ${error}`);
+            return [];
+        }
     }
 }
 

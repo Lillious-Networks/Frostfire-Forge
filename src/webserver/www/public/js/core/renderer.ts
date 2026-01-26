@@ -34,7 +34,6 @@ function updateCamera(currentPlayer: any, deltaTime: number) {
     const targetX = currentPlayer.position.x;
     const targetY = currentPlayer.position.y;
 
-    // Camera follows player position instantly
     cameraX = targetX;
     cameraY = targetY;
 
@@ -48,7 +47,6 @@ function updateCamera(currentPlayer: any, deltaTime: number) {
     cameraX = Math.max(halfViewportWidth, Math.min(mapWidth - halfViewportWidth, cameraX));
     cameraY = Math.max(halfViewportHeight, Math.min(mapHeight - halfViewportHeight, cameraY));
 
-    // No camera smoothing - use instant camera for all rendering
     smoothMapX = cameraX;
     smoothMapY = cameraY;
 

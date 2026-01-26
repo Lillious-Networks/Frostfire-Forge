@@ -6,8 +6,10 @@ import { friendsList, friendsListSearch } from "./ui.js";
 
 
 function updateFriendsList(data: any) {
-    const currentPlayer = Array.from(cache.players).find(player => player.id === cachedPlayerId);
-    if (!currentPlayer || !data?.friends) return;
+    // Check if data has friends array
+    if (!data?.friends) {
+        return;
+    }
 
     const list = Array.from(friendsList.querySelectorAll('.friend-name')) as HTMLElement[];
 

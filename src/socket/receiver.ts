@@ -28,7 +28,7 @@ import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks } from "../modules/assetloader";
 import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable } from "../modules/spriteSheetManager";
-import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI } from "./aoi";
+import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers } from "./aoi";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 
 // Animation system configuration
@@ -453,7 +453,7 @@ authWorker.on("message", async (result: any) => {
       playerCache.set(_pcache.id, _pcache);
 
       // Initialize AOI state for the player
-      initializePlayerAOI(_pcache);
+      await initializePlayerAOI(_pcache);
       playerCache.set(_pcache.id, _pcache);
     }
 
@@ -2181,6 +2181,101 @@ export default async function packetReceiver(
 
             break;
           }
+          // Invite a player to party
+          case "INVITE": {
+            const username = args[0]?.toLowerCase() || null;
+            if (!username) {
+              sendPacket(
+                ws,
+                packetManager.notify({
+                  message: "Usage: /invite <username>",
+                })
+              );
+              break;
+            }
+
+            // Find the target player
+            const players = Object.values(playerCache.list());
+            const targetPlayer = players.find(
+              (p: any) => p.username && p.username.toLowerCase() === username.toLowerCase()
+            );
+
+            if (!targetPlayer) {
+              sendPacket(
+                ws,
+                packetManager.notify({
+                  message: `Player ${username} is not online.`,
+                })
+              );
+              break;
+            }
+
+            // Check if trying to invite self
+            if (targetPlayer.id === currentPlayer.id) {
+              sendPacket(
+                ws,
+                packetManager.notify({
+                  message: "You cannot invite yourself to a party.",
+                })
+              );
+              break;
+            }
+
+            // Check for existing invite
+            const existingInvite = targetPlayer.invitations?.find(
+              (invite: any) => invite?.type === "party" && invite?.from === currentPlayer.username
+            );
+
+            if (existingInvite) {
+              sendPacket(
+                ws,
+                packetManager.notify({
+                  message: `You have already sent a party invite to ${targetPlayer.username}.`,
+                })
+              );
+              break;
+            }
+
+            // Create the invitation data
+            const player_username =
+              currentPlayer.username.charAt(0).toUpperCase() +
+              currentPlayer.username.slice(1);
+
+            const invite_data = {
+              action: "INVITE_PARTY",
+              message: `${player_username} wants to invite you to their party`,
+              originator: currentPlayer.id.toString(),
+              authorization: randomBytes(16).toString(),
+            };
+
+            // Store invitation in cache
+            if (!currentPlayer.invitations) {
+              currentPlayer.invitations = [];
+            }
+
+            currentPlayer.invitations.push({
+              action: invite_data.action,
+              originator: invite_data.originator,
+              authorization: invite_data.authorization,
+            });
+
+            playerCache.set(currentPlayer.id, currentPlayer);
+
+            // Send invitation packet to target player
+            sendPacket(targetPlayer.ws, packetManager.invitation(invite_data));
+
+            // Notify sender
+            sendPacket(
+              ws,
+              packetManager.notify({
+                message: `Invitation sent to ${targetPlayer.username.charAt(0).toUpperCase() +
+                  targetPlayer.username.slice(1)
+                  }`,
+              })
+            );
+
+            break;
+          }
           // Summon a player
           case "SUMMON": {
             // admin.summon or admin.*
@@ -3486,6 +3581,12 @@ export default async function packetReceiver(
               playerCache.set(p.id, p);
             }
           });
+
+          // Sync remaining party members to leader's layer
+          const partyLeader = await parties.getPartyLeader(currentPlayer.party_id as number);
+          if (partyLeader && result.length > 0) {
+            await syncPartyLayers(partyLeader, result, playerCache, sendAnimationTo);
+          }
         }
 
         break;
@@ -3569,6 +3670,17 @@ export default async function packetReceiver(
               playerCache.set(p.id, p);
             }
           });
+
+          // Sync remaining party members to leader's layer
+          if ((result as string[]).length > 0) {
+            const remainingPartyId = await parties.getPartyId((result as string[])[0]);
+            if (remainingPartyId) {
+              const partyLeader = await parties.getPartyLeader(remainingPartyId);
+              if (partyLeader) {
+                await syncPartyLayers(partyLeader, result as string[], playerCache, sendAnimationTo);
+              }
+            }
+          }
         }
         break;
       }
@@ -3890,6 +4002,12 @@ export default async function packetReceiver(
                     playerCache.set(p.id, p);
                   }
                 });
+
+                // Sync party members to leader's layer
+                const partyLeader = await parties.getPartyLeader(partyId);
+                if (partyLeader && updatedPartyMembers.length > 0) {
+                  await syncPartyLayers(partyLeader, updatedPartyMembers as string[], playerCache, sendAnimationTo);
+                }
               } else {
                 // If the party does not exist, create a new one
                 const updatedPartyMembers = await parties.create(
@@ -3945,6 +4063,11 @@ export default async function packetReceiver(
                     }
                   }
                 );
+
+                // Sync party members to leader's layer (inviter is the leader for new parties)
+                if (updatedPartyMembers.length > 0) {
+                  await syncPartyLayers(inviter.username.toLowerCase(), updatedPartyMembers as string[], playerCache, sendAnimationTo);
+                }
               }
             }
             break;
@@ -4596,7 +4719,7 @@ function normalizeDirection(direction: string): string {
   return "down"; // safe fallback for invalid directions
 }
 
-async function sendAnimationTo(targetWs: any, name: string, playerId?: string, revision?: number) {
+export async function sendAnimationTo(targetWs: any, name: string, playerId?: string, revision?: number) {
   const targetPlayer = playerCache.get(playerId || targetWs.data.id);
   if (!targetPlayer) return;
 

@@ -3,7 +3,7 @@ const MAX_BUFFER_SIZE = 1024 * 1024 * 1024; // 1GB
 const packetQueue = new Map<string, (() => void)[]>();
 import crypto from "crypto";
 import { packetManager } from "./packet_manager.ts";
-import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer } from "./receiver.ts";
+import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, sendAnimationTo } from "./receiver.ts";
 import eventEmitter from "node:events";
 export const listener = new eventEmitter();
 const event = new eventEmitter();
@@ -14,7 +14,7 @@ import packet from "../modules/packet.ts";
 import path from "node:path";
 import fs from "node:fs";
 import { generateKeyPair } from "../modules/cipher.ts";
-import { despawnPlayerFromAllAOI } from "./aoi.ts";
+import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondensation } from "./aoi.ts";
 
 // Load settings
 import * as settings from "../config/settings.json";
@@ -243,6 +243,12 @@ event.emit("online");
 
 listener.emit("onAwake");
 listener.emit("onStart");
+
+// Start auto party layer sync every 15 seconds
+startAutoPartyLayerSync(sendAnimationTo);
+
+// Start auto layer condensation every 5 minutes
+startAutoLayerCondensation(sendAnimationTo);
 
 setInterval(() => {
   listener.emit("onUpdate");
