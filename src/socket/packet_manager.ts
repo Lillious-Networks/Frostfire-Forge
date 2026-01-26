@@ -204,6 +204,7 @@ export const packetManager = {
             isAdmin: data.isAdmin,
             isGuest: data.isGuest,
             isStealth: data.isStealth,
+            isNoclip: data.isNoclip,
             stats: data.stats,
             sprite: data.sprite,
             mounted: data.mounted,
@@ -288,6 +289,11 @@ export const packetManager = {
   stealth: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "STEALTH", data })),
+    ] as any[];
+  },
+  noclip: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "NOCLIP", data })),
     ] as any[];
   },
   audio: (data: any) => {
@@ -451,6 +457,26 @@ export const packetManager = {
         JSON.stringify({
           type: "BATCH_DISCONNECT_PLAYER",
           data: despawnData
+        })
+      )
+    ] as any[];
+  },
+  getOnlinePlayers: () => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "GET_ONLINE_PLAYERS",
+          data: null
+        })
+      )
+    ] as any[];
+  },
+  onlinePlayersList: (players: Array<{ username: string; map: string; isAdmin: boolean }>) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "ONLINE_PLAYERS_LIST",
+          data: players
         })
       )
     ] as any[];

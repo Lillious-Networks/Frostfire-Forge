@@ -269,11 +269,6 @@ start.addEventListener('click', async () => {
                 }, 30000); // 30 second timeout
             };
 
-            // Stagger client creation with minimal delays for faster login
-            if (amount > 10) {
-                logMessage(`Creating ${amount} clients with 10ms stagger delay for faster login`);
-            }
-
             for (let i = 0; i < amount; i++) {
                 // Add minimal delay between each client creation (10ms per client)
                 await new Promise(resolve => setTimeout(resolve, i * 10));
@@ -602,7 +597,7 @@ start.addEventListener('click', async () => {
 
         result.innerHTML = `
             <p><strong>Benchmark Complete</strong></p>
-            <p>Test Duration: ${totalTime}s (players started moving before timer)</p>
+            <p>Test Duration: ${totalTime}s</p>
             ${startedWithNote}
             ${connectionStatus}
             ${latencyInfo}

@@ -248,6 +248,66 @@
           </div>
       </div>
       <div id="party-container" class="ui"></div>
+      <!-- Admin Panel -->
+      <div id="admin-panel-container" class="ui">
+        <div id="admin-panel-content" class="ui">
+          <!-- Target Player Section -->
+          <div class="admin-section ui">
+            <label class="admin-label ui">Target Player</label>
+            <select id="admin-player-select" class="admin-select ui">
+              <option value="">Select a player...</option>
+            </select>
+          </div>
+
+          <!-- Self Commands Section -->
+          <div class="admin-section ui">
+            <label class="admin-label ui">Self Commands</label>
+            <div class="admin-button-grid ui">
+              <button type="button" id="admin-noclip" class="admin-button ui">Noclip</button>
+              <button type="button" id="admin-stealth" class="admin-button ui">Stealth</button>
+            </div>
+          </div>
+
+          <!-- Player Commands Section -->
+          <div class="admin-section ui">
+            <label class="admin-label ui">Player Management</label>
+            <div class="admin-button-grid ui">
+              <button type="button" id="admin-summon" class="admin-button ui">Summon</button>
+              <button type="button" id="admin-teleport" class="admin-button ui">Teleport To</button>
+              <button type="button" id="admin-respawn" class="admin-button ui">Respawn</button>
+              <button type="button" id="admin-kick" class="admin-button admin-button-warning ui">Kick</button>
+              <button type="button" id="admin-ban" class="admin-button admin-button-danger ui">Ban</button>
+              <button type="button" id="admin-unban" class="admin-button ui">Unban</button>
+              <button type="button" id="admin-toggle-admin" class="admin-button admin-button-special ui">Toggle Admin</button>
+            </div>
+          </div>
+
+          <!-- Server Commands Section -->
+          <div class="admin-section ui">
+            <label class="admin-label ui">Server Control</label>
+            <input type="text" id="admin-map-input" class="admin-input ui" placeholder="Map name (leave empty for current map)" />
+            <button type="button" id="admin-reload-map" class="admin-button admin-button-full ui">Reload Map</button>
+          </div>
+
+          <!-- Warp Section -->
+          <div class="admin-section ui">
+            <label class="admin-label ui">Warp to Map</label>
+            <input type="text" id="admin-warp-input" class="admin-input ui" placeholder="Map name to warp to" />
+            <button type="button" id="admin-warp" class="admin-button admin-button-full ui">Warp</button>
+          </div>
+
+          <!-- Broadcast Section -->
+          <div class="admin-section ui">
+            <label class="admin-label ui">Broadcast Message</label>
+            <input type="text" id="admin-broadcast-input" class="admin-input ui" placeholder="Type your message..." />
+            <div class="admin-button-grid ui">
+              <button type="button" id="admin-broadcast-all" class="admin-button ui">All Players</button>
+              <button type="button" id="admin-broadcast-map" class="admin-button ui">Current Map</button>
+              <button type="button" id="admin-broadcast-admins" class="admin-button ui">Admins Only</button>
+            </div>
+          </div>
+        </div>
+      </div>
       <!-- Tile Editor Floating Panels -->
       <div id="tile-editor-container" class="ui" style="display: none;">
         <!-- Toolbar Panel (no header, entire panel is draggable) -->

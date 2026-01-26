@@ -63,7 +63,7 @@ function getVisibleChunks(): Array<{x: number, y: number}> {
   const chunkPixelSize = window.mapData.chunkSize * window.mapData.tilewidth;
   const viewportWidth = window.innerWidth;
   const viewportHeight = window.innerHeight;
-
+  
   // Calculate camera bounds in world space
   const cameraLeft = cameraX - viewportWidth / 2;
   const cameraTop = cameraY - viewportHeight / 2;

@@ -153,7 +153,15 @@ window.addEventListener("keydown", async (e) => {
     return;
   }
   if (!getIsLoaded() || (pauseMenu.style.display === "block" && e.code !== "Escape")) return;
-  if ((chatInput === document.activeElement || document.activeElement == friendsListSearch) && !["Enter", "Escape"].includes(e.code)) return;
+
+  // Prevent movement when typing in any input field
+  const activeElement = document.activeElement;
+  const isTypingInInput = activeElement && (
+    activeElement.tagName === 'INPUT' ||
+    activeElement.tagName === 'TEXTAREA' ||
+    (activeElement as HTMLElement).contentEditable === 'true'
+  );
+  if (isTypingInInput && !["Enter", "Escape"].includes(e.code)) return;
 
   // Handle movement keys
   if (movementKeys.has(e.code)) {
@@ -183,7 +191,15 @@ window.addEventListener("keydown", async (e) => {
 });
 
 window.addEventListener("keyup", (e) => {
-  if (chatInput === document.activeElement) return;
+  // Prevent movement keys from being cleared when typing in any input field
+  const activeElement = document.activeElement;
+  const isTypingInInput = activeElement && (
+    activeElement.tagName === 'INPUT' ||
+    activeElement.tagName === 'TEXTAREA' ||
+    (activeElement as HTMLElement).contentEditable === 'true'
+  );
+  if (isTypingInInput) return;
+
   if (movementKeys.has(e.code)) {
     pressedKeys.delete(e.code);
     if (pressedKeys.size === 0) {
@@ -455,6 +471,21 @@ chatInput.addEventListener("focus", () => {
 
 friendsListSearch.addEventListener("focus", () => {
   stopMovement();
+});
+
+// Stop movement when focusing on admin panel input fields
+const adminInputFields = [
+  document.getElementById("admin-map-input"),
+  document.getElementById("admin-warp-input"),
+  document.getElementById("admin-broadcast-input")
+];
+
+adminInputFields.forEach(field => {
+  if (field) {
+    field.addEventListener("focus", () => {
+      stopMovement();
+    });
+  }
 });
 
 chatInput.addEventListener("blur", () => {

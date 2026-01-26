@@ -228,6 +228,7 @@ export function queueSpawnPlayerPacket(
       isAdmin: spawnedPlayer.isAdmin,
       isGuest: spawnedPlayer.isGuest,
       isStealth: spawnedPlayer.isStealth,
+      isNoclip: spawnedPlayer.isNoclip,
       stats: spawnedPlayer.stats,
       mounted: spawnedPlayer.mounted,
       animation: null,
@@ -312,9 +313,11 @@ export async function updatePlayerAOI(
       const enteredPlayer = playerCache.get(enteredPlayerId);
       if (!enteredPlayer) continue;
 
-      // Check visibility based on stealth
-      const canSeeEntered = !enteredPlayer.isStealth || player.isAdmin;
-      const canSeePlayer = !player.isStealth || enteredPlayer.isAdmin;
+      // Check visibility based on stealth and force visibility flag
+      const playerForceSeeEntered = player.forceVisibleTo?.has(enteredPlayer.id);
+      const enteredPlayerForceSeePlayer = enteredPlayer.forceVisibleTo?.has(player.id);
+      const canSeeEntered = !enteredPlayer.isStealth || player.isAdmin || playerForceSeeEntered;
+      const canSeePlayer = !player.isStealth || enteredPlayer.isAdmin || enteredPlayerForceSeePlayer;
 
       // Queue entered player's spawn data to current player
       if (canSeeEntered && spawnBatchQueue) {

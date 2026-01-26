@@ -69,6 +69,7 @@ const hotbar = document.getElementById("hotbar") as HTMLDivElement;
 const hotbarGrid = hotbar.querySelector("#grid") as HTMLDivElement;
 const hotbarSlots = hotbarGrid.querySelectorAll(".slot") as NodeListOf<HTMLDivElement>;
 const castbar = document.getElementById("castbar") as HTMLDivElement;
+const adminPanelContainer = document.getElementById("admin-panel-container") as HTMLDivElement;
 
 // Add click support to hotbar slots
 hotbarSlots.forEach((slot, index) => {
@@ -753,6 +754,268 @@ async function loadHotbarConfiguration(hotbarConfig: any) {
   });
 }
 
+// Setup admin panel button event handlers and player list
+const adminPlayerSelect = document.getElementById("admin-player-select") as HTMLSelectElement;
+const adminNoclipButton = document.getElementById("admin-noclip");
+const adminStealthButton = document.getElementById("admin-stealth");
+const adminSummonButton = document.getElementById("admin-summon");
+const adminTeleportButton = document.getElementById("admin-teleport");
+const adminKickButton = document.getElementById("admin-kick");
+const adminBanButton = document.getElementById("admin-ban");
+const adminUnbanButton = document.getElementById("admin-unban");
+const adminRespawnButton = document.getElementById("admin-respawn");
+const adminToggleAdminButton = document.getElementById("admin-toggle-admin");
+const adminMapInput = document.getElementById("admin-map-input") as HTMLInputElement;
+const adminReloadMapButton = document.getElementById("admin-reload-map");
+const adminWarpInput = document.getElementById("admin-warp-input") as HTMLInputElement;
+const adminWarpButton = document.getElementById("admin-warp");
+const adminBroadcastInput = document.getElementById("admin-broadcast-input") as HTMLInputElement;
+const adminBroadcastAllButton = document.getElementById("admin-broadcast-all");
+const adminBroadcastMapButton = document.getElementById("admin-broadcast-map");
+const adminBroadcastAdminsButton = document.getElementById("admin-broadcast-admins");
+
+// Function to update map input with current map name
+function updateAdminMapInput() {
+  if (!adminMapInput) return;
+
+  // Get current map name from window.mapData
+  if ((window as any).mapData && (window as any).mapData.name) {
+    const mapName = (window as any).mapData.name;
+    // Remove .json extension if present
+    const displayName = mapName.replace(/\.json$/i, '');
+    adminMapInput.placeholder = `Current map: ${displayName}`;
+  }
+}
+
+// Function to update admin player list with data from server
+function updateAdminPlayerListWithData(players: Array<{ username: string; map: string; isAdmin: boolean }>) {
+  if (!adminPlayerSelect) return;
+
+  const currentSelection = adminPlayerSelect.value;
+
+  // Clear existing options except the first one
+  adminPlayerSelect.innerHTML = '<option value="">Select a player...</option>';
+
+  // Add all players with map info
+  players.forEach((player) => {
+    if (player.username) {
+      const option = document.createElement("option");
+      option.value = player.username;
+      const adminBadge = player.isAdmin ? " [Admin]" : "";
+      option.textContent = `${player.username} (${player.map})${adminBadge}`;
+      adminPlayerSelect.appendChild(option);
+    }
+  });
+
+  // Restore selection if player still exists
+  if (currentSelection) {
+    const exists = players.some((p) => p.username === currentSelection);
+    if (exists) {
+      adminPlayerSelect.value = currentSelection;
+    }
+  }
+}
+
+// Function to request online players from server
+function requestOnlinePlayers() {
+  sendRequest({ type: "GET_ONLINE_PLAYERS", data: null });
+}
+
+// Helper function to get selected player
+function getSelectedPlayer(): string {
+  return adminPlayerSelect?.value || "";
+}
+
+// Helper function to send command
+function sendAdminCommand(command: string, args: string[] = []) {
+  const fullCommand = args.length > 0 ? `${command} ${args.join(" ")}` : command;
+  sendRequest({
+    type: "COMMAND",
+    data: { command: fullCommand }
+  });
+}
+
+// Helper function to show notification
+function showAdminNotification(message: string) {
+  if (!notificationContainer || !notificationMessage) return;
+  notificationMessage.innerText = message;
+  notificationContainer.style.display = "flex";
+  setTimeout(() => {
+    if (notificationContainer) {
+      notificationContainer.style.display = "none";
+    }
+  }, 3000);
+}
+
+// Self commands
+if (adminNoclipButton) {
+  adminNoclipButton.addEventListener("click", () => {
+    sendRequest({ type: "NOCLIP", data: null });
+  });
+}
+
+if (adminStealthButton) {
+  adminStealthButton.addEventListener("click", () => {
+    sendRequest({ type: "STEALTH", data: null });
+  });
+}
+
+// Player commands
+if (adminSummonButton) {
+  adminSummonButton.addEventListener("click", () => {
+    const player = getSelectedPlayer();
+    if (!player) {
+      showAdminNotification("Please select a player first");
+      return;
+    }
+    sendAdminCommand("summon", [player]);
+  });
+}
+
+if (adminTeleportButton) {
+  adminTeleportButton.addEventListener("click", () => {
+    const player = getSelectedPlayer();
+    if (!player) {
+      showAdminNotification("Please select a player first");
+      return;
+    }
+    sendAdminCommand("teleport", [player]);
+  });
+}
+
+if (adminKickButton) {
+  adminKickButton.addEventListener("click", () => {
+    const player = getSelectedPlayer();
+    if (!player) {
+      showAdminNotification("Please select a player first");
+      return;
+    }
+    sendAdminCommand("kick", [player]);
+  });
+}
+
+if (adminBanButton) {
+  adminBanButton.addEventListener("click", () => {
+    const player = getSelectedPlayer();
+    if (!player) {
+      showAdminNotification("Please select a player first");
+      return;
+    }
+    sendAdminCommand("ban", [player]);
+  });
+}
+
+if (adminUnbanButton) {
+  adminUnbanButton.addEventListener("click", () => {
+    const player = getSelectedPlayer();
+    if (!player) {
+      showAdminNotification("Please select a player first");
+      return;
+    }
+    sendAdminCommand("unban", [player]);
+  });
+}
+
+if (adminRespawnButton) {
+  adminRespawnButton.addEventListener("click", () => {
+    const player = getSelectedPlayer();
+    if (!player) {
+      showAdminNotification("Please select a player first");
+      return;
+    }
+    sendAdminCommand("respawn", [player]);
+  });
+}
+
+if (adminToggleAdminButton) {
+  adminToggleAdminButton.addEventListener("click", () => {
+    const player = getSelectedPlayer();
+    if (!player) {
+      showAdminNotification("Please select a player first");
+      return;
+    }
+    sendAdminCommand("setadmin", [player]);
+  });
+}
+
+// Server commands
+if (adminReloadMapButton) {
+  adminReloadMapButton.addEventListener("click", () => {
+    // Get map name from input or use current map
+    let mapName = adminMapInput?.value.trim();
+
+    if (!mapName) {
+      // Use current map if no input provided
+      if ((window as any).mapData && (window as any).mapData.name) {
+        mapName = (window as any).mapData.name.replace(/\.json$/i, '');
+      }
+    }
+
+    if (!mapName) {
+      showAdminNotification("Unable to determine map name");
+      return;
+    }
+
+    sendAdminCommand("reloadmap", [mapName]);
+  });
+}
+
+// Warp command
+if (adminWarpButton) {
+  adminWarpButton.addEventListener("click", () => {
+    const mapName = adminWarpInput?.value.trim();
+
+    if (!mapName) {
+      showAdminNotification("Please enter a map name to warp to");
+      return;
+    }
+
+    sendAdminCommand("warp", [mapName]);
+
+    // Clear the input after warping
+    if (adminWarpInput) {
+      adminWarpInput.value = "";
+    }
+  });
+}
+
+// Broadcast commands
+if (adminBroadcastAllButton) {
+  adminBroadcastAllButton.addEventListener("click", () => {
+    const message = adminBroadcastInput?.value.trim();
+    if (!message) {
+      showAdminNotification("Please enter a message");
+      return;
+    }
+    sendAdminCommand("broadcast", ["ALL", message]);
+    adminBroadcastInput.value = "";
+  });
+}
+
+if (adminBroadcastMapButton) {
+  adminBroadcastMapButton.addEventListener("click", () => {
+    const message = adminBroadcastInput?.value.trim();
+    if (!message) {
+      showAdminNotification("Please enter a message");
+      return;
+    }
+    sendAdminCommand("broadcast", ["MAP", message]);
+    adminBroadcastInput.value = "";
+  });
+}
+
+if (adminBroadcastAdminsButton) {
+  adminBroadcastAdminsButton.addEventListener("click", () => {
+    const message = adminBroadcastInput?.value.trim();
+    if (!message) {
+      showAdminNotification("Please enter a message");
+      return;
+    }
+    sendAdminCommand("broadcast", ["ADMINS", message]);
+    adminBroadcastInput.value = "";
+  });
+}
+
 export {
     toggleUI, toggleDebugContainer, handleStatsUI, createPartyUI, updatePartyMemberStats, updateHealthBar, updateStaminaBar, castSpell, positionText,
     friendsListUI, inventoryUI, spellBookUI, pauseMenu, menuElements, chatInput, canvas, ctx, fpsSlider, healthBar,
@@ -763,7 +1026,8 @@ export {
     guildMemberCount, guildMemberInviteInput, guildMemberInviteButton, collisionDebugCheckbox, chunkOutlineDebugCheckbox,
     collisionTilesDebugCheckbox, noPvpDebugCheckbox, wireframeDebugCheckbox, showGridCheckbox, loadedChunksText, collectablesUI,
     hotbarSlots, saveHotbarConfiguration, loadHotbarConfiguration, equipmentLeftColumn, equipmentRightColumn, equipmentBottomCenter,
-    saveInventoryConfiguration, loadInventoryConfiguration, setupInventorySlotHandlers, updateCurrencyDisplay,
+    saveInventoryConfiguration, loadInventoryConfiguration, setupInventorySlotHandlers, updateCurrencyDisplay, adminPanelContainer,
+    updateAdminMapInput, updateAdminPlayerListWithData,
 };
 
 // Function to update currency display

@@ -9,6 +9,7 @@ const authentication_session_queue = new Set<string>();
 // Track pending authentications with their websocket, token, and language
 const pendingAuthentications = new Map<string, { ws: any; token: string; language: string }>();
 import playerCache from "../services/playermanager.ts";
+import layerManager from "../services/layermanager";
 import assetCache from "../services/assetCache";
 import { reloadMap } from "../modules/assetloader";
 import { clearMapCache } from "../systems/player.ts";
@@ -468,8 +469,6 @@ authWorker.on("message", async (result: any) => {
     sendPacket(ws, packetManager.loadMap(mapData));
 
     setImmediate(async () => {
-      const snapshotRevision = globalStateRevision;
-
       // Get current player from cache
       const currentPlayer = playerCache.get(ws.data.id);
       if (!currentPlayer) return;
@@ -491,6 +490,7 @@ authWorker.on("message", async (result: any) => {
         isAdmin: playerData.isAdmin,
         isGuest: playerData.isGuest,
         isStealth: playerData.isStealth,
+        isNoclip: playerData.isNoclip,
         stats: stats || {},
         animation: null,
         friends: playerData.friends || [],
@@ -499,6 +499,10 @@ authWorker.on("message", async (result: any) => {
         currency: playerData.currency || { copper: 0, silver: 0, gold: 0 },
       };
       sendPacket(ws, packetManager.spawnPlayer(spawnDataForAll));
+
+      // Capture snapshot revision RIGHT BEFORE reading positions to ensure consistency
+      // This prevents race conditions where positions are read after players have moved
+      const snapshotRevision = globalStateRevision;
 
       // Build LOAD_PLAYERS data from players in AOI
       const playerDataForLoad: any[] = [];
@@ -512,8 +516,9 @@ authWorker.on("message", async (result: any) => {
           userid: p.userid,
           location: {
             map: p.location.map,
-            x: p.location.position.x || 0,
-            y: p.location.position.y || 0,
+            // Clone position to prevent it from being updated while building packet
+            x: Number(p.location.position.x) || 0,
+            y: Number(p.location.position.y) || 0,
             direction: p.location.position?.direction || "down",
             moving: p.moving || false,
           },
@@ -521,6 +526,7 @@ authWorker.on("message", async (result: any) => {
           isAdmin: p.isAdmin,
           isGuest: p.isGuest,
           isStealth: p.isStealth,
+          isNoclip: p.isNoclip,
           stats: p.stats,
           animation: null,
           mounted: p.mounted,
@@ -547,6 +553,27 @@ authWorker.on("message", async (result: any) => {
             );
           }
         });
+      }
+
+      // Force immediate position sync: collect movements from the queue and send to new player
+      // This ensures the new player gets current positions even if they arrive during client loading
+      const mapName = currentPlayer.location.map;
+      const queuedMovements = movementBatchQueue.get(mapName);
+      if (queuedMovements && queuedMovements.size > 0) {
+        const movementsForNewPlayer: any[] = [];
+
+        // Get all movements for players in this player's AOI
+        for (const playerId of currentPlayer.aoi.playersInAOI) {
+          const movement = queuedMovements.get(playerId as string);
+          if (movement) {
+            movementsForNewPlayer.push(movement);
+          }
+        }
+
+        // Send immediate position update if we have any movements queued
+        if (movementsForNewPlayer.length > 0) {
+          sendPacket(ws, packetManager.batchMoveXY(movementsForNewPlayer));
+        }
       }
 
       // Send initial animation for self
@@ -1027,7 +1054,11 @@ export default async function packetReceiver(
                   globalStateRevision++;
                   const movementData = {
                     id: ws.data.id,
-                    _data: currentPlayer.location.position,
+                    _data: {
+                      x: Number(currentPlayer.location.position.x),
+                      y: Number(currentPlayer.location.position.y),
+                      direction: currentPlayer.location.position.direction
+                    },
                     revision: globalStateRevision
                   };
                   sendPacket(ws, packetManager.moveXY(movementData));
@@ -1049,7 +1080,11 @@ export default async function packetReceiver(
 
           const movementData = {
             id: ws.data.id,
-            _data: currentPlayer.location.position,
+            _data: {
+              x: Number(currentPlayer.location.position.x),
+              y: Number(currentPlayer.location.position.y),
+              direction: currentPlayer.location.position.direction
+            },
             revision: globalStateRevision,
             isStealth: currentPlayer.isStealth
           };
@@ -1095,7 +1130,11 @@ export default async function packetReceiver(
         // Broadcast movement using AOI
         const movementData = {
           id: ws.data.id,
-          _data: currentPlayer.location.position,
+          _data: {
+            x: Number(currentPlayer.location.position.x),
+            y: Number(currentPlayer.location.position.y),
+            direction: currentPlayer.location.position.direction
+          },
           revision: globalStateRevision
         };
         broadcastToAOI(currentPlayer, packetManager.moveXY(movementData), true);
@@ -1294,6 +1333,11 @@ export default async function packetReceiver(
         if (!currentPlayer?.isAdmin) return;
         const isNoclip = await player.toggleNoclip(currentPlayer.username);
         currentPlayer.isNoclip = isNoclip;
+        const noclipData = {
+          id: ws.data.id,
+          isNoclip: currentPlayer.isNoclip,
+        };
+        sendPacket(ws, packetManager.noclip(noclipData));
         break;
       }
       case "STEALTH": {
@@ -1318,7 +1362,11 @@ export default async function packetReceiver(
           playersInMap.forEach(async (player) => {
             const moveXYData = {
               id: ws.data.id,
-              _data: currentPlayer.location.position,
+              _data: {
+                x: Number(currentPlayer.location.position.x),
+                y: Number(currentPlayer.location.position.y),
+                direction: currentPlayer.location.position.direction
+              },
               revision: globalStateRevision
             };
 
@@ -1867,7 +1915,11 @@ export default async function packetReceiver(
               player.ws,
               packetManager.moveXY({
                 id: target.id,
-                _data: target.location.position,
+                _data: {
+                  x: Number(target.location.position.x),
+                  y: Number(target.location.position.y),
+                  direction: target.location.position.direction
+                },
                 revision: globalStateRevision
               })
             );
@@ -2339,54 +2391,437 @@ export default async function packetReceiver(
               break;
             }
 
-            // Must be in the same map
+            // Check if target player is in a different map
             if (targetPlayer.location.map !== currentPlayer.location.map) {
+              // Move target player to admin's map
+              const result = await player.setLocation(
+                targetPlayer.id,
+                currentPlayer.location.map,
+                {
+                  x: currentPlayer.location.position.x,
+                  y: currentPlayer.location.position.y,
+                  direction: targetPlayer.location.position?.direction || "down",
+                }
+              );
+
+              // Check if location update was successful
+              if (
+                result &&
+                typeof result === "object" &&
+                "affectedRows" in result &&
+                (result as { affectedRows: number }).affectedRows != 0
+              ) {
+                // Update player's location in cache
+                targetPlayer.location.map = currentPlayer.location.map;
+                targetPlayer.location.position = {
+                  x: currentPlayer.location.position.x,
+                  y: currentPlayer.location.position.y,
+                  direction: targetPlayer.location.position?.direction || "down",
+                };
+
+                // Mark admin to see target after reconnect (admin can see summoned player)
+                // Target should NOT see admin if admin is in stealth
+                if (!currentPlayer.forceVisibleTo) currentPlayer.forceVisibleTo = new Set();
+                currentPlayer.forceVisibleTo.add(targetPlayer.id);
+
+                playerCache.set(targetPlayer.id, targetPlayer);
+                playerCache.set(currentPlayer.id, currentPlayer);
+
+                // Clear force visibility flag after 5 seconds
+                setTimeout(() => {
+                  const admin = playerCache.get(currentPlayer.id);
+                  if (admin?.forceVisibleTo) {
+                    admin.forceVisibleTo.delete(targetPlayer.id);
+                    playerCache.set(admin.id, admin);
+                  }
+                }, 5000);
+
+                // Send reconnect packet to force map reload
+                sendPacket(targetPlayer.ws, packetManager.reconnect());
+
+                // Notify the target player
+                sendPacket(
+                  targetPlayer.ws,
+                  packetManager.notify({
+                    message: `You have been summoned by an admin`,
+                  })
+                );
+
+                // Notify the admin
+                sendPacket(
+                  ws,
+                  packetManager.notify({
+                    message: `Summoned ${targetPlayer.username.charAt(0).toUpperCase() +
+                      targetPlayer.username.slice(1)
+                      } to your location`,
+                  })
+                );
+              } else {
+                const notifyData = {
+                  message: "Failed to summon player",
+                };
+                sendPacket(ws, packetManager.notify(notifyData));
+              }
+            } else {
+              // Same map - move position and sync to admin's layer
+              targetPlayer.location.position = {
+                x: currentPlayer.location.position.x,
+                y: currentPlayer.location.position.y,
+                direction: targetPlayer.location.position?.direction || "down",
+              };
+
+              // Sync target to admin's layer
+              if (currentPlayer.aoi?.layerId && targetPlayer.aoi) {
+                const adminLayerId = currentPlayer.aoi.layerId;
+                const adminLayerInfo = layerManager.getLayerInfo(adminLayerId);
+
+                if (adminLayerInfo && adminLayerInfo.playerCount < 100) { // AOI_CONFIG.MAX_PLAYERS_PER_LAYER
+                  // Move target to admin's layer
+                  layerManager.removePlayerFromLayer(targetPlayer.id);
+                  const layer = layerManager.getLayerInfo(adminLayerId);
+                  if (layer) {
+                    layer.players.add(targetPlayer.id);
+                    layer.playerCount++;
+                    targetPlayer.aoi.layerId = adminLayerId;
+                    log.info(`[SUMMON] ${targetPlayer.username} moved to admin's layer ${adminLayerId}`);
+                  }
+                }
+              }
+
+              // Update the target player's position in the cache
+              playerCache.set(targetPlayer.id, targetPlayer);
+
+              // Update AOI for both players to refresh visibility
+              await updatePlayerAOI(targetPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+              await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+
+              // Ensure admin can see the summoned player (bypasses stealth for admin's view only)
+              const targetSpawnData = {
+                id: targetPlayer.id,
+                userid: targetPlayer.userid,
+                location: {
+                  map: targetPlayer.location.map,
+                  x: targetPlayer.location.position.x,
+                  y: targetPlayer.location.position.y,
+                  direction: targetPlayer.location.position?.direction || "down",
+                  moving: targetPlayer.moving || false,
+                },
+                username: targetPlayer.username,
+                isAdmin: targetPlayer.isAdmin,
+                isGuest: targetPlayer.isGuest,
+                isStealth: targetPlayer.isStealth,
+                isNoclip: targetPlayer.isNoclip,
+                stats: targetPlayer.stats,
+                animation: null,
+                mounted: targetPlayer.mounted,
+              };
+
+              // Send target spawn to admin so admin can see them
+              sendPacket(ws, packetManager.loadPlayers({
+                players: [targetSpawnData],
+                snapshotRevision: globalStateRevision
+              }));
+
+              // Send target animation to admin
+              const targetAnimationName = getAnimationNameForDirection(
+                targetPlayer.location.position?.direction || "down",
+                !!targetPlayer.moving,
+                !!targetPlayer.mounted,
+                targetPlayer.mount_type || undefined,
+                !!targetPlayer.casting
+              );
+              await sendAnimationTo(ws, targetAnimationName, targetPlayer.id);
+
+              // Increment revision before sending movement
+              globalStateRevision++;
+
+              // Send position update to the summoned player so they see themselves move
+              // Admin remains invisible if in stealth
+              const targetMovementData = {
+                id: targetPlayer.id,
+                _data: {
+                  x: Number(targetPlayer.location.position.x),
+                  y: Number(targetPlayer.location.position.y),
+                  direction: targetPlayer.location.position.direction
+                },
+                revision: globalStateRevision
+              };
+              sendPacket(targetPlayer.ws, packetManager.moveXY(targetMovementData));
+
+              // Send position update to the admin so they see the summoned player move
+              sendPacket(ws, packetManager.moveXY(targetMovementData));
+
+              // Broadcast the summoned player's new position to all players in admin's AOI
+              // This ensures other players see the summoned player appear/move
+              const allPlayers = playerCache.list();
+              for (const playerId of currentPlayer.aoi.playersInAOI) {
+                const otherPlayer = allPlayers[playerId as string];
+                if (!otherPlayer || !otherPlayer.ws || otherPlayer.id === targetPlayer.id || otherPlayer.id === currentPlayer.id) continue;
+
+                // Check if other player can see the summoned target (stealth visibility)
+                const canSeeTarget = !targetPlayer.isStealth || otherPlayer.isAdmin;
+                if (canSeeTarget) {
+                  sendPacket(otherPlayer.ws, packetManager.moveXY(targetMovementData));
+                }
+              }
+
+              // Notify the target player
+              sendPacket(
+                targetPlayer.ws,
+                packetManager.notify({
+                  message: `You have been summoned by an admin`,
+                })
+              );
+
+              // Notify the admin
+              sendPacket(
+                ws,
+                packetManager.notify({
+                  message: `Summoned ${targetPlayer.username.charAt(0).toUpperCase() +
+                    targetPlayer.username.slice(1)
+                    }`,
+                })
+              );
+            }
+            break;
+          }
+          // Teleport to a player
+          case "GOTO":
+          case "TELEPORT": {
+            // admin.summon or admin.*
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "admin.summon" || p === "admin.*"
+              )
+            ) {
               const notifyData = {
-                message: "You can only summon players in the same map",
+                message: "You don't have permission to use this command",
               };
               sendPacket(ws, packetManager.notify(notifyData));
               break;
             }
 
-            // Move the target player to the current player's position
-            targetPlayer.location.position = {
-              x: currentPlayer.location.position.x,
-              y: currentPlayer.location.position.y,
-              direction: targetPlayer.location.position?.direction || "down",
-            };
+            const identifier = args[0]?.toLowerCase() || null;
+            if (!identifier) {
+              const notifyData = {
+                message: "Please provide a username or ID",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
 
-            // Update the target player's position in the cache
-            playerCache.set(targetPlayer.id, targetPlayer);
+            // Find player by ID or username
+            let targetPlayer;
+            if (isNaN(Number(identifier))) {
+              // Search by username
+              const players = Object.values(playerCache.list());
+              targetPlayer = players.find(
+                (p) => p.username.toLowerCase() === identifier.toLowerCase()
+              );
+            } else {
+              // Search by ID
+              targetPlayer = playerCache.get(identifier);
+            }
 
-            const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+            if (!targetPlayer) {
+              const notifyData = {
+                message: "Player not found or is not online",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
 
-            globalStateRevision++;
-            playersInMap.forEach((player) => {
-              const moveXYData = {
+            // Prevent teleporting to yourself
+            if (targetPlayer.id === currentPlayer.id) {
+              const notifyData = {
+                message: "You cannot teleport to yourself",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            // Check if target player is in a different map
+            if (targetPlayer.location.map !== currentPlayer.location.map) {
+              // Move admin to target player's map
+              const result = await player.setLocation(
+                currentPlayer.id,
+                targetPlayer.location.map,
+                {
+                  x: targetPlayer.location.position.x,
+                  y: targetPlayer.location.position.y,
+                  direction: currentPlayer.location.position?.direction || "down",
+                }
+              );
+
+              // Check if location update was successful
+              if (
+                result &&
+                typeof result === "object" &&
+                "affectedRows" in result &&
+                (result as { affectedRows: number }).affectedRows != 0
+              ) {
+                // Update admin's location in cache
+                currentPlayer.location.map = targetPlayer.location.map;
+                currentPlayer.location.position = {
+                  x: targetPlayer.location.position.x,
+                  y: targetPlayer.location.position.y,
+                  direction: currentPlayer.location.position?.direction || "down",
+                };
+
+                // Mark admin to see target after reconnect (admin can see target player)
+                // Target should NOT see admin if admin is in stealth
+                if (!currentPlayer.forceVisibleTo) currentPlayer.forceVisibleTo = new Set();
+                currentPlayer.forceVisibleTo.add(targetPlayer.id);
+
+                playerCache.set(currentPlayer.id, currentPlayer);
+                playerCache.set(targetPlayer.id, targetPlayer);
+
+                // Clear force visibility flag after 5 seconds
+                setTimeout(() => {
+                  const admin = playerCache.get(currentPlayer.id);
+                  if (admin?.forceVisibleTo) {
+                    admin.forceVisibleTo.delete(targetPlayer.id);
+                    playerCache.set(admin.id, admin);
+                  }
+                }, 5000);
+
+                // Send reconnect packet to force map reload
+                sendPacket(ws, packetManager.reconnect());
+
+                // Notify the admin
+                sendPacket(
+                  ws,
+                  packetManager.notify({
+                    message: `Teleported to ${targetPlayer.username.charAt(0).toUpperCase() +
+                      targetPlayer.username.slice(1)
+                      }'s location`,
+                  })
+                );
+              } else {
+                const notifyData = {
+                  message: "Failed to teleport to player",
+                };
+                sendPacket(ws, packetManager.notify(notifyData));
+              }
+            } else {
+              // Same map - move position and sync to target's layer
+              currentPlayer.location.position = {
+                x: targetPlayer.location.position.x,
+                y: targetPlayer.location.position.y,
+                direction: currentPlayer.location.position?.direction || "down",
+              };
+
+              // Sync admin to target's layer
+              if (targetPlayer.aoi?.layerId && currentPlayer.aoi) {
+                const targetLayerId = targetPlayer.aoi.layerId;
+                const targetLayerInfo = layerManager.getLayerInfo(targetLayerId);
+
+                if (targetLayerInfo && targetLayerInfo.playerCount < 100) { // AOI_CONFIG.MAX_PLAYERS_PER_LAYER
+                  // Move admin to target's layer
+                  layerManager.removePlayerFromLayer(currentPlayer.id);
+                  const layer = layerManager.getLayerInfo(targetLayerId);
+                  if (layer) {
+                    layer.players.add(currentPlayer.id);
+                    layer.playerCount++;
+                    currentPlayer.aoi.layerId = targetLayerId;
+                    log.info(`[TELEPORT] Admin ${currentPlayer.username} moved to target's layer ${targetLayerId}`);
+                  }
+                }
+              }
+
+              // Update the admin's position in the cache
+              playerCache.set(currentPlayer.id, currentPlayer);
+
+              // Update AOI for both players to refresh visibility
+              await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+              await updatePlayerAOI(targetPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+
+              // Ensure admin can see the target player (bypasses stealth for admin's view only)
+              const targetSpawnDataTeleport = {
                 id: targetPlayer.id,
-                _data: targetPlayer.location.position,
+                userid: targetPlayer.userid,
+                location: {
+                  map: targetPlayer.location.map,
+                  x: targetPlayer.location.position.x,
+                  y: targetPlayer.location.position.y,
+                  direction: targetPlayer.location.position?.direction || "down",
+                  moving: targetPlayer.moving || false,
+                },
+                username: targetPlayer.username,
+                isAdmin: targetPlayer.isAdmin,
+                isGuest: targetPlayer.isGuest,
+                isStealth: targetPlayer.isStealth,
+                isNoclip: targetPlayer.isNoclip,
+                stats: targetPlayer.stats,
+                animation: null,
+                mounted: targetPlayer.mounted,
+              };
+
+              // Send target spawn to admin so admin can see them
+              sendPacket(ws, packetManager.loadPlayers({
+                players: [targetSpawnDataTeleport],
+                snapshotRevision: globalStateRevision
+              }));
+
+              // Send target animation to admin
+              const targetAnimationNameTeleport = getAnimationNameForDirection(
+                targetPlayer.location.position?.direction || "down",
+                !!targetPlayer.moving,
+                !!targetPlayer.mounted,
+                targetPlayer.mount_type || undefined,
+                !!targetPlayer.casting
+              );
+              await sendAnimationTo(ws, targetAnimationNameTeleport, targetPlayer.id);
+
+              // Increment revision before sending movement
+              globalStateRevision++;
+
+              // Send admin's position update to themselves
+              // Admin remains invisible to non-admin target player
+              const adminMovementData = {
+                id: currentPlayer.id,
+                _data: {
+                  x: Number(currentPlayer.location.position.x),
+                  y: Number(currentPlayer.location.position.y),
+                  direction: currentPlayer.location.position.direction
+                },
                 revision: globalStateRevision
               };
-              sendPacket(player.ws, packetManager.moveXY(moveXYData));
-            });
+              sendPacket(ws, packetManager.moveXY(adminMovementData));
 
-            // Notify the target player
-            sendPacket(
-              targetPlayer.ws,
-              packetManager.notify({
-                message: `You have been summoned by an admin`,
-              })
-            );
+              // Broadcast the admin's position to other admins in target's AOI (if admin is in stealth)
+              // Non-admin players won't see the admin if admin is in stealth
+              if (currentPlayer.isStealth) {
+                const allPlayers = playerCache.list();
+                for (const playerId of targetPlayer.aoi.playersInAOI) {
+                  const otherPlayer = allPlayers[playerId as string];
+                  if (!otherPlayer || !otherPlayer.ws || otherPlayer.id === currentPlayer.id) continue;
 
-            // Notify the admin
-            sendPacket(
-              ws,
-              packetManager.notify({
-                message: `Summoned ${targetPlayer.username.charAt(0).toUpperCase() +
-                  targetPlayer.username.slice(1)
-                  }`,
-              })
-            );
+                  // Only send to other admins if current player is in stealth
+                  if (otherPlayer.isAdmin) {
+                    sendPacket(otherPlayer.ws, packetManager.moveXY(adminMovementData));
+                  }
+                }
+              } else {
+                // If not in stealth, broadcast to all players in target's AOI
+                const allPlayers = playerCache.list();
+                for (const playerId of targetPlayer.aoi.playersInAOI) {
+                  const otherPlayer = allPlayers[playerId as string];
+                  if (!otherPlayer || !otherPlayer.ws || otherPlayer.id === currentPlayer.id) continue;
+                  sendPacket(otherPlayer.ws, packetManager.moveXY(adminMovementData));
+                }
+              }
+
+              // Notify the admin
+              sendPacket(
+                ws,
+                packetManager.notify({
+                  message: `Teleported to ${targetPlayer.username.charAt(0).toUpperCase() +
+                    targetPlayer.username.slice(1)
+                    }`,
+                })
+              );
+            }
             break;
           }
           // Kick a player
@@ -2995,7 +3430,11 @@ export default async function packetReceiver(
               playersInMap.forEach((player) => {
                 const moveData = {
                   id: targetPlayer.id,
-                  _data: targetPlayer.location.position,
+                  _data: {
+                    x: Number(targetPlayer.location.position.x),
+                    y: Number(targetPlayer.location.position.y),
+                    direction: targetPlayer.location.position.direction
+                  },
                   revision: globalStateRevision
                 };
                 sendPacket(player.ws, packetManager.moveXY(moveData));
@@ -3324,9 +3763,8 @@ export default async function packetReceiver(
               map.compressed = result.compressed;
               map.data = result.data;
 
-              const playersInMap = filterPlayersByMap(
-                currentPlayer.location.map
-              );
+              // Only reload for players currently on the reloaded map
+              const playersInMap = filterPlayersByMap(mapName);
               playersInMap.forEach((player) => {
                 const mapData = [
                   result?.compressed,
@@ -4065,7 +4503,7 @@ export default async function packetReceiver(
                 );
 
                 // Sync party members to leader's layer (inviter is the leader for new parties)
-                if (updatedPartyMembers.length > 0) {
+                if (Array.isArray(updatedPartyMembers) && updatedPartyMembers.length > 0) {
                   await syncPartyLayers(inviter.username.toLowerCase(), updatedPartyMembers as string[], playerCache, sendAnimationTo);
                 }
               }
@@ -4494,6 +4932,21 @@ export default async function packetReceiver(
             await sendSpriteSheetAnimation(ws, currentAnimationName, currentPlayer.id);
           }
         }
+        break;
+      }
+      case "GET_ONLINE_PLAYERS": {
+        if (!currentPlayer?.isAdmin) return;
+
+        // Get all online players from cache
+        const allPlayers = Object.values(playerCache.list());
+        const playerList = allPlayers.map((p: any) => ({
+          username: p.username,
+          map: p.location.map.replace(".json", ""),
+          isAdmin: p.isAdmin || false
+        }));
+
+        // Send the list back to the requesting admin
+        sendPacket(ws, packetManager.onlinePlayersList(playerList));
         break;
       }
       // Unknown packet type
