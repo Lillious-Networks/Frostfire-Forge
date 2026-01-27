@@ -42,7 +42,12 @@ let globalStateRevision: number = 0;
 
 // Movement batching system
 export const movementBatchQueue = new Map<string, Map<string, any>>(); // Map of map -> Map of playerId -> movement
-const BATCH_INTERVAL_MS = 40; // Send batched movements every 40ms (25 Hz) - balanced for smoothness and load
+
+// Adaptive batch interval based on player count
+let currentBatchInterval = 40; // Start at 40ms (25 Hz)
+const BATCH_INTERVAL_NORMAL = 40; // 25 Hz for <300 players
+const BATCH_INTERVAL_MEDIUM = 50; // 20 Hz for 300-600 players
+const BATCH_INTERVAL_HIGH = 66; // 15 Hz for 600+ players
 
 // Maximum buffered bytes before skipping updates (512KB - very aggressive)
 const MAX_BUFFER_BACKPRESSURE = 1024 * 512;
@@ -51,7 +56,25 @@ const MAX_BUFFER_BACKPRESSURE = 1024 * 512;
 let lastFlushTime = Date.now();
 let flushCount = 0;
 
+// Function to adjust batch interval based on player count
+function adjustBatchInterval(): void {
+  const playerCount = Object.keys(playerCache.list()).length;
+
+  let newInterval = BATCH_INTERVAL_NORMAL;
+  if (playerCount >= 600) {
+    newInterval = BATCH_INTERVAL_HIGH;
+  } else if (playerCount >= 300) {
+    newInterval = BATCH_INTERVAL_MEDIUM;
+  }
+
+  if (newInterval !== currentBatchInterval) {
+    currentBatchInterval = newInterval;
+    log.debug(`[MOVEMENT] Adjusted batch interval to ${newInterval}ms for ${playerCount} players (${Math.round(1000/newInterval)} Hz)`);
+  }
+}
+
 // Flush and send batched movements with AOI filtering
+// OPTIMIZED: Pre-compute receiver sets to avoid O(n*m) complexity
 function flushMovementBatches() {
   const startTime = Date.now();
 
@@ -63,39 +86,64 @@ function flushMovementBatches() {
   const isOverloaded = timeSinceLastFlush > 30;
   let skippedDueToLoad = 0;
 
+  // Check if queue is too large and drop oldest entries
+  const MAX_BATCH_QUEUE_SIZE = 1000;
+  if (movementBatchQueue.size > MAX_BATCH_QUEUE_SIZE) {
+    const toDrop = Math.floor(MAX_BATCH_QUEUE_SIZE * 0.1);
+    const keys = Array.from(movementBatchQueue.keys());
+    for (let i = 0; i < toDrop; i++) {
+      movementBatchQueue.delete(keys[i]);
+    }
+    log.debug(`[MOVEMENT] Dropped ${toDrop} movement batches due to queue overflow`);
+  }
+
   for (const [_mapName, playerMovements] of movementBatchQueue.entries()) {
     if (playerMovements.size === 0) continue;
-
-    // Build per-receiver movement lists by iterating movements once
-    // This changes complexity from O(n*m) to O(m*k) where k is average AOI size
-    const receiverMovements = new Map<string, any[]>();
 
     // Direct access to cache object - avoid Map overhead
     const allPlayers = playerCache.list();
 
-    // For each movement, determine who should receive it
+    // OPTIMIZATION: Pre-compute receiver sets for all players ONCE
+    // This reduces complexity from O(n*m) to O(n+m) where n=players, m=movements
+    const receiverSets = new Map<string, Set<string>>();
+
+    for (const playerId in allPlayers) {
+      const player = allPlayers[playerId];
+      if (!player || !player.aoi) continue;
+
+      // Each player can receive from: self + players in their AOI
+      const receivers = new Set<string>([playerId]);
+      if (player.aoi.playersInAOI) {
+        for (const aoiPlayerId of player.aoi.playersInAOI) {
+          receivers.add(aoiPlayerId as string);
+        }
+      }
+      receiverSets.set(playerId, receivers);
+    }
+
+    // Build per-receiver movement lists by iterating movements once
+    // Now O(m*k) where k is average AOI size (~30) instead of O(n*m) where n=all players (~1000)
+    const receiverMovements = new Map<string, any[]>();
+
     for (const [movingPlayerId, movementData] of playerMovements.entries()) {
       const movingPlayer = allPlayers[movingPlayerId];
       if (!movingPlayer || !movingPlayer.aoi) continue;
 
-      // Send to self (always, for client prediction)
-      if (!receiverMovements.has(movingPlayerId)) {
-        receiverMovements.set(movingPlayerId, []);
-      }
-      receiverMovements.get(movingPlayerId)!.push(movementData);
+      // Find all players who can see this mover
+      // Player can see mover if mover is in their receiver set
+      for (const [potentialReceiverId, receiversForPlayer] of receiverSets.entries()) {
+        if (!receiversForPlayer.has(movingPlayerId)) continue;
 
-      // Send to players in mover's AOI (bidirectional - if A sees B, B sees A)
-      for (const receiverId of movingPlayer.aoi.playersInAOI) {
-        // Apply stealth visibility rules early
+        // Apply stealth visibility rules
         if (movementData.isStealth) {
-          const receiver = allPlayers[receiverId as string];
+          const receiver = allPlayers[potentialReceiverId];
           if (!receiver || !receiver.isAdmin) continue;
         }
 
-        if (!receiverMovements.has(receiverId as string)) {
-          receiverMovements.set(receiverId as string, []);
+        if (!receiverMovements.has(potentialReceiverId)) {
+          receiverMovements.set(potentialReceiverId, []);
         }
-        receiverMovements.get(receiverId as string)!.push(movementData);
+        receiverMovements.get(potentialReceiverId)!.push(movementData);
       }
     }
 
@@ -229,8 +277,21 @@ function flushAllBatches() {
   flushDespawnBatches();
 }
 
-// Start the unified batching timer
-setInterval(flushAllBatches, BATCH_INTERVAL_MS);
+// Start the unified batching timer with adaptive interval
+// Initial interval, will be adjusted based on player count
+let batchTimer = setInterval(flushAllBatches, currentBatchInterval);
+
+// Adjust batch interval every 5 seconds based on player count
+setInterval(() => {
+  const oldInterval = currentBatchInterval;
+  adjustBatchInterval();
+
+  // Restart timer if interval changed
+  if (currentBatchInterval !== oldInterval) {
+    clearInterval(batchTimer);
+    batchTimer = setInterval(flushAllBatches, currentBatchInterval);
+  }
+}, 5000);
 
 /**
  * Clear all queued batch data for a disconnecting player

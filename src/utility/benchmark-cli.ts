@@ -576,14 +576,18 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
     stopped = true;
     clearInterval(progressInterval);
 
-    const endTime = Date.now();
-    const totalTime = ((endTime - startTime) / 1000).toFixed(2);
-
-    // Count final active connections
+    // Draw final 100% progress before showing results
     let finalActiveConnections = 0;
     websockets.forEach((ws: any) => {
         if (ws.readyState === 1) finalActiveConnections++;
     });
+    const finalLatencyDuringTest = getLatencyStats();
+    process.stdout.write('\x1b[2K\r');
+    drawProgress(config.duration, config.duration, finalActiveConnections, actualClientCount, finalLatencyDuringTest);
+    console.log(''); // Add newline after final progress
+
+    const endTime = Date.now();
+    const totalTime = ((endTime - startTime) / 1000).toFixed(2);
 
     // Close all connections
     websockets.forEach((ws: any) => cleanupWebsocket(ws));
