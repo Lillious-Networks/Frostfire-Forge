@@ -50,6 +50,8 @@ import {
   equipmentBottomCenter,
   setupInventorySlotHandlers,
   updateCurrencyDisplay,
+  updateAdminMapInput,
+  updateAdminPlayerListWithData,
 } from "./ui.ts";
 import { playAudio, playMusic } from "./audio.ts";
 import { updateXp } from "./xp.ts";
@@ -73,8 +75,8 @@ let sessionActive: boolean = false;
 
 let snapshotRevision: number | null = null;
 let snapshotApplied: boolean = false;
-let movementUpdateBuffer: Array<{id: string, data: any, revision: number}> = [];
 let animationUpdateBuffer: Array<{id: string, name: string, data: any, revision: number}> = [];
+let pendingMovements: Array<{id: string, _data: any, revision: number}> = [];
 
 // Set up equipment slots drag and drop handlers
 // This needs to be called after cloning equipment slots to re-attach handlers
@@ -135,13 +137,15 @@ const setupEquipmentSlotHandlers = () => {
 
 socket.onopen = () => {
   cache.players.clear();
+  // Request fresh player list from server for admin panel
+  sendRequest({ type: "GET_ONLINE_PLAYERS", data: null });
   sessionActive = false;
   cachedPlayerId = null;
 
   snapshotRevision = null;
   snapshotApplied = false;
-  movementUpdateBuffer = [];
   animationUpdateBuffer = [];
+  pendingMovements = [];
 
   sendRequest({
     type: "PING",
@@ -333,6 +337,13 @@ socket.onmessage = async (event) => {
     }
     case "UPDATE_ONLINE_STATUS": {
       updateFriendOnlineStatus(data.username, data.online);
+      break;
+    }
+    case "ONLINE_PLAYERS_LIST": {
+      // Update the admin panel with all online players
+      if (data && Array.isArray(data)) {
+        updateAdminPlayerListWithData(data);
+      }
       break;
     }
     case "UPDATE_PARTY": {
@@ -554,6 +565,8 @@ socket.onmessage = async (event) => {
             if (cache.pendingPlayers && cache.pendingPlayers.has(data.id)) {
               cache.pendingPlayers.delete(data.id);
               cache.players.add(player);
+              // Request fresh player list from server for admin panel
+  sendRequest({ type: "GET_ONLINE_PLAYERS", data: null });
             }
           } else {
             await new Promise((resolve) => setTimeout(resolve, 100));
@@ -596,10 +609,32 @@ socket.onmessage = async (event) => {
       }
 
       await createPlayer(data);
+      // Request fresh player list from server for admin panel
+  sendRequest({ type: "GET_ONLINE_PLAYERS", data: null });
 
       // Update currency display if this is the current player
       if (data.id === cachedPlayerId) {
         updateCurrencyDisplay();
+
+        // Initialize button states for noclip and stealth
+        const noclipButton = document.getElementById("admin-noclip");
+        const stealthButton = document.getElementById("admin-stealth");
+
+        if (noclipButton) {
+          if (data.isNoclip) {
+            noclipButton.classList.add("active");
+          } else {
+            noclipButton.classList.remove("active");
+          }
+        }
+
+        if (stealthButton) {
+          if (data.isStealth) {
+            stealthButton.classList.add("active");
+          } else {
+            stealthButton.classList.remove("active");
+          }
+        }
       }
       break;
     }
@@ -618,7 +653,10 @@ socket.onmessage = async (event) => {
 
       const players = data.players || data;
       snapshotRevision = data.snapshotRevision ?? null;
-      (Array.isArray(players) ? players : []).forEach((player: any) => {
+
+      // Create players sequentially to ensure they're in cache before position updates arrive
+      const playerArray = Array.isArray(players) ? players : [];
+      for (const player of playerArray) {
         if (player.id != cachedPlayerId) {
           // Check if player already exists by username/userid (not just ID)
           const existingByUsername = Array.from(cache.players).find(
@@ -626,28 +664,31 @@ socket.onmessage = async (event) => {
           );
 
           if (!existingByUsername) {
-            createPlayer(player);
+            await createPlayer(player);
           }
         }
-      });
+      }
 
       snapshotApplied = true;
 
-      const bufferedUpdates = movementUpdateBuffer
-        .filter(update => snapshotRevision === null || update.revision > snapshotRevision)
-        .sort((a, b) => a.revision - b.revision);
-
-      bufferedUpdates.forEach(update => {
-        const player = Array.from(cache.players).find(p => p.id === update.id);
-        if (player) {
-          player.position.x = update.data.x;
-          player.position.y = update.data.y;
-          player.typing = false;
+      // Apply any pending movements that arrived before players were created
+      if (pendingMovements.length > 0) {
+        for (const movement of pendingMovements) {
+          const player = Array.from(cache.players).find(
+            (p) => p.id === movement.id
+          );
+          if (player && movement._data) {
+            player.position.x = movement._data.x;
+            player.position.y = movement._data.y;
+            if (movement.id === cachedPlayerId) {
+              positionText.innerText = `Position: ${movement._data.x}, ${movement._data.y}`;
+            }
+          }
         }
-      });
+        pendingMovements = []; // Clear the buffer
+      }
 
-      movementUpdateBuffer = [];
-
+      // Clear any buffered animations (movements are no longer buffered)
       const bufferedAnimations = animationUpdateBuffer
         .filter(update => snapshotRevision === null || update.revision > snapshotRevision)
         .sort((a, b) => a.revision - b.revision);
@@ -725,6 +766,8 @@ socket.onmessage = async (event) => {
           cache.players.delete(player);
         }
       });
+      // Request fresh player list from server for admin panel
+  sendRequest({ type: "GET_ONLINE_PLAYERS", data: null });
       break;
     }
     case "DISCONNECT_PLAYER": {
@@ -738,6 +781,8 @@ socket.onmessage = async (event) => {
       );
       if (player) {
         cache.players.delete(player);
+        // Request fresh player list from server for admin panel
+  sendRequest({ type: "GET_ONLINE_PLAYERS", data: null });
       }
       // If they were targeted, hide target stats
       // if (wasTargeted) {
@@ -754,6 +799,8 @@ socket.onmessage = async (event) => {
       );
       if (player) {
         cache.players.delete(player);
+        // Request fresh player list from server for admin panel
+  sendRequest({ type: "GET_ONLINE_PLAYERS", data: null });
       }
       break;
     }
@@ -772,6 +819,8 @@ socket.onmessage = async (event) => {
           cache.players.delete(player);
         }
       });
+      // Request fresh player list from server for admin panel
+  sendRequest({ type: "GET_ONLINE_PLAYERS", data: null });
       break;
     }
     case "MOVEXY": {
@@ -779,12 +828,8 @@ socket.onmessage = async (event) => {
         break;
       }
 
-      if (!snapshotApplied && data.revision !== undefined) {
-        movementUpdateBuffer.push({
-          id: data.id,
-          data: data._data,
-          revision: data.revision
-        });
+      // Skip processing if session not active or player not spawned yet
+      if (!sessionActive || !cachedPlayerId) {
         break;
       }
 
@@ -807,13 +852,26 @@ socket.onmessage = async (event) => {
       // Handle batched movement updates - data is an array of movements
       if (!Array.isArray(data)) break;
 
+      // Skip processing if session not active
+      if (!sessionActive || !cachedPlayerId) {
+        break;
+      }
+
       for (const movement of data) {
         if (movement._data === "abort") continue;
 
         const player = Array.from(cache.players).find(
           (p) => p.id === movement.id
         );
-        if (!player) continue;
+
+        if (!player) {
+          // Player doesn't exist yet - buffer this movement for later application
+          // This happens when BATCH_MOVEXY arrives before LOAD_PLAYERS creates the player
+          if (!snapshotApplied) {
+            pendingMovements.push(movement);
+          }
+          continue;
+        }
 
         player.typing = false;
         player.position.x = movement._data.x;
@@ -839,6 +897,11 @@ socket.onmessage = async (event) => {
         if (loaded && selfPlayerSpriteLoaded) {
           hideLoadingScreen();
         }
+
+        // Update admin map input with current map name
+        if (loaded) {
+          updateAdminMapInput();
+        }
       }
       break;
     case "LOGIN_SUCCESS":
@@ -852,11 +915,13 @@ socket.onmessage = async (event) => {
         sessionActive = true;
 
         cache.players.clear();
+        // Request fresh player list from server for admin panel
+  sendRequest({ type: "GET_ONLINE_PLAYERS", data: null });
 
         snapshotRevision = null;
         snapshotApplied = false;
-        movementUpdateBuffer = [];
         animationUpdateBuffer = [];
+        pendingMovements = [];
 
         const sessionToken = getCookie("token");
         if (!sessionToken) {
@@ -1582,6 +1647,26 @@ socket.onmessage = async (event) => {
       // displayElement(targetStats, true);
       break;
     }
+    case "NOCLIP": {
+      const data = JSON.parse(packet.decode(event.data))["data"];
+      const currentPlayer = Array.from(cache.players).find(
+        (player) => player.id === cachedPlayerId || player.id === cachedPlayerId
+      );
+
+      // Update noclip button color if self
+      if (currentPlayer && data.id === currentPlayer.id) {
+        const noclipButton = document.getElementById("admin-noclip");
+        if (noclipButton) {
+          if (data.isNoclip) {
+            noclipButton.classList.add("active");
+          } else {
+            noclipButton.classList.remove("active");
+          }
+        }
+      }
+
+      break;
+    }
     case "STEALTH": {
       const data = JSON.parse(packet.decode(event.data))["data"];
       const currentPlayer = Array.from(cache.players).find(
@@ -1594,6 +1679,16 @@ socket.onmessage = async (event) => {
           type: "MOVEXY",
           data: "ABORT",
         });
+
+        // Update stealth button color if self
+        const stealthButton = document.getElementById("admin-stealth");
+        if (stealthButton) {
+          if (data.isStealth) {
+            stealthButton.classList.add("active");
+          } else {
+            stealthButton.classList.remove("active");
+          }
+        }
       }
 
       cache.players.forEach((player) => {

@@ -1,7 +1,7 @@
-import { sendRequest, getIsLoaded } from "./socket.js";
+import { sendRequest, getIsLoaded, cachedPlayerId } from "./socket.js";
 import Cache from "./cache.js";
 const cache = Cache.getInstance();
-import { toggleUI, toggleDebugContainer, handleStatsUI, collectablesUI, hotbarSlots } from "./ui.js";
+import { toggleUI, toggleDebugContainer, handleStatsUI, collectablesUI, hotbarSlots, adminPanelContainer } from "./ui.js";
 import { handleCommand, handleChatMessage } from "./chat.js";
 import { setDirection, setPendingRequest } from "./renderer.js";
 import { chatInput } from "./chat.js";
@@ -15,6 +15,7 @@ let toggleSpellBook = false;
 let toggleFriendsList = false;
 let toggleCollectables = false;
 let toggleGuild = false;
+let toggleAdminPanel = false;
 let controllerConnected: boolean = false;
 let contextMenuKeyTriggered = false;
 let isKeyPressed = false;
@@ -141,6 +142,38 @@ export const keyHandlers = {
     if (isKeyOnCooldown("Enter")) return;
     putKeyOnCooldown("Enter");
     handleEnterKey();
+  },
+  Insert: () => {
+    if (toggleSpellBook) {
+      toggleSpellBook = toggleUI(spellBookUI, toggleSpellBook, -450);
+    }
+
+    if (toggleGuild) {
+      toggleGuild = toggleUI(guildContainer, toggleGuild, -450);
+    }
+
+    if (toggleCollectables) {
+      toggleCollectables = toggleUI(collectablesUI, toggleCollectables, -450);
+    }
+
+    if (toggleFriendsList) {
+      toggleFriendsList = toggleUI(friendsListUI, toggleFriendsList, -450);
+    }
+
+    if (toggleInventory) {
+      toggleInventory = toggleUI(inventoryUI, toggleInventory, -350);
+    }
+
+    // Only allow admin panel to be opened by admin players
+    const currentPlayer = Array.from(cache.players).find(p => p.id === cachedPlayerId);
+    if (currentPlayer?.isAdmin) {
+      toggleAdminPanel = toggleUI(adminPanelContainer, toggleAdminPanel, -480);
+
+      // Request fresh player list when opening admin panel
+      if (toggleAdminPanel) {
+        sendRequest({ type: "GET_ONLINE_PLAYERS", data: null });
+      }
+    }
   }
 } as const;
 

@@ -78,6 +78,7 @@ declare interface Player {
   position?: PositionData;
   location?: LocationData;
   map?: string;
+  layer?: string | null;
   stats?: StatsData;
   isStealth?: boolean;
   isAdmin?: boolean;

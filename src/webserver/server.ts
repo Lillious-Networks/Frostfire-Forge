@@ -11,7 +11,6 @@ import * as settings from "../config/settings.json";
 import path from "path";
 import fs from "fs";
 import animator_html from "./www/public/animator.html";
-import benchmark_html from "./www/public/benchmark.html";
 import connectiontest_html from "./www/public/connection-test.html";
 import login_html from "./www/public/index.html";
 import register_html from "./www/public/register.html";
@@ -66,7 +65,6 @@ const routes = {
       });
     }
   },
-  "/benchmark": benchmark_html,
   "/connection-test": connectiontest_html,
   "/": login_html,
   "/registration": register_html,
@@ -264,7 +262,6 @@ Bun.serve({
     port: _https ? (process.env.WEBSRV_PORTSSL || 443) : (process.env.WEBSRV_PORT || 80),
     routes: {
       "/swaggerui": routes["/swaggerui"],
-      "/benchmark": routes["/benchmark"],
       "/connection-test": routes["/connection-test"],
       "/": routes["/"],
       "/registration": routes["/registration"],

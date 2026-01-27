@@ -371,7 +371,7 @@ export function getVisibleLayersSorted(layeredAnim: LayeredAnimation): Animation
   const animName = layeredAnim.currentAnimationName;
   const direction = animName.split('_').pop() || '';
   const isUpDirection = direction === 'up' || direction === 'upleft' || direction === 'upright';
-  const isLeftDirection = direction === 'left' || direction === 'downleft' || direction === 'upleft';
+  const isLeftDirection = direction === 'left' || direction === 'upleft';
 
   // Dynamically adjust layer zIndex based on direction
   return layers.map(layer => {

@@ -160,33 +160,23 @@ if (!fs.existsSync(path.join(configPath, "settings.json"))) {
 }
 
 const AOI_CONFIG = {
-  // AOI radius in pixels (800 = ~12-13 tiles at 64px/tile)
-  DEFAULT_RADIUS: 800,
-
-  // Distance player must move before AOI recalculation (reduces CPU load)
+  DEFAULT_RADIUS: 1000,
   UPDATE_THRESHOLD: 100,
-
-  // Grid cell size for spatial indexing (optimization)
   GRID_CELL_SIZE: 512,
-
-  // Enable/disable spatial grid optimization
   USE_SPATIAL_GRID: false,
-
-  // Minimum players on a map before spatial grid is used
   SPATIAL_GRID_THRESHOLD: 50,
-
-  // Enable debug logging for AOI system
-  DEBUG: false,
+  MAX_PLAYERS_PER_LAYER: 50,
+  DEBUG: false
 };
 
-if (!fs.existsSync(path.join(configPath, "aoi.ts"))) {
+if (!fs.existsSync(path.join(configPath, "aoi.json"))) {
   fs.writeFileSync(
-    path.join(configPath, "aoi.ts"),
-    `export const AOI_CONFIG = ${JSON.stringify(AOI_CONFIG, null, 2)};`
+    path.join(configPath, "aoi.json"),
+    JSON.stringify(AOI_CONFIG, null, 2)
   );
-  console.log(`Created AOI config file at ${path.join(configPath, "aoi.ts")}`);
+  console.log(`Created AOI config file at ${path.join(configPath, "aoi.json")}`);
 } else {
-  console.log(`AOI config loaded from ${path.join(configPath, "aoi.ts")}`);
+  console.log(`AOI config loaded from ${path.join(configPath, "aoi.json")}`);
 }
 
 const security_definitions = `# Security Definitions

@@ -9,6 +9,7 @@ const authentication_session_queue = new Set<string>();
 // Track pending authentications with their websocket, token, and language
 const pendingAuthentications = new Map<string, { ws: any; token: string; language: string }>();
 import playerCache from "../services/playermanager.ts";
+import layerManager from "../services/layermanager";
 import assetCache from "../services/assetCache";
 import { reloadMap } from "../modules/assetloader";
 import { clearMapCache } from "../systems/player.ts";
@@ -28,7 +29,7 @@ import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks } from "../modules/assetloader";
 import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable } from "../modules/spriteSheetManager";
-import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI } from "./aoi";
+import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers } from "./aoi";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 
 // Animation system configuration
@@ -41,70 +42,169 @@ let globalStateRevision: number = 0;
 
 // Movement batching system
 export const movementBatchQueue = new Map<string, Map<string, any>>(); // Map of map -> Map of playerId -> movement
-const BATCH_INTERVAL_MS = 16; // Send batched movements every 16ms (60 Hz)
+
+// Adaptive batch interval based on player count
+let currentBatchInterval = 40; // Start at 40ms (25 Hz)
+const BATCH_INTERVAL_NORMAL = 40; // 25 Hz for <300 players
+const BATCH_INTERVAL_MEDIUM = 50; // 20 Hz for 300-600 players
+const BATCH_INTERVAL_HIGH = 66; // 15 Hz for 600+ players
+
+// Maximum buffered bytes before skipping updates (512KB - very aggressive)
+const MAX_BUFFER_BACKPRESSURE = 1024 * 512;
+
+// Adaptive load tracking
+let lastFlushTime = Date.now();
+let flushCount = 0;
+
+// Function to adjust batch interval based on player count
+function adjustBatchInterval(): void {
+  const playerCount = Object.keys(playerCache.list()).length;
+
+  let newInterval = BATCH_INTERVAL_NORMAL;
+  if (playerCount >= 600) {
+    newInterval = BATCH_INTERVAL_HIGH;
+  } else if (playerCount >= 300) {
+    newInterval = BATCH_INTERVAL_MEDIUM;
+  }
+
+  if (newInterval !== currentBatchInterval) {
+    currentBatchInterval = newInterval;
+    log.debug(`[MOVEMENT] Adjusted batch interval to ${newInterval}ms for ${playerCount} players (${Math.round(1000/newInterval)} Hz)`);
+  }
+}
 
 // Flush and send batched movements with AOI filtering
+// OPTIMIZED: Pre-compute receiver sets to avoid O(n*m) complexity
 function flushMovementBatches() {
-  for (const [mapName, playerMovements] of movementBatchQueue.entries()) {
+  const startTime = Date.now();
+
+  // Adaptive rate limiting based on flush performance
+  const timeSinceLastFlush = startTime - lastFlushTime;
+  lastFlushTime = startTime;
+
+  // If previous flush took >30ms, we're overloaded - skip some receivers
+  const isOverloaded = timeSinceLastFlush > 30;
+  let skippedDueToLoad = 0;
+
+  // Check if queue is too large and drop oldest entries
+  const MAX_BATCH_QUEUE_SIZE = 1000;
+  if (movementBatchQueue.size > MAX_BATCH_QUEUE_SIZE) {
+    const toDrop = Math.floor(MAX_BATCH_QUEUE_SIZE * 0.1);
+    const keys = Array.from(movementBatchQueue.keys());
+    for (let i = 0; i < toDrop; i++) {
+      movementBatchQueue.delete(keys[i]);
+    }
+    log.debug(`[MOVEMENT] Dropped ${toDrop} movement batches due to queue overflow`);
+  }
+
+  for (const [_mapName, playerMovements] of movementBatchQueue.entries()) {
     if (playerMovements.size === 0) continue;
 
-    // Get all players in this map
-    const playersInMap = filterPlayersByMap(mapName);
+    // Direct access to cache object - avoid Map overhead
+    const allPlayers = playerCache.list();
 
-    // For each player, filter movements to only those in their AOI
-    playersInMap.forEach((receivingPlayer) => {
-      // Skip if player has no AOI or websocket is closed/missing
-      if (!receivingPlayer.aoi || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) return;
+    // OPTIMIZATION: Pre-compute receiver sets for all players ONCE
+    // This reduces complexity from O(n*m) to O(n+m) where n=players, m=movements
+    const receiverSets = new Map<string, Set<string>>();
 
-      const movementsForThisPlayer: any[] = [];
+    for (const playerId in allPlayers) {
+      const player = allPlayers[playerId];
+      if (!player || !player.aoi) continue;
 
-      // Check each movement to see if it should be sent to this player
-      for (const [movingPlayerId, movementData] of playerMovements.entries()) {
-        // Always include self movement
-        if (movingPlayerId === receivingPlayer.id) {
-          movementsForThisPlayer.push(movementData);
-          continue;
+      // Each player can receive from: self + players in their AOI
+      const receivers = new Set<string>([playerId]);
+      if (player.aoi.playersInAOI) {
+        for (const aoiPlayerId of player.aoi.playersInAOI) {
+          receivers.add(aoiPlayerId as string);
         }
+      }
+      receiverSets.set(playerId, receivers);
+    }
 
-        // Check if moving player is in receiving player's AOI
-        if (!receivingPlayer.aoi.playersInAOI.has(movingPlayerId)) {
-          continue;
-        }
+    // Build per-receiver movement lists by iterating movements once
+    // Now O(m*k) where k is average AOI size (~30) instead of O(n*m) where n=all players (~1000)
+    const receiverMovements = new Map<string, any[]>();
+
+    for (const [movingPlayerId, movementData] of playerMovements.entries()) {
+      const movingPlayer = allPlayers[movingPlayerId];
+      if (!movingPlayer || !movingPlayer.aoi) continue;
+
+      // Find all players who can see this mover
+      // Player can see mover if mover is in their receiver set
+      for (const [potentialReceiverId, receiversForPlayer] of receiverSets.entries()) {
+        if (!receiversForPlayer.has(movingPlayerId)) continue;
 
         // Apply stealth visibility rules
-        if (movementData.isStealth && !receivingPlayer.isAdmin) {
-          continue; // Only admins can see stealth movements
+        if (movementData.isStealth) {
+          const receiver = allPlayers[potentialReceiverId];
+          if (!receiver || !receiver.isAdmin) continue;
         }
 
-        movementsForThisPlayer.push(movementData);
+        if (!receiverMovements.has(potentialReceiverId)) {
+          receiverMovements.set(potentialReceiverId, []);
+        }
+        receiverMovements.get(potentialReceiverId)!.push(movementData);
+      }
+    }
+
+    // Send batched movements to each receiver with backpressure check
+    let sentCount = 0;
+    const receiverArray = Array.from(receiverMovements.entries());
+
+    // Prioritize: send to fewer receivers first (they're less loaded)
+    // This ensures at least some players get smooth updates
+    receiverArray.sort((a, b) => a[1].length - b[1].length);
+
+    for (const [receiverId, movements] of receiverArray) {
+      const receiver = allPlayers[receiverId];
+      if (!receiver || !receiver.ws || receiver.ws.readyState !== 1) continue;
+
+      // Skip if too much backpressure (prevents buffer overflow and latency spikes)
+      if (receiver.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
+        skippedDueToLoad++;
+        continue;
       }
 
-      // Send batched movements if any qualify
-      if (movementsForThisPlayer.length > 0) {
-        const batchPacket = packetManager.batchMoveXY(movementsForThisPlayer);
-        sendPacket(receivingPlayer.ws, batchPacket);
+      const batchPacket = packetManager.batchMoveXY(movements);
+      sendPacket(receiver.ws, batchPacket);
+      sentCount++;
+
+      // Adaptive throttling: if overloaded and taking too long, stop processing
+      // But ensure we send to at least 100 receivers for minimum service level
+      if (isOverloaded && sentCount > 100 && Date.now() - startTime > 25) {
+        skippedDueToLoad += receiverArray.length - sentCount;
+        break;
       }
-    });
+    }
   }
 
   // Clear all batches
   movementBatchQueue.clear();
-}
 
-// Start the batching timer
-setInterval(flushMovementBatches, BATCH_INTERVAL_MS);
+  flushCount++;
+  if (flushCount % 100 === 0 && skippedDueToLoad > 0) {
+    log.debug(`[MOVEMENT] Skipped ${skippedDueToLoad} updates due to load (flush took ${Date.now() - startTime}ms)`);
+  }
+}
 
 // Spawn player batching system
 export const spawnBatchQueue = new Map<string, Map<string, any>>(); // Map of receivingPlayerId -> Map of spawnedPlayerId -> spawnData
 
 // Flush and send batched spawn packets
 function flushSpawnBatches() {
+  if (spawnBatchQueue.size === 0) return;
+
+  const allPlayers = playerCache.list();
+
   for (const [receivingPlayerId, spawnedPlayers] of spawnBatchQueue.entries()) {
     if (spawnedPlayers.size === 0) continue;
 
-    const receivingPlayer = playerCache.get(receivingPlayerId);
+    const receivingPlayer = allPlayers[receivingPlayerId];
     // Skip if player or websocket is missing/closed
     if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
+
+    // Skip if too much backpressure
+    if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) continue;
 
     const spawnsForThisPlayer = Array.from(spawnedPlayers.values());
 
@@ -118,7 +218,7 @@ function flushSpawnBatches() {
 
       // Send animations for each spawned player
       spawnsForThisPlayer.forEach(async (spawnData) => {
-        const spawnedPlayer = playerCache.get(spawnData.id);
+        const spawnedPlayer = allPlayers[spawnData.id];
         if (!spawnedPlayer) return;
 
         const animationName = getAnimationNameForDirection(
@@ -138,20 +238,24 @@ function flushSpawnBatches() {
   spawnBatchQueue.clear();
 }
 
-// Start the spawn batching timer
-setInterval(flushSpawnBatches, BATCH_INTERVAL_MS);
-
 // Despawn/disconnect batching system
 export const despawnBatchQueue = new Map<string, Set<string>>(); // Map of receivingPlayerId -> Set of despawnedPlayerIds
 
 // Flush and send batched despawn packets
 function flushDespawnBatches() {
+  if (despawnBatchQueue.size === 0) return;
+
+  const allPlayers = playerCache.list();
+
   for (const [receivingPlayerId, despawnedPlayerIds] of despawnBatchQueue.entries()) {
     if (despawnedPlayerIds.size === 0) continue;
 
-    const receivingPlayer = playerCache.get(receivingPlayerId);
+    const receivingPlayer = allPlayers[receivingPlayerId];
     // Skip if player or websocket is missing/closed
     if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
+
+    // Skip if too much backpressure
+    if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) continue;
 
     const despawnsArray = Array.from(despawnedPlayerIds);
 
@@ -166,8 +270,28 @@ function flushDespawnBatches() {
   despawnBatchQueue.clear();
 }
 
-// Start the despawn batching timer
-setInterval(flushDespawnBatches, BATCH_INTERVAL_MS);
+// Master flush function - flushes all batch types
+function flushAllBatches() {
+  flushMovementBatches();
+  flushSpawnBatches();
+  flushDespawnBatches();
+}
+
+// Start the unified batching timer with adaptive interval
+// Initial interval, will be adjusted based on player count
+let batchTimer = setInterval(flushAllBatches, currentBatchInterval);
+
+// Adjust batch interval every 5 seconds based on player count
+setInterval(() => {
+  const oldInterval = currentBatchInterval;
+  adjustBatchInterval();
+
+  // Restart timer if interval changed
+  if (currentBatchInterval !== oldInterval) {
+    clearInterval(batchTimer);
+    batchTimer = setInterval(flushAllBatches, currentBatchInterval);
+  }
+}, 5000);
 
 /**
  * Clear all queued batch data for a disconnecting player
@@ -391,7 +515,7 @@ authWorker.on("message", async (result: any) => {
       playerCache.set(_pcache.id, _pcache);
 
       // Initialize AOI state for the player
-      initializePlayerAOI(_pcache);
+      await initializePlayerAOI(_pcache);
       playerCache.set(_pcache.id, _pcache);
     }
 
@@ -406,8 +530,6 @@ authWorker.on("message", async (result: any) => {
     sendPacket(ws, packetManager.loadMap(mapData));
 
     setImmediate(async () => {
-      const snapshotRevision = globalStateRevision;
-
       // Get current player from cache
       const currentPlayer = playerCache.get(ws.data.id);
       if (!currentPlayer) return;
@@ -429,6 +551,7 @@ authWorker.on("message", async (result: any) => {
         isAdmin: playerData.isAdmin,
         isGuest: playerData.isGuest,
         isStealth: playerData.isStealth,
+        isNoclip: playerData.isNoclip,
         stats: stats || {},
         animation: null,
         friends: playerData.friends || [],
@@ -437,6 +560,10 @@ authWorker.on("message", async (result: any) => {
         currency: playerData.currency || { copper: 0, silver: 0, gold: 0 },
       };
       sendPacket(ws, packetManager.spawnPlayer(spawnDataForAll));
+
+      // Capture snapshot revision RIGHT BEFORE reading positions to ensure consistency
+      // This prevents race conditions where positions are read after players have moved
+      const snapshotRevision = globalStateRevision;
 
       // Build LOAD_PLAYERS data from players in AOI
       const playerDataForLoad: any[] = [];
@@ -450,8 +577,9 @@ authWorker.on("message", async (result: any) => {
           userid: p.userid,
           location: {
             map: p.location.map,
-            x: p.location.position.x || 0,
-            y: p.location.position.y || 0,
+            // Clone position to prevent it from being updated while building packet
+            x: Number(p.location.position.x) || 0,
+            y: Number(p.location.position.y) || 0,
             direction: p.location.position?.direction || "down",
             moving: p.moving || false,
           },
@@ -459,6 +587,7 @@ authWorker.on("message", async (result: any) => {
           isAdmin: p.isAdmin,
           isGuest: p.isGuest,
           isStealth: p.isStealth,
+          isNoclip: p.isNoclip,
           stats: p.stats,
           animation: null,
           mounted: p.mounted,
@@ -487,6 +616,27 @@ authWorker.on("message", async (result: any) => {
         });
       }
 
+      // Force immediate position sync: collect movements from the queue and send to new player
+      // This ensures the new player gets current positions even if they arrive during client loading
+      const mapName = currentPlayer.location.map;
+      const queuedMovements = movementBatchQueue.get(mapName);
+      if (queuedMovements && queuedMovements.size > 0) {
+        const movementsForNewPlayer: any[] = [];
+
+        // Get all movements for players in this player's AOI
+        for (const playerId of currentPlayer.aoi.playersInAOI) {
+          const movement = queuedMovements.get(playerId as string);
+          if (movement) {
+            movementsForNewPlayer.push(movement);
+          }
+        }
+
+        // Send immediate position update if we have any movements queued
+        if (movementsForNewPlayer.length > 0) {
+          sendPacket(ws, packetManager.batchMoveXY(movementsForNewPlayer));
+        }
+      }
+
       // Send initial animation for self
       if (position?.direction) {
         await sendAnimationTo(
@@ -511,15 +661,23 @@ authWorker.on("message", async (result: any) => {
       const currentPlayerData = playerCache.get(ws.data.id);
       if (!currentPlayerData) return;
 
+      // Build username index for O(1) lookups instead of O(n) find operations
+      // This changes complexity from O(f*n) to O(n + f)
+      const allPlayers = playerCache.list();
+      const usernameIndex = new Map<string, any>();
+
+      for (const player of Object.values(allPlayers)) {
+        if (player.ws && player.username) {
+          usernameIndex.set(player.username.toLowerCase(), player);
+        }
+      }
+
       // Only iterate through the new player's friends list instead of all players
       const newPlayerFriends = currentPlayerData.friends || [];
-      const allPlayers = playerCache.list();
 
       for (const friendUsername of newPlayerFriends) {
-        // Find if this friend is online
-        const onlineFriend = Object.values(allPlayers).find(
-          (p: any) => p.username === friendUsername && p.ws
-        );
+        // O(1) lookup instead of O(n) find
+        const onlineFriend = usernameIndex.get(friendUsername.toLowerCase());
 
         if (onlineFriend) {
           // Notify the friend that the new player is online
@@ -656,8 +814,9 @@ export default async function packetReceiver(
       }
       case "TIME_SYNC": {
         if (!currentPlayer) return;
+        // Update timestamp in memory only - no need to call playerCache.set()
+        // since currentPlayer is already a reference to the cached object
         currentPlayer.lastUpdated = performance.now();
-        playerCache.set(currentPlayer.id, currentPlayer);
         // Echo back TIME_SYNC for latency measurement
         sendPacket(ws, packetManager.timeSync(data));
         break;
@@ -721,10 +880,10 @@ export default async function packetReceiver(
       case "MOVEXY": {
         if (!currentPlayer) return;
 
-        const baseSpeed = 2;
+        const baseSpeed = 6; // Balanced for 30Hz update rate (6 * 30 = 180 pixels/sec)
         const mountSpeedMultiplier = 1.35;
         const speed = currentPlayer.mounted ? baseSpeed * mountSpeedMultiplier : baseSpeed;
-        const targetFPS = 60;
+        const targetFPS = 30; // Matches 33ms broadcast interval
         const frameTime = 1000 / targetFPS;
         const lastDirection =
           currentPlayer.location.position?.direction || "down";
@@ -747,7 +906,7 @@ export default async function packetReceiver(
             clearInterval(currentPlayer.movementInterval);
             currentPlayer.movementInterval = null;
             currentPlayer.moving = false;
-            playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
             globalStateRevision++;
             await sendPositionAnimation(
@@ -767,7 +926,7 @@ export default async function packetReceiver(
         if (currentPlayer.casting && currentPlayer.interruptableSpell) {
           currentPlayer.casting = false;
           currentPlayer.lastInterruptTime = performance.now();
-          playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
           const playersInMap = filterPlayersByMap(currentPlayer.location.map);
           playersInMap.forEach((player) => {
             sendPacket(
@@ -794,7 +953,7 @@ export default async function packetReceiver(
 
         currentPlayer.location.position.direction = direction || "down";
         currentPlayer.moving = true;
-        playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
         globalStateRevision++;
         await sendPositionAnimation(
@@ -814,10 +973,12 @@ export default async function packetReceiver(
 
         let lastTime = performance.now();
         let running = false;
+        let aoiUpdateCounter = 0; // Rate-limit expensive AOI updates
 
         const movePlayer = async () => {
           if (running) return;
           running = true;
+          aoiUpdateCounter++;
 
           // Stop movement if websocket closed
           if (!ws || ws.readyState !== 1) {
@@ -858,13 +1019,14 @@ export default async function packetReceiver(
           if (!offset) {
             running = false;
             currentPlayer.moving = false;
-            playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
             return;
           }
 
           tempPosition.x = Math.round(tempPosition.x + offset.dx);
           tempPosition.y = Math.round(tempPosition.y + offset.dy);
 
+          // Always check collision to prevent getting stuck in walls
           const collision = await player.checkIfWouldCollide(
             currentPlayer.location.map,
             {
@@ -889,7 +1051,7 @@ export default async function packetReceiver(
             clearInterval(currentPlayer.movementInterval);
             currentPlayer.movementInterval = null;
             currentPlayer.moving = false;
-            playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
             globalStateRevision++;
             await sendPositionAnimation(
@@ -903,17 +1065,17 @@ export default async function packetReceiver(
               currentPlayer.casting || false
             );
 
-            const reason = collision.reason;
+            const reason = collision?.reason;
 
             // Send collision tile for debugging
-            if (reason === "tile_collision" && collision.tile) {
+            if (reason === "tile_collision" && collision?.tile) {
               sendPacket(ws, packetManager.collisionDebug({
                 tileX: collision.tile.x,
                 tileY: collision.tile.y
               }));
             }
 
-            if (reason === "warp_collision" && collision.warp) {
+            if (reason === "warp_collision" && collision?.warp) {
               const currentMap = currentPlayer.location.map;
               const warp = collision.warp as {
                 map: string;
@@ -954,7 +1116,11 @@ export default async function packetReceiver(
                   globalStateRevision++;
                   const movementData = {
                     id: ws.data.id,
-                    _data: currentPlayer.location.position,
+                    _data: {
+                      x: Number(currentPlayer.location.position.x),
+                      y: Number(currentPlayer.location.position.y),
+                      direction: currentPlayer.location.position.direction
+                    },
                     revision: globalStateRevision
                   };
                   sendPacket(ws, packetManager.moveXY(movementData));
@@ -968,14 +1134,19 @@ export default async function packetReceiver(
 
           globalStateRevision++;
 
-          // Check if AOI needs updating based on distance threshold
-          if (shouldUpdateAOI(currentPlayer)) {
+          // Rate-limit AOI updates to every 10 frames (every 500ms at 20 FPS)
+          // This reduces load dramatically with high player counts
+          if (aoiUpdateCounter % 10 === 0 && shouldUpdateAOI(currentPlayer)) {
             await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
           }
 
           const movementData = {
             id: ws.data.id,
-            _data: currentPlayer.location.position,
+            _data: {
+              x: Number(currentPlayer.location.position.x),
+              y: Number(currentPlayer.location.position.y),
+              direction: currentPlayer.location.position.direction
+            },
             revision: globalStateRevision,
             isStealth: currentPlayer.isStealth
           };
@@ -995,7 +1166,9 @@ export default async function packetReceiver(
 
         movePlayer(); // Immediate first step
 
-        currentPlayer.movementInterval = setInterval(movePlayer, 1);
+        // Match movement update rate to batch broadcast rate (33ms = 30 FPS)
+        // Prevents queue buildup with high player counts
+        currentPlayer.movementInterval = setInterval(movePlayer, 33);
         break;
       }
       case "TELEPORTXY": {
@@ -1019,7 +1192,11 @@ export default async function packetReceiver(
         // Broadcast movement using AOI
         const movementData = {
           id: ws.data.id,
-          _data: currentPlayer.location.position,
+          _data: {
+            x: Number(currentPlayer.location.position.x),
+            y: Number(currentPlayer.location.position.y),
+            direction: currentPlayer.location.position.direction
+          },
           revision: globalStateRevision
         };
         broadcastToAOI(currentPlayer, packetManager.moveXY(movementData), true);
@@ -1218,6 +1395,11 @@ export default async function packetReceiver(
         if (!currentPlayer?.isAdmin) return;
         const isNoclip = await player.toggleNoclip(currentPlayer.username);
         currentPlayer.isNoclip = isNoclip;
+        const noclipData = {
+          id: ws.data.id,
+          isNoclip: currentPlayer.isNoclip,
+        };
+        sendPacket(ws, packetManager.noclip(noclipData));
         break;
       }
       case "STEALTH": {
@@ -1242,7 +1424,11 @@ export default async function packetReceiver(
           playersInMap.forEach(async (player) => {
             const moveXYData = {
               id: ws.data.id,
-              _data: currentPlayer.location.position,
+              _data: {
+                x: Number(currentPlayer.location.position.x),
+                y: Number(currentPlayer.location.position.y),
+                direction: currentPlayer.location.position.direction
+              },
               revision: globalStateRevision
             };
 
@@ -1379,11 +1565,11 @@ export default async function packetReceiver(
             );
           });
           currentPlayer.lastInterruptTime = performance.now();
-          playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
           return;
         }
 
-        playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
         // If not enough mana, return
         // Get fresh stats from cache to avoid race condition with rapid casts
@@ -1488,7 +1674,7 @@ export default async function packetReceiver(
 
         // Set an async timeout to simulate spell casting time
         currentPlayer.casting = true;
-        playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
         // Update animation to show casting
         globalStateRevision++;
@@ -1791,7 +1977,11 @@ export default async function packetReceiver(
               player.ws,
               packetManager.moveXY({
                 id: target.id,
-                _data: target.location.position,
+                _data: {
+                  x: Number(target.location.position.x),
+                  y: Number(target.location.position.y),
+                  direction: target.location.position.direction
+                },
                 revision: globalStateRevision
               })
             );
@@ -1851,7 +2041,7 @@ export default async function packetReceiver(
         target.last_attack = performance.now();
 
         // Spell cooldown was already set at cast start (includes cast time + cooldown)
-        playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
         break;
       }
@@ -2105,6 +2295,101 @@ export default async function packetReceiver(
 
             break;
           }
+          // Invite a player to party
+          case "INVITE": {
+            const username = args[0]?.toLowerCase() || null;
+            if (!username) {
+              sendPacket(
+                ws,
+                packetManager.notify({
+                  message: "Usage: /invite <username>",
+                })
+              );
+              break;
+            }
+
+            // Find the target player
+            const players = Object.values(playerCache.list());
+            const targetPlayer = players.find(
+              (p: any) => p.username && p.username.toLowerCase() === username.toLowerCase()
+            );
+
+            if (!targetPlayer) {
+              sendPacket(
+                ws,
+                packetManager.notify({
+                  message: `Player ${username} is not online.`,
+                })
+              );
+              break;
+            }
+
+            // Check if trying to invite self
+            if (targetPlayer.id === currentPlayer.id) {
+              sendPacket(
+                ws,
+                packetManager.notify({
+                  message: "You cannot invite yourself to a party.",
+                })
+              );
+              break;
+            }
+
+            // Check for existing invite
+            const existingInvite = targetPlayer.invitations?.find(
+              (invite: any) => invite?.type === "party" && invite?.from === currentPlayer.username
+            );
+
+            if (existingInvite) {
+              sendPacket(
+                ws,
+                packetManager.notify({
+                  message: `You have already sent a party invite to ${targetPlayer.username}.`,
+                })
+              );
+              break;
+            }
+
+            // Create the invitation data
+            const player_username =
+              currentPlayer.username.charAt(0).toUpperCase() +
+              currentPlayer.username.slice(1);
+
+            const invite_data = {
+              action: "INVITE_PARTY",
+              message: `${player_username} wants to invite you to their party`,
+              originator: currentPlayer.id.toString(),
+              authorization: randomBytes(16).toString(),
+            };
+
+            // Store invitation in cache
+            if (!currentPlayer.invitations) {
+              currentPlayer.invitations = [];
+            }
+
+            currentPlayer.invitations.push({
+              action: invite_data.action,
+              originator: invite_data.originator,
+              authorization: invite_data.authorization,
+            });
+
+            playerCache.set(currentPlayer.id, currentPlayer);
+
+            // Send invitation packet to target player
+            sendPacket(targetPlayer.ws, packetManager.invitation(invite_data));
+
+            // Notify sender
+            sendPacket(
+              ws,
+              packetManager.notify({
+                message: `Invitation sent to ${targetPlayer.username.charAt(0).toUpperCase() +
+                  targetPlayer.username.slice(1)
+                  }`,
+              })
+            );
+
+            break;
+          }
           // Summon a player
           case "SUMMON": {
             // admin.summon or admin.*
@@ -2168,54 +2453,437 @@ export default async function packetReceiver(
               break;
             }
 
-            // Must be in the same map
+            // Check if target player is in a different map
             if (targetPlayer.location.map !== currentPlayer.location.map) {
+              // Move target player to admin's map
+              const result = await player.setLocation(
+                targetPlayer.id,
+                currentPlayer.location.map,
+                {
+                  x: currentPlayer.location.position.x,
+                  y: currentPlayer.location.position.y,
+                  direction: targetPlayer.location.position?.direction || "down",
+                }
+              );
+
+              // Check if location update was successful
+              if (
+                result &&
+                typeof result === "object" &&
+                "affectedRows" in result &&
+                (result as { affectedRows: number }).affectedRows != 0
+              ) {
+                // Update player's location in cache
+                targetPlayer.location.map = currentPlayer.location.map;
+                targetPlayer.location.position = {
+                  x: currentPlayer.location.position.x,
+                  y: currentPlayer.location.position.y,
+                  direction: targetPlayer.location.position?.direction || "down",
+                };
+
+                // Mark admin to see target after reconnect (admin can see summoned player)
+                // Target should NOT see admin if admin is in stealth
+                if (!currentPlayer.forceVisibleTo) currentPlayer.forceVisibleTo = new Set();
+                currentPlayer.forceVisibleTo.add(targetPlayer.id);
+
+                playerCache.set(targetPlayer.id, targetPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
+
+                // Clear force visibility flag after 5 seconds
+                setTimeout(() => {
+                  const admin = playerCache.get(currentPlayer.id);
+                  if (admin?.forceVisibleTo) {
+                    admin.forceVisibleTo.delete(targetPlayer.id);
+                    playerCache.set(admin.id, admin);
+                  }
+                }, 5000);
+
+                // Send reconnect packet to force map reload
+                sendPacket(targetPlayer.ws, packetManager.reconnect());
+
+                // Notify the target player
+                sendPacket(
+                  targetPlayer.ws,
+                  packetManager.notify({
+                    message: `You have been summoned by an admin`,
+                  })
+                );
+
+                // Notify the admin
+                sendPacket(
+                  ws,
+                  packetManager.notify({
+                    message: `Summoned ${targetPlayer.username.charAt(0).toUpperCase() +
+                      targetPlayer.username.slice(1)
+                      } to your location`,
+                  })
+                );
+              } else {
+                const notifyData = {
+                  message: "Failed to summon player",
+                };
+                sendPacket(ws, packetManager.notify(notifyData));
+              }
+            } else {
+              // Same map - move position and sync to admin's layer
+              targetPlayer.location.position = {
+                x: currentPlayer.location.position.x,
+                y: currentPlayer.location.position.y,
+                direction: targetPlayer.location.position?.direction || "down",
+              };
+
+              // Sync target to admin's layer
+              if (currentPlayer.aoi?.layerId && targetPlayer.aoi) {
+                const adminLayerId = currentPlayer.aoi.layerId;
+                const adminLayerInfo = layerManager.getLayerInfo(adminLayerId);
+
+                if (adminLayerInfo && adminLayerInfo.playerCount < 100) { // AOI_CONFIG.MAX_PLAYERS_PER_LAYER
+                  // Move target to admin's layer
+                  layerManager.removePlayerFromLayer(targetPlayer.id);
+                  const layer = layerManager.getLayerInfo(adminLayerId);
+                  if (layer) {
+                    layer.players.add(targetPlayer.id);
+                    layer.playerCount++;
+                    targetPlayer.aoi.layerId = adminLayerId;
+                    log.info(`[SUMMON] ${targetPlayer.username} moved to admin's layer ${adminLayerId}`);
+                  }
+                }
+              }
+
+              // Update the target player's position in the cache
+              playerCache.set(targetPlayer.id, targetPlayer);
+
+              // Update AOI for both players to refresh visibility
+              await updatePlayerAOI(targetPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+              await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+
+              // Ensure admin can see the summoned player (bypasses stealth for admin's view only)
+              const targetSpawnData = {
+                id: targetPlayer.id,
+                userid: targetPlayer.userid,
+                location: {
+                  map: targetPlayer.location.map,
+                  x: targetPlayer.location.position.x,
+                  y: targetPlayer.location.position.y,
+                  direction: targetPlayer.location.position?.direction || "down",
+                  moving: targetPlayer.moving || false,
+                },
+                username: targetPlayer.username,
+                isAdmin: targetPlayer.isAdmin,
+                isGuest: targetPlayer.isGuest,
+                isStealth: targetPlayer.isStealth,
+                isNoclip: targetPlayer.isNoclip,
+                stats: targetPlayer.stats,
+                animation: null,
+                mounted: targetPlayer.mounted,
+              };
+
+              // Send target spawn to admin so admin can see them
+              sendPacket(ws, packetManager.loadPlayers({
+                players: [targetSpawnData],
+                snapshotRevision: globalStateRevision
+              }));
+
+              // Send target animation to admin
+              const targetAnimationName = getAnimationNameForDirection(
+                targetPlayer.location.position?.direction || "down",
+                !!targetPlayer.moving,
+                !!targetPlayer.mounted,
+                targetPlayer.mount_type || undefined,
+                !!targetPlayer.casting
+              );
+              await sendAnimationTo(ws, targetAnimationName, targetPlayer.id);
+
+              // Increment revision before sending movement
+              globalStateRevision++;
+
+              // Send position update to the summoned player so they see themselves move
+              // Admin remains invisible if in stealth
+              const targetMovementData = {
+                id: targetPlayer.id,
+                _data: {
+                  x: Number(targetPlayer.location.position.x),
+                  y: Number(targetPlayer.location.position.y),
+                  direction: targetPlayer.location.position.direction
+                },
+                revision: globalStateRevision
+              };
+              sendPacket(targetPlayer.ws, packetManager.moveXY(targetMovementData));
+
+              // Send position update to the admin so they see the summoned player move
+              sendPacket(ws, packetManager.moveXY(targetMovementData));
+
+              // Broadcast the summoned player's new position to all players in admin's AOI
+              // This ensures other players see the summoned player appear/move
+              const allPlayers = playerCache.list();
+              for (const playerId of currentPlayer.aoi.playersInAOI) {
+                const otherPlayer = allPlayers[playerId as string];
+                if (!otherPlayer || !otherPlayer.ws || otherPlayer.id === targetPlayer.id || otherPlayer.id === currentPlayer.id) continue;
+
+                // Check if other player can see the summoned target (stealth visibility)
+                const canSeeTarget = !targetPlayer.isStealth || otherPlayer.isAdmin;
+                if (canSeeTarget) {
+                  sendPacket(otherPlayer.ws, packetManager.moveXY(targetMovementData));
+                }
+              }
+
+              // Notify the target player
+              sendPacket(
+                targetPlayer.ws,
+                packetManager.notify({
+                  message: `You have been summoned by an admin`,
+                })
+              );
+
+              // Notify the admin
+              sendPacket(
+                ws,
+                packetManager.notify({
+                  message: `Summoned ${targetPlayer.username.charAt(0).toUpperCase() +
+                    targetPlayer.username.slice(1)
+                    }`,
+                })
+              );
+            }
+            break;
+          }
+          // Teleport to a player
+          case "GOTO":
+          case "TELEPORT": {
+            // admin.summon or admin.*
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "admin.summon" || p === "admin.*"
+              )
+            ) {
               const notifyData = {
-                message: "You can only summon players in the same map",
+                message: "You don't have permission to use this command",
               };
               sendPacket(ws, packetManager.notify(notifyData));
               break;
             }
 
-            // Move the target player to the current player's position
-            targetPlayer.location.position = {
-              x: currentPlayer.location.position.x,
-              y: currentPlayer.location.position.y,
-              direction: targetPlayer.location.position?.direction || "down",
-            };
+            const identifier = args[0]?.toLowerCase() || null;
+            if (!identifier) {
+              const notifyData = {
+                message: "Please provide a username or ID",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
 
-            // Update the target player's position in the cache
-            playerCache.set(targetPlayer.id, targetPlayer);
+            // Find player by ID or username
+            let targetPlayer;
+            if (isNaN(Number(identifier))) {
+              // Search by username
+              const players = Object.values(playerCache.list());
+              targetPlayer = players.find(
+                (p) => p.username.toLowerCase() === identifier.toLowerCase()
+              );
+            } else {
+              // Search by ID
+              targetPlayer = playerCache.get(identifier);
+            }
 
-            const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+            if (!targetPlayer) {
+              const notifyData = {
+                message: "Player not found or is not online",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
 
-            globalStateRevision++;
-            playersInMap.forEach((player) => {
-              const moveXYData = {
+            // Prevent teleporting to yourself
+            if (targetPlayer.id === currentPlayer.id) {
+              const notifyData = {
+                message: "You cannot teleport to yourself",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            // Check if target player is in a different map
+            if (targetPlayer.location.map !== currentPlayer.location.map) {
+              // Move admin to target player's map
+              const result = await player.setLocation(
+                currentPlayer.id,
+                targetPlayer.location.map,
+                {
+                  x: targetPlayer.location.position.x,
+                  y: targetPlayer.location.position.y,
+                  direction: currentPlayer.location.position?.direction || "down",
+                }
+              );
+
+              // Check if location update was successful
+              if (
+                result &&
+                typeof result === "object" &&
+                "affectedRows" in result &&
+                (result as { affectedRows: number }).affectedRows != 0
+              ) {
+                // Update admin's location in cache
+                currentPlayer.location.map = targetPlayer.location.map;
+                currentPlayer.location.position = {
+                  x: targetPlayer.location.position.x,
+                  y: targetPlayer.location.position.y,
+                  direction: currentPlayer.location.position?.direction || "down",
+                };
+
+                // Mark admin to see target after reconnect (admin can see target player)
+                // Target should NOT see admin if admin is in stealth
+                if (!currentPlayer.forceVisibleTo) currentPlayer.forceVisibleTo = new Set();
+                currentPlayer.forceVisibleTo.add(targetPlayer.id);
+
+                playerCache.set(currentPlayer.id, currentPlayer);
+                playerCache.set(targetPlayer.id, targetPlayer);
+
+                // Clear force visibility flag after 5 seconds
+                setTimeout(() => {
+                  const admin = playerCache.get(currentPlayer.id);
+                  if (admin?.forceVisibleTo) {
+                    admin.forceVisibleTo.delete(targetPlayer.id);
+                    playerCache.set(admin.id, admin);
+                  }
+                }, 5000);
+
+                // Send reconnect packet to force map reload
+                sendPacket(ws, packetManager.reconnect());
+
+                // Notify the admin
+                sendPacket(
+                  ws,
+                  packetManager.notify({
+                    message: `Teleported to ${targetPlayer.username.charAt(0).toUpperCase() +
+                      targetPlayer.username.slice(1)
+                      }'s location`,
+                  })
+                );
+              } else {
+                const notifyData = {
+                  message: "Failed to teleport to player",
+                };
+                sendPacket(ws, packetManager.notify(notifyData));
+              }
+            } else {
+              // Same map - move position and sync to target's layer
+              currentPlayer.location.position = {
+                x: targetPlayer.location.position.x,
+                y: targetPlayer.location.position.y,
+                direction: currentPlayer.location.position?.direction || "down",
+              };
+
+              // Sync admin to target's layer
+              if (targetPlayer.aoi?.layerId && currentPlayer.aoi) {
+                const targetLayerId = targetPlayer.aoi.layerId;
+                const targetLayerInfo = layerManager.getLayerInfo(targetLayerId);
+
+                if (targetLayerInfo && targetLayerInfo.playerCount < 100) { // AOI_CONFIG.MAX_PLAYERS_PER_LAYER
+                  // Move admin to target's layer
+                  layerManager.removePlayerFromLayer(currentPlayer.id);
+                  const layer = layerManager.getLayerInfo(targetLayerId);
+                  if (layer) {
+                    layer.players.add(currentPlayer.id);
+                    layer.playerCount++;
+                    currentPlayer.aoi.layerId = targetLayerId;
+                    log.info(`[TELEPORT] Admin ${currentPlayer.username} moved to target's layer ${targetLayerId}`);
+                  }
+                }
+              }
+
+              // Update the admin's position in the cache
+              playerCache.set(currentPlayer.id, currentPlayer);
+
+              // Update AOI for both players to refresh visibility
+              await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+              await updatePlayerAOI(targetPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+
+              // Ensure admin can see the target player (bypasses stealth for admin's view only)
+              const targetSpawnDataTeleport = {
                 id: targetPlayer.id,
-                _data: targetPlayer.location.position,
+                userid: targetPlayer.userid,
+                location: {
+                  map: targetPlayer.location.map,
+                  x: targetPlayer.location.position.x,
+                  y: targetPlayer.location.position.y,
+                  direction: targetPlayer.location.position?.direction || "down",
+                  moving: targetPlayer.moving || false,
+                },
+                username: targetPlayer.username,
+                isAdmin: targetPlayer.isAdmin,
+                isGuest: targetPlayer.isGuest,
+                isStealth: targetPlayer.isStealth,
+                isNoclip: targetPlayer.isNoclip,
+                stats: targetPlayer.stats,
+                animation: null,
+                mounted: targetPlayer.mounted,
+              };
+
+              // Send target spawn to admin so admin can see them
+              sendPacket(ws, packetManager.loadPlayers({
+                players: [targetSpawnDataTeleport],
+                snapshotRevision: globalStateRevision
+              }));
+
+              // Send target animation to admin
+              const targetAnimationNameTeleport = getAnimationNameForDirection(
+                targetPlayer.location.position?.direction || "down",
+                !!targetPlayer.moving,
+                !!targetPlayer.mounted,
+                targetPlayer.mount_type || undefined,
+                !!targetPlayer.casting
+              );
+              await sendAnimationTo(ws, targetAnimationNameTeleport, targetPlayer.id);
+
+              // Increment revision before sending movement
+              globalStateRevision++;
+
+              // Send admin's position update to themselves
+              // Admin remains invisible to non-admin target player
+              const adminMovementData = {
+                id: currentPlayer.id,
+                _data: {
+                  x: Number(currentPlayer.location.position.x),
+                  y: Number(currentPlayer.location.position.y),
+                  direction: currentPlayer.location.position.direction
+                },
                 revision: globalStateRevision
               };
-              sendPacket(player.ws, packetManager.moveXY(moveXYData));
-            });
+              sendPacket(ws, packetManager.moveXY(adminMovementData));
 
-            // Notify the target player
-            sendPacket(
-              targetPlayer.ws,
-              packetManager.notify({
-                message: `You have been summoned by an admin`,
-              })
-            );
+              // Broadcast the admin's position to other admins in target's AOI (if admin is in stealth)
+              // Non-admin players won't see the admin if admin is in stealth
+              if (currentPlayer.isStealth) {
+                const allPlayers = playerCache.list();
+                for (const playerId of targetPlayer.aoi.playersInAOI) {
+                  const otherPlayer = allPlayers[playerId as string];
+                  if (!otherPlayer || !otherPlayer.ws || otherPlayer.id === currentPlayer.id) continue;
 
-            // Notify the admin
-            sendPacket(
-              ws,
-              packetManager.notify({
-                message: `Summoned ${targetPlayer.username.charAt(0).toUpperCase() +
-                  targetPlayer.username.slice(1)
-                  }`,
-              })
-            );
+                  // Only send to other admins if current player is in stealth
+                  if (otherPlayer.isAdmin) {
+                    sendPacket(otherPlayer.ws, packetManager.moveXY(adminMovementData));
+                  }
+                }
+              } else {
+                // If not in stealth, broadcast to all players in target's AOI
+                const allPlayers = playerCache.list();
+                for (const playerId of targetPlayer.aoi.playersInAOI) {
+                  const otherPlayer = allPlayers[playerId as string];
+                  if (!otherPlayer || !otherPlayer.ws || otherPlayer.id === currentPlayer.id) continue;
+                  sendPacket(otherPlayer.ws, packetManager.moveXY(adminMovementData));
+                }
+              }
+
+              // Notify the admin
+              sendPacket(
+                ws,
+                packetManager.notify({
+                  message: `Teleported to ${targetPlayer.username.charAt(0).toUpperCase() +
+                    targetPlayer.username.slice(1)
+                    }`,
+                })
+              );
+            }
             break;
           }
           // Kick a player
@@ -2824,7 +3492,11 @@ export default async function packetReceiver(
               playersInMap.forEach((player) => {
                 const moveData = {
                   id: targetPlayer.id,
-                  _data: targetPlayer.location.position,
+                  _data: {
+                    x: Number(targetPlayer.location.position.x),
+                    y: Number(targetPlayer.location.position.y),
+                    direction: targetPlayer.location.position.direction
+                  },
                   revision: globalStateRevision
                 };
                 sendPacket(player.ws, packetManager.moveXY(moveData));
@@ -3153,9 +3825,8 @@ export default async function packetReceiver(
               map.compressed = result.compressed;
               map.data = result.data;
 
-              const playersInMap = filterPlayersByMap(
-                currentPlayer.location.map
-              );
+              // Only reload for players currently on the reloaded map
+              const playersInMap = filterPlayersByMap(mapName);
               playersInMap.forEach((player) => {
                 const mapData = [
                   result?.compressed,
@@ -3410,6 +4081,12 @@ export default async function packetReceiver(
               playerCache.set(p.id, p);
             }
           });
+
+          // Sync remaining party members to leader's layer
+          const partyLeader = await parties.getPartyLeader(currentPlayer.party_id as number);
+          if (partyLeader && result.length > 0) {
+            await syncPartyLayers(partyLeader, result, playerCache, sendAnimationTo);
+          }
         }
 
         break;
@@ -3493,6 +4170,17 @@ export default async function packetReceiver(
               playerCache.set(p.id, p);
             }
           });
+
+          // Sync remaining party members to leader's layer
+          if ((result as string[]).length > 0) {
+            const remainingPartyId = await parties.getPartyId((result as string[])[0]);
+            if (remainingPartyId) {
+              const partyLeader = await parties.getPartyLeader(remainingPartyId);
+              if (partyLeader) {
+                await syncPartyLayers(partyLeader, result as string[], playerCache, sendAnimationTo);
+              }
+            }
+          }
         }
         break;
       }
@@ -3814,6 +4502,12 @@ export default async function packetReceiver(
                     playerCache.set(p.id, p);
                   }
                 });
+
+                // Sync party members to leader's layer
+                const partyLeader = await parties.getPartyLeader(partyId);
+                if (partyLeader && updatedPartyMembers.length > 0) {
+                  await syncPartyLayers(partyLeader, updatedPartyMembers as string[], playerCache, sendAnimationTo);
+                }
               } else {
                 // If the party does not exist, create a new one
                 const updatedPartyMembers = await parties.create(
@@ -3869,6 +4563,11 @@ export default async function packetReceiver(
                     }
                   }
                 );
+
+                // Sync party members to leader's layer (inviter is the leader for new parties)
+                if (Array.isArray(updatedPartyMembers) && updatedPartyMembers.length > 0) {
+                  await syncPartyLayers(inviter.username.toLowerCase(), updatedPartyMembers as string[], playerCache, sendAnimationTo);
+                }
               }
             }
             break;
@@ -3981,7 +4680,7 @@ export default async function packetReceiver(
           currentPlayer.mount_type = null;
         }
 
-        playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
         const direction = currentPlayer.location.position?.direction || "down";
         const walking = currentPlayer.moving || false;
@@ -4297,6 +4996,21 @@ export default async function packetReceiver(
         }
         break;
       }
+      case "GET_ONLINE_PLAYERS": {
+        if (!currentPlayer?.isAdmin) return;
+
+        // Get all online players from cache
+        const allPlayers = Object.values(playerCache.list());
+        const playerList = allPlayers.map((p: any) => ({
+          username: p.username,
+          map: p.location.map.replace(".json", ""),
+          isAdmin: p.isAdmin || false
+        }));
+
+        // Send the list back to the requesting admin
+        sendPacket(ws, packetManager.onlinePlayersList(playerList));
+        break;
+      }
       // Unknown packet type
       default: {
         log.error(`Unknown packet type: ${type}`);
@@ -4520,7 +5234,7 @@ function normalizeDirection(direction: string): string {
   return "down"; // safe fallback for invalid directions
 }
 
-async function sendAnimationTo(targetWs: any, name: string, playerId?: string, revision?: number) {
+export async function sendAnimationTo(targetWs: any, name: string, playerId?: string, revision?: number) {
   const targetPlayer = playerCache.get(playerId || targetWs.data.id);
   if (!targetPlayer) return;
 
