@@ -753,8 +753,9 @@ export default async function packetReceiver(
       }
       case "TIME_SYNC": {
         if (!currentPlayer) return;
+        // Update timestamp in memory only - no need to call playerCache.set()
+        // since currentPlayer is already a reference to the cached object
         currentPlayer.lastUpdated = performance.now();
-        playerCache.set(currentPlayer.id, currentPlayer);
         // Echo back TIME_SYNC for latency measurement
         sendPacket(ws, packetManager.timeSync(data));
         break;
@@ -844,7 +845,7 @@ export default async function packetReceiver(
             clearInterval(currentPlayer.movementInterval);
             currentPlayer.movementInterval = null;
             currentPlayer.moving = false;
-            playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
             globalStateRevision++;
             await sendPositionAnimation(
@@ -864,7 +865,7 @@ export default async function packetReceiver(
         if (currentPlayer.casting && currentPlayer.interruptableSpell) {
           currentPlayer.casting = false;
           currentPlayer.lastInterruptTime = performance.now();
-          playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
           const playersInMap = filterPlayersByMap(currentPlayer.location.map);
           playersInMap.forEach((player) => {
             sendPacket(
@@ -891,7 +892,7 @@ export default async function packetReceiver(
 
         currentPlayer.location.position.direction = direction || "down";
         currentPlayer.moving = true;
-        playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
         globalStateRevision++;
         await sendPositionAnimation(
@@ -957,7 +958,7 @@ export default async function packetReceiver(
           if (!offset) {
             running = false;
             currentPlayer.moving = false;
-            playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
             return;
           }
 
@@ -989,7 +990,7 @@ export default async function packetReceiver(
             clearInterval(currentPlayer.movementInterval);
             currentPlayer.movementInterval = null;
             currentPlayer.moving = false;
-            playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
             globalStateRevision++;
             await sendPositionAnimation(
@@ -1503,11 +1504,11 @@ export default async function packetReceiver(
             );
           });
           currentPlayer.lastInterruptTime = performance.now();
-          playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
           return;
         }
 
-        playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
         // If not enough mana, return
         // Get fresh stats from cache to avoid race condition with rapid casts
@@ -1612,7 +1613,7 @@ export default async function packetReceiver(
 
         // Set an async timeout to simulate spell casting time
         currentPlayer.casting = true;
-        playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
         // Update animation to show casting
         globalStateRevision++;
@@ -1979,7 +1980,7 @@ export default async function packetReceiver(
         target.last_attack = performance.now();
 
         // Spell cooldown was already set at cast start (includes cast time + cooldown)
-        playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
         break;
       }
@@ -2425,7 +2426,7 @@ export default async function packetReceiver(
                 currentPlayer.forceVisibleTo.add(targetPlayer.id);
 
                 playerCache.set(targetPlayer.id, targetPlayer);
-                playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
                 // Clear force visibility flag after 5 seconds
                 setTimeout(() => {
@@ -4618,7 +4619,7 @@ export default async function packetReceiver(
           currentPlayer.mount_type = null;
         }
 
-        playerCache.set(currentPlayer.id, currentPlayer);
+        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
         const direction = currentPlayer.location.position?.direction || "down";
         const walking = currentPlayer.moving || false;
