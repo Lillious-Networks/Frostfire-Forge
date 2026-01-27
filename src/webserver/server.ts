@@ -260,6 +260,7 @@ const routes = {
 
 Bun.serve({
     port: _https ? (process.env.WEBSRV_PORTSSL || 443) : (process.env.WEBSRV_PORT || 80),
+    reusePort: true,
     routes: {
       "/swaggerui": routes["/swaggerui"],
       "/connection-test": routes["/connection-test"],
