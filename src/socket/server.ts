@@ -60,8 +60,8 @@ if (settings?.websocketRatelimit?.enabled) {
 // Set to store all connected clients
 const connections = new Set<Identity>();
 
-// Set to track the amount of requests
-const ClientRateLimit = [] as ClientRateLimit[];
+// Map to track the amount of requests (changed from Array for O(1) lookups)
+const ClientRateLimit = new Map<string, ClientRateLimit>();
 
 const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
 
@@ -104,33 +104,14 @@ const Server = Bun.serve<Packet, any>({
       listener.emit("onConnection", ws.data.id);
 
       if (settings?.websocketRatelimit?.enabled) {
-        ClientRateLimit.push({
+        ClientRateLimit.set(ws.data.id, {
           id: ws.data.id,
           requests: 0,
           rateLimited: false,
           time: null,
           windowTime: 0,
         });
-
-      setInterval(() => {
-        const index = ClientRateLimit.findIndex(
-          (client) => client.id === ws.data.id
-        );
-        if (index === -1) return;
-        const client = ClientRateLimit[index];
-
-        if (client.rateLimited) {
-          client.requests = 0;
-          client.windowTime = 0;
-          return;
-        }
-        client.windowTime += 1000;
-        if (client.windowTime > RateLimitOptions.maxWindowTime) {
-          client.requests = 0;
-          client.windowTime = 0;
-        }
-      }, 1000);
-    }
+      }
 
       ws.subscribe("CONNECTION_COUNT" as Subscription["event"]);
       ws.subscribe("BROADCAST" as Subscription["event"]);
@@ -178,12 +159,8 @@ const Server = Bun.serve<Packet, any>({
           ws.unsubscribe("BROADCAST" as Subscription["event"]);
           ws.unsubscribe("DISCONNECT_PLAYER" as Subscription["event"]);
 
-          for (let i = 0; i < ClientRateLimit.length; i++) {
-            if (ClientRateLimit[i].id === ws.data.id) {
-              ClientRateLimit.splice(i, 1);
-              break;
-            }
-          }
+          // Remove from rate limit map (O(1) operation)
+          ClientRateLimit.delete(ws.data.id);
         }
         // Disconnect notifications are now handled by AOI system with batching
         // ws.publish("DISCONNECT_PLAYER") removed to avoid duplicate packets
@@ -204,9 +181,8 @@ const Server = Bun.serve<Packet, any>({
         }
 
         if (settings?.websocketRatelimit?.enabled) {
-          const idx = ClientRateLimit.findIndex((c) => c.id === ws.data.id);
-          if (idx !== -1) {
-            const client = ClientRateLimit[idx];
+          const client = ClientRateLimit.get(ws.data.id);
+          if (client) {
             if (client.rateLimited) return;
 
             client.requests++;
@@ -266,15 +242,34 @@ setInterval(() => {
   listener.emit("onServerTick");
 }, 1000);
 
+// Global rate limit window time management (replaces per-client intervals)
+// This single interval handles all clients instead of creating 1000+ separate intervals
+if (settings?.websocketRatelimit?.enabled) {
+  setInterval(() => {
+    for (const client of ClientRateLimit.values()) {
+      if (client.rateLimited) {
+        client.requests = 0;
+        client.windowTime = 0;
+        continue;
+      }
+      client.windowTime += 1000;
+      if (client.windowTime > RateLimitOptions.maxWindowTime) {
+        client.requests = 0;
+        client.windowTime = 0;
+      }
+    }
+  }, 1000);
+  log.success(`Global rate limit interval started (manages ${ClientRateLimit.size} clients with 1 timer)`);
+}
+
 // Fixed update loop
 listener.on("onUpdate", async () => {});
 
 listener.on("onFixedUpdate", async () => {
   if (settings?.websocketRatelimit?.enabled) {
-    if (ClientRateLimit.length < 1) return;
+    if (ClientRateLimit.size < 1) return;
     const timestamp = Date.now();
-    for (let i = 0; i < ClientRateLimit.length; i++) {
-      const client = ClientRateLimit[i];
+    for (const client of ClientRateLimit.values()) {
       if (client.rateLimited && client.time) {
         if (timestamp - client.time! > RateLimitOptions.time) {
           client.rateLimited = false;
@@ -397,12 +392,7 @@ listener.on("onServerTick", async () => {
       listener.emit("onDisconnect", { id, reason: "inactive" });
 
       packetQueue.delete(id);
-      for (let i = 0; i < ClientRateLimit.length; i++) {
-        if (ClientRateLimit[i].id === id) {
-          ClientRateLimit.splice(i, 1);
-          break;
-        }
-      }
+      ClientRateLimit.delete(id);
     }
   }
 });
@@ -545,7 +535,7 @@ export const events = {
     return ClientRateLimit;
   },
   GetRateLimitedClients() {
-    return ClientRateLimit.filter((client) => client.rateLimited);
+    return Array.from(ClientRateLimit.values()).filter((client) => client.rateLimited);
   },
 };
 
