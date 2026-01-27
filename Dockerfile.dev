@@ -35,5 +35,5 @@ RUN bun setup-development
 EXPOSE 8080
 EXPOSE 3001
 
-# Run development setup and start server
-CMD ["bun", "run", "development"]
+# Run development setup and start server twice to utilize reusePort
+CMD sh -c "bun run development & bun run development"
