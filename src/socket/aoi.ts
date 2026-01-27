@@ -84,11 +84,9 @@ export async function initializePlayerAOI(player: any): Promise<void> {
             const layer = layerManager.getLayerInfo(targetLayer)!;
             layer.players.add(player.id);
             layer.playerCount++;
-            log.info(`[LAYER] Leader ${player.username} rejoining party layer ${layerId}`);
           } else {
             // Party layer is full, assign normally
             layerId = layerManager.assignPlayerToLayer(player.id, mapName);
-            log.info(`[LAYER] Leader ${player.username} - party layer full, assigned to ${layerId}`);
           }
         } else {
           layerId = layerManager.assignPlayerToLayer(player.id, mapName);
@@ -109,11 +107,9 @@ export async function initializePlayerAOI(player: any): Promise<void> {
             const layer = layerManager.getLayerInfo(leaderLayerId)!;
             layer.players.add(player.id);
             layer.playerCount++;
-            log.info(`[LAYER] Member ${player.username} joining leader's layer ${layerId}`);
           } else {
             // Leader's layer is full, assign normally
             layerId = layerManager.assignPlayerToLayer(player.id, mapName);
-            log.info(`[LAYER] Member ${player.username} - leader's layer full, assigned to ${layerId}`);
           }
         } else {
           // Leader not online, assign normally
@@ -139,10 +135,6 @@ export async function initializePlayerAOI(player: any): Promise<void> {
     mapChangeSequence: 0,
     layerId: layerId,
   };
-
-  if (AOI_CONFIG.DEBUG) {
-    log.info(`[AOI] Initialized AOI for player ${player.id} at (${pos.x}, ${pos.y}) on layer ${layerId}`);
-  }
 }
 
 /**
@@ -235,7 +227,7 @@ export function queueSpawnPlayerPacket(
     };
 
     if (AOI_CONFIG.DEBUG) {
-      log.info(`[AOI] Queued SPAWN_PLAYER for ${spawnedPlayer.id}`);
+      log.debug(`[AOI] Queued SPAWN_PLAYER for ${spawnedPlayer.id}`);
     }
 
     return spawnData;
@@ -278,7 +270,7 @@ export async function updatePlayerAOI(
     // Check if map changed during async operation
     if (player.aoi.mapChangeSequence !== currentSequence) {
       if (AOI_CONFIG.DEBUG) {
-        log.info(`[AOI] Map changed during AOI update for ${player.id}, aborting`);
+        log.debug(`[AOI] Map changed during AOI update for ${player.id}, aborting`);
       }
       return;
     }
@@ -303,7 +295,7 @@ export async function updatePlayerAOI(
     });
 
     if (AOI_CONFIG.DEBUG && (enteredAOI.length > 0 || exitedAOI.length > 0)) {
-      log.info(
+      log.debug(
         `[AOI] Player ${player.id}: ${enteredAOI.length} entered, ${exitedAOI.length} exited`
       );
     }
@@ -516,7 +508,7 @@ export function despawnPlayerFromAllAOI(
     }
 
     if (AOI_CONFIG.DEBUG) {
-      log.info(
+      log.debug(
         `[AOI] Despawned player ${departingPlayer.id} from ${affectedPlayers.length} players (${reason})`
       );
     }
@@ -562,7 +554,7 @@ export async function handleMapChangeAOI(
       player.aoi.layerId = newLayerId;
 
       if (AOI_CONFIG.DEBUG) {
-        log.info(`[AOI] Player ${player.id} changing map from ${oldMap} to ${newMap}, assigned to ${newLayerId}`);
+        log.debug(`[AOI] Player ${player.id} changing map from ${oldMap} to ${newMap}, assigned to ${newLayerId}`);
       }
     }
 
@@ -606,6 +598,25 @@ export { layerManager };
  * Synchronize party members to the same layer and update their AOIs
  * Called when party composition changes
  */
+interface AOIPlayer {
+  id: string;
+  username: string;
+  aoi?: PlayerAOIState;
+  ws?: any;
+  location: { map: string; position: { x: number; y: number; direction?: string } };
+  moving?: boolean;
+  mounted?: boolean;
+  mount_type?: string;
+  casting?: boolean;
+  isAdmin?: boolean;
+  forceVisibleTo?: Set<string>;
+  isStealth?: boolean;
+  isNoclip?: boolean;
+  stats?: any;
+  isGuest?: boolean;
+  userid?: string;
+}
+
 export async function syncPartyLayers(
   partyLeaderUsername: string,
   partyMemberUsernames: string[],
@@ -614,9 +625,9 @@ export async function syncPartyLayers(
 ): Promise<void> {
   try {
     // Get player objects for leader and members
-    const allPlayers = playerCache.list();
+    const allPlayers: { [id: string]: AOIPlayer } = playerCache.list();
 
-    const leaderPlayer = Object.values(allPlayers).find((p: any) =>
+    const leaderPlayer = Object.values(allPlayers).find((p: AOIPlayer) =>
       p.username && p.username.toLowerCase() === partyLeaderUsername.toLowerCase()
     );
 
@@ -690,9 +701,9 @@ export async function syncPartyLayers(
       playersNeedingUpdate.push({ player: leaderPlayer, oldLayerId: leaderOldLayerId });
 
       if (leaderOldLayerId !== targetLayerId) {
-        log.info(`[LAYER] Leader ${leaderPlayer.username} changing from ${leaderOldLayerId} to ${targetLayerId}`);
+        log.debug(`[LAYER] Leader ${leaderPlayer.username} changing from ${leaderOldLayerId} to ${targetLayerId}`);
       } else {
-        log.info(`[LAYER] Leader ${leaderPlayer.username} staying on ${targetLayerId}, refreshing AOI for new members`);
+        log.debug(`[LAYER] Leader ${leaderPlayer.username} staying on ${targetLayerId}, refreshing AOI for new members`);
       }
 
       leaderPlayer.aoi.layerId = targetLayerId;
@@ -706,7 +717,7 @@ export async function syncPartyLayers(
         playersNeedingUpdate.push({ player: member, oldLayerId: oldLayerId });
 
         if (oldLayerId !== targetLayerId) {
-          log.info(`[LAYER] Member ${member.username} changing from ${oldLayerId} to ${targetLayerId}`);
+          log.debug(`[LAYER] Member ${member.username} changing from ${oldLayerId} to ${targetLayerId}`);
         }
 
         member.aoi.layerId = targetLayerId;
@@ -725,7 +736,7 @@ export async function syncPartyLayers(
 
     // STEP 3: Update AOI for all affected players
     // Now that all layer IDs are updated, calculate new AOIs based on new layers
-    for (const { player, oldLayerId } of playersNeedingUpdate) {
+    for (const { player } of playersNeedingUpdate) {
       // updatePlayerAOI will:
       // - Find players in range on NEW layer (already updated)
       // - Compare with old playersInAOI
@@ -796,9 +807,9 @@ export async function syncPartyLayers(
       return `${player.username}(${pos?.x},${pos?.y})`;
     }).join(", ");
 
-    log.info(`[LAYER] Synced party of ${partyLeaderUsername} to layer ${layerManager.getLayerName(targetLayerId)}`);
-    log.info(`[LAYER] Positions: ${positionInfo}`);
-    log.info(`[LAYER] Sent ${totalSpawns} spawns, ${totalDespawns} despawns to ${playersNeedingUpdate.length} players`);
+    log.debug(`[LAYER] Synced party of ${partyLeaderUsername} to layer ${layerManager.getLayerName(targetLayerId)}`);
+    log.debug(`[LAYER] Positions: ${positionInfo}`);
+    log.debug(`[LAYER] Sent ${totalSpawns} spawns, ${totalDespawns} despawns to ${playersNeedingUpdate.length} players`);
   } catch (error) {
     log.error(`[LAYER] Error syncing party layers: ${error}`);
   }
@@ -869,7 +880,6 @@ export function startAutoPartyLayerSync(
 
         // If any members are out of sync, sync the entire party
         if (needsSync && onlineMembers.length > 0) {
-          log.info(`[LAYER] Auto-syncing party ${party.leader} - members out of sync`);
           await syncPartyLayers(
             party.leader,
             party.members,
@@ -882,8 +892,6 @@ export function startAutoPartyLayerSync(
       log.error(`[LAYER] Error in auto party layer sync: ${error}`);
     }
   }, 15000); // Run every 15 seconds
-
-  log.info(`[LAYER] Auto party layer sync started (15 second interval)`);
 }
 
 /**
@@ -943,14 +951,12 @@ export function startAutoLayerCondensation(
 
             if (availableSpace >= sourceLayer.playerCount) {
               // We can move all players from source to target
-              log.info(`[LAYER] Condensing ${sourceLayer.playerCount} players from ${layerManager.getLayerName(sourceLayer.layerId)} to ${layerManager.getLayerName(targetLayer.layerId)} on map ${mapName}`);
+              log.debug(`[LAYER] Condensing ${sourceLayer.playerCount} players from ${layerManager.getLayerName(sourceLayer.layerId)} to ${layerManager.getLayerName(targetLayer.layerId)} on map ${mapName}`);
 
               // Move each player
               for (const playerId of sourceLayer.players) {
                 const player = playerCache.get(playerId);
                 if (!player || !player.aoi) continue;
-
-                const oldLayerId = player.aoi.layerId;
 
                 // Update layer assignment in layer manager
                 layerManager.removePlayerFromLayer(playerId);
@@ -1032,13 +1038,11 @@ export function startAutoLayerCondensation(
             }
           }
 
-          log.info(`[LAYER] Condensation complete for map ${mapName}`);
+          log.debug(`[LAYER] Condensation complete for map ${mapName}`);
         }
       }
     } catch (error) {
       log.error(`[LAYER] Error in auto layer condensation: ${error}`);
     }
   }, 300000); // Run every 5 minutes (300000ms)
-
-  log.info(`[LAYER] Auto layer condensation started (5 minute interval)`);
 }

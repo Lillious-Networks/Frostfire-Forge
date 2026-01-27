@@ -259,7 +259,6 @@ if (settings?.websocketRatelimit?.enabled) {
       }
     }
   }, 1000);
-  log.success(`Global rate limit interval started (manages ${ClientRateLimit.size} clients with 1 timer)`);
 }
 
 // Fixed update loop
