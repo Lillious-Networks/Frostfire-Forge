@@ -67,7 +67,7 @@ const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
 
 const Server = Bun.serve<Packet, any>({
   port: process.env.WEB_SOCKET_PORT || 3000,
-  reusePort: true,
+  reusePort: false,
   fetch(req, Server) {
     const id = crypto.randomBytes(32).toString("hex");
     const useragent = req.headers.get("user-agent");
