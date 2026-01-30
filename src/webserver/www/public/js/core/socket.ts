@@ -175,8 +175,11 @@ async function connectThroughGateway(gatewayUrl: string, clientId: string): Prom
       reject(new Error('Gateway connection timeout'));
     }, 10000);
 
-    // Add clientId as query parameter
-    const url = new URL(gatewayUrl);
+    // Convert HTTP gateway URL to WebSocket URL
+    // gatewayUrl is like "http://forge.lillious.com:8000"
+    // We need to connect to the gateway's WebSocket port
+    const wsUrl = `${config.WEBSOCKET_URL}:${config.WEB_SOCKET_PORT}`;
+    const url = new URL(wsUrl);
     url.searchParams.set('clientId', clientId);
 
     const gatewayWs = new WebSocket(url.toString());
