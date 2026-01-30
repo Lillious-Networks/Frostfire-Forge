@@ -433,6 +433,39 @@ const httpServer = Bun.serve({
       });
     }
 
+    // Proxy HTTP requests to game servers (for assets like tilesets, maps)
+    // Routes: /tileset, /map, /assets, etc.
+    const assetRoutes = ['/tileset', '/map', '/assets', '/world', '/npc', '/item'];
+    const isAssetRequest = assetRoutes.some(route => url.pathname.startsWith(route));
+
+    if (isAssetRequest) {
+      // Get a random available server (simple load balancing for assets)
+      const availableServers = Array.from(gameServers.values());
+      if (availableServers.length === 0) {
+        return new Response("No game servers available", { status: 503 });
+      }
+
+      const targetServer = availableServers[Math.floor(Math.random() * availableServers.length)];
+      const targetUrl = `http://${targetServer.host}:${targetServer.port}${url.pathname}${url.search}`;
+
+      try {
+        // Proxy the request to the game server
+        const proxyResponse = await fetch(targetUrl, {
+          method: req.method,
+          headers: req.headers,
+          body: req.body
+        });
+
+        return new Response(proxyResponse.body, {
+          status: proxyResponse.status,
+          headers: proxyResponse.headers
+        });
+      } catch (error) {
+        console.error(`[Gateway] Failed to proxy request to ${targetUrl}:`, error);
+        return new Response("Failed to fetch asset", { status: 502 });
+      }
+    }
+
     return new Response("Gateway Load Balancer", { status: 200 });
   }
 });
