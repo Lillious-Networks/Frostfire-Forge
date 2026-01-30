@@ -30,6 +30,19 @@ jobs:
       runs-on: self-hosted
       environment: production
       steps:
+        - name: Cleanup Docker Resources Before Build
+          continue-on-error: true
+          run: |
+            echo "Cleaning up Docker resources before build..."
+            # Remove dangling images
+            docker image prune -f || true
+            # Remove all build cache
+            docker builder prune -f -a || true
+            # Remove all unused images (not just dangling)
+            docker image prune -a -f || true
+            # Remove stopped containers
+            docker container prune -f || true
+
         - name: Checkout Repository
           uses: actions/checkout@v4
 
@@ -251,8 +264,8 @@ jobs:
                   original_image="${backup_image%-backup}"
                   echo "Restoring $backup_image to $original_image"
 
-                  # Remove the new (failed) image if it exists
-                  docker rmi "$original_image" 2>/dev/null || echo "No new image to remove"
+                  # Force remove the new (failed) image if it exists
+                  docker rmi -f "$original_image" 2>/dev/null || echo "No new image to remove"
 
                   # Re-tag backup image to original name
                   docker tag "$backup_image" "$original_image"
@@ -262,6 +275,11 @@ jobs:
               echo "No backup images found to restore"
               exit 1
             fi
+
+            # Clean up failed build artifacts
+            echo "Cleaning up failed build artifacts..."
+            docker image prune -f || true
+            docker builder prune -f || true
 
         - name: Start containers with backup images
           env:
@@ -291,6 +309,21 @@ jobs:
               exit 1
             fi
 
+    cleanup-failed:
+      name: Cleanup Failed Build Artifacts
+      runs-on: self-hosted
+      environment: production
+      needs: [verify-docker-container]
+      if: failure()
+      steps:
+        - name: Remove Failed Build Artifacts
+          continue-on-error: true
+          run: |
+            echo "Cleaning up failed build artifacts..."
+            docker image prune -a -f || true
+            docker builder prune -f -a || true
+            docker container prune -f || true
+
     cleanup:
       name: Cleanup Old Docker Images
       runs-on: self-hosted
@@ -315,8 +348,11 @@ jobs:
               echo "No backup images found"
             fi
 
-            echo "Removing unused Docker images..."
-            docker image prune -f
+            echo "Removing all unused Docker images and build cache..."
+            docker image prune -a -f || true
+            docker builder prune -f -a || true
+            docker container prune -f || true
+            docker volume prune -f || true
 
     create_release_tag:
         name: Create Release Tag
