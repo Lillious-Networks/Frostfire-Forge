@@ -224,6 +224,7 @@ if (settings?.gateway?.enabled) {
   try {
     const serverId = process.env.SERVER_ID || `server-${crypto.randomBytes(8).toString("hex")}`;
     const serverHost = process.env.SERVER_HOST || "localhost";
+    const publicHost = process.env.PUBLIC_HOST || serverHost;
     const serverPort = parseInt(process.env.WEB_SOCKET_PORT || "3000");
     const httpPort = parseInt(process.env.WEBSRV_PORT || "80");
 
@@ -231,6 +232,7 @@ if (settings?.gateway?.enabled) {
       gatewayUrl: settings.gateway.url,
       serverId,
       host: serverHost,
+      publicHost: publicHost,
       port: httpPort,
       wsPort: serverPort,
       maxConnections: settings?.websocket?.maxConnections || 2000,

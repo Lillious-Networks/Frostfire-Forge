@@ -10,6 +10,7 @@ interface ServerRegistrationConfig {
   gatewayUrl: string;
   serverId: string;
   host: string;
+  publicHost?: string;  // External hostname for clients (optional, defaults to host)
   port: number;
   wsPort: number;
   maxConnections: number;
@@ -37,6 +38,7 @@ class GatewayClient {
         body: JSON.stringify({
           id: this.config.serverId,
           host: this.config.host,
+          publicHost: this.config.publicHost || this.config.host,
           port: this.config.port,
           wsPort: this.config.wsPort,
           maxConnections: this.config.maxConnections,

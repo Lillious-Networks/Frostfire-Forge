@@ -58,7 +58,8 @@ jobs:
           echo 'REDIS_URL="redis://default:development@redis-dev:6380"' >> .env.development
           echo 'REDIS_PASSWORD="development"' >> .env.development
           echo 'VERSION="${{ github.run_number }}-development"' >> .env.development
-          echo 'SERVER_HOST="forge.lillious.com"' >> .env.development
+          echo 'SERVER_HOST="frostfire-forge-dev"' >> .env.development
+          echo 'PUBLIC_HOST="forge.lillious.com"' >> .env.development
           echo 'GATEWAY_AUTH_KEY="${{ secrets.GATEWAY_AUTH_KEY }}"' >> .env.development
 
           # Create gateway .env.gateway file
