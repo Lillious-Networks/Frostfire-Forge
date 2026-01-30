@@ -1,6 +1,5 @@
 import.meta.hot.accept;
 import { config } from "../web/global.js";
-const socket = new WebSocket(config.WEBSOCKET_URL || "ws://localhost:3000");
 const version = config?.VERSION;
 import "./events.ts";
 import pako from "../libs/pako.js";
@@ -59,7 +58,10 @@ import { createNPC } from "./npc.ts";
 import parseAPNG from "../libs/apng_parser.js";
 import { getCookie } from "./cookies.ts";
 import { createCachedImage } from "./images.ts";
-socket.binaryType = "arraybuffer";
+
+// Socket will be initialized after gateway check
+let socket: WebSocket;
+
 let sentRequests: number = 0,
   receivedResponses: number = 0;
 
@@ -135,6 +137,114 @@ const setupEquipmentSlotHandlers = () => {
   });
 };
 
+/**
+ * Get or generate client ID for sticky sessions
+ */
+function getClientId(): string {
+  // Try to get from localStorage first
+  let clientId = localStorage.getItem('gateway_clientId');
+
+  if (!clientId) {
+    // Try to use username from cookie if available
+    const username = getCookie('username');
+    if (username) {
+      clientId = `user-${username}`;
+    } else {
+      // Generate a unique ID
+      clientId = `client-${crypto.randomUUID()}`;
+    }
+    localStorage.setItem('gateway_clientId', clientId);
+  }
+
+  return clientId;
+}
+
+/**
+ * Connect through gateway with sticky sessions
+ */
+async function connectThroughGateway(gatewayUrl: string, clientId: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      gatewayWs.close();
+      reject(new Error('Gateway connection timeout'));
+    }, 10000);
+
+    // Add clientId as query parameter
+    const url = new URL(gatewayUrl);
+    url.searchParams.set('clientId', clientId);
+
+    const gatewayWs = new WebSocket(url.toString());
+
+    gatewayWs.onmessage = (event) => {
+      clearTimeout(timeout);
+
+      try {
+        const data = JSON.parse(event.data);
+
+        if (data.type === 'server_assignment') {
+          console.log('[Gateway] Assigned to server:', data.server);
+          console.log('[Gateway] Client ID:', data.clientId);
+
+          // Store the clientId returned by gateway
+          localStorage.setItem('gateway_clientId', data.clientId);
+
+          // Build game server URL
+          const gameUrl = `ws://${data.server.host}:${data.server.wsPort}`;
+          gatewayWs.close();
+          resolve(gameUrl);
+        } else if (data.type === 'error') {
+          gatewayWs.close();
+          reject(new Error(`Gateway error: ${data.message}`));
+        }
+      } catch (error) {
+        gatewayWs.close();
+        reject(new Error(`Failed to parse gateway message: ${error}`));
+      }
+    };
+
+    gatewayWs.onerror = (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    };
+
+    gatewayWs.onclose = (event) => {
+      clearTimeout(timeout);
+      if (event.code !== 1000) {
+        reject(new Error(`Gateway closed: ${event.code}`));
+      }
+    };
+  });
+}
+
+/**
+ * Initialize WebSocket connection (direct or via gateway)
+ */
+async function initializeSocket() {
+  const gatewayEnabled = config.GATEWAY_ENABLED === 'true';
+  const gatewayUrl = config.GATEWAY_URL;
+  let socketUrl = config.WEBSOCKET_URL || "ws://localhost:3000";
+
+  if (gatewayEnabled && gatewayUrl) {
+    try {
+      console.log('[Gateway] Connecting through gateway...');
+      const clientId = getClientId();
+      socketUrl = await connectThroughGateway(gatewayUrl, clientId);
+      console.log('[Gateway] Connecting to assigned server:', socketUrl);
+    } catch (error) {
+      console.warn('[Gateway] Gateway connection failed, using direct connection:', error);
+    }
+  }
+
+  // Create WebSocket connection
+  socket = new WebSocket(socketUrl);
+  socket.binaryType = "arraybuffer";
+  setupSocketHandlers();
+}
+
+/**
+ * Setup socket event handlers
+ */
+function setupSocketHandlers() {
 socket.onopen = () => {
   cache.players.clear();
   // Request fresh player list from server for admin panel
@@ -2290,6 +2400,8 @@ function showNotification(
   }
 }
 
+} // End of setupSocketHandlers()
+
 let loaded: boolean = false;
 export let selfPlayerSpriteLoaded: boolean = false;
 
@@ -2334,6 +2446,9 @@ async function isLoaded() {
     }, 10);
   });
 }
+
+// Initialize socket connection (via gateway or direct)
+initializeSocket();
 
 setInterval(() => {
   if (

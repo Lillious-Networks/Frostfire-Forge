@@ -22,6 +22,8 @@ function transpileDirectory(sourceDir: string) {
             const envVars = [ // TODO maybe move this to a config ts file or something to make it more visible or something
                 { key: "__VAR.WEBSOCKETURL__", value: (`${process.env.WEB_SOCKET_URL}:${process.env.WEB_SOCKET_PORT}` as string), defaultvalue: "ws://localhost:3000" },
                 { key: "__VAR.VERSION__", value: process.env.VERSION as string, defaultvalue: "" },
+                { key: "__VAR.GATEWAY_ENABLED__", value: process.env.GATEWAY_ENABLED as string, defaultvalue: "false" },
+                { key: "__VAR.GATEWAY_URL__", value: process.env.GATEWAY_URL as string, defaultvalue: "ws://localhost:9000" },
             ];
             let replacedResult = result; // copy result to new variable to edit it
             envVars.forEach((env) => replacedResult = replacedResult.replaceAll(env.key, env.value || env.defaultvalue) );

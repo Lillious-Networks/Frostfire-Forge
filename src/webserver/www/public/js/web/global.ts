@@ -1,4 +1,6 @@
 export const config = {
     WEBSOCKET_URL: '__VAR.WEBSOCKETURL__',
-    VERSION: '__VAR.VERSION__'
+    VERSION: '__VAR.VERSION__',
+    GATEWAY_ENABLED: '__VAR.GATEWAY_ENABLED__',
+    GATEWAY_URL: '__VAR.GATEWAY_URL__'
 };
