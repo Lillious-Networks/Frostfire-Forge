@@ -26,8 +26,10 @@ A simple gateway/load balancer that distributes client connections across multip
 - **Health Monitoring**: Automatic heartbeat system to detect failed servers
 - **Round-Robin Load Balancing**: Distributes NEW clients evenly across available servers
 - **Sticky Sessions**: Clients with same ID always reconnect to the same server
+- **Automatic Session Migration**: When a server dies, sessions are automatically migrated to healthy servers
 - **Connection Limits**: Respects per-server connection limits
 - **Automatic Cleanup**: Removes unresponsive servers and expired sessions automatically
+- **Backpressure Handling**: Prevents WebSocket buffer overflow with automatic message queuing
 
 ## Quick Start
 
@@ -165,6 +167,16 @@ Check gateway status and registered servers.
 ```json
 {
   "totalServers": 3,
+  "totalActiveSessions": 150,
+  "totalMigrations": 47,
+  "recentMigrations": [
+    {
+      "timestamp": 1706543210000,
+      "fromServer": "server-3",
+      "toServer": "2 servers",
+      "clientCount": 23
+    }
+  ],
   "servers": [
     {
       "id": "server-1",
@@ -210,7 +222,8 @@ Edit `config.json` to customize:
 6. **Direct Connection**: Client disconnects from gateway and connects directly to assigned server
 7. **Session Persistence**: Client's `clientId` → server mapping is saved for 30 minutes
 8. **Health Check**: Gateway removes servers that miss heartbeats (timeout: 15 seconds)
-9. **Session Cleanup**: Expired sessions are cleaned up every minute
+9. **Session Migration**: When a server dies, all its sessions are automatically migrated to healthy servers
+10. **Session Cleanup**: Expired sessions are cleaned up every minute
 
 ## Load Balancing Strategy
 
@@ -246,6 +259,17 @@ For production deployments, consider:
 5. **Security**: Add authentication for server registration
 6. **SSL/TLS**: Enable secure connections
 7. **Horizontal Scaling**: Multiple gateway instances with shared state (Redis)
+
+## Documentation
+
+For detailed information about specific features:
+
+- **[SESSION-MIGRATION.md](./SESSION-MIGRATION.md)** - Complete guide to automatic session migration
+- **[STICKY-SESSIONS.md](./STICKY-SESSIONS.md)** - Sticky session implementation details
+- **[BACKPRESSURE.md](./BACKPRESSURE.md)** - Backpressure handling system
+- **[CLIENT-INTEGRATION-COMPLETE.md](./CLIENT-INTEGRATION-COMPLETE.md)** - Client integration guide
+- **[BENCHMARK-WITH-GATEWAY.md](./BENCHMARK-WITH-GATEWAY.md)** - Benchmark tool usage with gateway
+- **[QUICKSTART.md](./QUICKSTART.md)** - Quick start guide
 
 ## Troubleshooting
 

@@ -6,7 +6,12 @@
  * - Clients connect to the gateway
  * - Gateway distributes clients across available servers using round-robin
  * - Sticky sessions ensure clients always reconnect to the same server
+ * - Implements backpressure handling for WebSocket connections
  */
+
+// Backpressure configuration
+const MAX_BUFFER_SIZE = 1024 * 1024 * 1024; // 1GB
+const packetQueue = new Map<string, (() => void)[]>();
 
 interface GameServer {
   id: string;
@@ -46,6 +51,15 @@ let roundRobinIndex = 0;
 
 // Sticky session tracking: clientId → ClientSession
 const clientSessions: Map<string, ClientSession> = new Map();
+
+// Migration statistics
+let totalMigrations = 0;
+const migrationHistory: Array<{
+  timestamp: number;
+  fromServer: string;
+  toServer: string;
+  clientCount: number;
+}> = [];
 
 /**
  * Get the next available server using round-robin load balancing
@@ -107,22 +121,99 @@ function getServerForClient(clientId: string): GameServer | null {
 }
 
 /**
- * Remove dead servers that haven't sent heartbeat
+ * Migrate sessions from a dead server to healthy servers
+ */
+function migrateSessionsFromDeadServer(deadServerId: string): number {
+  const sessionsToMigrate: string[] = [];
+
+  // Find all sessions pointing to the dead server
+  for (const [clientId, session] of clientSessions.entries()) {
+    if (session.serverId === deadServerId) {
+      sessionsToMigrate.push(clientId);
+    }
+  }
+
+  if (sessionsToMigrate.length === 0) {
+    return 0;
+  }
+
+  // Get available healthy servers
+  const healthyServers = Array.from(gameServers.values()).filter(
+    server => server.activeConnections < server.maxConnections
+  );
+
+  if (healthyServers.length === 0) {
+    console.warn(`[Gateway] No healthy servers available for migration from ${deadServerId}`);
+    // Delete sessions if no healthy servers available
+    for (const clientId of sessionsToMigrate) {
+      clientSessions.delete(clientId);
+    }
+    return 0;
+  }
+
+  console.log(`[Gateway] Migrating ${sessionsToMigrate.length} sessions from dead server ${deadServerId}`);
+
+  let migrationIndex = 0;
+  let migratedCount = 0;
+
+  // Migrate sessions to healthy servers (round-robin distribution)
+  for (const clientId of sessionsToMigrate) {
+    const session = clientSessions.get(clientId);
+    if (!session) continue;
+
+    // Select next healthy server in round-robin fashion
+    const targetServer = healthyServers[migrationIndex % healthyServers.length];
+    migrationIndex++;
+
+    // Update session to point to new server
+    session.serverId = targetServer.id;
+    session.lastActivity = Date.now(); // Reset activity to prevent immediate expiration
+
+    migratedCount++;
+    console.log(`[Gateway] Migrated client ${clientId}: ${deadServerId} → ${targetServer.id}`);
+  }
+
+  // Record migration in history
+  if (migratedCount > 0) {
+    const targetServerId = healthyServers[0].id;
+    migrationHistory.push({
+      timestamp: Date.now(),
+      fromServer: deadServerId,
+      toServer: migratedCount === 1 ? healthyServers[0].id : `${healthyServers.length} servers`,
+      clientCount: migratedCount
+    });
+
+    // Keep only last 100 migrations in history
+    if (migrationHistory.length > 100) {
+      migrationHistory.shift();
+    }
+
+    totalMigrations += migratedCount;
+  }
+
+  return migratedCount;
+}
+
+/**
+ * Remove dead servers that haven't sent heartbeat and migrate their sessions
  */
 function cleanupDeadServers() {
   const now = Date.now();
   for (const [id, server] of gameServers.entries()) {
     if (now - server.lastHeartbeat > config.serverTimeout) {
-      console.log(`[Gateway] Removing dead server: ${id} (${server.host}:${server.port})`);
-      gameServers.delete(id);
+      console.log(`[Gateway] Server died: ${id} (${server.host}:${server.port})`);
 
-      // Clean up sessions pointing to this dead server
-      for (const [clientId, session] of clientSessions.entries()) {
-        if (session.serverId === id) {
-          clientSessions.delete(clientId);
-          console.log(`[Gateway] Removed session for client ${clientId} (server died)`);
-        }
+      // Migrate sessions before removing server
+      const migratedCount = migrateSessionsFromDeadServer(id);
+
+      if (migratedCount > 0) {
+        console.log(`[Gateway] Successfully migrated ${migratedCount} sessions from ${id}`);
+      } else {
+        console.log(`[Gateway] No sessions to migrate from ${id}`);
       }
+
+      // Remove the dead server
+      gameServers.delete(id);
     }
   }
 }
@@ -149,6 +240,52 @@ function cleanupExpiredSessions() {
 // Start cleanup intervals
 setInterval(cleanupDeadServers, config.heartbeatInterval);
 setInterval(cleanupExpiredSessions, 60000); // Clean up sessions every minute
+
+/**
+ * Handle WebSocket backpressure
+ * Queues actions if buffer is full, executes when buffer has space
+ */
+function handleBackpressure(ws: any, action: () => void, retryCount = 0) {
+  if (retryCount > 20) {
+    console.warn("[Gateway] Max retries reached. Action skipped to avoid infinite loop.");
+    return;
+  }
+
+  if (ws.readyState !== 1) { // 1 = WebSocket.OPEN
+    console.warn("[Gateway] WebSocket is not open. Action cannot proceed.");
+    return;
+  }
+
+  const clientId = ws.data?.clientId;
+  if (!clientId) {
+    console.warn("[Gateway] No clientId found for WebSocket. Action cannot proceed.");
+    return;
+  }
+
+  const queue = packetQueue.get(clientId);
+  if (!queue) {
+    console.warn("[Gateway] No packet queue found for WebSocket. Action cannot proceed.");
+    return;
+  }
+
+  if (ws.bufferedAmount > MAX_BUFFER_SIZE) {
+    const retryInterval = Math.min(50 + retryCount * 50, 500);
+    console.log(`[Gateway] Backpressure detected for ${clientId}. Retrying in ${retryInterval}ms (Attempt ${retryCount + 1})`);
+
+    queue.push(action);
+    setTimeout(() => handleBackpressure(ws, action, retryCount + 1), retryInterval);
+  } else {
+    action();
+
+    // Process queued actions while buffer has space
+    while (queue.length > 0 && ws.bufferedAmount <= MAX_BUFFER_SIZE) {
+      const nextAction = queue.shift();
+      if (nextAction) {
+        nextAction();
+      }
+    }
+  }
+}
 
 /**
  * HTTP Server for game server registration
@@ -263,6 +400,8 @@ const httpServer = Bun.serve({
       return new Response(JSON.stringify({
         totalServers: gameServers.size,
         totalActiveSessions: clientSessions.size,
+        totalMigrations: totalMigrations,
+        recentMigrations: migrationHistory.slice(-10), // Last 10 migrations
         servers
       }), {
         headers: { "Content-Type": "application/json" }
@@ -292,44 +431,62 @@ function getClientId(url: URL): string {
 const wsServer = Bun.serve({
   port: config.wsPort,
   websocket: {
-    message(ws, message) {
+    message(ws: any, message) {
       // Forward message to the assigned game server
       // This is a simple pass-through implementation
-      ws.send(message);
+      // Use backpressure handling when sending
+      handleBackpressure(ws, () => {
+        ws.send(message);
+      });
     },
     open(ws: any) {
       const clientId = ws.data?.clientId || "unknown";
       console.log(`[Gateway] Client connected: ${clientId}, finding server...`);
 
+      // Initialize packet queue for backpressure handling
+      packetQueue.set(clientId, []);
+
       // Use sticky session logic
       const server = getServerForClient(clientId);
       if (!server) {
-        ws.send(JSON.stringify({
-          type: "error",
-          message: "No available servers"
-        }));
-        ws.close();
+        handleBackpressure(ws, () => {
+          ws.send(JSON.stringify({
+            type: "error",
+            message: "No available servers"
+          }));
+        });
+        // Close after a short delay to allow message to be sent
+        setTimeout(() => ws.close(), 100);
         return;
       }
 
-      // Send server assignment to client
-      ws.send(JSON.stringify({
-        type: "server_assignment",
-        clientId: clientId,
-        server: {
-          host: server.host,
-          port: server.port,
-          wsPort: server.wsPort
-        }
-      }));
+      // Send server assignment to client with backpressure handling
+      handleBackpressure(ws, () => {
+        ws.send(JSON.stringify({
+          type: "server_assignment",
+          clientId: clientId,
+          server: {
+            host: server.host,
+            port: server.port,
+            wsPort: server.wsPort
+          }
+        }));
+      });
 
       console.log(`[Gateway] Client ${clientId} assigned to server: ${server.id} (${server.host}:${server.wsPort})`);
 
       // Client should now disconnect from gateway and connect to assigned server
       // In a more sophisticated implementation, the gateway could proxy the connection
     },
-    close(ws) {
-      console.log("[Gateway] Client disconnected");
+    close(ws: any) {
+      const clientId = ws.data?.clientId;
+      if (clientId) {
+        // Clean up packet queue
+        packetQueue.delete(clientId);
+        console.log(`[Gateway] Client disconnected: ${clientId}`);
+      } else {
+        console.log("[Gateway] Client disconnected");
+      }
     },
     error(ws, error) {
       console.error("[Gateway] WebSocket error:", error);
