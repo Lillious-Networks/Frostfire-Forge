@@ -152,8 +152,13 @@ function getClientId(): string {
   // For guest users, try to get from localStorage
   let clientId = localStorage.getItem('gateway_clientId');
   if (!clientId) {
-    // Generate a unique ID for new guests
-    clientId = `client-${crypto.randomUUID()}`;
+    // Generate a unique ID for new guests (browser-compatible)
+    if (window.crypto && window.crypto.randomUUID) {
+      clientId = `client-${window.crypto.randomUUID()}`;
+    } else {
+      // Fallback for older browsers
+      clientId = `client-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    }
     localStorage.setItem('gateway_clientId', clientId);
   }
 
