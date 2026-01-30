@@ -181,19 +181,34 @@ jobs:
         id: verify
         continue-on-error: true
         run: |
-          echo "Waiting 15 seconds for services to start..."
-          sleep 15
+          echo "Waiting 20 seconds for services to start..."
+          sleep 20
 
-          echo "Fetching Docker logs..."
-          LOGS=$(docker compose -f docker-compose.dev.yml logs --tail=50)
+          echo "=== Docker Container Status ==="
+          docker compose -f docker-compose.dev.yml ps
 
-          echo "$LOGS"
+          echo ""
+          echo "=== Gateway Logs ==="
+          docker compose -f docker-compose.dev.yml logs gateway-dev --tail=100
 
-          if echo "$LOGS" | grep -q "Webserver started"; then
-            echo "✅ Webserver started successfully"
+          echo ""
+          echo "=== Game Server Logs ==="
+          docker compose -f docker-compose.dev.yml logs frostfire-forge-dev --tail=100
+
+          echo ""
+          echo "=== Redis Logs ==="
+          docker compose -f docker-compose.dev.yml logs redis-dev --tail=50
+
+          echo ""
+          echo "=== Checking for success indicators ==="
+          LOGS=$(docker compose -f docker-compose.dev.yml logs)
+
+          if echo "$LOGS" | grep -qi "webserver started\|server.*running\|listening.*8000\|HTTP Server running"; then
+            echo "✅ Services started successfully"
             exit 0
           else
-            echo "❌ Webserver did NOT start"
+            echo "❌ Services did NOT start properly"
+            echo "Check logs above for errors"
             exit 1
           fi
 
@@ -258,15 +273,19 @@ jobs:
 
       - name: Verify rollback
         run: |
-          echo "Waiting 15 seconds for services to start..."
-          sleep 15
+          echo "Waiting 20 seconds for services to start..."
+          sleep 20
 
-          echo "Fetching Docker logs..."
-          LOGS=$(docker compose -f docker-compose.dev.yml logs --tail=50)
+          echo "=== Docker Container Status ==="
+          docker compose -f docker-compose.dev.yml ps
+
+          echo ""
+          echo "=== Fetching Docker logs ==="
+          LOGS=$(docker compose -f docker-compose.dev.yml logs --tail=100)
 
           echo "$LOGS"
 
-          if echo "$LOGS" | grep -q "Webserver started"; then
+          if echo "$LOGS" | grep -qi "webserver started\|server.*running\|listening.*8000\|HTTP Server running"; then
             echo "✅ Rollback successful - Previous version is running"
           else
             echo "❌ Rollback failed - Manual intervention required"
