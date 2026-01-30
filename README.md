@@ -39,6 +39,8 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
 ## 📋 Table of Contents
 
 - [Requirements](#-requirements)
+- [Architecture](#-architecture)
+  - [Gateway Load Balancer](#gateway-load-balancer)
 - [Quick Start](#-quick-start)
   - [Development Setup](#development-setup)
   - [Production Setup](#production-setup)
@@ -63,6 +65,61 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
 > - [Bun](https://bun.sh/) - JavaScript runtime & package manager
 > - [MySQL](https://www.mysql.com/downloads/) - Database (or SQLite for development)
 > - [Docker](https://www.docker.com/) (Optional) - For containerized deployment
+
+---
+
+## 🏗️ Architecture
+
+### Gateway Load Balancer
+
+Frostfire Forge includes an optional **Gateway Load Balancer** for horizontal scaling across multiple game servers.
+
+#### Features
+- **Sticky Sessions**: Players remain connected to the same game server
+- **Round-Robin Distribution**: New players are distributed evenly across available servers
+- **Automatic Failover**: Sessions migrate to healthy servers when a server goes down
+- **WebSocket Proxying**: Transparent bidirectional message forwarding between clients and game servers
+- **Health Monitoring**: Automatic detection and removal of unhealthy servers
+
+#### Architecture Overview
+```
+Client → Gateway (HTTP/WS) → Game Server(s)
+         :8000/:9000          :8080/:3001 (internal)
+```
+
+The gateway handles all external connections and proxies traffic to internal game servers. This allows:
+- Multiple game servers running on the same or different machines
+- Zero-downtime deployments with rolling updates
+- Horizontal scaling based on player load
+
+#### Configuration
+
+Set `GATEWAY_ENABLED=true` in your environment to enable gateway mode. Game servers will automatically register with the gateway on startup.
+
+**Gateway Environment Variables:**
+```bash
+WEBSRV_PORT=8000           # Gateway HTTP port (external)
+WS_PORT=9000               # Gateway WebSocket port (external)
+GATEWAY_AUTH_KEY=secret    # Shared secret for server registration
+HEARTBEAT_INTERVAL=5000    # Server health check interval (ms)
+SERVER_TIMEOUT=15000       # Server considered dead after (ms)
+SESSION_TIMEOUT=1800000    # Session expiration time (ms)
+```
+
+**Game Server Environment Variables:**
+```bash
+GATEWAY_ENABLED=true                    # Enable gateway mode
+GATEWAY_URL=http://gateway:8000         # Gateway registration URL
+GATEWAY_AUTH_KEY=secret                 # Must match gateway's key
+SERVER_HOST=game-server-1               # Internal hostname
+PUBLIC_HOST=yourdomain.com              # External hostname for clients
+WEBSRV_PORT=8080                        # Internal HTTP port
+WEB_SOCKET_PORT=3001                    # Internal WebSocket port
+GATEWAY_WS_PORT=9000                    # Gateway WebSocket port (for client)
+```
+
+> [!NOTE]
+> When using Docker, game server ports (8080, 3001) should NOT be exposed externally. Only the gateway ports (8000, 9000) need to be exposed.
 
 ---
 
@@ -184,8 +241,11 @@ bun run docker:prod:build
 - **Development**: Source code is mounted as a volume for hot-reload
 - **Production**: Multi-stage build with optimized dependencies
 - **Environment Files**: `.env.production`, `.env.development` or `.env.local` is automatically loaded
-- **Ports Exposed**: 80 (HTTP), 443 (HTTPS), 3000 (Application)
+- **Ports Exposed**:
+  - **With Gateway**: 8000 (HTTP), 9000 (WebSocket)
+  - **Without Gateway**: 80 (HTTP), 443 (HTTPS), 3000 (WebSocket)
 - **Redis**: If `CACHE=redis`, configure `REDIS_URL` and `REDIS_PASSWORD` in your `.env` file
+- **Gateway**: Development environment includes gateway by default. Configure via `GATEWAY_ENABLED` environment variable
 
 ---
 
@@ -223,9 +283,17 @@ OPEN_AI_MODEL="gpt-4"
 
 # Application Settings
 WEB_SOCKET_URL="wss://yourdomain.com"
-WEB_SOCKET_PORT="3000"
+WEB_SOCKET_PORT="3001"                    # Internal WebSocket port
 DOMAIN="https://yourdomain.com"
 GAME_NAME="Your Game Name"
+
+# Gateway Load Balancer (Optional)
+GATEWAY_ENABLED="false"                   # Enable gateway mode
+GATEWAY_URL="http://gateway:8000"         # Gateway registration endpoint
+GATEWAY_WS_PORT="9000"                    # Gateway WebSocket port for clients
+GATEWAY_AUTH_KEY="your_secret_key"        # Shared secret for server registration
+SERVER_HOST="game-server-hostname"        # Internal server hostname
+PUBLIC_HOST="yourdomain.com"              # External hostname for clients
 
 # Caching
 CACHE="redis" | "memory"
@@ -234,6 +302,9 @@ REDIS_URL="redis://default@redis:6379"  # Required if CACHE=redis
 # Versioning (can be provided at runtime)
 VERSION="1.0.0"
 ```
+
+> [!TIP]
+> **Gateway Configuration**: When `GATEWAY_ENABLED=true`, clients connect to the gateway on `GATEWAY_WS_PORT` (default: 9000). The gateway proxies traffic to game servers on their internal `WEB_SOCKET_PORT` (default: 3001).
 
 ---
 

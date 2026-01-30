@@ -191,8 +191,6 @@ async function connectThroughGateway(gatewayUrl: string, clientId: string): Prom
       wsUrl = `${baseUrl}:${config.GATEWAY_WS_PORT || '9000'}`;
     }
 
-    console.log('[Gateway] Connecting to gateway WebSocket:', wsUrl);
-
     const url = new URL(wsUrl);
     url.searchParams.set('clientId', clientId);
 
@@ -205,9 +203,6 @@ async function connectThroughGateway(gatewayUrl: string, clientId: string): Prom
         const data = JSON.parse(event.data);
 
         if (data.type === 'server_assignment') {
-          console.log('[Gateway] Assigned to server:', data.server);
-          console.log('[Gateway] Client ID:', data.clientId);
-
           // Store the clientId returned by gateway
           localStorage.setItem('gateway_clientId', data.clientId);
 
@@ -216,7 +211,6 @@ async function connectThroughGateway(gatewayUrl: string, clientId: string): Prom
 
           // Return the gateway WebSocket connection - don't close it!
           // The gateway will proxy all traffic to the assigned game server
-          console.log('[Gateway] Using gateway connection for proxying');
           resolve(gatewayWs);
         } else if (data.type === 'error') {
           gatewayWs.close();
@@ -264,10 +258,8 @@ async function initializeSocket() {
 
   if (gatewayEnabled && gatewayUrl) {
     try {
-      console.log('[Gateway] Connecting through gateway...');
       const clientId = getClientId();
       socket = await connectThroughGateway(gatewayUrl, clientId);
-      console.log('[Gateway] Connected through gateway, proxying enabled');
     } catch (error) {
       console.warn('[Gateway] Gateway connection failed, using direct connection:', error);
       // Fallback to direct connection
@@ -285,7 +277,6 @@ async function initializeSocket() {
 
   // If using gateway, socket is already open - manually trigger initialization
   if (gatewayEnabled && socket.readyState === WebSocket.OPEN) {
-    console.log('[Gateway] Socket already open, triggering initialization manually');
     initializeConnection();
   }
 
