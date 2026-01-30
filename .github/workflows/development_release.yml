@@ -106,25 +106,43 @@ jobs:
     needs: [build]
     steps:
       - name: Tag current images as backup
+        continue-on-error: true
         run: |
           # Get list of running containers and their images
-          RUNNING_IMAGES=$(docker compose -f docker-compose.dev.yml ps --format json | jq -r '.Image' 2>/dev/null || echo "")
+          RUNNING_IMAGES=$(docker compose -f docker-compose.dev.yml ps --format json 2>/dev/null | jq -r '.Image' 2>/dev/null || echo "")
 
-          if [ -n "$RUNNING_IMAGES" ]; then
-            echo "Backing up current Docker images..."
-            # Remove duplicates and filter out SHA256 hashes
-            UNIQUE_IMAGES=$(echo "$RUNNING_IMAGES" | sort -u | grep -v "^sha256:")
+          if [ -z "$RUNNING_IMAGES" ]; then
+            echo "No running containers found, checking for existing images..."
+            # Try to get images from docker-compose config
+            IMAGES=$(docker compose -f docker-compose.dev.yml config 2>/dev/null | grep 'image:' | awk '{print $2}' || echo "")
 
-            while IFS= read -r image; do
-              if [ -n "$image" ] && [ "$image" != "sha256:"* ]; then
-                # Tag each running image with a backup suffix
-                echo "Tagging $image as ${image}-backup"
-                docker tag "$image" "${image}-backup" || echo "Failed to tag $image, might not exist"
-              fi
-            done <<< "$UNIQUE_IMAGES"
-          else
-            echo "No running containers found to backup"
+            if [ -z "$IMAGES" ]; then
+              echo "No images found to backup, skipping..."
+              exit 0
+            fi
+            RUNNING_IMAGES="$IMAGES"
           fi
+
+          echo "Backing up current Docker images..."
+          # Remove duplicates and filter out SHA256 hashes
+          UNIQUE_IMAGES=$(echo "$RUNNING_IMAGES" | sort -u | grep -v "^sha256:" | grep -v "^$")
+
+          if [ -z "$UNIQUE_IMAGES" ]; then
+            echo "No valid images to backup"
+            exit 0
+          fi
+
+          while IFS= read -r image; do
+            if [ -n "$image" ] && [ "$image" != "sha256:"* ]; then
+              # Check if image exists before tagging
+              if docker image inspect "$image" >/dev/null 2>&1; then
+                echo "Tagging $image as ${image}-backup"
+                docker tag "$image" "${image}-backup" || echo "Failed to tag $image"
+              else
+                echo "Image $image does not exist, skipping..."
+              fi
+            fi
+          done <<< "$UNIQUE_IMAGES"
 
   stop-docker-container:
     name: Stop Docker Container
