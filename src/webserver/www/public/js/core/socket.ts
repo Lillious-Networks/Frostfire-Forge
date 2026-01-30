@@ -168,7 +168,7 @@ function getClientId(): string {
 /**
  * Connect through gateway with sticky sessions
  */
-async function connectThroughGateway(gatewayUrl: string, clientId: string): Promise<string> {
+async function connectThroughGateway(gatewayUrl: string, clientId: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       gatewayWs.close();
@@ -212,10 +212,13 @@ async function connectThroughGateway(gatewayUrl: string, clientId: string): Prom
           // Store the clientId returned by gateway
           localStorage.setItem('gateway_clientId', data.clientId);
 
-          // Build game server URL
-          const gameUrl = `ws://${data.server.host}:${data.server.wsPort}`;
-          gatewayWs.close();
-          resolve(gameUrl);
+          // Clear the temporary message handler - setupSocketHandlers will set the real one
+          gatewayWs.onmessage = null;
+
+          // Return the gateway WebSocket connection - don't close it!
+          // The gateway will proxy all traffic to the assigned game server
+          console.log('[Gateway] Using gateway connection for proxying');
+          resolve(gatewayWs);
         } else if (data.type === 'error') {
           gatewayWs.close();
           reject(new Error(`Gateway error: ${data.message}`));
@@ -259,21 +262,25 @@ async function initializeSocket() {
 
   const gatewayEnabled = config.GATEWAY_ENABLED === 'true';
   const gatewayUrl = config.GATEWAY_URL;
-  let socketUrl = config.WEBSOCKET_URL || "ws://localhost:3000";
 
   if (gatewayEnabled && gatewayUrl) {
     try {
       console.log('[Gateway] Connecting through gateway...');
       const clientId = getClientId();
-      socketUrl = await connectThroughGateway(gatewayUrl, clientId);
-      console.log('[Gateway] Connecting to assigned server:', socketUrl);
+      socket = await connectThroughGateway(gatewayUrl, clientId);
+      console.log('[Gateway] Connected through gateway, proxying enabled');
     } catch (error) {
       console.warn('[Gateway] Gateway connection failed, using direct connection:', error);
+      // Fallback to direct connection
+      const socketUrl = config.WEBSOCKET_URL || "ws://localhost:3000";
+      socket = new WebSocket(socketUrl);
     }
+  } else {
+    // Direct connection (no gateway)
+    const socketUrl = config.WEBSOCKET_URL || "ws://localhost:3000";
+    socket = new WebSocket(socketUrl);
   }
 
-  // Create WebSocket connection
-  socket = new WebSocket(socketUrl);
   socket.binaryType = "arraybuffer";
   setupSocketHandlers();
   isReconnecting = false;
