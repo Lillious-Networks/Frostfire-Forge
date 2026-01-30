@@ -222,10 +222,23 @@ async function connectThroughGateway(gatewayUrl: string, clientId: string): Prom
   });
 }
 
+// Reconnection tracking
+let isReconnecting = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+
 /**
  * Initialize WebSocket connection (direct or via gateway)
  */
 async function initializeSocket() {
+  // Prevent multiple simultaneous reconnection attempts
+  if (isReconnecting) {
+    console.log('[Socket] Already attempting to reconnect, skipping...');
+    return;
+  }
+
+  isReconnecting = true;
+
   const gatewayEnabled = config.GATEWAY_ENABLED === 'true';
   const gatewayUrl = config.GATEWAY_URL;
   let socketUrl = config.WEBSOCKET_URL || "ws://localhost:3000";
@@ -245,6 +258,7 @@ async function initializeSocket() {
   socket = new WebSocket(socketUrl);
   socket.binaryType = "arraybuffer";
   setupSocketHandlers();
+  isReconnecting = false;
 }
 
 /**
@@ -252,6 +266,9 @@ async function initializeSocket() {
  */
 function setupSocketHandlers() {
 socket.onopen = () => {
+  // Reset reconnection tracking on successful connection
+  reconnectAttempts = 0;
+
   cache.players.clear();
   // Request fresh player list from server for admin panel
   sendRequest({ type: "GET_ONLINE_PLAYERS", data: null });
@@ -277,9 +294,21 @@ socket.onclose = (ev: CloseEvent) => {
   const wasUnexpected = ev.code !== 1000 && ev.code !== 1001;
 
   if (wasUnexpected && config.GATEWAY_ENABLED === 'true') {
-    console.log(`[Socket] Unexpected disconnect (${ev.code}), attempting reconnect through gateway...`);
+    reconnectAttempts++;
+
+    if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+      console.error(`[Socket] Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached`);
+      showNotification(
+        `Failed to reconnect after ${MAX_RECONNECT_ATTEMPTS} attempts. Please refresh the page.`,
+        false,
+        true
+      );
+      return;
+    }
+
+    console.log(`[Socket] Unexpected disconnect (${ev.code}), attempting reconnect (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
     showNotification(
-      `Connection lost (${ev.code}). Reconnecting...`,
+      `Connection lost (${ev.code}). Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`,
       false,
       false
     );
@@ -289,6 +318,7 @@ socket.onclose = (ev: CloseEvent) => {
       try {
         await initializeSocket();
         console.log('[Socket] Reconnected successfully');
+        reconnectAttempts = 0; // Reset on successful connection
       } catch (error) {
         console.error('[Socket] Reconnect failed:', error);
         showNotification(

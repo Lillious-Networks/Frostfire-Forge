@@ -99,7 +99,6 @@ function getServerForClient(clientId: string): GameServer | null {
     if (assignedServer && assignedServer.activeConnections < assignedServer.maxConnections) {
       // Update last activity timestamp
       existingSession.lastActivity = Date.now();
-      console.log(`[Gateway] ✓ STICKY SESSION: Returning client ${clientId} to existing server: ${assignedServer.id}`);
       return assignedServer;
     } else {
       // Server is gone or full, remove session and assign new server
@@ -458,9 +457,6 @@ const httpServer = Bun.serve({
         const session = clientSessions.get(httpSessionId);
         if (session) {
           targetServer = gameServers.get(session.serverId) || null;
-          if (targetServer) {
-            console.log(`[Gateway] HTTP sticky session: ${httpSessionId} → ${targetServer.id}`);
-          }
         }
       }
 
@@ -477,7 +473,6 @@ const httpServer = Bun.serve({
         });
 
         isNewSession = true;
-        console.log(`[Gateway] Created HTTP sticky session ${httpSessionId} → ${targetServer.id}`);
       }
 
       const targetUrl = `http://${targetServer.host}:${targetServer.port}${url.pathname}${url.search}`;
@@ -503,7 +498,6 @@ const httpServer = Bun.serve({
           headers: responseHeaders
         });
       } catch (error) {
-        console.error(`[Gateway] Failed to proxy request to ${targetUrl}:`, error);
         return new Response("Failed to fetch resource", { status: 502 });
       }
     }
