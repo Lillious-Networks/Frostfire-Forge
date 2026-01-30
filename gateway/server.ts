@@ -300,6 +300,7 @@ function handleBackpressure(ws: any, action: () => void, retryCount = 0) {
  */
 const httpServer = Bun.serve({
   port: config.port,
+  hostname: "0.0.0.0",
   async fetch(req) {
     const url = new URL(req.url);
 
@@ -439,13 +440,46 @@ const httpServer = Bun.serve({
     const isGatewayRoute = gatewayRoutes.some(route => url.pathname.startsWith(route));
 
     if (!isGatewayRoute) {
-      // Get a random available server (simple load balancing for assets)
       const availableServers = Array.from(gameServers.values());
       if (availableServers.length === 0) {
         return new Response("No game servers available", { status: 503 });
       }
 
-      const targetServer = availableServers[Math.floor(Math.random() * availableServers.length)];
+      // Use sticky HTTP sessions based on cookie
+      const cookies = req.headers.get('cookie') || '';
+      const httpSessionMatch = cookies.match(/gateway_http_session=([^;]+)/);
+      let targetServer: GameServer | null = null;
+      let httpSessionId: string | null = null;
+      let isNewSession = false;
+
+      if (httpSessionMatch) {
+        httpSessionId = httpSessionMatch[1];
+        // Try to get the server for this HTTP session
+        const session = clientSessions.get(httpSessionId);
+        if (session) {
+          targetServer = gameServers.get(session.serverId) || null;
+          if (targetServer) {
+            console.log(`[Gateway] HTTP sticky session: ${httpSessionId} → ${targetServer.id}`);
+          }
+        }
+      }
+
+      // If no sticky session, pick a random server and create session
+      if (!targetServer) {
+        targetServer = availableServers[Math.floor(Math.random() * availableServers.length)];
+
+        // Create a session ID for HTTP requests
+        httpSessionId = `http-${crypto.randomUUID()}`;
+        clientSessions.set(httpSessionId, {
+          serverId: targetServer.id,
+          lastActivity: Date.now(),
+          clientId: httpSessionId
+        });
+
+        isNewSession = true;
+        console.log(`[Gateway] Created HTTP sticky session ${httpSessionId} → ${targetServer.id}`);
+      }
+
       const targetUrl = `http://${targetServer.host}:${targetServer.port}${url.pathname}${url.search}`;
 
       try {
@@ -456,13 +490,21 @@ const httpServer = Bun.serve({
           body: req.body
         });
 
+        // Clone response headers and add sticky session cookie
+        const responseHeaders = new Headers(proxyResponse.headers);
+
+        // Set sticky session cookie if this is a new session
+        if (isNewSession && httpSessionId) {
+          responseHeaders.set('Set-Cookie', `gateway_http_session=${httpSessionId}; Path=/; Max-Age=3600; SameSite=Lax; HttpOnly`);
+        }
+
         return new Response(proxyResponse.body, {
           status: proxyResponse.status,
-          headers: proxyResponse.headers
+          headers: responseHeaders
         });
       } catch (error) {
         console.error(`[Gateway] Failed to proxy request to ${targetUrl}:`, error);
-        return new Response("Failed to fetch asset", { status: 502 });
+        return new Response("Failed to fetch resource", { status: 502 });
       }
     }
 
@@ -488,6 +530,7 @@ function getClientId(url: URL): string {
  */
 const wsServer = Bun.serve({
   port: config.wsPort,
+  hostname: "0.0.0.0",
   websocket: {
     message(ws: any, message) {
       // Forward message to the assigned game server
