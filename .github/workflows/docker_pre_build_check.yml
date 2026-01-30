@@ -46,7 +46,7 @@ jobs:
           echo 'GAME_NAME="Docker Pre-Build"' >> .env.development
           echo 'CACHE="memory"' >> .env.development
           echo 'VERSION="${{ github.run_number }}-pre-build"' >> .env.development
-          echo 'SERVER_HOST="frostfire-forge-dev"' >> .env.development
+          echo 'SERVER_HOST="localhost"' >> .env.development
           echo 'GATEWAY_AUTH_KEY="pre-build-test-key"' >> .env.development
 
           # Create gateway .env.gateway file
