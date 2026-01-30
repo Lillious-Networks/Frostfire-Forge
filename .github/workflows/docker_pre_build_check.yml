@@ -42,7 +42,7 @@ jobs:
           echo 'WEB_SOCKET_URL="ws://localhost:9000"' >> .env.development
           echo 'WEB_SOCKET_PORT=3001' >> .env.development
           echo 'DOMAIN="http://localhost:8000"' >> .env.development
-          echo 'GATEWAY_URL="http://gateway-dev:8000"' >> .env.development
+          echo 'GATEWAY_URL="http://localhost:8000"' >> .env.development
           echo 'GAME_NAME="Docker Pre-Build"' >> .env.development
           echo 'CACHE="memory"' >> .env.development
           echo 'VERSION="${{ github.run_number }}-pre-build"' >> .env.development
