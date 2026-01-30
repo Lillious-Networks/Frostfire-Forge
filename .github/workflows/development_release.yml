@@ -49,8 +49,8 @@ jobs:
           echo 'DATABASE_NAME="frostfire-forge-dev"' >> .env.development
           echo 'WEBSRV_PORT=8080' >> .env.development
           echo 'WEBSRV_USESSL=false' >> .env.development
-          echo 'WEB_SOCKET_URL="ws://forge.lillious.com:9000"' >> .env.development
-          echo 'WEB_SOCKET_PORT=3001' >> .env.development
+          echo 'WEB_SOCKET_URL="ws://forge.lillious.com"' >> .env.development
+          echo 'WEB_SOCKET_PORT=9000' >> .env.development
           echo 'DOMAIN="http://forge.lillious.com:8000"' >> .env.development
           echo 'GATEWAY_URL="http://forge.lillious.com:8000"' >> .env.development
           echo 'GAME_NAME="Frostfire Forge Beta"' >> .env.development

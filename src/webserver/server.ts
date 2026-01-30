@@ -258,8 +258,10 @@ const routes = {
   },
 } as Record<string, any>;
 
+const serverPort = _https ? (parseInt(process.env.WEBSRV_PORTSSL || "") || 443) : (parseInt(process.env.WEBSRV_PORT || "") || 80);
+
 Bun.serve({
-    port: _https ? (process.env.WEBSRV_PORTSSL || 443) : (process.env.WEBSRV_PORT || 80),
+    port: serverPort,
     reusePort: false,
     routes: {
       "/swaggerui": routes["/swaggerui"],
@@ -663,5 +665,5 @@ function tryParseURL(url: string) : URL | null {
 }
 
 const readyTimeMs = performance.now() - now;
-log.success(`Webserver started on port ${_https ? "443 (HTTPS)" : "80 (HTTP)"} - Ready in ${(readyTimeMs / 1000).toFixed(3)}s (${readyTimeMs.toFixed(0)}ms)`);
+log.success(`Webserver started on port ${serverPort} (${_https ? "HTTPS" : "HTTP"}) - Ready in ${(readyTimeMs / 1000).toFixed(3)}s (${readyTimeMs.toFixed(0)}ms)`);
 await import('../socket/server');
