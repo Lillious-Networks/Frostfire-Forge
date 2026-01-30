@@ -63,6 +63,11 @@ jobs:
           echo 'SERVER_TIMEOUT=15000' >> Frostfire-Forge-Gateway/.env.gateway
           echo 'SESSION_TIMEOUT=1800000' >> Frostfire-Forge-Gateway/.env.gateway
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - name: Generate Gateway Config
         env:
           WEBSRV_PORT: 8000
