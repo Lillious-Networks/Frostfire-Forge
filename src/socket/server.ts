@@ -68,7 +68,7 @@ const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
 
 const Server = Bun.serve<Packet, any>({
   port: process.env.WEB_SOCKET_PORT || 3000,
-  reusePort: true,
+  reusePort: false,
   fetch(req, Server) {
     const id = crypto.randomBytes(32).toString("hex");
     const useragent = req.headers.get("user-agent");
@@ -235,7 +235,6 @@ if (settings?.gateway?.enabled) {
       wsPort: serverPort,
       maxConnections: settings?.websocket?.maxConnections || 2000,
       heartbeatInterval: settings.gateway.heartbeatInterval || 5000,
-      authKey: settings.gateway.authKey || "change-this-secret-key"
     });
 
     // Register with gateway
