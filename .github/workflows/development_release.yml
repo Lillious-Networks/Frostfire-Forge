@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Update environment variables
         run: |
@@ -42,20 +44,55 @@ jobs:
             rm .env.development
           fi
 
+          # Create game engine .env.development
           echo 'DATABASE_ENGINE="sqlite"' >> .env.development
           echo 'DATABASE_NAME="frostfire-forge-dev"' >> .env.development
           echo 'WEBSRV_PORT=8080' >> .env.development
           echo 'WEBSRV_USESSL=false' >> .env.development
-          echo 'WEB_SOCKET_URL="ws://forge.lillious.com"' >> .env.development
+          echo 'WEB_SOCKET_URL="ws://forge.lillious.com:9000"' >> .env.development
           echo 'WEB_SOCKET_PORT=3001' >> .env.development
-          echo 'DOMAIN="http://forge.lillious.com:8080"' >> .env.development
+          echo 'DOMAIN="http://forge.lillious.com:8000"' >> .env.development
+          echo 'GATEWAY_URL="http://gateway-dev:8000"' >> .env.development
           echo 'GAME_NAME="Frostfire Forge Beta"' >> .env.development
           echo 'CACHE="redis"' >> .env.development
           echo 'REDIS_URL="redis://default:development@redis-dev:6380"' >> .env.development
           echo 'REDIS_PASSWORD="development"' >> .env.development
           echo 'VERSION="${{ github.run_number }}-development"' >> .env.development
+          echo 'SERVER_HOST="frostfire-forge-dev"' >> .env.development
+          echo 'GATEWAY_AUTH_KEY="${{ secrets.GATEWAY_AUTH_KEY }}"' >> .env.development
+
+          # Create gateway .env.gateway file
+          if [ -f "Frostfire-Forge-Gateway/.env.gateway" ]; then
+            echo "Gateway .env.gateway file exists. Removing it."
+            rm Frostfire-Forge-Gateway/.env.gateway
+          fi
+
+          echo 'WEBSRV_PORT=8000' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'WS_PORT=9000' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'WEBSRV_USESSL=false' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'GATEWAY_AUTH_KEY="${{ secrets.GATEWAY_AUTH_KEY }}"' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'HEARTBEAT_INTERVAL=5000' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'SERVER_TIMEOUT=15000' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'SESSION_TIMEOUT=1800000' >> Frostfire-Forge-Gateway/.env.gateway
+
+      - name: Generate Gateway Config
+        env:
+          WEBSRV_PORT: 8000
+          WS_PORT: 9000
+          GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
+          HEARTBEAT_INTERVAL: 5000
+          SERVER_TIMEOUT: 15000
+          SESSION_TIMEOUT: 1800000
+        run: |
+          cd Frostfire-Forge-Gateway
+          bun run create-config
 
       - name: Build Docker Image
+        env:
+          GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
+          HTTP_PORT: 8000
+          HTTPS_PORT: 443
+          WS_PORT: 9000
         run: |
           docker compose -f docker-compose.dev.yml build
 
@@ -103,6 +140,11 @@ jobs:
     needs: [stop-docker-container]
     steps:
       - name: Start Docker Services
+        env:
+          GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
+          HTTP_PORT: 8000
+          HTTPS_PORT: 443
+          WS_PORT: 9000
         run: |
           docker compose -f docker-compose.dev.yml up -d
 
@@ -149,6 +191,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Stop failed containers
         run: |
@@ -182,6 +226,11 @@ jobs:
           fi
 
       - name: Start containers with backup images
+        env:
+          GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
+          HTTP_PORT: 8000
+          HTTPS_PORT: 443
+          WS_PORT: 9000
         run: |
           echo "Starting Docker containers with backup images..."
           docker compose -f docker-compose.dev.yml up -d

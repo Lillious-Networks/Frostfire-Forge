@@ -71,6 +71,12 @@ GAME_NAME=""
 
 CACHE=""
 REDIS_URL=""
+
+GATEWAY_ENABLED=""
+GATEWAY_URL=""
+SERVER_HOST=""
+
+GATEWAY_AUTH_KEY=""
 `;
 
 const assetConfig = {
@@ -121,6 +127,11 @@ const settings = {
   "default_map": "overworld",
   "guest_mode": {
     "enabled": true
+  },
+  "gateway": {
+    "enabled": true,
+    "url": process.env.GATEWAY_URL || process.env.DOMAIN,
+    "heartbeatInterval": 5000
   }
 };
 

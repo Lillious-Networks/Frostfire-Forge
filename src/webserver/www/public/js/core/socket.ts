@@ -1,6 +1,5 @@
 import.meta.hot.accept;
 import { config } from "../web/global.js";
-const socket = new WebSocket(config.WEBSOCKET_URL || "ws://localhost:3000");
 const version = config?.VERSION;
 import "./events.ts";
 import pako from "../libs/pako.js";
@@ -59,7 +58,10 @@ import { createNPC } from "./npc.ts";
 import parseAPNG from "../libs/apng_parser.js";
 import { getCookie } from "./cookies.ts";
 import { createCachedImage } from "./images.ts";
-socket.binaryType = "arraybuffer";
+
+// Socket will be initialized after gateway check
+let socket: WebSocket;
+
 let sentRequests: number = 0,
   receivedResponses: number = 0;
 
@@ -135,7 +137,138 @@ const setupEquipmentSlotHandlers = () => {
   });
 };
 
+/**
+ * Get or generate client ID for sticky sessions
+ */
+function getClientId(): string {
+  // ALWAYS prefer username from cookie if available (for sticky sessions)
+  const username = getCookie('username');
+  if (username) {
+    const userClientId = `user-${username}`;
+    localStorage.setItem('gateway_clientId', userClientId);
+    return userClientId;
+  }
+
+  // For guest users, try to get from localStorage
+  let clientId = localStorage.getItem('gateway_clientId');
+  if (!clientId) {
+    // Generate a unique ID for new guests (browser-compatible)
+    if (window.crypto && window.crypto.randomUUID) {
+      clientId = `client-${window.crypto.randomUUID()}`;
+    } else {
+      // Fallback for older browsers
+      clientId = `client-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    }
+    localStorage.setItem('gateway_clientId', clientId);
+  }
+
+  return clientId;
+}
+
+/**
+ * Connect through gateway with sticky sessions
+ */
+async function connectThroughGateway(gatewayUrl: string, clientId: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      gatewayWs.close();
+      reject(new Error('Gateway connection timeout'));
+    }, 10000);
+
+    // Add clientId as query parameter
+    const url = new URL(gatewayUrl);
+    url.searchParams.set('clientId', clientId);
+
+    const gatewayWs = new WebSocket(url.toString());
+
+    gatewayWs.onmessage = (event) => {
+      clearTimeout(timeout);
+
+      try {
+        const data = JSON.parse(event.data);
+
+        if (data.type === 'server_assignment') {
+          console.log('[Gateway] Assigned to server:', data.server);
+          console.log('[Gateway] Client ID:', data.clientId);
+
+          // Store the clientId returned by gateway
+          localStorage.setItem('gateway_clientId', data.clientId);
+
+          // Build game server URL
+          const gameUrl = `ws://${data.server.host}:${data.server.wsPort}`;
+          gatewayWs.close();
+          resolve(gameUrl);
+        } else if (data.type === 'error') {
+          gatewayWs.close();
+          reject(new Error(`Gateway error: ${data.message}`));
+        }
+      } catch (error) {
+        gatewayWs.close();
+        reject(new Error(`Failed to parse gateway message: ${error}`));
+      }
+    };
+
+    gatewayWs.onerror = (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    };
+
+    gatewayWs.onclose = (event) => {
+      clearTimeout(timeout);
+      if (event.code !== 1000) {
+        reject(new Error(`Gateway closed: ${event.code}`));
+      }
+    };
+  });
+}
+
+// Reconnection tracking
+let isReconnecting = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+
+/**
+ * Initialize WebSocket connection (direct or via gateway)
+ */
+async function initializeSocket() {
+  // Prevent multiple simultaneous reconnection attempts
+  if (isReconnecting) {
+    console.log('[Socket] Already attempting to reconnect, skipping...');
+    return;
+  }
+
+  isReconnecting = true;
+
+  const gatewayEnabled = config.GATEWAY_ENABLED === 'true';
+  const gatewayUrl = config.GATEWAY_URL;
+  let socketUrl = config.WEBSOCKET_URL || "ws://localhost:3000";
+
+  if (gatewayEnabled && gatewayUrl) {
+    try {
+      console.log('[Gateway] Connecting through gateway...');
+      const clientId = getClientId();
+      socketUrl = await connectThroughGateway(gatewayUrl, clientId);
+      console.log('[Gateway] Connecting to assigned server:', socketUrl);
+    } catch (error) {
+      console.warn('[Gateway] Gateway connection failed, using direct connection:', error);
+    }
+  }
+
+  // Create WebSocket connection
+  socket = new WebSocket(socketUrl);
+  socket.binaryType = "arraybuffer";
+  setupSocketHandlers();
+  isReconnecting = false;
+}
+
+/**
+ * Setup socket event handlers
+ */
+function setupSocketHandlers() {
 socket.onopen = () => {
+  // Reset reconnection tracking on successful connection
+  reconnectAttempts = 0;
+
   cache.players.clear();
   // Request fresh player list from server for admin panel
   sendRequest({ type: "GET_ONLINE_PLAYERS", data: null });
@@ -156,11 +289,57 @@ socket.onopen = () => {
 socket.onclose = (ev: CloseEvent) => {
   // Remove the loading bar if it exists
   progressBarContainer.style.display = "none";
-  showNotification(
-    `You have been disconnected from the server: ${ev.code}`,
-    false,
-    true
-  );
+
+  // Check if this was an unexpected disconnect (not code 1000 = normal closure)
+  const wasUnexpected = ev.code !== 1000 && ev.code !== 1001;
+
+  if (wasUnexpected && config.GATEWAY_ENABLED === 'true') {
+    reconnectAttempts++;
+
+    if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+      console.error(`[Socket] Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached`);
+      showNotification(
+        `Failed to reconnect after ${MAX_RECONNECT_ATTEMPTS} attempts. Please refresh the page.`,
+        false,
+        true
+      );
+      return;
+    }
+
+    console.log(`[Socket] Unexpected disconnect (${ev.code}), attempting reconnect (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
+    showNotification(
+      `Connection lost (${ev.code}). Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`,
+      false,
+      false
+    );
+
+    // Attempt to reconnect after 2 seconds
+    setTimeout(async () => {
+      try {
+        await initializeSocket();
+        console.log('[Socket] Reconnected successfully');
+        reconnectAttempts = 0; // Reset on successful connection
+        showNotification(
+          `Reconnected successfully!`,
+          true,
+          false
+        );
+      } catch (error) {
+        console.error('[Socket] Reconnect failed:', error);
+        showNotification(
+          `Reconnection failed. Please refresh the page.`,
+          false,
+          true
+        );
+      }
+    }, 2000);
+  } else {
+    showNotification(
+      `You have been disconnected from the server: ${ev.code}`,
+      false,
+      true
+    );
+  }
 };
 
 socket.onerror = (ev: Event) => {
@@ -2290,6 +2469,8 @@ function showNotification(
   }
 }
 
+} // End of setupSocketHandlers()
+
 let loaded: boolean = false;
 export let selfPlayerSpriteLoaded: boolean = false;
 
@@ -2334,6 +2515,9 @@ async function isLoaded() {
     }, 10);
   });
 }
+
+// Initialize socket connection (via gateway or direct)
+initializeSocket();
 
 setInterval(() => {
   if (

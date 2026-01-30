@@ -19,6 +19,7 @@ import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondens
 // Load settings
 import * as settings from "../config/settings.json";
 import assetCache from "../services/assetCache.ts";
+import { GatewayClient } from "../modules/gateway-client.ts";
 
 const _cert = path.join(import.meta.dir, "../certs/cert.pem");
 const _key = path.join(import.meta.dir, "../certs/key.pem");
@@ -67,7 +68,7 @@ const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
 
 const Server = Bun.serve<Packet, any>({
   port: process.env.WEB_SOCKET_PORT || 3000,
-  reusePort: false,
+  reusePort: true,
   fetch(req, Server) {
     const id = crypto.randomBytes(32).toString("hex");
     const useragent = req.headers.get("user-agent");
@@ -216,6 +217,33 @@ listener.on("onAwake", async () => {
 listener.on("onStart", async () => {});
 
 event.emit("online");
+
+// Initialize gateway client if enabled
+let gatewayClient: GatewayClient | null = null;
+if (settings?.gateway?.enabled) {
+  try {
+    const serverId = process.env.SERVER_ID || `server-${crypto.randomBytes(8).toString("hex")}`;
+    const serverHost = process.env.SERVER_HOST || "localhost";
+    const serverPort = parseInt(process.env.WEB_SOCKET_PORT || "3000");
+    const httpPort = parseInt(process.env.WEBSRV_PORT || "80");
+
+    gatewayClient = new GatewayClient({
+      gatewayUrl: settings.gateway.url,
+      serverId,
+      host: serverHost,
+      port: httpPort,
+      wsPort: serverPort,
+      maxConnections: settings?.websocket?.maxConnections || 2000,
+      heartbeatInterval: settings.gateway.heartbeatInterval || 5000,
+      authKey: settings.gateway.authKey || "change-this-secret-key"
+    });
+
+    // Register with gateway
+    await gatewayClient.register();
+  } catch (error) {
+    log.error(`Failed to initialize gateway client: ${error}`);
+  }
+}
 
 listener.emit("onAwake");
 listener.emit("onStart");
@@ -393,6 +421,11 @@ listener.on("onServerTick", async () => {
       packetQueue.delete(id);
       ClientRateLimit.delete(id);
     }
+  }
+
+  // Update gateway with current connection count
+  if (gatewayClient) {
+    gatewayClient.setActiveConnections(connections.size);
   }
 });
 
@@ -573,3 +606,20 @@ function handleBackpressure(ws: any, action: () => void, retryCount = 0) {
     }
   }
 }
+
+// Graceful shutdown handler
+async function gracefulShutdown(signal: string) {
+  log.info(`Received ${signal}, shutting down gracefully...`);
+
+  // Unregister from gateway if enabled
+  if (gatewayClient) {
+    await gatewayClient.unregister();
+  }
+
+  log.info("Shutdown complete");
+  process.exit(0);
+}
+
+// Register shutdown handlers
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));

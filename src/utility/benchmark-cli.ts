@@ -4,8 +4,9 @@
  *
  * Replicates the browser-based benchmark functionality as a command-line tool.
  * Tests WebSocket connections, simulates player movements, and measures server performance.
+ * Supports gateway/load balancer routing with sticky session testing.
  *
- * Automatically reads configuration from environment variables (DOMAIN, WEB_SOCKET_URL, WEB_SOCKET_PORT).
+ * Automatically reads configuration from environment variables (DOMAIN, WEB_SOCKET_URL, WEB_SOCKET_PORT, GATEWAY_ENABLED).
  * Run with --env-file to specify environment file, or CLI arguments will override env vars.
  *
  * Usage:
@@ -17,11 +18,14 @@
  *   --duration <number>    Test duration in seconds (default: 60, min: 10)
  *   --host <url>          Server host URL (overrides DOMAIN env var)
  *   --ws <url>            WebSocket URL (overrides WEB_SOCKET_URL:WEB_SOCKET_PORT)
+ *   --gateway             Enable gateway load balancer routing
+ *   --gateway-url <url>   Gateway WebSocket URL (default: ws://localhost:9000)
  *   --help                Show this help message
  *
  * Examples:
  *   bun --env-file=.env.production src/utility/benchmark-cli.ts --clients 100 --duration 120
  *   bun --env-file=.env.local src/utility/benchmark-cli.ts --clients 50 --duration 60
+ *   bun --env-file=.env.local src/utility/benchmark-cli.ts --clients 100 --gateway
  */
 
 import chalk from 'chalk';
@@ -34,6 +38,8 @@ function parseArgs() {
     const defaultHost = process.env.DOMAIN || 'http://localhost:80';
     let wsBaseUrl = process.env.WEB_SOCKET_URL || 'ws://localhost';
     const wsPort = process.env.WEB_SOCKET_PORT || '3000';
+    const gatewayEnabled = process.env.GATEWAY_ENABLED === 'true';
+    const defaultGatewayUrl = process.env.GATEWAY_URL || 'ws://localhost:9000';
 
     // Convert http:// to ws:// and https:// to wss:// for WebSocket URLs
     if (wsBaseUrl.startsWith('http://')) {
@@ -54,6 +60,8 @@ function parseArgs() {
         duration: 60,
         host: defaultHost,
         websocketUrl: defaultWebsocketUrl,
+        gatewayEnabled: gatewayEnabled,
+        gatewayUrl: defaultGatewayUrl,
         help: false
     };
 
@@ -71,6 +79,13 @@ function parseArgs() {
                 break;
             case '--ws':
                 config.websocketUrl = args[++i] || defaultWebsocketUrl;
+                break;
+            case '--gateway':
+                config.gatewayEnabled = true;
+                break;
+            case '--gateway-url':
+                config.gatewayUrl = args[++i] || defaultGatewayUrl;
+                config.gatewayEnabled = true; // Automatically enable if URL provided
                 break;
             case '--help':
                 config.help = true;
@@ -94,17 +109,26 @@ Options:
   --duration <number>    Test duration in seconds (min: 10, default: 60, no limit)
   --host <url>          Server host URL (overrides DOMAIN env var)
   --ws <url>            WebSocket URL (overrides WEB_SOCKET_URL:WEB_SOCKET_PORT)
+  --gateway             Enable gateway load balancer routing
+  --gateway-url <url>   Gateway WebSocket URL (default: ws://localhost:9000)
   --help                Show this help message
 
 Environment Variables:
   DOMAIN                Server host URL (e.g., http://beta.forge.lillious.com)
   WEB_SOCKET_URL        WebSocket base URL (e.g., ws://beta.forge.lillious.com)
   WEB_SOCKET_PORT       WebSocket port (e.g., 3000)
+  GATEWAY_ENABLED       Enable gateway routing (true/false)
+  GATEWAY_URL           Gateway WebSocket URL (e.g., ws://localhost:9000)
 
 Examples:
+  # Direct connection (default)
   bun --env-file=.env.production src/utility/benchmark-cli.ts --clients 100 --duration 120
-  bun --env-file=.env.local src/utility/benchmark-cli.ts --clients 50 --duration 60
-  bun --env-file=.env.development src/utility/benchmark-cli.ts
+
+  # Connect through gateway
+  bun --env-file=.env.local src/utility/benchmark-cli.ts --clients 50 --gateway
+
+  # Connect through gateway with custom URL
+  bun --env-file=.env.local src/utility/benchmark-cli.ts --clients 100 --gateway-url ws://gateway.example.com:9000
 `);
 }
 
@@ -150,6 +174,55 @@ function log(message: string, level: 'info' | 'error' | 'success' | 'warn' = 'in
         warn: chalk.yellow('⚠')
     }[level];
     console.log(`${timestamp} ${prefix} ${message}`);
+}
+
+// Connect through gateway to get server assignment
+async function connectThroughGateway(gatewayUrl: string, clientId: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+            gatewayWs.close();
+            reject(new Error('Gateway connection timeout'));
+        }, 10000);
+
+        // Add clientId as query parameter
+        const url = new URL(gatewayUrl);
+        url.searchParams.set('clientId', clientId);
+
+        const gatewayWs = new WebSocket(url.toString());
+
+        gatewayWs.addEventListener('message', (event: any) => {
+            clearTimeout(timeout);
+
+            try {
+                const data = JSON.parse(event.data);
+
+                if (data.type === 'server_assignment') {
+                    // Build game server URL
+                    const gameUrl = `ws://${data.server.host}:${data.server.wsPort}`;
+                    gatewayWs.close();
+                    resolve(gameUrl);
+                } else if (data.type === 'error') {
+                    gatewayWs.close();
+                    reject(new Error(`Gateway error: ${data.message}`));
+                }
+            } catch (error) {
+                gatewayWs.close();
+                reject(new Error(`Failed to parse gateway message: ${error}`));
+            }
+        });
+
+        gatewayWs.addEventListener('error', (error) => {
+            clearTimeout(timeout);
+            reject(error);
+        });
+
+        gatewayWs.addEventListener('close', (event: any) => {
+            clearTimeout(timeout);
+            if (event.code !== 1000) {
+                reject(new Error(`Gateway closed: ${event.code}`));
+            }
+        });
+    });
 }
 
 // Progress bar with connection status
@@ -284,7 +357,7 @@ function startMovementSimulation(websocket: any, initialDelay: number = 0) {
 }
 
 // Create clients
-async function createClients(amount: number, host: string, websocketUrl: string): Promise<any[]> {
+async function createClients(amount: number, host: string, websocketUrl: string, config: ReturnType<typeof parseArgs>): Promise<any[]> {
     const allWebsockets: any[] = [];
     const loggedInWebsockets: any[] = [];
 
@@ -369,7 +442,19 @@ async function createClients(amount: number, host: string, websocketUrl: string)
                     return;
                 }
 
-                const websocket = new WebSocket(websocketUrl, {
+                // Determine WebSocket URL (gateway or direct)
+                let finalWebsocketUrl = websocketUrl;
+                if (config.gatewayEnabled) {
+                    try {
+                        // Generate unique clientId for this benchmark client
+                        const clientId = `benchmark-${crypto.randomUUID()}`;
+                        finalWebsocketUrl = await connectThroughGateway(config.gatewayUrl, clientId);
+                    } catch (error: any) {
+                        log(`Gateway connection failed for client ${i + 1}, using direct: ${error.message}`, 'warn');
+                    }
+                }
+
+                const websocket = new WebSocket(finalWebsocketUrl, {
                     headers: {
                         'User-Agent': 'Frostfire-Forge-Benchmark-CLI/1.0'
                     }
@@ -482,14 +567,23 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
     console.log(`  ${chalk.bold('Clients:')}  ${chalk.white(config.clients)}`);
     console.log(`  ${chalk.bold('Duration:')} ${chalk.white(config.duration + 's')}`);
     console.log(`  ${chalk.bold('Host:')}     ${chalk.blue(config.host)}`);
-    console.log(`  ${chalk.bold('WS URL:')}   ${chalk.blue(config.websocketUrl)}`);
+
+    if (config.gatewayEnabled) {
+        console.log(`  ${chalk.bold('Gateway:')}  ${chalk.green('Enabled')} ${chalk.gray('→')} ${chalk.blue(config.gatewayUrl)}`);
+        console.log(`  ${chalk.dim('Note:')} ${chalk.dim('Each client will be assigned to a server via gateway')}`);
+    } else {
+        console.log(`  ${chalk.bold('WS URL:')}   ${chalk.blue(config.websocketUrl)}`);
+        console.log(`  ${chalk.bold('Gateway:')}  ${chalk.gray('Disabled')}`);
+    }
 
     // Show environment info
-    if (process.env.DOMAIN || process.env.WEB_SOCKET_URL) {
+    if (process.env.DOMAIN || process.env.WEB_SOCKET_URL || process.env.GATEWAY_ENABLED) {
         console.log('\n  ' + chalk.dim('Environment:'));
         if (process.env.DOMAIN) console.log(`  ${chalk.dim('DOMAIN:')} ${chalk.dim(process.env.DOMAIN)}`);
         if (process.env.WEB_SOCKET_URL) console.log(`  ${chalk.dim('WEB_SOCKET_URL:')} ${chalk.dim(process.env.WEB_SOCKET_URL)}`);
         if (process.env.WEB_SOCKET_PORT) console.log(`  ${chalk.dim('WEB_SOCKET_PORT:')} ${chalk.dim(process.env.WEB_SOCKET_PORT)}`);
+        if (process.env.GATEWAY_ENABLED) console.log(`  ${chalk.dim('GATEWAY_ENABLED:')} ${chalk.dim(process.env.GATEWAY_ENABLED)}`);
+        if (process.env.GATEWAY_URL) console.log(`  ${chalk.dim('GATEWAY_URL:')} ${chalk.dim(process.env.GATEWAY_URL)}`);
     }
     console.log('\n' + chalk.gray('─'.repeat(60)) + '\n');
 
@@ -497,8 +591,12 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
 
     const startTime = Date.now();
 
-    log(`Creating ${config.clients} guest accounts...`, 'info');
-    const websockets = await createClients(config.clients, config.host, config.websocketUrl);
+    if (config.gatewayEnabled) {
+        log(`Creating ${config.clients} guest accounts (via gateway)...`, 'info');
+    } else {
+        log(`Creating ${config.clients} guest accounts...`, 'info');
+    }
+    const websockets = await createClients(config.clients, config.host, config.websocketUrl, config);
     const actualClientCount = websockets.length;
 
     console.log(''); // Add newline after connection progress

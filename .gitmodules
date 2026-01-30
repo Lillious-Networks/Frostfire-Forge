@@ -4,3 +4,6 @@
 [submodule "github-api-extended"]
 	path = github-api-extended
 	url = https://github.com/tyler-technologies-oss/github-api-extended
+[submodule "Frostfire-Forge-Gateway"]
+	path = Frostfire-Forge-Gateway
+	url = https://github.com/Lillious-Networks/Frostfire-Forge-Gateway.git
