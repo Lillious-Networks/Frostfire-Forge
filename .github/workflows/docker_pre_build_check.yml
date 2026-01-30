@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Update environment variables for Docker Pre-Build Check Image
         run: |
@@ -32,17 +34,52 @@ jobs:
             rm .env.development
           fi
 
+          # Create game engine .env.development
           echo 'DATABASE_ENGINE="sqlite"' >> .env.development
           echo 'DATABASE_NAME="docker-pre-build"' >> .env.development
           echo 'WEBSRV_PORT=8080' >> .env.development
           echo 'WEBSRV_USESSL=false' >> .env.development
-          echo 'WEB_SOCKET_URL="ws://localhost"' >> .env.development
+          echo 'WEB_SOCKET_URL="ws://localhost:9000"' >> .env.development
           echo 'WEB_SOCKET_PORT=3001' >> .env.development
-          echo 'DOMAIN="http://localhost:8080"' >> .env.development
+          echo 'DOMAIN="http://localhost:8000"' >> .env.development
+          echo 'GATEWAY_URL="http://gateway-dev:8000"' >> .env.development
           echo 'GAME_NAME="Docker Pre-Build"' >> .env.development
           echo 'CACHE="memory"' >> .env.development
           echo 'VERSION="${{ github.run_number }}-pre-build"' >> .env.development
+          echo 'SERVER_HOST="frostfire-forge-dev"' >> .env.development
+          echo 'GATEWAY_AUTH_KEY="pre-build-test-key"' >> .env.development
+
+          # Create gateway .env.gateway file
+          if [ -f "Frostfire-Forge-Gateway/.env.gateway" ]; then
+            echo "Gateway .env.gateway file exists. Removing it."
+            rm Frostfire-Forge-Gateway/.env.gateway
+          fi
+
+          echo 'WEBSRV_PORT=8000' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'WS_PORT=9000' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'WEBSRV_USESSL=false' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'GATEWAY_AUTH_KEY="pre-build-test-key"' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'HEARTBEAT_INTERVAL=5000' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'SERVER_TIMEOUT=15000' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'SESSION_TIMEOUT=1800000' >> Frostfire-Forge-Gateway/.env.gateway
+
+      - name: Generate Gateway Config
+        env:
+          WEBSRV_PORT: 8000
+          WS_PORT: 9000
+          GATEWAY_AUTH_KEY: pre-build-test-key
+          HEARTBEAT_INTERVAL: 5000
+          SERVER_TIMEOUT: 15000
+          SESSION_TIMEOUT: 1800000
+        run: |
+          cd Frostfire-Forge-Gateway
+          bun run create-config
 
       - name: Build Docker Pre-Build Check Image
+        env:
+          GATEWAY_AUTH_KEY: pre-build-test-key
+          HTTP_PORT: 8000
+          HTTPS_PORT: 443
+          WS_PORT: 9000
         run: |
           docker compose -f docker-compose.dev.yml build
