@@ -14,7 +14,6 @@ interface ServerRegistrationConfig {
   wsPort: number;
   maxConnections: number;
   heartbeatInterval: number;
-  authKey: string;
 }
 
 class GatewayClient {
@@ -41,7 +40,7 @@ class GatewayClient {
           port: this.config.port,
           wsPort: this.config.wsPort,
           maxConnections: this.config.maxConnections,
-          authKey: this.config.authKey
+          authKey: process.env.GATEWAY_AUTH_KEY
         })
       });
 
@@ -74,7 +73,7 @@ class GatewayClient {
           body: JSON.stringify({
             id: this.config.serverId,
             activeConnections: this.activeConnections,
-            authKey: this.config.authKey
+            authKey: process.env.GATEWAY_AUTH_KEY
           })
         });
 
@@ -122,7 +121,7 @@ class GatewayClient {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: this.config.serverId,
-          authKey: this.config.authKey
+          authKey: process.env.GATEWAY_AUTH_KEY
         })
       });
       this.registered = false;
