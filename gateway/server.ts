@@ -433,12 +433,12 @@ const httpServer = Bun.serve({
       });
     }
 
-    // Proxy HTTP requests to game servers (for assets like tilesets, maps)
-    // Routes: /tileset, /map, /assets, etc.
-    const assetRoutes = ['/tileset', '/map', '/assets', '/world', '/npc', '/item'];
-    const isAssetRequest = assetRoutes.some(route => url.pathname.startsWith(route));
+    // Proxy ALL HTTP requests to game servers except gateway-specific routes
+    // Gateway-specific routes that should NOT be proxied
+    const gatewayRoutes = ['/register', '/heartbeat', '/unregister', '/status', '/debug'];
+    const isGatewayRoute = gatewayRoutes.some(route => url.pathname.startsWith(route));
 
-    if (isAssetRequest) {
+    if (!isGatewayRoute) {
       // Get a random available server (simple load balancing for assets)
       const availableServers = Array.from(gameServers.values());
       if (availableServers.length === 0) {
