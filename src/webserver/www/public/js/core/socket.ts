@@ -176,20 +176,19 @@ async function connectThroughGateway(gatewayUrl: string, clientId: string): Prom
     }, 10000);
 
     // Convert HTTP gateway URL to WebSocket URL
-    // Use config.WEBSOCKET_URL and config.WEB_SOCKET_PORT to connect to gateway WS
+    // Use config.WEBSOCKET_URL base and GATEWAY_WS_PORT for gateway connection
     let wsUrl = config.WEBSOCKET_URL || "ws://localhost";
 
-    // Parse the URL to add port properly
+    // Parse the URL to use gateway WebSocket port
     try {
       const parsedUrl = new URL(wsUrl);
-      // Only add port if not already specified
-      if (!parsedUrl.port) {
-        parsedUrl.port = config.WEB_SOCKET_PORT;
-      }
+      // Use gateway WebSocket port (9000), not game engine port
+      parsedUrl.port = config.GATEWAY_WS_PORT || '9000';
       wsUrl = parsedUrl.toString();
     } catch (e) {
-      // Fallback if URL parsing fails
-      wsUrl = `${wsUrl}:${config.WEB_SOCKET_PORT}`;
+      // Fallback if URL parsing fails - extract base URL without port
+      const baseUrl = wsUrl.split(':').slice(0, 2).join(':'); // ws://hostname
+      wsUrl = `${baseUrl}:${config.GATEWAY_WS_PORT || '9000'}`;
     }
 
     console.log('[Gateway] Connecting to gateway WebSocket:', wsUrl);

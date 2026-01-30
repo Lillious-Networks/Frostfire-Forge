@@ -21,6 +21,8 @@ function transpileDirectory(sourceDir: string) {
             // Token-replace known variables in script
             const envVars = [ // TODO maybe move this to a config ts file or something to make it more visible or something
                 { key: "__VAR.WEBSOCKETURL__", value: (`${process.env.WEB_SOCKET_URL}:${process.env.WEB_SOCKET_PORT}` as string), defaultvalue: "ws://localhost:3000" },
+                { key: "__VAR.WEB_SOCKET_PORT__", value: process.env.WEB_SOCKET_PORT as string, defaultvalue: "3001" },
+                { key: "__VAR.GATEWAY_WS_PORT__", value: process.env.GATEWAY_WS_PORT as string, defaultvalue: "9000" },
                 { key: "__VAR.VERSION__", value: process.env.VERSION as string, defaultvalue: "" },
                 { key: "__VAR.GATEWAY_ENABLED__", value: process.env.GATEWAY_ENABLED as string, defaultvalue: "false" },
                 { key: "__VAR.GATEWAY_URL__", value: process.env.GATEWAY_URL as string, defaultvalue: "ws://localhost:9000" },
