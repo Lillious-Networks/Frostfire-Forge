@@ -176,9 +176,24 @@ async function connectThroughGateway(gatewayUrl: string, clientId: string): Prom
     }, 10000);
 
     // Convert HTTP gateway URL to WebSocket URL
-    // gatewayUrl is like "http://forge.lillious.com:8000"
-    // We need to connect to the gateway's WebSocket port
-    const wsUrl = `${config.WEBSOCKET_URL}:${config.WEB_SOCKET_PORT}`;
+    // Use config.WEBSOCKET_URL and config.WEB_SOCKET_PORT to connect to gateway WS
+    let wsUrl = config.WEBSOCKET_URL || "ws://localhost";
+
+    // Parse the URL to add port properly
+    try {
+      const parsedUrl = new URL(wsUrl);
+      // Only add port if not already specified
+      if (!parsedUrl.port) {
+        parsedUrl.port = config.WEB_SOCKET_PORT;
+      }
+      wsUrl = parsedUrl.toString();
+    } catch (e) {
+      // Fallback if URL parsing fails
+      wsUrl = `${wsUrl}:${config.WEB_SOCKET_PORT}`;
+    }
+
+    console.log('[Gateway] Connecting to gateway WebSocket:', wsUrl);
+
     const url = new URL(wsUrl);
     url.searchParams.set('clientId', clientId);
 
