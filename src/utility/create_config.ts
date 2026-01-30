@@ -130,7 +130,7 @@ const settings = {
   },
   "gateway": {
     "enabled": true,
-    "url": process.env.DOMAIN,
+    "url": process.env.GATEWAY_URL || process.env.DOMAIN,
     "heartbeatInterval": 5000
   }
 };
