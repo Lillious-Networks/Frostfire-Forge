@@ -283,14 +283,20 @@ async function initializeSocket() {
 
   socket.binaryType = "arraybuffer";
   setupSocketHandlers();
+
+  // If using gateway, socket is already open - manually trigger initialization
+  if (gatewayEnabled && socket.readyState === WebSocket.OPEN) {
+    console.log('[Gateway] Socket already open, triggering initialization manually');
+    initializeConnection();
+  }
+
   isReconnecting = false;
 }
 
 /**
- * Setup socket event handlers
+ * Initialize connection (called when socket opens)
  */
-function setupSocketHandlers() {
-socket.onopen = () => {
+function initializeConnection() {
   // Reset reconnection tracking on successful connection
   reconnectAttempts = 0;
 
@@ -309,6 +315,14 @@ socket.onopen = () => {
     type: "PING",
     data: null,
   });
+}
+
+/**
+ * Setup socket event handlers
+ */
+function setupSocketHandlers() {
+socket.onopen = () => {
+  initializeConnection();
 };
 
 socket.onclose = (ev: CloseEvent) => {
