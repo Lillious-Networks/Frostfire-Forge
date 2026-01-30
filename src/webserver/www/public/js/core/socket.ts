@@ -141,18 +141,19 @@ const setupEquipmentSlotHandlers = () => {
  * Get or generate client ID for sticky sessions
  */
 function getClientId(): string {
-  // Try to get from localStorage first
-  let clientId = localStorage.getItem('gateway_clientId');
+  // ALWAYS prefer username from cookie if available (for sticky sessions)
+  const username = getCookie('username');
+  if (username) {
+    const userClientId = `user-${username}`;
+    localStorage.setItem('gateway_clientId', userClientId);
+    return userClientId;
+  }
 
+  // For guest users, try to get from localStorage
+  let clientId = localStorage.getItem('gateway_clientId');
   if (!clientId) {
-    // Try to use username from cookie if available
-    const username = getCookie('username');
-    if (username) {
-      clientId = `user-${username}`;
-    } else {
-      // Generate a unique ID
-      clientId = `client-${crypto.randomUUID()}`;
-    }
+    // Generate a unique ID for new guests
+    clientId = `client-${crypto.randomUUID()}`;
     localStorage.setItem('gateway_clientId', clientId);
   }
 
@@ -266,11 +267,39 @@ socket.onopen = () => {
 socket.onclose = (ev: CloseEvent) => {
   // Remove the loading bar if it exists
   progressBarContainer.style.display = "none";
-  showNotification(
-    `You have been disconnected from the server: ${ev.code}`,
-    false,
-    true
-  );
+
+  // Check if this was an unexpected disconnect (not code 1000 = normal closure)
+  const wasUnexpected = ev.code !== 1000 && ev.code !== 1001;
+
+  if (wasUnexpected && config.GATEWAY_ENABLED === 'true') {
+    console.log(`[Socket] Unexpected disconnect (${ev.code}), attempting reconnect through gateway...`);
+    showNotification(
+      `Connection lost (${ev.code}). Reconnecting...`,
+      false,
+      false
+    );
+
+    // Attempt to reconnect after 2 seconds
+    setTimeout(async () => {
+      try {
+        await initializeSocket();
+        console.log('[Socket] Reconnected successfully');
+      } catch (error) {
+        console.error('[Socket] Reconnect failed:', error);
+        showNotification(
+          `Reconnection failed. Please refresh the page.`,
+          false,
+          true
+        );
+      }
+    }, 2000);
+  } else {
+    showNotification(
+      `You have been disconnected from the server: ${ev.code}`,
+      false,
+      true
+    );
+  }
 };
 
 socket.onerror = (ev: Event) => {

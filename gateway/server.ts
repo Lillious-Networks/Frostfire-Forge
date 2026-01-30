@@ -85,23 +85,29 @@ function getNextServer(): GameServer | null {
  * Otherwise, assign a new server using round-robin
  */
 function getServerForClient(clientId: string): GameServer | null {
+  console.log(`[Gateway] Looking up session for clientId: ${clientId}`);
+
   // Check if client has an existing session
   const existingSession = clientSessions.get(clientId);
 
   if (existingSession) {
+    console.log(`[Gateway] Found existing session: clientId=${clientId}, serverId=${existingSession.serverId}`);
+
     // Check if the assigned server is still available and healthy
     const assignedServer = gameServers.get(existingSession.serverId);
 
     if (assignedServer && assignedServer.activeConnections < assignedServer.maxConnections) {
       // Update last activity timestamp
       existingSession.lastActivity = Date.now();
-      console.log(`[Gateway] Returning client ${clientId} to existing server: ${assignedServer.id} (sticky session)`);
+      console.log(`[Gateway] ✓ STICKY SESSION: Returning client ${clientId} to existing server: ${assignedServer.id}`);
       return assignedServer;
     } else {
       // Server is gone or full, remove session and assign new server
-      console.log(`[Gateway] Previous server ${existingSession.serverId} unavailable, reassigning client ${clientId}`);
+      console.log(`[Gateway] ✗ Previous server ${existingSession.serverId} unavailable (exists: ${!!assignedServer}, full: ${assignedServer?.activeConnections >= assignedServer?.maxConnections}), reassigning client ${clientId}`);
       clientSessions.delete(clientId);
     }
+  } else {
+    console.log(`[Gateway] No existing session found for clientId: ${clientId}`);
   }
 
   // No existing session or server unavailable - assign new server
@@ -114,7 +120,9 @@ function getServerForClient(clientId: string): GameServer | null {
       lastActivity: Date.now(),
       clientId
     });
-    console.log(`[Gateway] Created new session for client ${clientId} → server ${server.id}`);
+    console.log(`[Gateway] ✓ NEW SESSION: Created session for client ${clientId} → server ${server.id} (Total sessions: ${clientSessions.size})`);
+  } else {
+    console.log(`[Gateway] ✗ NO SERVER AVAILABLE for client ${clientId}`);
   }
 
   return server;
@@ -404,6 +412,23 @@ const httpServer = Bun.serve({
         recentMigrations: migrationHistory.slice(-10), // Last 10 migrations
         servers
       }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    // Debug endpoint to view sessions
+    if (url.pathname === "/debug/sessions" && req.method === "GET") {
+      const sessions = Array.from(clientSessions.entries()).map(([clientId, session]) => ({
+        clientId,
+        serverId: session.serverId,
+        lastActivity: new Date(session.lastActivity).toISOString(),
+        age: Math.floor((Date.now() - session.lastActivity) / 1000) + 's'
+      }));
+
+      return new Response(JSON.stringify({
+        totalSessions: clientSessions.size,
+        sessions: sessions
+      }, null, 2), {
         headers: { "Content-Type": "application/json" }
       });
     }
