@@ -45,10 +45,18 @@ jobs:
           fi
 
           # Create game engine .env.development
-          echo 'DATABASE_ENGINE="sqlite"' >> .env.development
-          echo 'DATABASE_NAME="frostfire-forge-dev"' >> .env.development
+          echo 'DATABASE_ENGINE=mysql' >> .env.development
+          echo 'DATABASE_HOST="${{ secrets.DATABASE_HOST }}"' >> .env.development
+          echo 'DATABASE_NAME="${{ secrets.DATABASE_NAME }}"' >> .env.development
+          echo 'DATABASE_PASSWORD="${{ secrets.DATABASE_PASSWORD }}"' >> .env.development
+          echo 'DATABASE_USER="${{ secrets.DATABASE_USER }}"' >> .env.development
+          echo 'DATABASE_PORT="${{ secrets.DATABASE_PORT }}"' >> .env.development
+          echo 'SESSION_KEY=""' >> .env.development
+          echo 'SQL_SSL_MODE=DISABLED' >> .env.development
           echo 'WEBSRV_PORT=8000' >> .env.development
+          echo 'WEBSRV_PORTSSL=443' >> .env.development
           echo 'WEBSRV_USESSL=false' >> .env.development
+          echo 'TRANSLATION_SERVICE="none"' >> .env.development
           echo 'WEB_SOCKET_URL="ws://forge.lillious.com:9000"' >> .env.development
           echo 'WEB_SOCKET_PORT=3001' >> .env.development
           echo 'GATEWAY_WS_PORT=9000' >> .env.development
