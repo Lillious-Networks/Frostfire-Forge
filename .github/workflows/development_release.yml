@@ -47,13 +47,13 @@ jobs:
           # Create game engine .env.development
           echo 'DATABASE_ENGINE="sqlite"' >> .env.development
           echo 'DATABASE_NAME="frostfire-forge-dev"' >> .env.development
-          echo 'WEBSRV_PORT=8080' >> .env.development
+          echo 'WEBSRV_PORT=8000' >> .env.development
           echo 'WEBSRV_USESSL=false' >> .env.development
-          echo 'WEB_SOCKET_URL="ws://forge.lillious.com"' >> .env.development
+          echo 'WEB_SOCKET_URL="ws://forge.lillious.com:9000"' >> .env.development
           echo 'WEB_SOCKET_PORT=3001' >> .env.development
           echo 'GATEWAY_WS_PORT=9000' >> .env.development
           echo 'DOMAIN="http://forge.lillious.com:8000"' >> .env.development
-          echo 'GATEWAY_URL="http://forge.lillious.com:8000"' >> .env.development
+          echo 'GATEWAY_URL="http://gateway-dev:9999"' >> .env.development
           echo 'GATEWAY_ENABLED=true' >> .env.development
           echo 'GAME_NAME="Frostfire Forge Beta"' >> .env.development
           echo 'CACHE="redis"' >> .env.development
@@ -70,21 +70,21 @@ jobs:
             rm Frostfire-Forge-Gateway/.env.gateway
           fi
 
-          echo 'WEBSRV_PORT=8000' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'WEBSRV_PORT=9999' >> Frostfire-Forge-Gateway/.env.gateway
           echo 'WS_PORT=9000' >> Frostfire-Forge-Gateway/.env.gateway
           echo 'WEBSRV_USESSL=false' >> Frostfire-Forge-Gateway/.env.gateway
           echo 'GATEWAY_AUTH_KEY="${{ secrets.GATEWAY_AUTH_KEY }}"' >> Frostfire-Forge-Gateway/.env.gateway
-          echo 'HEARTBEAT_INTERVAL=5000' >> Frostfire-Forge-Gateway/.env.gateway
-          echo 'SERVER_TIMEOUT=15000' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'HEARTBEAT_INTERVAL=1000' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'SERVER_TIMEOUT=3000' >> Frostfire-Forge-Gateway/.env.gateway
           echo 'SESSION_TIMEOUT=1800000' >> Frostfire-Forge-Gateway/.env.gateway
 
       - name: Generate Gateway Config
         env:
-          WEBSRV_PORT: 8000
+          WEBSRV_PORT: 9999
           WS_PORT: 9000
           GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
-          HEARTBEAT_INTERVAL: 5000
-          SERVER_TIMEOUT: 15000
+          HEARTBEAT_INTERVAL: 1000
+          SERVER_TIMEOUT: 3000
           SESSION_TIMEOUT: 1800000
         run: |
           cd Frostfire-Forge-Gateway
@@ -93,7 +93,7 @@ jobs:
       - name: Build Docker Image
         env:
           GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
-          HTTP_PORT: 8000
+          HTTP_PORT: 9999
           HTTPS_PORT: 443
           WS_PORT: 9000
         run: |
@@ -145,7 +145,7 @@ jobs:
       - name: Start Docker Services
         env:
           GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
-          HTTP_PORT: 8000
+          HTTP_PORT: 9999
           HTTPS_PORT: 443
           WS_PORT: 9000
         run: |
@@ -231,7 +231,7 @@ jobs:
       - name: Start containers with backup images
         env:
           GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
-          HTTP_PORT: 8000
+          HTTP_PORT: 9999
           HTTPS_PORT: 443
           WS_PORT: 9000
         run: |

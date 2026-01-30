@@ -4,13 +4,13 @@ services:
       context: ./Frostfire-Forge-Gateway
       dockerfile: Dockerfile
       args:
-        HTTP_PORT: ${HTTP_PORT:-8000}
+        HTTP_PORT: ${HTTP_PORT:-9999}
         HTTPS_PORT: ${HTTPS_PORT:-443}
         WS_PORT: ${WS_PORT:-9000}
     container_name: frostfire-gateway-dev
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "9999:9999"
       - "9000:9000"
     env_file:
       - ./Frostfire-Forge-Gateway/.env.gateway
@@ -27,10 +27,9 @@ services:
       dockerfile: Dockerfile.dev
     container_name: frostfire-forge-dev
     restart: unless-stopped
-    # Ports NOT exposed - only accessible through gateway
-    # ports:
-    #   - "8080:8080"
-    #   - "3001:3001"
+    ports:
+      - "8000:8000"
+      - "3001:3001"
     volumes:
       - ./.env.development:/app/.env.development:ro
     env_file:
