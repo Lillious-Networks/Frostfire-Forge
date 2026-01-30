@@ -234,7 +234,8 @@ if (settings?.gateway?.enabled) {
       port: httpPort,
       wsPort: serverPort,
       maxConnections: settings?.websocket?.maxConnections || 2000,
-      heartbeatInterval: settings.gateway.heartbeatInterval || 5000
+      heartbeatInterval: settings.gateway.heartbeatInterval || 5000,
+      authKey: settings.gateway.authKey || "change-this-secret-key"
     });
 
     // Register with gateway

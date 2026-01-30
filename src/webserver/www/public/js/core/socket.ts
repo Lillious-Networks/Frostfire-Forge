@@ -319,6 +319,11 @@ socket.onclose = (ev: CloseEvent) => {
         await initializeSocket();
         console.log('[Socket] Reconnected successfully');
         reconnectAttempts = 0; // Reset on successful connection
+        showNotification(
+          `Reconnected successfully!`,
+          true,
+          false
+        );
       } catch (error) {
         console.error('[Socket] Reconnect failed:', error);
         showNotification(
