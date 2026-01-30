@@ -74,8 +74,8 @@ jobs:
           echo 'WS_PORT=9000' >> Frostfire-Forge-Gateway/.env.gateway
           echo 'WEBSRV_USESSL=false' >> Frostfire-Forge-Gateway/.env.gateway
           echo 'GATEWAY_AUTH_KEY="${{ secrets.GATEWAY_AUTH_KEY }}"' >> Frostfire-Forge-Gateway/.env.gateway
-          echo 'HEARTBEAT_INTERVAL=1000' >> Frostfire-Forge-Gateway/.env.gateway
-          echo 'SERVER_TIMEOUT=3000' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'HEARTBEAT_INTERVAL=5000' >> Frostfire-Forge-Gateway/.env.gateway
+          echo 'SERVER_TIMEOUT=15000' >> Frostfire-Forge-Gateway/.env.gateway
           echo 'SESSION_TIMEOUT=1800000' >> Frostfire-Forge-Gateway/.env.gateway
 
       - name: Generate Gateway Config
@@ -83,8 +83,8 @@ jobs:
           WEBSRV_PORT: 9999
           WS_PORT: 9000
           GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
-          HEARTBEAT_INTERVAL: 1000
-          SERVER_TIMEOUT: 3000
+          HEARTBEAT_INTERVAL: 5000
+          SERVER_TIMEOUT: 15000
           SESSION_TIMEOUT: 1800000
         run: |
           cd Frostfire-Forge-Gateway
