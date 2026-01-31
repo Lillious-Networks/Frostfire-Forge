@@ -83,38 +83,7 @@ jobs:
           echo 'PUBLIC_HOST="server1.lillious.com"' >> .env.development
           echo 'GATEWAY_AUTH_KEY="${{ secrets.GATEWAY_AUTH_KEY }}"' >> .env.development
 
-          # Create gateway .env.gateway file
-          if [ -f "Frostfire-Forge-Gateway/.env.gateway" ]; then
-            echo "Gateway .env.gateway file exists. Removing it."
-            rm Frostfire-Forge-Gateway/.env.gateway
-          fi
-
-          echo 'WEBSRV_PORT=9999' >> Frostfire-Forge-Gateway/.env.gateway
-          echo 'WS_PORT=9000' >> Frostfire-Forge-Gateway/.env.gateway
-          echo 'WEBSRV_USESSL=false' >> Frostfire-Forge-Gateway/.env.gateway
-          echo 'GATEWAY_AUTH_KEY="${{ secrets.GATEWAY_AUTH_KEY }}"' >> Frostfire-Forge-Gateway/.env.gateway
-          echo 'HEARTBEAT_INTERVAL=5000' >> Frostfire-Forge-Gateway/.env.gateway
-          echo 'SERVER_TIMEOUT=15000' >> Frostfire-Forge-Gateway/.env.gateway
-          echo 'SESSION_TIMEOUT=1800000' >> Frostfire-Forge-Gateway/.env.gateway
-
-      - name: Generate Gateway Config
-        env:
-          WEBSRV_PORT: 9999
-          WS_PORT: 9000
-          GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
-          HEARTBEAT_INTERVAL: 5000
-          SERVER_TIMEOUT: 15000
-          SESSION_TIMEOUT: 1800000
-        run: |
-          cd Frostfire-Forge-Gateway
-          bun run create-config
-
       - name: Build Docker Image
-        env:
-          GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
-          HTTP_PORT: 9999
-          HTTPS_PORT: 443
-          WS_PORT: 9000
         run: |
           docker compose -f docker-compose.dev.yml build
 
@@ -180,11 +149,6 @@ jobs:
     needs: [stop-docker-container]
     steps:
       - name: Start Docker Services
-        env:
-          GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
-          HTTP_PORT: 9999
-          HTTPS_PORT: 443
-          WS_PORT: 9000
         run: |
           docker compose -f docker-compose.dev.yml up -d
 
@@ -205,10 +169,6 @@ jobs:
 
           echo "=== Docker Container Status ==="
           docker compose -f docker-compose.dev.yml ps
-
-          echo ""
-          echo "=== Gateway Logs ==="
-          docker compose -f docker-compose.dev.yml logs gateway-dev --tail=100
 
           echo ""
           echo "=== Game Server Logs ==="
@@ -286,11 +246,6 @@ jobs:
           docker builder prune -f || true
 
       - name: Start containers with backup images
-        env:
-          GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
-          HTTP_PORT: 9999
-          HTTPS_PORT: 443
-          WS_PORT: 9000
         run: |
           echo "Starting Docker containers with backup images..."
           docker compose -f docker-compose.dev.yml up -d

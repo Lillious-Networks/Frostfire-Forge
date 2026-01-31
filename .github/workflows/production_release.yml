@@ -95,20 +95,6 @@ jobs:
             echo 'PUBLIC_HOST="forge.lillious.com"' >> .env.production
             echo 'GATEWAY_AUTH_KEY="${{ secrets.GATEWAY_AUTH_KEY }}"' >> .env.production
 
-            # Create gateway .env.gateway file
-            if [ -f "Frostfire-Forge-Gateway/.env.gateway" ]; then
-              echo "Gateway .env.gateway file exists. Removing it."
-              rm Frostfire-Forge-Gateway/.env.gateway
-            fi
-
-            echo 'WEBSRV_PORT=80' >> Frostfire-Forge-Gateway/.env.gateway
-            echo 'WS_PORT=3000' >> Frostfire-Forge-Gateway/.env.gateway
-            echo 'WEBSRV_USESSL=false' >> Frostfire-Forge-Gateway/.env.gateway
-            echo 'GATEWAY_AUTH_KEY="${{ secrets.GATEWAY_AUTH_KEY }}"' >> Frostfire-Forge-Gateway/.env.gateway
-            echo 'HEARTBEAT_INTERVAL=1000' >> Frostfire-Forge-Gateway/.env.gateway
-            echo 'SERVER_TIMEOUT=3000' >> Frostfire-Forge-Gateway/.env.gateway
-            echo 'SESSION_TIMEOUT=1800000' >> Frostfire-Forge-Gateway/.env.gateway
-
         - name: Create Certificate Chain
           working-directory: src/certs
           run: |
@@ -121,29 +107,8 @@ jobs:
             # Create private key
             echo "${{ secrets.CERT_PRIVATE_KEY }}" > key.pem
 
-        - name: Setup Bun
-          uses: oven-sh/setup-bun@v2
-          with:
-            bun-version: latest
-
-        - name: Generate Gateway Config
-          env:
-            WEBSRV_PORT: 80
-            WS_PORT: 3000
-            GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
-            HEARTBEAT_INTERVAL: 1000
-            SERVER_TIMEOUT: 3000
-            SESSION_TIMEOUT: 1800000
-          run: |
-            cd Frostfire-Forge-Gateway
-            bun run create-config
-
         - name: Build Docker Image
           env:
-            GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
-            HTTP_PORT: 80
-            HTTPS_PORT: 443
-            WS_PORT: 3000
             REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
           run: |
             docker compose -f docker-compose.prod.yml build
@@ -193,10 +158,6 @@ jobs:
       steps:
         - name: Start Docker Services
           env:
-            GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
-            HTTP_PORT: 80
-            HTTPS_PORT: 443
-            WS_PORT: 3000
             REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
           run: |
             docker compose -f docker-compose.prod.yml up -d
@@ -283,10 +244,6 @@ jobs:
 
         - name: Start containers with backup images
           env:
-            GATEWAY_AUTH_KEY: ${{ secrets.GATEWAY_AUTH_KEY }}
-            HTTP_PORT: 80
-            HTTPS_PORT: 443
-            WS_PORT: 3000
             REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
           run: |
             echo "Starting Docker containers with backup images..."

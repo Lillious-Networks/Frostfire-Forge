@@ -1,27 +1,4 @@
 services:
-  gateway-prod:
-    build:
-      context: ./Frostfire-Forge-Gateway
-      dockerfile: Dockerfile
-      args:
-        HTTP_PORT: ${HTTP_PORT:-80}
-        HTTPS_PORT: ${HTTPS_PORT:-443}
-        WS_PORT: ${WS_PORT:-3000}
-    container_name: frostfire-gateway-prod
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      - "3000:3000"
-    env_file:
-      - ./Frostfire-Forge-Gateway/.env.gateway
-    environment:
-      - GATEWAY_AUTH_KEY=${GATEWAY_AUTH_KEY}
-    volumes:
-      - ./Frostfire-Forge-Gateway/config.json:/app/config.json:ro
-    networks:
-      - frostfire-network
-
   frostfire-forge:
     build:
       context: .
@@ -42,7 +19,6 @@ services:
       - frostfire-network
     depends_on:
       - redis
-      - gateway-prod
 
   redis:
     image: redis:7-alpine
