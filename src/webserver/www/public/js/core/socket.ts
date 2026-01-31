@@ -206,12 +206,15 @@ async function connectThroughGateway(gatewayUrl: string, clientId: string): Prom
           // Store the clientId returned by gateway
           localStorage.setItem('gateway_clientId', data.clientId);
 
-          // Clear the temporary message handler - setupSocketHandlers will set the real one
-          gatewayWs.onmessage = null;
+          // Close gateway connection
+          gatewayWs.close();
 
-          // Return the gateway WebSocket connection - don't close it!
-          // The gateway will proxy all traffic to the assigned game server
-          resolve(gatewayWs);
+          // Connect directly to the assigned game server
+          const gameServerWsUrl = `${data.server.host.startsWith('ws') ? '' : 'ws://'}${data.server.host}:${data.server.wsPort}`;
+          console.log(`[Gateway] Connecting to assigned server: ${gameServerWsUrl}`);
+
+          const gameServerWs = new WebSocket(gameServerWsUrl);
+          resolve(gameServerWs);
         } else if (data.type === 'error') {
           gatewayWs.close();
           reject(new Error(`Gateway error: ${data.message}`));
