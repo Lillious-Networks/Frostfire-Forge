@@ -96,9 +96,63 @@ class GatewayClient {
   }
 
   /**
-   * Get system RAM usage in MB
+   * Get container RAM usage in MB (or system RAM if not in container)
    */
   private getRamUsage(): { used: number; total: number } {
+    try {
+      // Try to read container memory from cgroup (Docker/Kubernetes)
+      const fs = require('fs');
+
+      // Try cgroup v2 first (newer Docker)
+      if (fs.existsSync('/sys/fs/cgroup/memory.max')) {
+        const maxBytes = fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim();
+        const currentBytes = fs.readFileSync('/sys/fs/cgroup/memory.current', 'utf8').trim();
+
+        // If max is "max", container has no memory limit - use host memory
+        if (maxBytes === 'max') {
+          return this.getHostRamUsage();
+        }
+
+        const totalMem = parseInt(maxBytes) / (1024 * 1024); // Convert to MB
+        const usedMem = parseInt(currentBytes) / (1024 * 1024);
+
+        return {
+          used: Math.round(usedMem),
+          total: Math.round(totalMem)
+        };
+      }
+
+      // Try cgroup v1 (older Docker)
+      if (fs.existsSync('/sys/fs/cgroup/memory/memory.limit_in_bytes')) {
+        const maxBytes = fs.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8').trim();
+        const currentBytes = fs.readFileSync('/sys/fs/cgroup/memory/memory.usage_in_bytes', 'utf8').trim();
+
+        const totalMem = parseInt(maxBytes) / (1024 * 1024);
+        const usedMem = parseInt(currentBytes) / (1024 * 1024);
+
+        // If limit is very large (no real limit), use host memory
+        if (totalMem > os.totalmem() / (1024 * 1024)) {
+          return this.getHostRamUsage();
+        }
+
+        return {
+          used: Math.round(usedMem),
+          total: Math.round(totalMem)
+        };
+      }
+    } catch (error) {
+      // If reading cgroup fails, fall back to host memory
+      log.debug(`Failed to read container memory, using host memory: ${error}`);
+    }
+
+    // Not in a container or reading failed - use host memory
+    return this.getHostRamUsage();
+  }
+
+  /**
+   * Get host RAM usage in MB
+   */
+  private getHostRamUsage(): { used: number; total: number } {
     const totalMem = os.totalmem() / (1024 * 1024); // Convert to MB
     const freeMem = os.freemem() / (1024 * 1024);   // Convert to MB
     const usedMem = totalMem - freeMem;
