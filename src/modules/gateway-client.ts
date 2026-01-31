@@ -98,19 +98,21 @@ class GatewayClient {
   /**
    * Get container RAM usage in MB (or system RAM if not in container)
    */
-  private getRamUsage(): { used: number; total: number } {
+  private async getRamUsage(): Promise<{ used: number; total: number }> {
     try {
       // Try to read container memory from cgroup (Docker/Kubernetes)
-      const fs = require('fs');
-
       // Try cgroup v2 first (newer Docker)
-      if (fs.existsSync('/sys/fs/cgroup/memory.current')) {
-        const currentBytes = fs.readFileSync('/sys/fs/cgroup/memory.current', 'utf8').trim();
+      const currentFile = Bun.file('/sys/fs/cgroup/memory.current');
+      if (await currentFile.exists()) {
+        const currentText = await currentFile.text();
+        const currentBytes = currentText.trim();
         const usedMem = parseInt(currentBytes) / (1024 * 1024);
 
         // Check if there's a memory limit set
-        if (fs.existsSync('/sys/fs/cgroup/memory.max')) {
-          const maxBytes = fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim();
+        const maxFile = Bun.file('/sys/fs/cgroup/memory.max');
+        if (await maxFile.exists()) {
+          const maxText = await maxFile.text();
+          const maxBytes = maxText.trim();
 
           // If max is "max", no limit set - report used vs host total
           if (maxBytes === 'max') {
@@ -138,13 +140,17 @@ class GatewayClient {
       }
 
       // Try cgroup v1 (older Docker)
-      if (fs.existsSync('/sys/fs/cgroup/memory/memory.usage_in_bytes')) {
-        const currentBytes = fs.readFileSync('/sys/fs/cgroup/memory/memory.usage_in_bytes', 'utf8').trim();
+      const usageFile = Bun.file('/sys/fs/cgroup/memory/memory.usage_in_bytes');
+      if (await usageFile.exists()) {
+        const usageText = await usageFile.text();
+        const currentBytes = usageText.trim();
         const usedMem = parseInt(currentBytes) / (1024 * 1024);
 
         // Check if there's a memory limit set
-        if (fs.existsSync('/sys/fs/cgroup/memory/memory.limit_in_bytes')) {
-          const maxBytes = fs.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8').trim();
+        const limitFile = Bun.file('/sys/fs/cgroup/memory/memory.limit_in_bytes');
+        if (await limitFile.exists()) {
+          const limitText = await limitFile.text();
+          const maxBytes = limitText.trim();
           const totalMem = parseInt(maxBytes) / (1024 * 1024);
           const hostTotal = os.totalmem() / (1024 * 1024);
 
@@ -200,7 +206,7 @@ class GatewayClient {
     this.heartbeatTimer = setInterval(async () => {
       try {
         const cpuUsage = this.getCpuUsage();
-        const ramUsage = this.getRamUsage();
+        const ramUsage = await this.getRamUsage();
 
         const response = await fetch(`${this.config.gatewayUrl}/heartbeat`, {
           method: "POST",
