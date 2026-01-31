@@ -409,12 +409,12 @@ async function createClients(amount: number, host: string, websocketUrl: string,
 
         // Create clients with controlled staggering in batches
         const clientPromises = [];
-        const batchSize = 2; // Create 2 clients at a time
-        const batchDelay = 500; // 500ms between batches (very conservative for high counts)
+        const batchSize = 1; // Create 1 client at a time to avoid database contention
+        const batchDelay = 300; // 300ms between clients (prevents overwhelming guest account creation)
 
         for (let i = 0; i < amount; i++) {
             const clientPromise = (async () => {
-                // Add delay based on batch (every 2 clients waits 500ms)
+                // Add delay based on batch (each client waits 300ms)
                 const batchIndex = Math.floor(i / batchSize);
                 if (batchIndex > 0) {
                     await new Promise(resolve => setTimeout(resolve, batchIndex * batchDelay));
@@ -426,7 +426,8 @@ async function createClients(amount: number, host: string, websocketUrl: string,
                     headers: {
                         'Content-Type': 'application/json',
                         'User-Agent': 'Frostfire-Forge-Benchmark-CLI/1.0'
-                    }
+                    },
+                    signal: AbortSignal.timeout(15000) // 15 second timeout for guest account creation
                 });
 
                 if (response.status !== 301) {
@@ -516,7 +517,11 @@ async function createClients(amount: number, host: string, websocketUrl: string,
                     }
                 });
                 } catch (error: any) {
-                    log(`Error creating guest account: ${error.message}`, 'error');
+                    if (error.name === 'AbortError' || error.name === 'TimeoutError') {
+                        log(`Guest account creation timed out after 15s (possible database contention)`, 'error');
+                    } else {
+                        log(`Error creating guest account: ${error.message}`, 'error');
+                    }
                 }
             })();
 

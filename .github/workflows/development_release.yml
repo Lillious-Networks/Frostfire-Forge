@@ -70,7 +70,7 @@ jobs:
           echo 'WEBSRV_PORTSSL=443' >> .env.development
           echo 'WEBSRV_USESSL=false' >> .env.development
           echo 'TRANSLATION_SERVICE="none"' >> .env.development
-          echo 'WEB_SOCKET_URL="ws://forge.lillious.com:9000"' >> .env.development
+          echo 'WEB_SOCKET_URL="ws://gateway.lillious.com"' >> .env.development
           echo 'WEB_SOCKET_PORT=3001' >> .env.development
           echo 'GATEWAY_WS_PORT=9000' >> .env.development
           echo 'DOMAIN="http://forge.lillious.com:8000"' >> .env.development
