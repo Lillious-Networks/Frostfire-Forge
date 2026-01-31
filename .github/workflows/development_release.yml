@@ -80,7 +80,7 @@ jobs:
           echo 'CACHE="memory"' >> .env.development
           echo 'VERSION="${{ github.run_number }}-development"' >> .env.development
           echo 'SERVER_HOST="frostfire-forge-dev"' >> .env.development
-          echo 'PUBLIC_HOST="forge.lillious.com"' >> .env.development
+          echo 'PUBLIC_HOST="server1.lillious.com"' >> .env.development
           echo 'GATEWAY_AUTH_KEY="${{ secrets.GATEWAY_AUTH_KEY }}"' >> .env.development
 
           # Create gateway .env.gateway file
