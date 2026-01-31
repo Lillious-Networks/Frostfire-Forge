@@ -104,40 +104,70 @@ class GatewayClient {
       const fs = require('fs');
 
       // Try cgroup v2 first (newer Docker)
-      if (fs.existsSync('/sys/fs/cgroup/memory.max')) {
-        const maxBytes = fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim();
+      if (fs.existsSync('/sys/fs/cgroup/memory.current')) {
         const currentBytes = fs.readFileSync('/sys/fs/cgroup/memory.current', 'utf8').trim();
-
-        // If max is "max", container has no memory limit - use host memory
-        if (maxBytes === 'max') {
-          return this.getHostRamUsage();
-        }
-
-        const totalMem = parseInt(maxBytes) / (1024 * 1024); // Convert to MB
         const usedMem = parseInt(currentBytes) / (1024 * 1024);
 
+        // Check if there's a memory limit set
+        if (fs.existsSync('/sys/fs/cgroup/memory.max')) {
+          const maxBytes = fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim();
+
+          // If max is "max", no limit set - report used vs host total
+          if (maxBytes === 'max') {
+            const hostTotal = os.totalmem() / (1024 * 1024);
+            return {
+              used: Math.round(usedMem),
+              total: Math.round(hostTotal)
+            };
+          }
+
+          // Has a limit - report used vs limit
+          const totalMem = parseInt(maxBytes) / (1024 * 1024);
+          return {
+            used: Math.round(usedMem),
+            total: Math.round(totalMem)
+          };
+        }
+
+        // No limit file, use host total
+        const hostTotal = os.totalmem() / (1024 * 1024);
         return {
           used: Math.round(usedMem),
-          total: Math.round(totalMem)
+          total: Math.round(hostTotal)
         };
       }
 
       // Try cgroup v1 (older Docker)
-      if (fs.existsSync('/sys/fs/cgroup/memory/memory.limit_in_bytes')) {
-        const maxBytes = fs.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8').trim();
+      if (fs.existsSync('/sys/fs/cgroup/memory/memory.usage_in_bytes')) {
         const currentBytes = fs.readFileSync('/sys/fs/cgroup/memory/memory.usage_in_bytes', 'utf8').trim();
-
-        const totalMem = parseInt(maxBytes) / (1024 * 1024);
         const usedMem = parseInt(currentBytes) / (1024 * 1024);
 
-        // If limit is very large (no real limit), use host memory
-        if (totalMem > os.totalmem() / (1024 * 1024)) {
-          return this.getHostRamUsage();
+        // Check if there's a memory limit set
+        if (fs.existsSync('/sys/fs/cgroup/memory/memory.limit_in_bytes')) {
+          const maxBytes = fs.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8').trim();
+          const totalMem = parseInt(maxBytes) / (1024 * 1024);
+          const hostTotal = os.totalmem() / (1024 * 1024);
+
+          // If limit is unrealistically large (no real limit), use actual container usage vs host total
+          if (totalMem > hostTotal) {
+            return {
+              used: Math.round(usedMem),
+              total: Math.round(hostTotal)
+            };
+          }
+
+          // Has a real limit - report used vs limit
+          return {
+            used: Math.round(usedMem),
+            total: Math.round(totalMem)
+          };
         }
 
+        // No limit file, use host total
+        const hostTotal = os.totalmem() / (1024 * 1024);
         return {
           used: Math.round(usedMem),
-          total: Math.round(totalMem)
+          total: Math.round(hostTotal)
         };
       }
     } catch (error) {
