@@ -565,7 +565,8 @@ async function login(req: Request, server: any) {
       // Remove any verification code that may exist
       await query("UPDATE accounts SET verification_code = NULL WHERE token = ?", [token]);
       // 2FA is not enabled, so we can just return the token
-      return new Response(JSON.stringify({ message: "Logged in successfully"}), { status: 301, headers: { "Set-Cookie": `token=${token}; Path=/;` } });
+      log.debug(`Login successful for ${username}, setting cookie with token: ${token}`);
+      return new Response(JSON.stringify({ message: "Logged in successfully"}), { status: 301, headers: { "Set-Cookie": `token=${token}; Path=/; SameSite=Lax` } });
     } else {
       // 2FA is enabled, so we need to send a verification email
       const result = await verify(token, useremail.toLowerCase(), username.toLowerCase()) as any;

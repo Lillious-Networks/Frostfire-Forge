@@ -73,7 +73,7 @@ jobs:
           echo 'WEB_SOCKET_URL="ws://gateway.lillious.com"' >> .env.development
           echo 'WEB_SOCKET_PORT=3001' >> .env.development
           echo 'GATEWAY_WS_PORT=9000' >> .env.development
-          echo 'DOMAIN="http://forge.lillious.com:8000"' >> .env.development
+          echo 'DOMAIN="http://development.lillious.com:8000"' >> .env.development
           echo 'GATEWAY_URL="http://gateway.lillious.com:9999"' >> .env.development
           echo 'GATEWAY_ENABLED=true' >> .env.development
           echo 'GAME_NAME="Frostfire Forge Beta"' >> .env.development
