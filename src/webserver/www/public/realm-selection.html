@@ -1,0 +1,368 @@
+<html lang="en">
+    <head>
+        <link rel="icon" type="image/ico" href="img/icons/favicon.ico">
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="theme-color" content="#000000">
+        <title>Select Realm</title>
+        <script src="js/web/notification.js"></script>
+        <link rel="stylesheet" href="css/style.css">
+        <style>
+            #realm-container {
+                background: rgba(31, 41, 55, 0.6);
+                backdrop-filter: blur(20px);
+                -webkit-backdrop-filter: blur(20px);
+                border: 1px solid rgba(139, 92, 246, 0.2);
+                border-radius: 16px;
+                padding: 30px;
+                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+                max-width: 600px;
+                width: 100%;
+            }
+
+            #realm-title {
+                color: #e8eaf6;
+                font-size: 24px;
+                font-weight: 700;
+                margin-bottom: 20px;
+                text-align: center;
+                letter-spacing: 0.5px;
+            }
+
+            #realm-list {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                margin-bottom: 20px;
+                max-height: 400px;
+                overflow-y: auto;
+                padding-right: 10px;
+            }
+
+            .realm-card {
+                background: linear-gradient(135deg, rgba(31, 41, 55, 0.8) 0%, rgba(31, 41, 55, 0.6) 100%);
+                border: 1px solid rgba(139, 92, 246, 0.15);
+                border-radius: 8px;
+                padding: 12px 14px;
+                cursor: pointer;
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                position: relative;
+                overflow: hidden;
+            }
+
+            .realm-card::before {
+                content: '';
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                height: 2px;
+                background: linear-gradient(90deg, #8b5cf6, #6366f1);
+                opacity: 0;
+                transition: opacity 0.3s;
+            }
+
+            .realm-card:hover {
+                border-color: rgba(139, 92, 246, 0.4);
+                background: linear-gradient(135deg, rgba(31, 41, 55, 0.9) 0%, rgba(31, 41, 55, 0.7) 100%);
+                box-shadow: 0 4px 20px rgba(139, 92, 246, 0.2);
+                transform: translateY(-2px);
+            }
+
+            .realm-card:hover::before {
+                opacity: 1;
+            }
+
+            .realm-card.selected {
+                border-color: rgba(139, 92, 246, 0.6);
+                background: linear-gradient(135deg, rgba(139, 92, 246, 0.3) 0%, rgba(31, 41, 55, 0.8) 100%);
+            }
+
+            .realm-card.selected::before {
+                opacity: 1;
+            }
+
+            .realm-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+
+            .realm-name {
+                color: #e8eaf6;
+                font-size: 14px;
+                font-weight: 700;
+                letter-spacing: 0.3px;
+            }
+
+            .realm-right {
+                display: flex;
+                flex-direction: column;
+                align-items: flex-end;
+                gap: 4px;
+            }
+
+            .realm-status {
+                padding: 3px 8px;
+                border-radius: 4px;
+                font-size: 9px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.6px;
+            }
+
+            .realm-latency {
+                color: #9ca3af;
+                font-size: 10px;
+                font-weight: 500;
+            }
+
+            .realm-status.healthy {
+                background: rgba(16, 185, 129, 0.2);
+                color: #34d399;
+                border: 1px solid rgba(16, 185, 129, 0.4);
+            }
+
+            .realm-status.degraded {
+                background: rgba(245, 158, 11, 0.2);
+                color: #fbbf24;
+                border: 1px solid rgba(245, 158, 11, 0.4);
+            }
+
+            .realm-status.alert {
+                background: rgba(220, 38, 38, 0.2);
+                color: #fca5a5;
+                border: 1px solid rgba(220, 38, 38, 0.4);
+            }
+
+            .realm-metrics {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-top: 8px;
+            }
+
+            .realm-metric {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+            }
+
+            .realm-metric-label {
+                color: #9ca3af;
+                font-size: 11px;
+                font-weight: 500;
+            }
+
+            .realm-metric-value {
+                color: #fff;
+                font-size: 12px;
+                font-weight: 700;
+            }
+
+            #continue-button {
+                width: 100%;
+                padding: 14px 20px;
+                background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+                color: white;
+                font-size: 15px;
+                font-weight: 600;
+                border-radius: 10px;
+                cursor: pointer;
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                border: 1px solid rgba(139, 92, 246, 0.3);
+                margin-top: 10px;
+            }
+
+            #continue-button:hover:not(:disabled) {
+                background: linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%);
+                box-shadow: 0 8px 32px rgba(139, 92, 246, 0.4);
+                transform: translateY(-2px);
+            }
+
+            #continue-button:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+
+            #loading-message {
+                text-align: center;
+                color: #9ca3af;
+                font-size: 14px;
+                padding: 40px 20px;
+            }
+
+            #skip-link {
+                width: 100%;
+                padding: 12px 20px;
+                background: transparent;
+                color: #9ca3af;
+                font-size: 14px;
+                font-weight: 500;
+                border-radius: 10px;
+                cursor: pointer;
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                border: 1px solid rgba(156, 163, 175, 0.2);
+                margin-top: 10px;
+                display: block;
+                text-align: center;
+                text-decoration: none;
+                box-sizing: border-box;
+            }
+
+            #skip-link:hover {
+                color: #c4b5fd;
+                border-color: rgba(139, 92, 246, 0.3);
+                background: rgba(139, 92, 246, 0.05);
+                transform: translateY(-1px);
+            }
+
+            ::-webkit-scrollbar {
+                width: 8px;
+            }
+
+            ::-webkit-scrollbar-track {
+                background: rgba(0, 0, 0, 0.2);
+                border-radius: 10px;
+            }
+
+            ::-webkit-scrollbar-thumb {
+                background: rgba(139, 92, 246, 0.3);
+                border-radius: 10px;
+            }
+
+            ::-webkit-scrollbar-thumb:hover {
+                background: rgba(139, 92, 246, 0.5);
+            }
+        </style>
+    </head>
+    <body>
+        <div id="container">
+            <div id="logo"></div>
+            <div id="realm-container">
+                <div id="realm-title">Select Your Realm</div>
+                <div id="realm-list">
+                    <div id="loading-message">Loading available realms...</div>
+                </div>
+                <button type="button" id="continue-button" disabled>Continue</button>
+                <a id="skip-link">Skip</a>
+            </div>
+        </div>
+
+        <script>
+            let selectedServerId = null;
+            let servers = [];
+
+            async function loadServers() {
+                try {
+                    const response = await fetch('/api/gateway/servers');
+
+                    if (!response.ok) {
+                        throw new Error('Failed to fetch servers');
+                    }
+
+                    const data = await response.json();
+                    servers = data.servers;
+
+                    renderServers();
+                } catch (error) {
+                    document.getElementById('loading-message').innerHTML =
+                        `<span style="color: #fca5a5;">Failed to load realms. <a href="#" onclick="location.reload()">Retry</a> or <a href="#" id="skip-link-error">skip</a>.</span>`;
+
+                    document.getElementById('skip-link-error')?.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        continueToGame(null);
+                    });
+                }
+            }
+
+            function renderServers() {
+                const realmList = document.getElementById('realm-list');
+
+                if (servers.length === 0) {
+                    realmList.innerHTML = '<div id="loading-message">No realms available. Please try again later.</div>';
+                    return;
+                }
+
+                realmList.innerHTML = servers.map(server => {
+                    const status = server.status; // online, offline, or full
+                    const connectionsPercentage = ((server.activeConnections / server.maxConnections) * 100).toFixed(0);
+
+                    // Extract subdomain (realm name) from publicHost and capitalize first letter
+                    const subdomain = server.publicHost.split('.')[0];
+                    const realmName = subdomain.charAt(0).toUpperCase() + subdomain.slice(1);
+
+                    // Map status to visual style
+                    let statusClass = 'healthy';
+                    let statusText = 'Online';
+
+                    if (status === 'offline') {
+                        statusClass = 'alert';
+                        statusText = 'Offline';
+                    } else if (status === 'full') {
+                        statusClass = 'degraded';
+                        statusText = 'Full';
+                    }
+
+                    const latencyDisplay = (server.latency !== undefined && server.latency !== null)
+                        ? `${server.latency}ms`
+                        : 'unknown';
+
+                    return `
+                        <div class="realm-card ${status === 'offline' ? 'disabled' : ''}" data-server-id="${server.id}" ${status === 'offline' ? 'style="pointer-events: none; opacity: 0.5;"' : ''}>
+                            <div class="realm-header">
+                                <div class="realm-name">${realmName}</div>
+                                <div class="realm-right">
+                                    <div class="realm-status ${statusClass}">${statusText}</div>
+                                    <div class="realm-latency">${latencyDisplay}</div>
+                                </div>
+                            </div>
+                            <div class="realm-metrics">
+                                <div class="realm-metric">
+                                    <span class="realm-metric-label">Players:</span>
+                                    <span class="realm-metric-value">${server.activeConnections}/${server.maxConnections}</span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+                // Add click handlers
+                document.querySelectorAll('.realm-card').forEach(card => {
+                    card.addEventListener('click', () => {
+                        document.querySelectorAll('.realm-card').forEach(c => c.classList.remove('selected'));
+                        card.classList.add('selected');
+                        selectedServerId = card.dataset.serverId;
+                        document.getElementById('continue-button').disabled = false;
+                    });
+                });
+            }
+
+            function continueToGame(serverId) {
+                if (serverId) {
+                    // Store selected server for socket.ts to use
+                    localStorage.setItem('selectedServerId', serverId);
+                } else {
+                    // Clear selection for round-robin
+                    localStorage.removeItem('selectedServerId');
+                }
+                window.location.href = '/game';
+            }
+
+            document.getElementById('continue-button').addEventListener('click', () => {
+                continueToGame(selectedServerId);
+            });
+
+            document.getElementById('skip-link').addEventListener('click', (e) => {
+                e.preventDefault();
+                continueToGame(null);
+            });
+
+            // Load servers on page load
+            loadServers();
+        </script>
+    </body>
+</html>

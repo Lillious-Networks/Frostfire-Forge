@@ -22,7 +22,7 @@ login.addEventListener('click', async () => {
         window.Notify('success', 'Email sent successfully');
     } else if (response.status === 301) {
         // Player is already verified and logged in
-        window.location.href = '/game';
+        window.location.href = '/realm-selection';
     } else {
         const body = await response.json();
         window.Notify('error', body.message);
@@ -38,7 +38,7 @@ guestLogin.addEventListener('click', async (event) => {
         },
     });
     if (response.status === 301) {
-        window.location.href = '/game';
+        window.location.href = '/realm-selection';
     } else {
         const body = await response.json();
         window.Notify('error', body.message);

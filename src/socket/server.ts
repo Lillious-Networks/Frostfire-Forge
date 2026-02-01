@@ -235,7 +235,7 @@ if (settings?.gateway?.enabled) {
       publicHost: publicHost,
       port: httpPort,
       wsPort: serverPort,
-      maxConnections: settings?.websocket?.maxConnections || 2000,
+      maxConnections: settings?.websocket?.maxConnections || 500,
       heartbeatInterval: settings.gateway.heartbeatInterval || 5000,
     });
 

@@ -203,6 +203,8 @@ class GatewayClient {
    * Send periodic heartbeats to the gateway
    */
   private startHeartbeat() {
+    let previousRtt: number | null = null;
+
     this.heartbeatTimer = setInterval(async () => {
       try {
         const cpuUsage = this.getCpuUsage();
@@ -219,20 +221,26 @@ class GatewayClient {
             ramUsage: ramUsage.used,
             ramTotal: ramUsage.total,
             authKey: process.env.GATEWAY_AUTH_KEY,
-            timestamp: sendTime
+            timestamp: sendTime,
+            rtt: previousRtt // Send previous RTT for gateway to use
           })
         });
+
+        const receiveTime = Date.now();
+        const currentRtt = receiveTime - sendTime;
 
         const result = await response.json();
         if (!result.success) {
           log.warn("Gateway heartbeat failed, re-registering...");
           this.registered = false;
           await this.register();
-        } else if (result.timestamp) {
-          // Calculate round-trip time
-          const rtt = Date.now() - sendTime;
-          if (rtt > 100) {
-            log.warn(`High gateway latency: ${rtt}ms RTT`);
+        } else {
+          // Store RTT for next heartbeat
+          previousRtt = currentRtt;
+
+          // Log warning for high latency
+          if (currentRtt > 100) {
+            log.warn(`High gateway latency: ${currentRtt}ms RTT (${Math.round(currentRtt / 2)}ms one-way)`);
           }
         }
       } catch (error) {

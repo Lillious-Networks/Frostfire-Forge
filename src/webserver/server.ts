@@ -17,6 +17,7 @@ import register_html from "./www/public/register.html";
 import game_html from "./www/public/game.html";
 import forgotpassword_html from "./www/public/forgot-password.html";
 import changepassword_html from "./www/public/change-password.html";
+import realmselection_html from "./www/public/realm-selection.html";
 
 // Load whitelisted and blacklisted IPs and functions
 import { w_ips, b_ips, blacklistAdd } from "../systems/security";
@@ -256,6 +257,55 @@ const routes = {
       return new Response(JSON.stringify({ message: "Internal server error" }), { status: 500 });
     }
   },
+  "/api/gateway/servers": {
+    GET: async () => {
+      // Check if gateway is enabled
+      const gatewayEnabled = settings.gateway?.enabled;
+      const gatewayUrl = settings.gateway?.url;
+
+      if (!gatewayEnabled || !gatewayUrl) {
+        return new Response(JSON.stringify({
+          message: "Gateway not configured",
+          servers: []
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      try {
+        // Fetch server list from gateway (use public /status endpoint)
+        const response = await fetch(`${gatewayUrl}/status`, {
+          method: "GET",
+          headers: { "Content-Type": "application/json" }
+        });
+
+        if (!response.ok) {
+          throw new Error(`Gateway returned status ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        // Return all servers (realm selection will show all, user can see which are degraded)
+        return new Response(JSON.stringify({
+          servers: data.servers || []
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      } catch (error: any) {
+        log.error(`Failed to fetch gateway servers: ${error.message}`);
+        return new Response(JSON.stringify({
+          message: "Failed to fetch servers",
+          servers: []
+        }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    }
+  },
+  "/realm-selection": realmselection_html,
 } as Record<string, any>;
 
 const serverPort = _https ? (parseInt(process.env.WEBSRV_PORTSSL || "") || 443) : (parseInt(process.env.WEBSRV_PORT || "") || 80);
@@ -274,6 +324,7 @@ Bun.serve({
       "/change-password": routes["/change-password"],
       "/reset-password": routes["/reset-password"],
       "/update-password": routes["/update-password"],
+      "/realm-selection": routes["/realm-selection"],
       "/game": routes["/game"],
       "/animator": routes["/animator"],
       "/login": routes["/login"],
@@ -281,6 +332,7 @@ Bun.serve({
       "/tileset": routes["/tileset"],
       "/map-chunk": routes["/map-chunk"],
       "/music": routes["/music"],
+      "/api/gateway/servers": routes["/api/gateway/servers"],
     },
   async fetch(req: Request, server: any) {
     const url = tryParseURL(req.url);

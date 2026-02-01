@@ -166,9 +166,44 @@ function getClientId(): string {
 }
 
 /**
- * Connect through gateway with sticky sessions
+ * Connect through gateway with sticky sessions or to a selected server
  */
 async function connectThroughGateway(gatewayUrl: string, clientId: string): Promise<WebSocket> {
+  // Check if user selected a specific server
+  const selectedServerId = localStorage.getItem('selectedServerId');
+
+  if (selectedServerId) {
+    console.log(`[Gateway] User selected server: ${selectedServerId}`);
+
+    try {
+      // Fetch server details from gateway (use public /status endpoint)
+      const response = await fetch(`${gatewayUrl}/status`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch server list');
+      }
+
+      const data = await response.json();
+      const server = data.servers.find((s: any) => s.id === selectedServerId);
+
+      if (server) {
+        // Connect directly to the selected server
+        const gameServerWsUrl = `${server.publicHost.startsWith('ws') ? '' : 'ws://'}${server.publicHost}:${server.wsPort}`;
+        console.log(`[Gateway] Connecting to selected server: ${gameServerWsUrl}`);
+
+        const gameServerWs = new WebSocket(gameServerWsUrl);
+        return gameServerWs;
+      } else {
+        console.warn(`[Gateway] Selected server ${selectedServerId} not found, falling back to gateway assignment`);
+        // Clear invalid selection
+        localStorage.removeItem('selectedServerId');
+      }
+    } catch (error) {
+      console.warn(`[Gateway] Failed to connect to selected server, falling back to gateway assignment:`, error);
+      localStorage.removeItem('selectedServerId');
+    }
+  }
+
+  // Normal gateway assignment (round-robin)
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       gatewayWs.close();
