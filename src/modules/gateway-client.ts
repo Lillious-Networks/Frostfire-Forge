@@ -207,6 +207,7 @@ class GatewayClient {
       try {
         const cpuUsage = this.getCpuUsage();
         const ramUsage = await this.getRamUsage();
+        const sendTime = Date.now();
 
         const response = await fetch(`${this.config.gatewayUrl}/heartbeat`, {
           method: "POST",
@@ -217,7 +218,8 @@ class GatewayClient {
             cpuUsage: cpuUsage,
             ramUsage: ramUsage.used,
             ramTotal: ramUsage.total,
-            authKey: process.env.GATEWAY_AUTH_KEY
+            authKey: process.env.GATEWAY_AUTH_KEY,
+            timestamp: sendTime
           })
         });
 
@@ -226,6 +228,12 @@ class GatewayClient {
           log.warn("Gateway heartbeat failed, re-registering...");
           this.registered = false;
           await this.register();
+        } else if (result.timestamp) {
+          // Calculate round-trip time
+          const rtt = Date.now() - sendTime;
+          if (rtt > 100) {
+            log.warn(`High gateway latency: ${rtt}ms RTT`);
+          }
         }
       } catch (error) {
         log.error(`Gateway heartbeat error: ${error}`);
