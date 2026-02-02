@@ -66,14 +66,14 @@ jobs:
           echo 'DATABASE_PORT="${{ secrets.DATABASE_PORT }}"' >> .env.development
           echo 'SESSION_KEY=""' >> .env.development
           echo 'SQL_SSL_MODE=DISABLED' >> .env.development
-          echo 'WEBSRV_PORT=8000' >> .env.development
+          echo 'WEBSRV_PORT=8080' >> .env.development
           echo 'WEBSRV_PORTSSL=443' >> .env.development
           echo 'WEBSRV_USESSL=false' >> .env.development
           echo 'TRANSLATION_SERVICE="none"' >> .env.development
           echo 'WEB_SOCKET_URL="ws://gateway.lillious.com"' >> .env.development
           echo 'WEB_SOCKET_PORT=3001' >> .env.development
           echo 'GATEWAY_WS_PORT=9000' >> .env.development
-          echo 'DOMAIN="http://development.lillious.com:8000"' >> .env.development
+          echo 'DOMAIN="http://development.lillious.com:8080"' >> .env.development
           echo 'GATEWAY_URL="http://gateway.lillious.com:9999"' >> .env.development
           echo 'GATEWAY_ENABLED=true' >> .env.development
           echo 'GAME_NAME="Frostfire Forge Beta"' >> .env.development
@@ -182,7 +182,7 @@ jobs:
           echo "=== Checking for success indicators ==="
           LOGS=$(docker compose -f docker-compose.dev.yml logs)
 
-          if echo "$LOGS" | grep -qi "webserver started\|server.*running\|listening.*8000\|HTTP Server running"; then
+          if echo "$LOGS" | grep -qi "webserver started\|server.*running\|listening.*8080\|HTTP Server running"; then
             echo "✅ Services started successfully"
             exit 0
           else
@@ -264,7 +264,7 @@ jobs:
 
           echo "$LOGS"
 
-          if echo "$LOGS" | grep -qi "webserver started\|server.*running\|listening.*8000\|HTTP Server running"; then
+          if echo "$LOGS" | grep -qi "webserver started\|server.*running\|listening.*8080\|HTTP Server running"; then
             echo "✅ Rollback successful - Previous version is running"
           else
             echo "❌ Rollback failed - Manual intervention required"

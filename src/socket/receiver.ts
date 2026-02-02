@@ -47,10 +47,11 @@ export const movementBatchQueue = new Map<string, Map<string, any>>(); // Map of
 let currentBatchInterval = 40; // Start at 40ms (25 Hz)
 const BATCH_INTERVAL_NORMAL = 40; // 25 Hz for <300 players
 const BATCH_INTERVAL_MEDIUM = 50; // 20 Hz for 300-600 players
-const BATCH_INTERVAL_HIGH = 66; // 15 Hz for 600+ players
+const BATCH_INTERVAL_HIGH = 66; // 15 Hz for 600-900 players
+const BATCH_INTERVAL_EXTREME = 100; // 10 Hz for 900+ players
 
-// Maximum buffered bytes before skipping updates (512KB - very aggressive)
-const MAX_BUFFER_BACKPRESSURE = 1024 * 512;
+// Maximum buffered bytes before skipping updates (2MB - allows more buffering for high-latency connections)
+const MAX_BUFFER_BACKPRESSURE = 1024 * 1024 * 2;
 
 // Adaptive load tracking
 let lastFlushTime = Date.now();
@@ -61,7 +62,9 @@ function adjustBatchInterval(): void {
   const playerCount = Object.keys(playerCache.list()).length;
 
   let newInterval = BATCH_INTERVAL_NORMAL;
-  if (playerCount >= 600) {
+  if (playerCount >= 900) {
+    newInterval = BATCH_INTERVAL_EXTREME;
+  } else if (playerCount >= 600) {
     newInterval = BATCH_INTERVAL_HIGH;
   } else if (playerCount >= 300) {
     newInterval = BATCH_INTERVAL_MEDIUM;
@@ -183,7 +186,8 @@ function flushMovementBatches() {
 
   flushCount++;
   if (flushCount % 100 === 0 && skippedDueToLoad > 0) {
-    log.debug(`[MOVEMENT] Skipped ${skippedDueToLoad} updates due to load (flush took ${Date.now() - startTime}ms)`);
+    const playerCount = Object.keys(playerCache.list()).length;
+    log.warn(`[MOVEMENT] Skipped ${skippedDueToLoad} updates due to backpressure/load (${playerCount} players, flush took ${Date.now() - startTime}ms)`);
   }
 }
 
