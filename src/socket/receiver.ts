@@ -492,10 +492,10 @@ authWorker.on("message", async (result: any) => {
 
     // Add player to cache
     // Limit array sizes to prevent memory bloat
-    const limitedInventory = (playerData.inventory || []).slice(0, 30); // Max 30 items
-    const limitedFriends = (playerData.friends || []).slice(0, 100); // Max 100 friends
-    const limitedCollectables = (playerData.collectables || []).slice(0, 50); // Max 50 collectables
-    const limitedLearnedSpells = (playerData.learnedSpells || []).slice(0, 100); // Max 100 spells
+    const limitedInventory = Array.isArray(playerData.inventory) ? playerData.inventory.slice(0, 30) : [];
+    const limitedFriends = Array.isArray(playerData.friends) ? playerData.friends.slice(0, 100) : [];
+    const limitedCollectables = Array.isArray(playerData.collectables) ? playerData.collectables.slice(0, 50) : [];
+    const limitedLearnedSpells = Array.isArray(playerData.learnedSpells) ? playerData.learnedSpells.slice(0, 100) : (playerData.learnedSpells || []);
 
     playerCache.add(ws.data.id, {
       username: playerData.username,
