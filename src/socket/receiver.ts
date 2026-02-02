@@ -50,9 +50,9 @@ const BATCH_INTERVAL_MEDIUM = 50; // 20 Hz for 300-600 players
 const BATCH_INTERVAL_HIGH = 75; // 13 Hz for 600-800 players
 const BATCH_INTERVAL_EXTREME = 125; // 8 Hz for 800+ players (critical for network bandwidth)
 
-// Maximum buffered bytes before skipping updates (256KB - aggressive to prevent lag buildup)
-// Lower threshold = more frame skipping but better responsiveness
-const MAX_BUFFER_BACKPRESSURE = 1024 * 256;
+// Maximum buffered bytes before skipping updates (128KB - very aggressive to reduce memory usage)
+// Lower threshold = more frame skipping but better responsiveness and less RAM per player
+const MAX_BUFFER_BACKPRESSURE = 1024 * 128;
 
 // Adaptive load tracking
 let lastFlushTime = Date.now();
@@ -491,6 +491,12 @@ authWorker.on("message", async (result: any) => {
     }
 
     // Add player to cache
+    // Limit array sizes to prevent memory bloat
+    const limitedInventory = (playerData.inventory || []).slice(0, 30); // Max 30 items
+    const limitedFriends = (playerData.friends || []).slice(0, 100); // Max 100 friends
+    const limitedCollectables = (playerData.collectables || []).slice(0, 50); // Max 50 collectables
+    const limitedLearnedSpells = (playerData.learnedSpells || []).slice(0, 100); // Max 100 spells
+
     playerCache.add(ws.data.id, {
       username: playerData.username,
       animation: null,
@@ -511,7 +517,7 @@ authWorker.on("message", async (result: any) => {
       language: language || "en",
       ws,
       stats: playerData.stats || {},
-      friends: playerData.friends || [],
+      friends: limitedFriends,
       attackDelay: 0,
       lastMovementPacket: null,
       permissions: typeof playerData.permissions === "string" ? (playerData.permissions as string).split(",") : playerData.permissions || [],
@@ -527,13 +533,13 @@ authWorker.on("message", async (result: any) => {
       lastUpdated: performance.now(),
       mounted: false,
       mount_type: null,
-      collectables: playerData.collectables || [],
+      collectables: limitedCollectables,
       spellCooldowns: {},
       casting: false,
       lastInterruptTime: 0,
       interruptableSpell: false,
-      learnedSpells: playerData.learnedSpells || [],
-      inventory: playerData.inventory || [],
+      learnedSpells: limitedLearnedSpells,
+      inventory: limitedInventory,
       equipment: playerData.equipment || {},
     });
 
