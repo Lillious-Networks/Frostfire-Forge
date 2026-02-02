@@ -172,9 +172,10 @@ function flushMovementBatches() {
         continue;
       }
 
-      // Adaptive frame skip: if buffer is 50%+ full, skip every other update
+      // Adaptive frame skip: if buffer is 75%+ full, skip every other update
       // This prevents buffer from growing further while maintaining some updates
-      if (bufferedAmount > MAX_BUFFER_BACKPRESSURE * 0.5) {
+      // 75% threshold (96KB) gives more headroom before frame skipping starts
+      if (bufferedAmount > MAX_BUFFER_BACKPRESSURE * 0.75) {
         if (sentCount % 2 === 0) {
           skippedDueToLoad++;
           continue;
