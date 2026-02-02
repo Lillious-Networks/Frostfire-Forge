@@ -32,7 +32,7 @@ RUN bun create-config --environment development
 RUN bun setup-development
 
 # Expose required ports
-EXPOSE 8000
+EXPOSE 8080
 EXPOSE 3001
 
 # Run development setup and start server
