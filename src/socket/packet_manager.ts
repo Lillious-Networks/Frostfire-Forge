@@ -351,6 +351,11 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "SPRITE_SHEET_ANIMATION", data })),
     ] as any[];
   },
+  batchSpriteSheetAnimation: (animations: any[]) => {
+    return [
+      packet.encode(JSON.stringify({ type: "BATCH_SPRITE_SHEET_ANIMATION", data: animations })),
+    ] as any[];
+  },
   updateFriends: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "UPDATE_FRIENDS", data })),

@@ -47,11 +47,12 @@ export const movementBatchQueue = new Map<string, Map<string, any>>(); // Map of
 let currentBatchInterval = 40; // Start at 40ms (25 Hz)
 const BATCH_INTERVAL_NORMAL = 40; // 25 Hz for <300 players
 const BATCH_INTERVAL_MEDIUM = 50; // 20 Hz for 300-600 players
-const BATCH_INTERVAL_HIGH = 66; // 15 Hz for 600-900 players
-const BATCH_INTERVAL_EXTREME = 100; // 10 Hz for 900+ players
+const BATCH_INTERVAL_HIGH = 75; // 13 Hz for 600-800 players
+const BATCH_INTERVAL_EXTREME = 125; // 8 Hz for 800+ players (critical for network bandwidth)
 
-// Maximum buffered bytes before skipping updates (2MB - allows more buffering for high-latency connections)
-const MAX_BUFFER_BACKPRESSURE = 1024 * 1024 * 2;
+// Maximum buffered bytes before skipping updates (256KB - aggressive to prevent lag buildup)
+// Lower threshold = more frame skipping but better responsiveness
+const MAX_BUFFER_BACKPRESSURE = 1024 * 256;
 
 // Adaptive load tracking
 let lastFlushTime = Date.now();
@@ -62,7 +63,7 @@ function adjustBatchInterval(): void {
   const playerCount = Object.keys(playerCache.list()).length;
 
   let newInterval = BATCH_INTERVAL_NORMAL;
-  if (playerCount >= 900) {
+  if (playerCount >= 800) {
     newInterval = BATCH_INTERVAL_EXTREME;
   } else if (playerCount >= 600) {
     newInterval = BATCH_INTERVAL_HIGH;
@@ -72,7 +73,7 @@ function adjustBatchInterval(): void {
 
   if (newInterval !== currentBatchInterval) {
     currentBatchInterval = newInterval;
-    log.debug(`[MOVEMENT] Adjusted batch interval to ${newInterval}ms for ${playerCount} players (${Math.round(1000/newInterval)} Hz)`);
+    log.info(`[MOVEMENT] ⚡ Adjusted batch interval to ${newInterval}ms for ${playerCount} players (${Math.round(1000/newInterval)} Hz)`);
   }
 }
 
@@ -162,10 +163,22 @@ function flushMovementBatches() {
       const receiver = allPlayers[receiverId];
       if (!receiver || !receiver.ws || receiver.ws.readyState !== 1) continue;
 
-      // Skip if too much backpressure (prevents buffer overflow and latency spikes)
-      if (receiver.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
+      const bufferedAmount = receiver.ws.bufferedAmount;
+
+      // Aggressive backpressure handling with multi-tier thresholds
+      // If buffer is getting full, start skipping updates to prevent lag buildup
+      if (bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
         skippedDueToLoad++;
         continue;
+      }
+
+      // Adaptive frame skip: if buffer is 50%+ full, skip every other update
+      // This prevents buffer from growing further while maintaining some updates
+      if (bufferedAmount > MAX_BUFFER_BACKPRESSURE * 0.5) {
+        if (sentCount % 2 === 0) {
+          skippedDueToLoad++;
+          continue;
+        }
       }
 
       const batchPacket = packetManager.batchMoveXY(movements);
@@ -185,9 +198,20 @@ function flushMovementBatches() {
   movementBatchQueue.clear();
 
   flushCount++;
-  if (flushCount % 100 === 0 && skippedDueToLoad > 0) {
+  if (flushCount % 100 === 0) {
     const playerCount = Object.keys(playerCache.list()).length;
-    log.warn(`[MOVEMENT] Skipped ${skippedDueToLoad} updates due to backpressure/load (${playerCount} players, flush took ${Date.now() - startTime}ms)`);
+
+    // Calculate average buffer usage across all connected players
+    const allPlayersForStats = playerCache.list();
+    const allPlayersList = Object.values(allPlayersForStats);
+    const connectedPlayers = allPlayersList.filter(p => p?.ws && p.ws.readyState === 1);
+    const avgBuffered = connectedPlayers.length > 0
+      ? Math.round(connectedPlayers.reduce((sum, p) => sum + (p.ws?.bufferedAmount || 0), 0) / connectedPlayers.length / 1024)
+      : 0;
+
+    if (skippedDueToLoad > 0 || avgBuffered > 64) {
+      log.warn(`[MOVEMENT] ${playerCount} players | Skipped ${skippedDueToLoad} updates | Avg buffer: ${avgBuffered}KB | Flush: ${Date.now() - startTime}ms | Rate: ${Math.round(1000/currentBatchInterval)}Hz`);
+    }
   }
 }
 
@@ -195,7 +219,7 @@ function flushMovementBatches() {
 export const spawnBatchQueue = new Map<string, Map<string, any>>(); // Map of receivingPlayerId -> Map of spawnedPlayerId -> spawnData
 
 // Flush and send batched spawn packets
-function flushSpawnBatches() {
+async function flushSpawnBatches() {
   if (spawnBatchQueue.size === 0) return;
 
   const allPlayers = playerCache.list();
@@ -220,10 +244,10 @@ function flushSpawnBatches() {
       };
       sendPacket(receivingPlayer.ws, packetManager.loadPlayers(loadPlayersData));
 
-      // Send animations for each spawned player
-      spawnsForThisPlayer.forEach(async (spawnData) => {
+      // Batch animations for all spawned players
+      const animationPromises = spawnsForThisPlayer.map(async (spawnData) => {
         const spawnedPlayer = allPlayers[spawnData.id];
-        if (!spawnedPlayer) return;
+        if (!spawnedPlayer) return null;
 
         const animationName = getAnimationNameForDirection(
           spawnedPlayer.location.position.direction,
@@ -233,8 +257,20 @@ function flushSpawnBatches() {
           spawnedPlayer.casting || false
         );
 
-        await sendAnimationTo(receivingPlayer.ws, animationName, spawnData.id);
+        // Return animation data instead of sending immediately
+        return await getAnimationData(animationName, spawnData.id);
       });
+
+      // Wait for all animations to be prepared
+      const animationDataArray = (await Promise.all(animationPromises)).filter(a => a !== null);
+
+      // Send all animations in a single batched packet (huge bandwidth savings!)
+      if (animationDataArray.length > 0) {
+        sendPacket(receivingPlayer.ws, packetManager.batchSpriteSheetAnimation(animationDataArray));
+        if (animationDataArray.length > 10) {
+          log.debug(`[BATCH] Sent ${animationDataArray.length} animations in single packet to player ${receivingPlayerId}`);
+        }
+      }
     }
   }
 
@@ -275,9 +311,9 @@ function flushDespawnBatches() {
 }
 
 // Master flush function - flushes all batch types
-function flushAllBatches() {
+async function flushAllBatches() {
   flushMovementBatches();
-  flushSpawnBatches();
+  await flushSpawnBatches();
   flushDespawnBatches();
 }
 
@@ -5236,6 +5272,74 @@ function normalizeDirection(direction: string): string {
     return direction;
   }
   return "down"; // safe fallback for invalid directions
+}
+
+// Get animation data without sending (for batching)
+async function getAnimationData(name: string, playerId: string, revision?: number): Promise<any | null> {
+  const targetPlayer = playerCache.get(playerId);
+  if (!targetPlayer) return null;
+
+  // Use sprite sheet system only
+  if (!useSpriteSheets || !(await isSpriteSheetSystemAvailable())) {
+    return null;
+  }
+
+  const playerEquipment = targetPlayer.equipment || null;
+  const spriteSheetData = await getPlayerSpriteSheetData(name, playerEquipment);
+
+  // Check if at least one layer is available to render
+  if (!spriteSheetData.bodySprite && !spriteSheetData.headSprite) {
+    return null;
+  }
+
+  const { getSpriteSheetImage, getSpriteSheetTemplate } = await import("../modules/spriteSheetManager");
+
+  const extractEquipmentName = (prefixedName: string) => {
+    const firstUnderscore = prefixedName.indexOf('_');
+    return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
+  };
+
+  // Get base64 image data for each sprite sheet (only if sprite exists)
+  const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
+  const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
+  const armorHelmetImageData = spriteSheetData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHelmetSprite.name)) : null;
+  const armorShoulderguardsImageData = spriteSheetData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorShoulderguardsSprite.name)) : null;
+  const armorNeckImageData = spriteSheetData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorNeckSprite.name)) : null;
+  const armorHandsImageData = spriteSheetData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHandsSprite.name)) : null;
+  const armorChestImageData = spriteSheetData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorChestSprite.name)) : null;
+  const armorFeetImageData = spriteSheetData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorFeetSprite.name)) : null;
+  const armorLegsImageData = spriteSheetData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorLegsSprite.name)) : null;
+  const armorWeaponImageData = spriteSheetData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorWeaponSprite.name)) : null;
+
+  // Get mount sprite sheet if player is mounted
+  let mountSprite = null;
+  let mountImageData = null;
+  if (targetPlayer.mounted && targetPlayer.mount_type) {
+    mountSprite = await getSpriteSheetTemplate('player_mount_base');
+    if (mountSprite) {
+      const mountImageName = targetPlayer.mount_type;
+      mountSprite.name = mountImageName;
+      mountSprite.imageSource = `mounts/${mountImageName}.png`;
+      mountImageData = await getSpriteSheetImage(mountImageName);
+    }
+  }
+
+  return {
+    id: targetPlayer.id,
+    mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
+    bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
+    headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
+    armorHelmetSprite: (spriteSheetData.armorHelmetSprite && armorHelmetImageData) ? { ...spriteSheetData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
+    armorShoulderguardsSprite: (spriteSheetData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...spriteSheetData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
+    armorNeckSprite: (spriteSheetData.armorNeckSprite && armorNeckImageData) ? { ...spriteSheetData.armorNeckSprite, imageData: armorNeckImageData } : null,
+    armorHandsSprite: (spriteSheetData.armorHandsSprite && armorHandsImageData) ? { ...spriteSheetData.armorHandsSprite, imageData: armorHandsImageData } : null,
+    armorChestSprite: (spriteSheetData.armorChestSprite && armorChestImageData) ? { ...spriteSheetData.armorChestSprite, imageData: armorChestImageData } : null,
+    armorFeetSprite: (spriteSheetData.armorFeetSprite && armorFeetImageData) ? { ...spriteSheetData.armorFeetSprite, imageData: armorFeetImageData } : null,
+    armorLegsSprite: (spriteSheetData.armorLegsSprite && armorLegsImageData) ? { ...spriteSheetData.armorLegsSprite, imageData: armorLegsImageData } : null,
+    armorWeaponSprite: (spriteSheetData.armorWeaponSprite && armorWeaponImageData) ? { ...spriteSheetData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
+    animationState: spriteSheetData.animationState,
+    revision: revision,
+  };
 }
 
 export async function sendAnimationTo(targetWs: any, name: string, playerId?: string, revision?: number) {

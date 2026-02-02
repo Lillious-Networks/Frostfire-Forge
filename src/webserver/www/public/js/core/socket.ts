@@ -828,6 +828,96 @@ socket.onmessage = async (event) => {
       }
       break;
     }
+    case "BATCH_SPRITE_SHEET_ANIMATION": {
+      try {
+        // Process array of animation data
+        if (!Array.isArray(data) || data.length === 0) {
+          console.warn("BATCH_SPRITE_SHEET_ANIMATION received invalid data");
+          return;
+        }
+
+        // Process each animation in the batch sequentially
+        for (const animationData of data) {
+          // Reuse the existing SPRITE_SHEET_ANIMATION logic
+          if (!animationData?.bodySprite && !animationData?.headSprite && !animationData?.bodyArmorSprite && !animationData?.headArmorSprite) {
+            continue; // Skip invalid animations
+          }
+
+          const player = cache.players.size
+            ? Array.from(cache.players).find((p) => p.id === animationData.id)
+            : null;
+
+          const pendingPlayer = !player && cache.pendingPlayers
+            ? cache.pendingPlayers.get(animationData.id)
+            : null;
+
+          const targetPlayer = player || pendingPlayer;
+
+          if (targetPlayer) {
+            // Import layered animation system dynamically
+            const { initializeLayeredAnimation, changeLayeredAnimation } = await import('./layeredAnimation.js');
+
+            // Process animation state and direction
+            let animationState = animationData.animationState || 'idle';
+
+            if (animationState.includes('_')) {
+              const direction = animationState.split('_')[1];
+              targetPlayer.lastDirection = direction;
+            } else {
+              animationState = `${animationState}_${targetPlayer.lastDirection}`;
+            }
+
+            // Check if player already has a layered animation
+            const hasExisting = targetPlayer.layeredAnimation;
+            const spriteSheetsChanged = hasExisting ? (
+              targetPlayer.layeredAnimation.layers.mount?.spriteSheet?.name !== animationData.mountSprite?.name ||
+              targetPlayer.layeredAnimation.layers.body?.spriteSheet?.name !== animationData.bodySprite?.name ||
+              targetPlayer.layeredAnimation.layers.head?.spriteSheet?.name !== animationData.headSprite?.name ||
+              targetPlayer.layeredAnimation.layers.armor_helmet?.spriteSheet?.name !== animationData.armorHelmetSprite?.name ||
+              targetPlayer.layeredAnimation.layers.armor_shoulderguards?.spriteSheet?.name !== animationData.armorShoulderguardsSprite?.name ||
+              targetPlayer.layeredAnimation.layers.armor_neck?.spriteSheet?.name !== animationData.armorNeckSprite?.name ||
+              targetPlayer.layeredAnimation.layers.armor_hands?.spriteSheet?.name !== animationData.armorHandsSprite?.name ||
+              targetPlayer.layeredAnimation.layers.armor_chest?.spriteSheet?.name !== animationData.armorChestSprite?.name ||
+              targetPlayer.layeredAnimation.layers.armor_feet?.spriteSheet?.name !== animationData.armorFeetSprite?.name ||
+              targetPlayer.layeredAnimation.layers.armor_legs?.spriteSheet?.name !== animationData.armorLegsSprite?.name ||
+              targetPlayer.layeredAnimation.layers.armor_weapon?.spriteSheet?.name !== animationData.armorWeaponSprite?.name
+            ) : true;
+
+            if (!hasExisting || spriteSheetsChanged) {
+              targetPlayer.layeredAnimation = await initializeLayeredAnimation(
+                animationData.mountSprite || null,
+                animationData.bodySprite || null,
+                animationData.headSprite || null,
+                animationData.armorHelmetSprite || null,
+                animationData.armorShoulderguardsSprite || null,
+                animationData.armorNeckSprite || null,
+                animationData.armorHandsSprite || null,
+                animationData.armorChestSprite || null,
+                animationData.armorFeetSprite || null,
+                animationData.armorLegsSprite || null,
+                animationData.armorWeaponSprite || null,
+                animationState
+              );
+            } else {
+              // Just change animation state
+              await changeLayeredAnimation(targetPlayer.layeredAnimation, animationState);
+            }
+
+            // Move from pending to active if needed
+            if (cache.pendingPlayers && cache.pendingPlayers.has(animationData.id)) {
+              cache.pendingPlayers.delete(animationData.id);
+              cache.players.add(targetPlayer);
+            }
+          }
+        }
+
+        // Request fresh player list after batch processing
+        sendRequest({ type: "GET_ONLINE_PLAYERS", data: null });
+      } catch (error) {
+        console.error("Failed to process batched sprite sheet animations:", error);
+      }
+      break;
+    }
     case "PONG":
       sendRequest({
         type: "LOGIN",

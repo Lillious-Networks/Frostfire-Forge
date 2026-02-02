@@ -63,7 +63,7 @@ async function createSQLController(): Promise<any> {
       max: 50,
       idleTimeout: 60000,
       maxLifetime: 0,
-      connectionTimeout: 30000
+      connectionTimeout: 60000 // Increased from 30s to 60s
     });
 
     return db;
@@ -82,8 +82,8 @@ async function createSQLController(): Promise<any> {
       password: process.env.DATABASE_PASSWORD,
       database: process.env.DATABASE_NAME,
       tls: getSqlCert(),
-      connectionTimeout: 30,
-      idleTimeout: 30,
+      connectionTimeout: 60, // Increased from 30s to 60s
+      idleTimeout: 60, // Increased from 30s to 60s
       maxLifetime: 0,
       max: 20,
     });
@@ -100,7 +100,7 @@ async function createSQLController(): Promise<any> {
 }
 
 async function createSQLControllerWithRetry(): Promise<any> {
-  const maxRetryTime = 5000;
+  const maxRetryTime = 30000; // Increased from 5s to 30s
   const retryDelay = 1000;
   const startTime = Date.now();
   let lastError: Error | null = null;
@@ -111,7 +111,7 @@ async function createSQLControllerWithRetry(): Promise<any> {
 
       const testPromise = controller.unsafe("SELECT 1 AS test");
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Connection test query timeout")), 3000)
+        setTimeout(() => reject(new Error("Connection test query timeout")), 10000) // Increased from 3s to 10s
       );
 
       const result = await Promise.race([testPromise, timeoutPromise]);
@@ -148,7 +148,7 @@ self.onmessage = async (event: MessageEvent) => {
   const { id, sql, values } = event.data;
   const maxRetries = 3;
   const retryDelay = 1000;
-  const queryTimeout = 5000;
+  const queryTimeout = 15000; // Increased from 5s to 15s
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
