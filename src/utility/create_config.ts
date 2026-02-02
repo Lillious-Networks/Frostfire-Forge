@@ -121,7 +121,8 @@ const settings = {
   "websocket": {
     "maxPayloadMB": 50,
     "benchmarkenabled": false,
-    "idleTimeout": 120
+    "idleTimeout": 120,
+    "maxConnections": 50000
   },
   "world": "overworld",
   "default_map": "overworld",
@@ -131,7 +132,7 @@ const settings = {
   "gateway": {
     "enabled": true,
     "url": process.env.GATEWAY_URL || process.env.DOMAIN,
-    "heartbeatInterval": 5000
+    "heartbeatInterval": 1000
   }
 };
 

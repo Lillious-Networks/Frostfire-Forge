@@ -62,6 +62,7 @@ function parseArgs() {
         websocketUrl: defaultWebsocketUrl,
         gatewayEnabled: gatewayEnabled,
         gatewayUrl: defaultGatewayUrl,
+        realmId: undefined as string | undefined,
         help: false
     };
 
@@ -87,6 +88,9 @@ function parseArgs() {
                 config.gatewayUrl = args[++i] || defaultGatewayUrl;
                 config.gatewayEnabled = true; // Automatically enable if URL provided
                 break;
+            case '--realm':
+                config.realmId = args[++i];
+                break;
             case '--help':
                 config.help = true;
                 break;
@@ -111,6 +115,7 @@ Options:
   --ws <url>            WebSocket URL (overrides WEB_SOCKET_URL:WEB_SOCKET_PORT)
   --gateway             Enable gateway load balancer routing
   --gateway-url <url>   Gateway WebSocket URL (default: ws://localhost:9000)
+  --realm <id>          Specific realm/server ID to benchmark (optional)
   --help                Show this help message
 
 Environment Variables:
@@ -121,8 +126,11 @@ Environment Variables:
   GATEWAY_URL           Gateway WebSocket URL (e.g., ws://localhost:9000)
 
 Examples:
-  # Direct connection (default)
+  # Direct connection with automatic realm selection (distributes clients across all realms)
   bun --env-file=.env.production src/utility/benchmark-cli.ts --clients 100 --duration 120
+
+  # Benchmark a specific realm
+  bun --env-file=.env.production src/utility/benchmark-cli.ts --clients 50 --realm server-1
 
   # Connect through gateway
   bun --env-file=.env.local src/utility/benchmark-cli.ts --clients 50 --gateway
@@ -174,6 +182,30 @@ function log(message: string, level: 'info' | 'error' | 'success' | 'warn' = 'in
         warn: chalk.yellow('⚠')
     }[level];
     console.log(`${timestamp} ${prefix} ${message}`);
+}
+
+// Fetch available servers from the API
+async function fetchAvailableServers(host: string): Promise<any[]> {
+    try {
+        const response = await fetch(`${host}/api/gateway/servers`, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+                'User-Agent': 'Frostfire-Forge-Benchmark-CLI/1.0'
+            },
+            signal: AbortSignal.timeout(10000)
+        });
+
+        if (!response.ok) {
+            throw new Error(`Server list fetch failed: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return data.servers || [];
+    } catch (error: any) {
+        log(`Failed to fetch server list: ${error.message}`, 'warn');
+        return [];
+    }
 }
 
 // Connect through gateway to get server assignment
@@ -361,6 +393,28 @@ async function createClients(amount: number, host: string, websocketUrl: string,
     const allWebsockets: any[] = [];
     const loggedInWebsockets: any[] = [];
 
+    // Fetch available servers for realm selection
+    let availableServers: any[] = [];
+    if (!config.gatewayEnabled) {
+        availableServers = await fetchAvailableServers(host);
+        if (availableServers.length > 0) {
+            log(`Found ${availableServers.length} available realm(s)`, 'info');
+
+            // Filter to specific realm if requested
+            if (config.realmId) {
+                const specificServer = availableServers.find(s => s.id === config.realmId);
+                if (specificServer) {
+                    availableServers = [specificServer];
+                    log(`Using specific realm: ${config.realmId}`, 'info');
+                } else {
+                    log(`Realm '${config.realmId}' not found, using all available realms`, 'warn');
+                }
+            }
+        } else {
+            log('No realms found, using default connection', 'warn');
+        }
+    }
+
     return new Promise(async (resolve) => {
         let openedCount = 0;
         let loggedInCount = 0;
@@ -443,7 +497,7 @@ async function createClients(amount: number, host: string, websocketUrl: string,
                     return;
                 }
 
-                // Determine WebSocket URL (gateway or direct)
+                // Determine WebSocket URL (gateway, realm selection, or direct)
                 let finalWebsocketUrl = websocketUrl;
                 if (config.gatewayEnabled) {
                     try {
@@ -453,6 +507,15 @@ async function createClients(amount: number, host: string, websocketUrl: string,
                     } catch (error: any) {
                         log(`Gateway connection failed for client ${i + 1}, using direct: ${error.message}`, 'warn');
                     }
+                } else if (availableServers.length > 0) {
+                    // Use realm selection - distribute clients across servers
+                    const serverIndex = i % availableServers.length;
+                    const selectedServer = availableServers[serverIndex];
+
+                    // Build WebSocket URL from server info
+                    const protocol = selectedServer.publicHost?.startsWith('https') ? 'wss' : 'ws';
+                    const host = selectedServer.publicHost?.replace(/^https?:\/\//, '') || selectedServer.host;
+                    finalWebsocketUrl = `${protocol}://${host}:${selectedServer.wsPort}`;
                 }
 
                 const websocket = new WebSocket(finalWebsocketUrl, {
@@ -579,6 +642,11 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
     } else {
         console.log(`  ${chalk.bold('WS URL:')}   ${chalk.blue(config.websocketUrl)}`);
         console.log(`  ${chalk.bold('Gateway:')}  ${chalk.gray('Disabled')}`);
+        if (config.realmId) {
+            console.log(`  ${chalk.bold('Realm:')}    ${chalk.cyan(config.realmId)} ${chalk.dim('(specific)')}`);
+        } else {
+            console.log(`  ${chalk.bold('Realm:')}    ${chalk.cyan('Auto-select')} ${chalk.dim('(distributes across available realms)')}`);
+        }
     }
 
     // Show environment info
