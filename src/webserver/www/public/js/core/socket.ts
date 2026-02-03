@@ -1176,11 +1176,15 @@ socket.onmessage = async (event) => {
 
       player.typing = false;
 
-      player.position.x = data._data.x;
-      player.position.y = data._data.y;
+      // Support short keys (d) and old format (_data)
+      const moveData = data.d || data._data;
+      const playerId = data.i || data.id;
 
-      if (data.id === cachedPlayerId) {
-        positionText.innerText = `Position: ${data._data.x}, ${data._data.y}`;
+      player.position.x = moveData.x;
+      player.position.y = moveData.y;
+
+      if (playerId === cachedPlayerId) {
+        positionText.innerText = `Position: ${moveData.x}, ${moveData.y}`;
       }
       break;
     }
@@ -1194,10 +1198,14 @@ socket.onmessage = async (event) => {
       }
 
       for (const movement of data) {
-        if (movement._data === "abort") continue;
+        // Support short keys (i, d) and old format (id, _data)
+        const moveData = movement.d || movement._data;
+        const playerId = movement.i || movement.id;
+
+        if (moveData === "abort") continue;
 
         const player = Array.from(cache.players).find(
-          (p) => p.id === movement.id
+          (p) => p.id === playerId
         );
 
         if (!player) {
@@ -1210,11 +1218,11 @@ socket.onmessage = async (event) => {
         }
 
         player.typing = false;
-        player.position.x = movement._data.x;
-        player.position.y = movement._data.y;
+        player.position.x = moveData.x;
+        player.position.y = moveData.y;
 
-        if (movement.id === cachedPlayerId) {
-          positionText.innerText = `Position: ${movement._data.x}, ${movement._data.y}`;
+        if (playerId === cachedPlayerId) {
+          positionText.innerText = `Position: ${moveData.x}, ${moveData.y}`;
         }
       }
       break;

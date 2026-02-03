@@ -88,9 +88,14 @@ const Server = Bun.serve<Packet, any>({
   },
   tls: options,
   websocket: {
-    perMessageDeflate: false,
+    perMessageDeflate: {
+      compress: true,
+      decompress: true,
+    },
     maxPayloadLength: 1024 * 1024 * settings?.websocket?.maxPayloadMB || 1024 * 1024,
     idleTimeout: settings?.websocket?.idleTimeout || 120,
+    sendPings: true,
+    backpressureLimit: 1024 * 32, // Match our backpressure threshold
     async open(ws: any) {
       ws.binaryType = "arraybuffer";
 

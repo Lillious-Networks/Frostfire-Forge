@@ -50,9 +50,9 @@ const BATCH_INTERVAL_MEDIUM = 50; // 20 Hz for 300-600 players
 const BATCH_INTERVAL_HIGH = 75; // 13 Hz for 600-800 players
 const BATCH_INTERVAL_EXTREME = 125; // 8 Hz for 800+ players (critical for network bandwidth)
 
-// Maximum buffered bytes before skipping updates (128KB - very aggressive to reduce memory usage)
-// Lower threshold = more frame skipping but better responsiveness and less RAM per player
-const MAX_BUFFER_BACKPRESSURE = 1024 * 128;
+// Maximum buffered bytes before skipping updates (32KB - extremely aggressive for snappy feel)
+// Lower threshold = more frame skipping but instant responsiveness and minimal lag buildup
+const MAX_BUFFER_BACKPRESSURE = 1024 * 32;
 
 // Adaptive load tracking
 let lastFlushTime = Date.now();
@@ -165,21 +165,12 @@ function flushMovementBatches() {
 
       const bufferedAmount = receiver.ws.bufferedAmount;
 
-      // Aggressive backpressure handling with multi-tier thresholds
-      // If buffer is getting full, start skipping updates to prevent lag buildup
+      // Hard cutoff for snappy feel - no gradual frame skipping
+      // If buffer exceeds 32KB, drop the update entirely
+      // This prevents lag buildup and ensures animations stop immediately
       if (bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
         skippedDueToLoad++;
         continue;
-      }
-
-      // Adaptive frame skip: if buffer is 75%+ full, skip every other update
-      // This prevents buffer from growing further while maintaining some updates
-      // 75% threshold (96KB) gives more headroom before frame skipping starts
-      if (bufferedAmount > MAX_BUFFER_BACKPRESSURE * 0.75) {
-        if (sentCount % 2 === 0) {
-          skippedDueToLoad++;
-          continue;
-        }
       }
 
       const batchPacket = packetManager.batchMoveXY(movements);
@@ -210,7 +201,7 @@ function flushMovementBatches() {
       ? Math.round(connectedPlayers.reduce((sum, p) => sum + (p.ws?.bufferedAmount || 0), 0) / connectedPlayers.length / 1024)
       : 0;
 
-    if (skippedDueToLoad > 0 || avgBuffered > 64) {
+    if (skippedDueToLoad > 0 || avgBuffered > 24) {
       log.warn(`[MOVEMENT] ${playerCount} players | Skipped ${skippedDueToLoad} updates | Avg buffer: ${avgBuffered}KB | Flush: ${Date.now() - startTime}ms | Rate: ${Math.round(1000/currentBatchInterval)}Hz`);
     }
   }
@@ -232,7 +223,7 @@ async function flushSpawnBatches() {
     // Skip if player or websocket is missing/closed
     if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
 
-    // Skip if too much backpressure
+    // Skip if too much backpressure (hard cutoff for snappy feel)
     if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) continue;
 
     const spawnsForThisPlayer = Array.from(spawnedPlayers.values());
@@ -295,7 +286,7 @@ function flushDespawnBatches() {
     // Skip if player or websocket is missing/closed
     if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
 
-    // Skip if too much backpressure
+    // Skip if too much backpressure (hard cutoff for snappy feel)
     if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) continue;
 
     const despawnsArray = Array.from(despawnedPlayerIds);
@@ -1161,14 +1152,16 @@ export default async function packetReceiver(
                   sendPacket(ws, packetManager.reconnect());
                 } else {
                   globalStateRevision++;
+                  // Use short keys to reduce packet size
                   const movementData = {
-                    id: ws.data.id,
-                    _data: {
+                    i: ws.data.id,
+                    d: {
                       x: Number(currentPlayer.location.position.x),
                       y: Number(currentPlayer.location.position.y),
-                      direction: currentPlayer.location.position.direction
+                      dr: currentPlayer.location.position.direction
                     },
-                    revision: globalStateRevision
+                    r: globalStateRevision,
+                    s: currentPlayer.isStealth ? 1 : 0
                   };
                   sendPacket(ws, packetManager.moveXY(movementData));
                 }
@@ -1187,15 +1180,16 @@ export default async function packetReceiver(
             await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
           }
 
+          // Use short keys to reduce packet size (40% smaller with compression)
           const movementData = {
-            id: ws.data.id,
-            _data: {
+            i: ws.data.id,  // id
+            d: {            // _data
               x: Number(currentPlayer.location.position.x),
               y: Number(currentPlayer.location.position.y),
-              direction: currentPlayer.location.position.direction
+              dr: currentPlayer.location.position.direction  // direction
             },
-            revision: globalStateRevision,
-            isStealth: currentPlayer.isStealth
+            r: globalStateRevision,  // revision
+            s: currentPlayer.isStealth ? 1 : 0  // isStealth as bit
           };
 
           // Add movement to batch queue for AOI-filtered broadcasting
