@@ -1,6 +1,7 @@
 const PROCESS_STARTED_AT = Date.now() - performance.now();
 const MAX_BUFFER_SIZE = 1024 * 1024 * 1024; // 1GB
 const packetQueue = new Map<string, (() => void)[]>();
+import "../utility/validate_config.ts";
 import crypto from "crypto";
 import { packetManager } from "./packet_manager.ts";
 import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, sendAnimationTo } from "./receiver.ts";
