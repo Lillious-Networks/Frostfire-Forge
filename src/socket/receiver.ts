@@ -5224,13 +5224,16 @@ function tryParsePacket(data: any) {
 }
 
 function sendPacket(ws: any, packets: any[]) {
-  if (!ws || !ws.send || ws.readyState !== 1) return;
+  if (!ws || !ws.send || ws.readyState !== 1) {
+    log.warn(`Cannot send packet: WebSocket not ready (readyState: ${ws?.readyState})`);
+    return;
+  }
   try {
     packets.forEach((packet) => {
       ws.send(packet);
     });
   } catch (error) {
-    // Silently ignore errors when sending to closed websockets
+    log.error(`Failed to send packet: ${error}`);
   }
 }
 
