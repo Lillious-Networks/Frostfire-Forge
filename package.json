@@ -1,6 +1,6 @@
 {
   "name": "frostfire-forge",
-  "module": "./src/webserver/server.ts",
+  "module": "./src/socket/server.ts",
   "dependencies": {
     "nodemailer": "^7.0.12",
     "openai": "^4.104.0",
@@ -19,13 +19,10 @@
     "typescript-eslint": "^8.54.0"
   },
   "scripts": {
-    "production": "bun transpile-production && bun --env-file=.env.production ./src/webserver/server.ts --sql-preconnect",
-    "transpile-local": "bun --env-file=.env.local ./src/utility/transpiler.ts",
-    "transpile-development": "bun --env-file=.env.development ./src/utility/transpiler.ts",
-    "transpile-production": "bun --env-file=.env.production ./src/utility/transpiler.ts",
+    "production": "bun --env-file=.env.production ./src/socket/server.ts --sql-preconnect",
     "docs": "cd ./frostfiredocs && bun run preview",
-    "development": "bun transpile-development && bun --env-file=.env.development ./src/webserver/server.ts",
-    "local": "bun transpile-local && bun --inspect --env-file=.env.local ./src/webserver/server.ts",
+    "development": "bun --env-file=.env.development ./src/socket/server.ts",
+    "local": "bun --inspect --env-file=.env.local ./src/socket/server.ts",
     "setup": "bun --env-file=.env.production ./src/utility/database_setup.ts",
     "setup-sqlite": "bun --env-file=.env.development ./src/utility/database_setup_sqlite.ts",
     "setup-sqlite-local": "bun --env-file=.env.local ./src/utility/database_setup_sqlite.ts",

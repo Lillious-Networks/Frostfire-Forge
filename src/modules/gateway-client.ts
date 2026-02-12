@@ -23,6 +23,9 @@ class GatewayClient {
   private heartbeatTimer?: Timer;
   private activeConnections: number = 0;
   private registered: boolean = false;
+  private reconnectTimer?: Timer;
+  private reconnectAttempts: number = 0;
+  private maxReconnectDelay: number = 30000; // Max 30 seconds between retries
 
   constructor(config: ServerRegistrationConfig) {
     this.config = config;
@@ -31,9 +34,11 @@ class GatewayClient {
   /**
    * Register this server with the gateway
    */
-  async register(): Promise<boolean> {
+  async register(quiet: boolean = false): Promise<boolean> {
     try {
-      log.info(`Attempting to register with gateway at ${this.config.gatewayUrl}/register`);
+      if (!quiet) {
+        log.info(`Attempting to register with gateway at ${this.config.gatewayUrl}/register`);
+      }
 
       const response = await fetch(`${this.config.gatewayUrl}/register`, {
         method: "POST",
@@ -51,7 +56,9 @@ class GatewayClient {
 
       if (!response.ok) {
         const errorText = await response.text();
-        log.error(`Gateway registration failed with status ${response.status}: ${errorText}`);
+        if (!quiet) {
+          log.error(`Gateway registration failed with status ${response.status}: ${errorText}`);
+        }
         return false;
       }
 
@@ -59,18 +66,91 @@ class GatewayClient {
 
       if (result.success) {
         this.registered = true;
+        this.reconnectAttempts = 0; // Reset counter on success
+        if (this.reconnectTimer) {
+          clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = undefined;
+        }
         log.success(`Successfully registered with gateway as ${this.config.serverId}`);
         this.startHeartbeat();
         return true;
       }
 
-      log.error(`Gateway registration failed: ${result.error || "Unknown error"}`);
+      if (!quiet) {
+        log.error(`Gateway registration failed: ${result.error || "Unknown error"}`);
+      }
       return false;
     } catch (error) {
-      log.error(`Failed to connect to gateway at ${this.config.gatewayUrl}: ${error}`);
-      log.warn("Make sure the gateway is running and the URL is correct");
+      if (!quiet) {
+        log.error(`Failed to connect to gateway at ${this.config.gatewayUrl}: ${error}`);
+      }
       return false;
     }
+  }
+
+  /**
+   * Register with automatic retry using exponential backoff
+   * Blocks until successfully registered
+   */
+  async registerWithRetry(): Promise<void> {
+    log.info(`Connecting to gateway at ${this.config.gatewayUrl}...`);
+
+    while (true) {
+      const success = await this.register(this.reconnectAttempts > 0);
+
+      if (success) {
+        return;
+      }
+
+      this.reconnectAttempts++;
+
+      // Calculate exponential backoff: 1s, 2s, 4s, 8s, 16s, up to max (30s)
+      const delay = Math.min(
+        1000 * Math.pow(2, Math.min(this.reconnectAttempts - 1, 5)),
+        this.maxReconnectDelay
+      );
+
+      // Only log every 10 attempts to avoid spam
+      if (this.reconnectAttempts === 1) {
+        log.warn(`Failed to connect to gateway. Retrying...`);
+      } else if (this.reconnectAttempts % 10 === 0) {
+        log.warn(`Still attempting to connect to gateway (attempt ${this.reconnectAttempts})...`);
+      }
+
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+
+  /**
+   * Start automatic reconnection on disconnect
+   */
+  private startReconnect() {
+    if (this.reconnectTimer) {
+      return; // Already reconnecting
+    }
+
+    const attemptReconnect = async () => {
+      const success = await this.register(true); // Quiet retry
+
+      if (!success) {
+        this.reconnectAttempts++;
+
+        const delay = Math.min(
+          1000 * Math.pow(2, Math.min(this.reconnectAttempts - 1, 5)),
+          this.maxReconnectDelay
+        );
+
+        // Only log every 10 attempts
+        if (this.reconnectAttempts % 10 === 0) {
+          log.warn(`Attempting to reconnect to gateway (attempt ${this.reconnectAttempts})...`);
+        }
+
+        this.reconnectTimer = setTimeout(attemptReconnect, delay);
+      }
+    };
+
+    log.warn("Lost connection to gateway, reconnecting...");
+    this.reconnectTimer = setTimeout(attemptReconnect, 1000);
   }
 
   /**
@@ -93,6 +173,16 @@ class GatewayClient {
     const usage = 100 - ~~(100 * idle / total);
 
     return Math.max(0, Math.min(100, usage));
+  }
+
+
+  /**
+   * Get process RAM usage (RSS - Resident Set Size) in MB
+   */
+  private getProcessRamUsage(): number {
+    const memUsage = process.memoryUsage();
+    // RSS = Resident Set Size (total memory allocated for the process)
+    return Math.round(memUsage.rss / (1024 * 1024) * 10) / 10; // Round to 1 decimal
   }
 
   /**
@@ -208,7 +298,7 @@ class GatewayClient {
     this.heartbeatTimer = setInterval(async () => {
       try {
         const cpuUsage = this.getCpuUsage();
-        const ramUsage = await this.getRamUsage();
+        const ramUsage = this.getProcessRamUsage();
         const sendTime = Date.now();
 
         const response = await fetch(`${this.config.gatewayUrl}/heartbeat`, {
@@ -218,8 +308,7 @@ class GatewayClient {
             id: this.config.serverId,
             activeConnections: this.activeConnections,
             cpuUsage: cpuUsage,
-            ramUsage: ramUsage.used,
-            ramTotal: ramUsage.total,
+            ramUsage: ramUsage,
             authKey: process.env.GATEWAY_AUTH_KEY,
             timestamp: sendTime,
             rtt: previousRtt // Send previous RTT for gateway to use
@@ -231,20 +320,25 @@ class GatewayClient {
 
         const result = await response.json();
         if (!result.success) {
-          log.warn("Gateway heartbeat failed, re-registering...");
+          log.warn("Gateway heartbeat failed, reconnecting...");
           this.registered = false;
-          await this.register();
+          if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = undefined;
+          }
+          this.startReconnect();
         } else {
           // Store RTT for next heartbeat
           previousRtt = currentRtt;
-
-          // Log warning for high latency
-          if (currentRtt > 100) {
-            log.warn(`High gateway latency: ${currentRtt}ms RTT (${Math.round(currentRtt / 2)}ms one-way)`);
-          }
         }
       } catch (error) {
         log.error(`Gateway heartbeat error: ${error}`);
+        this.registered = false;
+        if (this.heartbeatTimer) {
+          clearInterval(this.heartbeatTimer);
+          this.heartbeatTimer = undefined;
+        }
+        this.startReconnect();
       }
     }, this.config.heartbeatInterval);
   }

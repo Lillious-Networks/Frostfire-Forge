@@ -1,4 +1,5 @@
-# Development Dockerfile for Frostfire Forge
+# Development Dockerfile for Frostfire Forge Game Server
+# WebSocket-only server (no HTTP webserver)
 FROM oven/bun:canary AS base
 WORKDIR /app
 
@@ -31,9 +32,12 @@ COPY --from=envcopy /app/.env.development .env.development
 RUN bun create-config --environment development
 RUN bun setup-development
 
-# Expose required ports
-EXPOSE 8080
-EXPOSE 3001
+# Expose WebSocket port only (no webserver)
+EXPOSE 3000
 
-# Run development setup and start server
+# Health check - verify WebSocket server is running
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD bun -e "fetch('http://localhost:3000').then(r => process.exit(0)).catch(() => process.exit(1))"
+
+# Start game server (WebSocket only)
 CMD ["bun", "run", "development"]

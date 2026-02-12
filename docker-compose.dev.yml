@@ -6,8 +6,7 @@ services:
     container_name: frostfire-forge-dev
     restart: unless-stopped
     ports:
-      - "8080:8080"
-      - "3001:3001"
+      - "3000:3000"  # WebSocket only (no HTTP webserver)
     volumes:
       - ./.env.development:/app/.env.development:ro
     env_file:

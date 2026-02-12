@@ -33,7 +33,7 @@ import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, 
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 
 // Animation system configuration
-const useSpriteSheets = settings.animation_system?.use_sprite_sheets ?? true;
+const useSpriteSheets = (settings as any).animation_system?.use_sprite_sheets ?? true;
 
 let restartScheduled: boolean;
 let restartTimers: ReturnType<typeof setTimeout>[];
@@ -5050,6 +5050,136 @@ export default async function packetReceiver(
 
         // Send the list back to the requesting admin
         sendPacket(ws, packetManager.onlinePlayersList(playerList));
+        break;
+      }
+      case "REQUEST_MAP_CHUNK": {
+        try {
+          const { map: mapName, x: chunkX, y: chunkY, size: chunkSize = 25 } = data as any;
+
+          if (!mapName || chunkX === undefined || chunkY === undefined) {
+            log.error("Invalid MAP_CHUNK request parameters");
+            break;
+          }
+
+          const maps = await assetCache.get("maps") as any[];
+          const map = maps.find((m: any) => m.name === mapName || m.name === `${mapName}.json`);
+
+          if (!map) {
+            sendPacket(ws, packetManager.mapChunk({ error: "Map not found" }));
+            break;
+          }
+
+          // Check if there's a saved chunk in memory first
+          const chunkKey = `${chunkX}-${chunkY}`;
+          if (map.chunks && map.chunks[chunkKey]) {
+            const savedChunk = map.chunks[chunkKey];
+            const response = {
+              chunkX,
+              chunkY,
+              startX: chunkX * chunkSize,
+              startY: chunkY * chunkSize,
+              width: savedChunk.width,
+              height: savedChunk.height,
+              tilewidth: map.data.tilewidth,
+              tileheight: map.data.tileheight,
+              layers: savedChunk.layers,
+            };
+            sendPacket(ws, packetManager.mapChunk(response));
+            break;
+          }
+
+          // Extract from original map data
+          const mapData = map.data;
+          const startX = chunkX * chunkSize;
+          const startY = chunkY * chunkSize;
+          const endX = Math.min(startX + chunkSize, mapData.width);
+          const endY = Math.min(startY + chunkSize, mapData.height);
+
+          if (startX >= mapData.width || startY >= mapData.height) {
+            sendPacket(ws, packetManager.mapChunk({ error: "Chunk out of bounds" }));
+            break;
+          }
+
+          // Extract chunk data for each layer
+          const chunkLayers = mapData.layers
+            .filter((layer: any) => {
+              if (layer.type !== "tilelayer") return false;
+              if (layer.visible) return true;
+              const layerName = layer.name ? layer.name.toLowerCase() : '';
+              return layerName.includes('collision') || layerName.includes('nopvp') || layerName.includes('no-pvp');
+            })
+            .map((layer: any, index: number) => {
+              const chunkData: number[] = [];
+              for (let y = startY; y < endY; y++) {
+                for (let x = startX; x < endX; x++) {
+                  const tileIndex = layer.data[y * mapData.width + x];
+                  chunkData.push(tileIndex);
+                }
+              }
+
+              let zIndex = layer.zIndex;
+              if (zIndex === undefined) {
+                const originalIndex = mapData.layers.findIndex((l: any) => l === layer);
+                zIndex = originalIndex !== -1 ? originalIndex : index;
+              }
+
+              return {
+                name: layer.name,
+                zIndex: zIndex,
+                data: chunkData,
+                width: endX - startX,
+                height: endY - startY,
+              };
+            });
+
+          const response = {
+            chunkX,
+            chunkY,
+            startX,
+            startY,
+            width: endX - startX,
+            height: endY - startY,
+            tilewidth: mapData.tilewidth,
+            tileheight: mapData.tileheight,
+            tilesets: mapData.tilesets,
+            layers: chunkLayers,
+          };
+
+          sendPacket(ws, packetManager.mapChunk(response));
+        } catch (error: any) {
+          log.error(`Error serving map chunk via WebSocket: ${error.message}`);
+          sendPacket(ws, packetManager.mapChunk({ error: "Internal server error" }));
+        }
+        break;
+      }
+      case "REQUEST_TILESET": {
+        try {
+          const { name: tilesetName } = data as any;
+
+          if (!tilesetName) {
+            log.error("Invalid TILESET request - missing name");
+            break;
+          }
+
+          const tilesets = await assetCache.get("tilesets") as any;
+          let tileset = null;
+
+          for (const key of Object.keys(tilesets)) {
+            if (tilesets[key].name === tilesetName) {
+              tileset = tilesets[key];
+              break;
+            }
+          }
+
+          if (tileset) {
+            sendPacket(ws, packetManager.tileset({ tileset }));
+          } else {
+            sendPacket(ws, packetManager.tileset({ error: "Tileset not found" }));
+          }
+        } catch (error: any) {
+          log.error(`Error serving tileset via WebSocket: ${error.message}`);
+          sendPacket(ws, packetManager.tileset({ error: "Internal server error" }));
+        }
         break;
       }
       // Unknown packet type

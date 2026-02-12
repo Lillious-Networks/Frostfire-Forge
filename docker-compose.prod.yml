@@ -7,10 +7,8 @@ services:
     restart: unless-stopped
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
-    # Ports NOT exposed - only accessible through gateway
-    # ports:
-    #   - "8080:8080"
-    #   - "3001:3001"
+    # WebSocket port (3000) - accessible through gateway load balancing
+    # Port not exposed externally in production
     volumes:
       - ./.env.production:/app/.env.production:ro
     env_file:

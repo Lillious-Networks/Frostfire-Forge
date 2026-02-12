@@ -6,7 +6,7 @@
  * Tests WebSocket connections, simulates player movements, and measures server performance.
  * Supports gateway/load balancer routing with sticky session testing.
  *
- * Automatically reads configuration from environment variables (DOMAIN, WEB_SOCKET_URL, WEB_SOCKET_PORT, GATEWAY_ENABLED).
+ * Automatically reads configuration from environment variables (WEB_SOCKET_PORT, GATEWAY_ENABLED, GATEWAY_URL).
  * Run with --env-file to specify environment file, or CLI arguments will override env vars.
  *
  * Usage:
@@ -16,10 +16,9 @@
  * Options:
  *   --clients <number>     Number of concurrent clients (default: 50, no limit)
  *   --duration <number>    Test duration in seconds (default: 60, min: 10)
- *   --host <url>          Server host URL (overrides DOMAIN env var)
- *   --ws <url>            WebSocket URL (overrides WEB_SOCKET_URL:WEB_SOCKET_PORT)
+ *   --ws <url>            WebSocket URL (default: ws://localhost:3000)
  *   --gateway             Enable gateway load balancer routing
- *   --gateway-url <url>   Gateway WebSocket URL (default: ws://localhost:9000)
+ *   --gateway-url <url>   Gateway HTTP URL (default from GATEWAY_URL env)
  *   --help                Show this help message
  *
  * Examples:
@@ -35,30 +34,17 @@ function parseArgs() {
     const args = process.argv.slice(2);
 
     // Get defaults from environment variables
-    const defaultHost = process.env.DOMAIN || 'http://localhost:80';
-    let wsBaseUrl = process.env.WEB_SOCKET_URL || 'ws://localhost';
     const wsPort = process.env.WEB_SOCKET_PORT || '3000';
     const gatewayEnabled = process.env.GATEWAY_ENABLED === 'true';
-    const defaultGatewayUrl = process.env.GATEWAY_URL || 'ws://localhost:9000';
+    const defaultGatewayUrl = process.env.GATEWAY_URL || 'http://localhost:9999';
 
-    // Convert http:// to ws:// and https:// to wss:// for WebSocket URLs
-    if (wsBaseUrl.startsWith('http://')) {
-        wsBaseUrl = wsBaseUrl.replace('http://', 'ws://');
-    } else if (wsBaseUrl.startsWith('https://')) {
-        wsBaseUrl = wsBaseUrl.replace('https://', 'wss://');
-    }
-
-    // Build default WebSocket URL from environment
-    let defaultWebsocketUrl = wsBaseUrl;
-    if (!defaultWebsocketUrl.includes(':') || defaultWebsocketUrl.split(':').length < 3) {
-        // Only add port if not already in URL
-        defaultWebsocketUrl = `${wsBaseUrl}:${wsPort}`;
-    }
+    // Build default WebSocket URL (direct connection to game server)
+    const useSSL = process.env.WEB_SOCKET_USE_SSL === 'true';
+    const defaultWebsocketUrl = `${useSSL ? 'wss' : 'ws'}://localhost:${wsPort}`;
 
     const config = {
         clients: 50,
         duration: 60,
-        host: defaultHost,
         websocketUrl: defaultWebsocketUrl,
         gatewayEnabled: gatewayEnabled,
         gatewayUrl: defaultGatewayUrl,
@@ -74,9 +60,6 @@ function parseArgs() {
                 break;
             case '--duration':
                 config.duration = Math.max(10, parseInt(args[++i]) || 60);
-                break;
-            case '--host':
-                config.host = args[++i] || defaultHost;
                 break;
             case '--ws':
                 config.websocketUrl = args[++i] || defaultWebsocketUrl;
@@ -111,19 +94,17 @@ Usage:
 Options:
   --clients <number>     Number of concurrent clients (min: 1, default: 50, no limit)
   --duration <number>    Test duration in seconds (min: 10, default: 60, no limit)
-  --host <url>          Server host URL (overrides DOMAIN env var)
-  --ws <url>            WebSocket URL (overrides WEB_SOCKET_URL:WEB_SOCKET_PORT)
+  --ws <url>            WebSocket URL (default: ws://localhost:3000 or wss:// if SSL enabled)
   --gateway             Enable gateway load balancer routing
-  --gateway-url <url>   Gateway WebSocket URL (default: ws://localhost:9000)
+  --gateway-url <url>   Gateway HTTP URL (default from GATEWAY_URL env or http://localhost:9999)
   --realm <id>          Specific realm/server ID to benchmark (optional)
   --help                Show this help message
 
 Environment Variables:
-  DOMAIN                Server host URL (e.g., http://beta.forge.lillious.com)
-  WEB_SOCKET_URL        WebSocket base URL (e.g., ws://beta.forge.lillious.com)
-  WEB_SOCKET_PORT       WebSocket port (e.g., 3000)
+  WEB_SOCKET_PORT       WebSocket port (default: 3000)
+  WEB_SOCKET_USE_SSL    Use SSL for WebSocket (true/false)
   GATEWAY_ENABLED       Enable gateway routing (true/false)
-  GATEWAY_URL           Gateway WebSocket URL (e.g., ws://localhost:9000)
+  GATEWAY_URL           Gateway HTTP URL (e.g., http://localhost:9999)
 
 Examples:
   # Direct connection with automatic realm selection (distributes clients across all realms)
@@ -650,11 +631,10 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
     }
 
     // Show environment info
-    if (process.env.DOMAIN || process.env.WEB_SOCKET_URL || process.env.GATEWAY_ENABLED) {
+    if (process.env.WEB_SOCKET_PORT || process.env.WEB_SOCKET_USE_SSL || process.env.GATEWAY_ENABLED) {
         console.log('\n  ' + chalk.dim('Environment:'));
-        if (process.env.DOMAIN) console.log(`  ${chalk.dim('DOMAIN:')} ${chalk.dim(process.env.DOMAIN)}`);
-        if (process.env.WEB_SOCKET_URL) console.log(`  ${chalk.dim('WEB_SOCKET_URL:')} ${chalk.dim(process.env.WEB_SOCKET_URL)}`);
         if (process.env.WEB_SOCKET_PORT) console.log(`  ${chalk.dim('WEB_SOCKET_PORT:')} ${chalk.dim(process.env.WEB_SOCKET_PORT)}`);
+        if (process.env.WEB_SOCKET_USE_SSL) console.log(`  ${chalk.dim('WEB_SOCKET_USE_SSL:')} ${chalk.dim(process.env.WEB_SOCKET_USE_SSL)}`);
         if (process.env.GATEWAY_ENABLED) console.log(`  ${chalk.dim('GATEWAY_ENABLED:')} ${chalk.dim(process.env.GATEWAY_ENABLED)}`);
         if (process.env.GATEWAY_URL) console.log(`  ${chalk.dim('GATEWAY_URL:')} ${chalk.dim(process.env.GATEWAY_URL)}`);
     }

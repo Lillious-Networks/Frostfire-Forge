@@ -6,8 +6,7 @@ services:
     container_name: frostfire-forge-local
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "3000:3000"
+      - "3000:3000"  # WebSocket only (no HTTP webserver)
     volumes:
       - ./.env.local:/app/.env.local:ro
     env_file:

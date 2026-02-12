@@ -23,10 +23,10 @@ import { GatewayClient } from "../modules/gateway-client.ts";
 
 const _cert = path.join(import.meta.dir, "../certs/cert.pem");
 const _key = path.join(import.meta.dir, "../certs/key.pem");
-const _https = process.env.WEBSRV_USESSL === "true";
+const useSSL = process.env.WEB_SOCKET_USE_SSL === "true";
 let options: Bun.TLSOptions | undefined = undefined;
 
-if (_https) {
+if (useSSL) {
   if (!fs.existsSync(_cert) || !fs.existsSync(_key)) {
     log.error(`Attempted to locate certificate and key but failed`);
     log.error(`Certificate: ${_cert}`);
@@ -219,7 +219,12 @@ setInterval(() => {
   const playerCount = Object.keys(playerCache.list()).length;
   const memPerPlayer = playerCount > 0 ? (memUsage.heapUsed / playerCount / 1024 / 1024).toFixed(2) : 0;
 
-  log.info(`[MEMORY] Heap: ${(memUsage.heapUsed / 1024 / 1024).toFixed(0)}MB / ${(memUsage.heapTotal / 1024 / 1024).toFixed(0)}MB | RSS: ${(memUsage.rss / 1024 / 1024).toFixed(0)}MB | Players: ${playerCount} | Per-player: ${memPerPlayer}MB`);
+  const heapUsedMB = (memUsage.heapUsed / 1024 / 1024).toFixed(1);
+  const heapTotalMB = (memUsage.heapTotal / 1024 / 1024).toFixed(1);
+  const rssMB = (memUsage.rss / 1024 / 1024).toFixed(1);
+  const heapPercent = ((memUsage.heapUsed / memUsage.heapTotal) * 100).toFixed(1);
+
+  log.info(`[MEMORY] Heap: ${heapUsedMB}MB / ${heapTotalMB}MB (${heapPercent}%) | RSS: ${rssMB}MB | Players: ${playerCount} | Per-player: ${memPerPlayer}MB`);
 
   if (memUsage.heapUsed / memUsage.heapTotal > 0.9) {
     log.warn(`[MEMORY] WARNING: Heap usage above 90% - consider restarting or reducing player count`);
@@ -239,29 +244,24 @@ event.emit("online");
 // Initialize gateway client if enabled
 let gatewayClient: GatewayClient | null = null;
 if (settings?.gateway?.enabled) {
-  try {
-    const serverId = process.env.SERVER_ID || `server-${crypto.randomBytes(8).toString("hex")}`;
-    const serverHost = process.env.SERVER_HOST || "localhost";
-    const publicHost = process.env.PUBLIC_HOST || serverHost;
-    const serverPort = parseInt(process.env.WEB_SOCKET_PORT || "3000");
-    const httpPort = parseInt(process.env.WEBSRV_PORT || "80");
+  const serverId = process.env.SERVER_ID || `server-${crypto.randomBytes(8).toString("hex")}`;
+  const serverHost = process.env.SERVER_HOST || "localhost";
+  const publicHost = process.env.PUBLIC_HOST || serverHost;
+  const wsPort = parseInt(process.env.WEB_SOCKET_PORT || "3000");
 
-    gatewayClient = new GatewayClient({
-      gatewayUrl: settings.gateway.url,
-      serverId,
-      host: serverHost,
-      publicHost: publicHost,
-      port: httpPort,
-      wsPort: serverPort,
-      maxConnections: settings?.websocket?.maxConnections || 500,
-      heartbeatInterval: settings.gateway.heartbeatInterval || 5000,
-    });
+  gatewayClient = new GatewayClient({
+    gatewayUrl: settings.gateway.url,
+    serverId,
+    host: serverHost,
+    publicHost: publicHost,
+    port: wsPort,  // WebSocket port (no separate HTTP port anymore)
+    wsPort: wsPort,
+    maxConnections: settings?.websocket?.maxConnections || 500,
+    heartbeatInterval: settings.gateway.heartbeatInterval || 5000,
+  });
 
-    // Register with gateway
-    await gatewayClient.register();
-  } catch (error) {
-    log.error(`Failed to initialize gateway client: ${error}`);
-  }
+  // Block until connected to gateway (keeps retrying forever)
+  await gatewayClient.registerWithRetry();
 }
 
 listener.emit("onAwake");
