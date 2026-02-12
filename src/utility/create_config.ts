@@ -66,9 +66,6 @@ const assetConfig = {
   maps: {
     path: "/maps/",
   },
-  tilesets: {
-    path: "/tilesets/",
-  },
   sfx: {
     path: "/sfx/",
   },

@@ -806,51 +806,7 @@ export async function reloadMap(mapName: string): Promise<MapData> {
 
 loadAllMaps();
 
-// Load tilesets
-async function loadTilesets() {
-  const now = performance.now();
-  const tilesets = [] as TilesetData[];
-  const tilesetDir = path.join(assetPath, assetData.tilesets.path);
-
-  if (!fs.existsSync(tilesetDir)) {
-    throw new Error(`Tilesets directory not found at ${tilesetDir}`);
-  }
-
-  const tilesetFiles = fs.readdirSync(tilesetDir);
-  tilesetFiles.forEach((file) => {
-    // Read raw file as Buffer
-    const tilesetData = fs.readFileSync(path.join(tilesetDir, file));
-    // Compress using gzip
-    const compressedData = zlib.gzipSync(tilesetData);
-
-    const originalSize = tilesetData.length;
-    const compressedSize = compressedData.length;
-    const ratio = (originalSize / compressedSize).toFixed(2);
-    const savings = (((originalSize - compressedSize) / originalSize) * 100).toFixed(2);
-
-    log.debug(`Loaded tileset: ${file}`);
-    log.debug(`Compressed tileset: ${file}
-  - Original: ${originalSize} bytes
-  - Compressed: ${compressedSize} bytes
-  - Compression Ratio: ${ratio}x
-  - Compression Savings: ${savings}%`);
-
-    tilesets.push({ name: file, data: compressedData });
-  });
-
-  // Store as Base64 strings to work with JSON.stringify in Redis
-  await assetCache.add(
-    "tilesets",
-    tilesets.map(t => ({
-      name: t.name,
-      data: t.data.toString("base64") // encode buffer as base64
-    }))
-  );
-
-  log.success(`Loaded ${tilesets.length} tileset(s) in ${(performance.now() - now).toFixed(2)}ms`);
-}
-
-await loadTilesets();
+// Tilesets are now served by the gateway via HTTP, not by the game server
 
 function tryParse(data: string): any {
   try {

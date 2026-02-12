@@ -485,25 +485,5 @@ export const packetManager = {
         })
       )
     ] as any[];
-  },
-  mapChunk: (data: any) => {
-    return [
-      packet.encode(
-        JSON.stringify({
-          type: "MAP_CHUNK",
-          data: data
-        })
-      )
-    ] as any[];
-  },
-  tileset: (data: any) => {
-    return [
-      packet.encode(
-        JSON.stringify({
-          type: "TILESET",
-          data: data
-        })
-      )
-    ] as any[];
   }
 };
