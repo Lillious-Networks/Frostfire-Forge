@@ -214,24 +214,6 @@ const Server = Bun.serve<Packet, any>({
   },
 });
 
-// Memory monitoring - log every 60 seconds
-setInterval(() => {
-  const memUsage = process.memoryUsage();
-  const playerCount = Object.keys(playerCache.list()).length;
-  const memPerPlayer = playerCount > 0 ? (memUsage.heapUsed / playerCount / 1024 / 1024).toFixed(2) : 0;
-
-  const heapUsedMB = (memUsage.heapUsed / 1024 / 1024).toFixed(1);
-  const heapTotalMB = (memUsage.heapTotal / 1024 / 1024).toFixed(1);
-  const rssMB = (memUsage.rss / 1024 / 1024).toFixed(1);
-  const heapPercent = ((memUsage.heapUsed / memUsage.heapTotal) * 100).toFixed(1);
-
-  log.info(`[MEMORY] Heap: ${heapUsedMB}MB / ${heapTotalMB}MB (${heapPercent}%) | RSS: ${rssMB}MB | Players: ${playerCount} | Per-player: ${memPerPlayer}MB`);
-
-  if (memUsage.heapUsed / memUsage.heapTotal > 0.9) {
-    log.warn(`[MEMORY] WARNING: Heap usage above 90% - consider restarting or reducing player count`);
-  }
-}, 60000);
-
 // Awake event
 listener.on("onAwake", async () => {
   await player.clear(); // Clear player sessions on startup
