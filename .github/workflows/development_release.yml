@@ -79,6 +79,7 @@ jobs:
           echo 'SERVER_HOST="${{ secrets.SERVER_HOST }}"' >> .env.development
           echo 'PUBLIC_HOST="${{ secrets.PUBLIC_HOST }}"' >> .env.development
           echo 'GATEWAY_AUTH_KEY="${{ secrets.GATEWAY_AUTH_KEY }}"' >> .env.development
+          echo 'GATEWAY_GAME_SERVER_SECRET="${{ secrets.GATEWAY_GAME_SERVER_SECRET }}"' >> .env.development
 
       - name: Build Docker Image
         run: |

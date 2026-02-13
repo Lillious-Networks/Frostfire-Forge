@@ -74,10 +74,44 @@ const Server = Bun.serve<Packet, any>({
     const id = crypto.randomBytes(32).toString("hex");
     const useragent = req.headers.get("user-agent");
     const chatDecryptionKey = keyPair.publicKey;
+
     if (!useragent) {
       log.error(`User-Agent header is missing for client with id: ${id}`);
       return new Response("User-Agent header is missing", { status: 400 });
     }
+
+    // Validate connection token from gateway
+    const url = new URL(req.url, `http://${req.headers.get("host")}`);
+    const token = url.searchParams.get("token");
+    const timestamp = url.searchParams.get("timestamp");
+    const expiresAt = url.searchParams.get("expiresAt");
+    const signature = url.searchParams.get("signature");
+
+    if (!token || !timestamp || !expiresAt || !signature) {
+      log.warn(`Connection attempt without valid token from: ${req.headers.get("x-forwarded-for") || "unknown"}`);
+      return new Response("Unauthorized: Missing connection token", { status: 401 });
+    }
+
+    // Verify token signature
+    const sharedSecret = process.env.GATEWAY_GAME_SERVER_SECRET || "default-secret-change-me";
+    const expectedSignature = crypto
+      .createHmac("sha256", sharedSecret)
+      .update(`${token}:${timestamp}:${expiresAt}`)
+      .digest("hex");
+
+    if (signature !== expectedSignature) {
+      log.warn(`Connection attempt with invalid token signature from: ${req.headers.get("x-forwarded-for") || "unknown"}`);
+      return new Response("Unauthorized: Invalid token", { status: 401 });
+    }
+
+    // Check if token is expired
+    const now = Date.now();
+    if (now > parseInt(expiresAt)) {
+      log.warn(`Connection attempt with expired token from: ${req.headers.get("x-forwarded-for") || "unknown"}`);
+      return new Response("Unauthorized: Token expired", { status: 401 });
+    }
+
+    log.debug(`Valid connection token from gateway for client: ${id}`);
 
     const success = Server.upgrade(req, { data: { id, useragent, chatDecryptionKey } as any });
     if (!success) {

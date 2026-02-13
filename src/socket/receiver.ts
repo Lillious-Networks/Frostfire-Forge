@@ -690,9 +690,6 @@ authWorker.on("message", async (result: any) => {
         broadcastToAOI(currentPlayer, animationData, false);
       }
 
-      // Send music
-      sendPacket(ws, packetManager.music({ name: 'music_entry' }));
-
     });
     setImmediate(() => {
       // Get fresh player data at send time
