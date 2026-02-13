@@ -30,7 +30,7 @@ import { randomBytes } from "../modules/hash";
 import { saveMapChunks } from "../modules/assetloader";
 import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable } from "../modules/spriteSheetManager";
 import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers } from "./aoi";
-const defaultMap = settings.default_map?.replace(".json", "") || "main";
+const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
 // Animation system configuration
 const useSpriteSheets = (settings as any).animation_system?.use_sprite_sheets ?? true;
