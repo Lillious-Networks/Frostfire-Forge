@@ -88,7 +88,9 @@ const Server = Bun.serve<Packet, any>({
     const signature = url.searchParams.get("signature");
 
     if (!token || !timestamp || !expiresAt || !signature) {
-      log.warn(`Connection attempt without valid token from: ${req.headers.get("x-forwarded-for") || "unknown"}`);
+      const ip = req.headers.get("x-forwarded-for") || req.headers.get("cf-connecting-ip") || "unknown";
+      const userAgent = req.headers.get("user-agent") || "no user-agent";
+      log.warn(`Connection attempt without valid token from: ${ip} (${userAgent})`);
       return new Response("Unauthorized: Missing connection token", { status: 401 });
     }
 

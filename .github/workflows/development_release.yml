@@ -67,9 +67,9 @@ jobs:
           echo 'SESSION_KEY=""' >> .env.development
           echo 'SQL_SSL_MODE=DISABLED' >> .env.development
           echo 'TRANSLATION_SERVICE="none"' >> .env.development
-          echo 'WEB_SOCKET_URL="ws://${{ secrets.SERVER_HOST }}"' >> .env.development
+          echo 'WEB_SOCKET_URL="wss://${{ secrets.SERVER_HOST }}"' >> .env.development
           echo 'WEB_SOCKET_PORT=3000' >> .env.development
-          echo 'WEB_SOCKET_USE_SSL=false' >> .env.development
+          echo 'WEB_SOCKET_USE_SSL=true' >> .env.development
           echo 'GATEWAY_URL="${{ secrets.GATEWAY_URL}}"' >> .env.development
           echo 'GATEWAY_ENABLED=true' >> .env.development
           echo 'GAME_NAME="Frostfire Forge Development"' >> .env.development
