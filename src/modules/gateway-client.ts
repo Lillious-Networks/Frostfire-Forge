@@ -51,7 +51,8 @@ class GatewayClient {
           wsPort: this.config.wsPort,
           maxConnections: this.config.maxConnections,
           authKey: process.env.GATEWAY_AUTH_KEY
-        })
+        }),
+        redirect: "follow"
       });
 
       if (!response.ok) {
@@ -208,7 +209,8 @@ class GatewayClient {
             authKey: process.env.GATEWAY_AUTH_KEY,
             timestamp: sendTime,
             rtt: previousRtt // Send previous RTT for gateway to use
-          })
+          }),
+          redirect: "follow"
         });
 
         const receiveTime = Date.now();
@@ -272,7 +274,8 @@ class GatewayClient {
         body: JSON.stringify({
           id: this.config.serverId,
           authKey: process.env.GATEWAY_AUTH_KEY
-        })
+        }),
+        redirect: "follow"
       });
       this.registered = false;
       log.success("Unregistered from gateway");
