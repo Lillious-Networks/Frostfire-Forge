@@ -16,7 +16,7 @@ WEB_SOCKET_PORT=3000
 WEB_SOCKET_USE_SSL=false
 GAME_NAME="Frostfire Forge - ${environment.charAt(0).toUpperCase() + environment.slice(1)} Environment"
 CACHE="memory"
-GATEWAY_ENABLED=false
+GATEWAY_ENABLED=true
 `;
 
 const production_environment_variables = `DATABASE_ENGINE=""

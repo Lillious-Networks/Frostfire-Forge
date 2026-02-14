@@ -38,11 +38,12 @@ if (useSSL) {
   try {
     // Read certificate and CA bundle, concatenate them for full chain
     const cert = fs.readFileSync(_cert, 'utf-8');
+    const key = fs.readFileSync(_key, 'utf-8');
     const ca = fs.existsSync(_ca) ? fs.readFileSync(_ca, 'utf-8') : '';
     const fullChain = ca ? cert + "\n" + ca : cert;
 
     options = {
-      key: Bun.file(_key),
+      key: key,
       cert: fullChain,
       ALPNProtocols: "http/1.1,h2",
     };
@@ -78,6 +79,31 @@ const Server = Bun.serve<Packet, any>({
   port: process.env.WEB_SOCKET_PORT || 3000,
   reusePort: false,
   fetch(req, Server) {
+    // Handle /ping endpoint for client latency measurement (no auth required)
+    const url = new URL(req.url, `http://${req.headers.get("host")}`);
+
+    // Handle CORS preflight
+    if (req.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type"
+        }
+      });
+    }
+
+    if (url.pathname === "/ping" && req.method === "GET") {
+      return new Response(JSON.stringify({ pong: Date.now() }), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
+    }
+
     const id = crypto.randomBytes(32).toString("hex");
     const useragent = req.headers.get("user-agent");
     const chatDecryptionKey = keyPair.publicKey;
@@ -88,7 +114,6 @@ const Server = Bun.serve<Packet, any>({
     }
 
     // Validate connection token from gateway
-    const url = new URL(req.url, `http://${req.headers.get("host")}`);
     const token = url.searchParams.get("token");
     const timestamp = url.searchParams.get("timestamp");
     const expiresAt = url.searchParams.get("expiresAt");
@@ -139,7 +164,7 @@ const Server = Bun.serve<Packet, any>({
     maxPayloadLength: 1024 * 1024 * settings?.websocket?.maxPayloadMB || 1024 * 1024,
     idleTimeout: settings?.websocket?.idleTimeout || 120,
     sendPings: true,
-    backpressureLimit: 1024 * 32, // Match our backpressure threshold
+    backpressureLimit: 1024 * 512,
     async open(ws: any) {
       ws.binaryType = "arraybuffer";
 

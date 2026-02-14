@@ -1,6 +1,6 @@
 # Production Dockerfile for Frostfire Forge Game Server
 # WebSocket-only server (no HTTP webserver)
-FROM oven/bun:1.1.40-alpine AS base
+FROM oven/bun:canary AS base
 WORKDIR /app
 
 # Copy .env file stage
@@ -11,7 +11,7 @@ COPY .env.production .env.production
 # Install dependencies stage
 FROM base AS deps
 COPY package.json bun.lockb* ./
-RUN bun install --frozen-lockfile --production
+RUN bun install --frozen-lockfile
 
 # Build stage
 FROM base AS build
@@ -28,13 +28,8 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app .
 COPY --from=envcopy /app/.env.production .env.production
 
-# Set environment labels
-ARG VERSION=unknown
-ARG BUILD_DATE=unknown
-LABEL org.opencontainers.image.version="${VERSION}" \
-      org.opencontainers.image.created="${BUILD_DATE}" \
-      org.opencontainers.image.title="Frostfire Forge Game Server" \
-      org.opencontainers.image.description="WebSocket game server for Frostfire Forge"
+RUN bun create-config --environment production
+RUN bun setup-production
 
 # Expose WebSocket port only (no webserver)
 EXPOSE 3000
