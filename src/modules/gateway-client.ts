@@ -32,15 +32,44 @@ class GatewayClient {
   }
 
   /**
+   * Get the gateway URL, upgrading HTTP to HTTPS if gateway supports SSL
+   */
+  private async getGatewayUrl(): Promise<string> {
+    let url = this.config.gatewayUrl;
+
+    // If using HTTP, check if HTTPS is available and upgrade
+    if (url.startsWith("http://")) {
+      const httpsUrl = url.replace("http://", "https://").replace(":9999", ":9998");
+      try {
+        // Try a simple HEAD request to see if HTTPS is available
+        const testResponse = await fetch(httpsUrl, {
+          method: "HEAD",
+          signal: AbortSignal.timeout(2000) // 2 second timeout
+        });
+        if (testResponse.ok || testResponse.status === 404) {
+          // HTTPS is available (404 is fine, just means the endpoint exists)
+          url = httpsUrl;
+        }
+      } catch {
+        // HTTPS not available, stick with HTTP
+      }
+    }
+
+    return url;
+  }
+
+  /**
    * Register this server with the gateway
    */
   async register(quiet: boolean = false): Promise<boolean> {
     try {
+      const gatewayUrl = await this.getGatewayUrl();
+
       if (!quiet) {
-        log.info(`Attempting to register with gateway at ${this.config.gatewayUrl}/register`);
+        log.info(`Attempting to register with gateway at ${gatewayUrl}/register`);
       }
 
-      const response = await fetch(`${this.config.gatewayUrl}/register`, {
+      const response = await fetch(`${gatewayUrl}/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -51,8 +80,7 @@ class GatewayClient {
           wsPort: this.config.wsPort,
           maxConnections: this.config.maxConnections,
           authKey: process.env.GATEWAY_AUTH_KEY
-        }),
-        redirect: "follow"
+        })
       });
 
       if (!response.ok) {
@@ -197,8 +225,9 @@ class GatewayClient {
         const cpuUsage = this.getCpuUsage();
         const ramUsage = this.getProcessRamUsage();
         const sendTime = Date.now();
+        const gatewayUrl = await this.getGatewayUrl();
 
-        const response = await fetch(`${this.config.gatewayUrl}/heartbeat`, {
+        const response = await fetch(`${gatewayUrl}/heartbeat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -209,8 +238,7 @@ class GatewayClient {
             authKey: process.env.GATEWAY_AUTH_KEY,
             timestamp: sendTime,
             rtt: previousRtt // Send previous RTT for gateway to use
-          }),
-          redirect: "follow"
+          })
         });
 
         const receiveTime = Date.now();
@@ -268,14 +296,14 @@ class GatewayClient {
     }
 
     try {
-      await fetch(`${this.config.gatewayUrl}/unregister`, {
+      const gatewayUrl = await this.getGatewayUrl();
+      await fetch(`${gatewayUrl}/unregister`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: this.config.serverId,
           authKey: process.env.GATEWAY_AUTH_KEY
-        }),
-        redirect: "follow"
+        })
       });
       this.registered = false;
       log.success("Unregistered from gateway");
