@@ -72,7 +72,6 @@ jobs:
             echo 'EMAIL_USER="${{ secrets.EMAIL_USER }}"' >> .env.production
             echo 'EMAIL_TEST="${{ secrets.EMAIL_TEST }}"' >> .env.production
             echo 'SESSION_KEY="${{ secrets.SESSION_KEY }}"' >> .env.production
-            echo 'RSA_PASSPHRASE="${{ secrets.RSA_PASSPHRASE }}"' >> .env.production
             echo 'SQL_SSL_MODE=DISABLED' >> .env.production
             echo 'GOOGLE_TRANSLATE_API_KEY="${{ secrets.GOOGLE_TRANSLATE_API_KEY }}"' >> .env.production
             echo 'OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}"' >> .env.production

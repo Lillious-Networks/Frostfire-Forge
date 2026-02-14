@@ -81,6 +81,18 @@ jobs:
           echo 'GATEWAY_AUTH_KEY="${{ secrets.GATEWAY_AUTH_KEY }}"' >> .env.development
           echo 'GATEWAY_GAME_SERVER_SECRET="${{ secrets.GATEWAY_GAME_SERVER_SECRET }}"' >> .env.development
 
+      - name: Create Certificate Chain
+        working-directory: src/certs
+        run: |
+          # Create CA Bundle using CERT_CA_BUNDLE secret
+          echo "${{ secrets.CERT_CA_BUNDLE }}" > cert.ca-bundle
+
+          # Create pem
+          echo "${{ secrets.CERT_PEM }}" > cert.pem
+
+          # Create private key
+          echo "${{ secrets.CERT_PRIVATE_KEY }}" > key.pem
+
       - name: Build Docker Image
         run: |
           docker compose -f docker-compose.dev.yml build
