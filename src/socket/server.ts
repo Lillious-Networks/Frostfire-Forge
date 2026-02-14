@@ -82,14 +82,15 @@ const Server = Bun.serve<Packet, any>({
     // Handle /ping endpoint for client latency measurement (no auth required)
     const url = new URL(req.url, `http://${req.headers.get("host")}`);
 
-    // Handle CORS preflight
+    // Handle CORS preflight for all requests
     if (req.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
         headers: {
           "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type"
+          "Access-Control-Allow-Methods": "*",
+          "Access-Control-Allow-Headers": "*",
+          "Access-Control-Max-Age": "86400"
         }
       });
     }
@@ -99,7 +100,9 @@ const Server = Bun.serve<Packet, any>({
         status: 200,
         headers: {
           "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "*",
+          "Access-Control-Allow-Headers": "*"
         }
       });
     }
