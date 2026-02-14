@@ -24,6 +24,7 @@ import { GatewayClient } from "../modules/gateway-client.ts";
 
 const _cert = path.join(import.meta.dir, "../certs/cert.pem");
 const _key = path.join(import.meta.dir, "../certs/key.pem");
+const _ca = path.join(import.meta.dir, "../certs/cert.ca-bundle");
 const useSSL = process.env.WEB_SOCKET_USE_SSL === "true";
 let options: Bun.TLSOptions | undefined = undefined;
 
@@ -35,11 +36,17 @@ if (useSSL) {
     throw new Error("SSL certificate or key is missing");
   }
   try {
+    // Read certificate and CA bundle, concatenate them for full chain
+    const cert = fs.readFileSync(_cert, 'utf-8');
+    const ca = fs.existsSync(_ca) ? fs.readFileSync(_ca, 'utf-8') : '';
+    const fullChain = ca ? cert + "\n" + ca : cert;
+
     options = {
       key: Bun.file(_key),
-      cert: Bun.file(_cert),
+      cert: fullChain,
       ALPNProtocols: "http/1.1,h2",
     };
+    log.success(`SSL enabled for WebSocket with certificate chain`);
   } catch (e) {
     log.error(e as string);
   }

@@ -105,6 +105,7 @@ const settings = {
     "maxConnections": 50000
   },
   "world": "overworld",
+  "default_map": "overworld.json",
   "gateway": {
     "enabled": true,
     "url": process.env.GATEWAY_URL,
