@@ -78,6 +78,7 @@ class GatewayClient {
           publicHost: this.config.publicHost || this.config.host,
           port: this.config.port,
           wsPort: this.config.wsPort,
+          useSSL: process.env.WEB_SOCKET_USE_SSL === 'true',
           maxConnections: this.config.maxConnections,
           authKey: process.env.GATEWAY_AUTH_KEY
         })
