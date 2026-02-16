@@ -1,33 +1,30 @@
 #!/usr/bin/env bun
 /**
- * Connection Benchmark Tool for Frostfire Forge
+ * Connection Hold Tool for Frostfire Forge
  *
- * Simplified benchmark tool that only tests WebSocket connection capacity.
+ * Opens and holds X number of WebSocket connections to stress-test connection capacity.
  * Does NOT create guest accounts or perform authentication - just opens
- * connections and sends BENCHMARK packets to keep them alive.
+ * connections, sends one BENCHMARK packet to register, then holds them open.
  *
- * This tool is designed to stress-test the server's ability to handle
- * many concurrent WebSocket connections without the overhead of player
- * accounts, login, movement simulation, etc.
+ * This tool is designed to test the server's ability to handle many concurrent
+ * WebSocket connections without the overhead of player accounts, login, movement, etc.
  *
  * Usage:
  *   bun --env-file=.env.production src/utility/benchmark-connections.ts [options]
  *
  * Options:
  *   --connections <number>  Number of concurrent connections (default: 100)
- *   --duration <number>     Test duration in seconds (default: 60, min: 10)
- *   --gateway              Enable gateway load balancer routing
- *   --gateway-url <url>    Gateway WebSocket URL (default from GATEWAY_URL env)
- *   --server-secret <key>  Shared secret for token generation (for direct mode)
- *   --ws <url>             Direct WebSocket URL (default: ws://localhost:3000)
+ *   --duration <number>     How long to hold connections in seconds (default: 60, min: 10)
+ *   --server-secret <key>  Shared secret for token generation
+ *   --ws <url>             WebSocket URL (overrides environment detection)
  *   --help                 Show this help message
  *
  * Examples:
- *   # Test 1000 connections through gateway for 2 minutes
- *   bun --env-file=.env.production src/utility/benchmark-connections.ts --connections 1000 --duration 120 --gateway
+ *   # Hold 10,000 connections for 5 minutes
+ *   bun --env-file=.env.production src/utility/benchmark-connections.ts --connections 10000 --duration 300
  *
- *   # Test 500 connections direct to server
- *   bun --env-file=.env.local src/utility/benchmark-connections.ts --connections 500 --ws ws://localhost:3000
+ *   # Hold 500 connections indefinitely (use Ctrl+C to stop)
+ *   bun --env-file=.env.local src/utility/benchmark-connections.ts --connections 500 --duration 999999
  */
 
 import chalk from 'chalk';
@@ -87,14 +84,14 @@ function parseArgs(): BenchmarkConfig {
 // Show help message
 function showHelp() {
     console.log(`
-${chalk.bold.cyan('Frostfire Forge - Connection Benchmark Tool')}
+${chalk.bold.cyan('Frostfire Forge - Connection Hold Tool')}
 
 ${chalk.bold('Usage:')}
   bun --env-file=<env-file> src/utility/benchmark-connections.ts [options]
 
 ${chalk.bold('Options:')}
   --connections <number>  Number of concurrent connections (min: 1, default: 100)
-  --duration <number>     Test duration in seconds (min: 10, default: 60)
+  --duration <number>     How long to hold connections in seconds (min: 10, default: 60)
   --server-secret <key>  Shared secret for token generation
   --ws <url>             WebSocket URL (overrides environment detection)
   --help                 Show this help message
@@ -107,20 +104,20 @@ ${chalk.bold('Environment Variables:')}
   GATEWAY_GAME_SERVER_SECRET   Shared secret for token signing
 
 ${chalk.bold('Examples:')}
-  # Test 1000 connections using environment settings
+  # Hold 10,000 connections for 5 minutes
+  bun --env-file=.env.production src/utility/benchmark-connections.ts --connections 10000 --duration 300
+
+  # Hold 1000 connections for default 60 seconds
   bun --env-file=.env.production src/utility/benchmark-connections.ts --connections 1000
 
-  # Test 10000 connections for 3 minutes
-  bun --env-file=.env.production src/utility/benchmark-connections.ts --connections 10000 --duration 180
-
-  # Test with custom WebSocket URL
-  bun src/utility/benchmark-connections.ts --connections 500 --ws wss://myserver.com:3000
+  # Hold connections indefinitely (use Ctrl+C to stop)
+  bun src/utility/benchmark-connections.ts --connections 500 --duration 999999
 
 ${chalk.bold('Notes:')}
   - This tool bypasses the gateway and connects directly to the game server
-  - Only opens WebSocket connections and sends BENCHMARK packets
-  - No guest accounts are created, no authentication is performed
-  - Designed to test raw connection capacity without gameplay overhead
+  - Opens WebSocket connections, sends one BENCHMARK packet, then holds them
+  - No guest accounts created, no authentication, no movement simulation
+  - Designed to stress-test raw connection capacity
   - Automatically generates connection tokens using GATEWAY_GAME_SERVER_SECRET
 `);
 }
@@ -216,28 +213,7 @@ async function createConnection(index: number, config: BenchmarkConfig): Promise
             stats.active++;
             activeConnections.add(ws);
 
-            // Start sending BENCHMARK packets every 5 seconds
-            const benchmarkInterval = setInterval(() => {
-                if (!testRunning || ws.readyState !== WebSocket.OPEN) {
-                    clearInterval(benchmarkInterval);
-                    return;
-                }
-
-                const sendTime = Date.now();
-                connectionTimestamps.set(ws, sendTime);
-
-                ws.send(packet.encode(JSON.stringify({
-                    type: 'BENCHMARK',
-                    data: {
-                        connectionId: index,
-                        timestamp: sendTime
-                    }
-                })));
-
-                stats.benchmarkPacketsSent++;
-            }, 5000);
-
-            // Send first packet immediately
+            // Send one BENCHMARK packet to register with server, then just hold the connection
             const sendTime = Date.now();
             connectionTimestamps.set(ws, sendTime);
             ws.send(packet.encode(JSON.stringify({
@@ -340,7 +316,7 @@ function drawProgress(elapsed: number, total: number, stats: ConnectionStats, ba
 // Main benchmark function
 async function runBenchmark(config: BenchmarkConfig) {
     console.log('\n' + chalk.bold.cyan('━'.repeat(70)));
-    console.log(chalk.bold.cyan('  Frostfire Forge - Connection Benchmark'));
+    console.log(chalk.bold.cyan('  Frostfire Forge - Connection Hold Test'));
     console.log(chalk.bold.cyan('━'.repeat(70)) + '\n');
 
     console.log(`  ${chalk.bold('Connections:')} ${chalk.white(config.connections)}`);
@@ -381,8 +357,21 @@ async function runBenchmark(config: BenchmarkConfig) {
         }
     }
 
-    // Wait a bit for connections to establish
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // Wait for ALL connections to establish (or timeout)
+    const startWaitTime = Date.now();
+    const maxWaitTime = 60000; // Max 60 seconds
+
+    while (true) {
+        const total = stats.opened + stats.failed;
+        const elapsedWait = Date.now() - startWaitTime;
+
+        // Stop if ALL connections are done (opened or failed) or max wait time
+        if (total >= config.connections || elapsedWait >= maxWaitTime) {
+            break;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
 
     clearInterval(progressUpdateInterval);
 
@@ -402,10 +391,10 @@ async function runBenchmark(config: BenchmarkConfig) {
         return;
     }
 
-    log('Running benchmark...', 'info');
+    log(`Holding ${stats.opened} connections for ${config.duration} seconds...`, 'info');
     console.log('');
 
-    // Progress tracking
+    // Simple progress tracking - just show time and active connections
     let elapsedSeconds = 0;
     const progressInterval = setInterval(() => {
         if (!testRunning) {
@@ -413,7 +402,15 @@ async function runBenchmark(config: BenchmarkConfig) {
             return;
         }
         elapsedSeconds++;
-        drawProgress(elapsedSeconds, config.duration, stats);
+
+        const percentage = Math.min(100, Math.round((elapsedSeconds / config.duration) * 100));
+        const filledLength = Math.round((40 * elapsedSeconds) / config.duration);
+        const bar = chalk.green('█'.repeat(filledLength)) + chalk.gray('░'.repeat(40 - filledLength));
+
+        const connectionColor = stats.active === stats.opened ? chalk.green : chalk.yellow;
+        const timeDisplay = chalk.white(`${elapsedSeconds}s`) + chalk.gray('/') + chalk.white(`${config.duration}s`);
+
+        process.stdout.write(`\r  ${chalk.bold('Holding:')} [${bar}] ${chalk.bold(percentage + '%')} ${timeDisplay} │ Active: ${connectionColor(stats.active)}${chalk.gray('/')}${chalk.white(stats.opened)}`);
     }, 1000);
 
     // Wait for test duration
@@ -423,7 +420,9 @@ async function runBenchmark(config: BenchmarkConfig) {
     clearInterval(progressInterval);
 
     // Draw final progress
-    drawProgress(config.duration, config.duration, stats);
+    const finalBar = chalk.green('█'.repeat(40));
+    const connectionColor = stats.active === stats.opened ? chalk.green : chalk.yellow;
+    process.stdout.write(`\r  ${chalk.bold('Holding:')} [${finalBar}] ${chalk.bold('100%')} ${chalk.white(config.duration + 's')}${chalk.gray('/')}${chalk.white(config.duration + 's')} │ Active: ${connectionColor(stats.active)}${chalk.gray('/')}${chalk.white(stats.opened)}\n`);
     console.log('');
 
     // Close all connections
@@ -439,46 +438,20 @@ async function runBenchmark(config: BenchmarkConfig) {
 
     // Display results
     console.log('\n' + chalk.bold.green('━'.repeat(70)));
-    console.log(chalk.bold.green('  Benchmark Complete'));
+    console.log(chalk.bold.green('  Connection Test Complete'));
     console.log(chalk.bold.green('━'.repeat(70)) + '\n');
 
-    console.log(`  ${chalk.bold('Connection Statistics:')}`);
+    console.log(`  ${chalk.bold('Total Duration:')} ${chalk.white(totalTime + 's')}`);
+    console.log(`\n  ${chalk.bold('Connection Statistics:')}`);
     console.log(`    ${chalk.bold('Total Attempted:')} ${chalk.white(config.connections)}`);
     console.log(`    ${chalk.bold('Opened:')}         ${chalk.green(stats.opened)}`);
     console.log(`    ${chalk.bold('Failed:')}         ${stats.failed > 0 ? chalk.red(stats.failed) : chalk.green('0')}`);
-    console.log(`    ${chalk.bold('Active at End:')}  ${chalk.cyan(stats.active)}`);
-    console.log(`    ${chalk.bold('Closed:')}         ${chalk.white(stats.closed)}`);
 
-    console.log(`\n  ${chalk.bold('Packet Statistics:')}`);
-    console.log(`    ${chalk.bold('Sent:')}           ${chalk.cyan(stats.benchmarkPacketsSent)}`);
-    console.log(`    ${chalk.bold('Received:')}       ${chalk.cyan(stats.benchmarkPacketsReceived)}`);
-
-    const packetLossRate = stats.benchmarkPacketsSent > 0
-        ? ((1 - stats.benchmarkPacketsReceived / stats.benchmarkPacketsSent) * 100).toFixed(2)
-        : '0.00';
-    const lossColor = parseFloat(packetLossRate) < 1 ? chalk.green : (parseFloat(packetLossRate) < 5 ? chalk.yellow : chalk.red);
-    console.log(`    ${chalk.bold('Loss Rate:')}      ${lossColor(packetLossRate + '%')}`);
-
-    if (stats.latencies.length > 0) {
-        const avg = Math.round(stats.latencies.reduce((a, b) => a + b, 0) / stats.latencies.length);
-        const min = Math.round(Math.min(...stats.latencies));
-        const max = Math.round(Math.max(...stats.latencies));
-
-        console.log(`\n  ${chalk.bold('Latency Statistics:')}`);
-
-        let avgColor = chalk.green;
-        if (avg > 100) avgColor = chalk.yellow;
-        if (avg > 200) avgColor = chalk.red;
-
-        console.log(`    ${chalk.bold('Average:')} ${avgColor(avg + 'ms')}`);
-        console.log(`    ${chalk.bold('Minimum:')} ${chalk.green(min + 'ms')}`);
-
-        let maxColor = chalk.green;
-        if (max > 200) maxColor = chalk.yellow;
-        if (max > 500) maxColor = chalk.red;
-
-        console.log(`    ${chalk.bold('Maximum:')} ${maxColor(max + 'ms')}`);
-        console.log(`    ${chalk.bold('Samples:')} ${chalk.white(stats.latencies.length.toLocaleString())}`);
+    if (stats.active === stats.opened) {
+        console.log(`    ${chalk.bold('Active at End:')}  ${chalk.green(stats.active)} ${chalk.green('✓ All connections held')}`);
+    } else {
+        const disconnected = stats.opened - stats.active;
+        console.log(`    ${chalk.bold('Active at End:')}  ${chalk.yellow(stats.active)} ${chalk.yellow('(' + disconnected + ' disconnected)')}`);
     }
 
     console.log('\n' + chalk.gray('━'.repeat(70)) + '\n');
