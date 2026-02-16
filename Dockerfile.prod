@@ -1,5 +1,4 @@
 # Production Dockerfile for Frostfire Forge Game Server
-# WebSocket-only server (no HTTP webserver)
 FROM oven/bun:canary AS base
 WORKDIR /app
 

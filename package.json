@@ -50,7 +50,11 @@
     "benchmark": "bun ./src/utility/benchmark-cli.ts",
     "benchmark:local": "bun --env-file=.env.local ./src/utility/benchmark-cli.ts",
     "benchmark:development": "bun --env-file=.env.development ./src/utility/benchmark-cli.ts",
-    "benchmark:production": "bun --env-file=.env.production ./src/utility/benchmark-cli.ts"
+    "benchmark:production": "bun --env-file=.env.production ./src/utility/benchmark-cli.ts",
+    "benchmark:connections": "bun ./src/utility/benchmark-connections.ts",
+    "benchmark:connections:local": "bun --env-file=.env.local ./src/utility/benchmark-connections.ts",
+    "benchmark:connections:development": "bun --env-file=.env.development ./src/utility/benchmark-connections.ts",
+    "benchmark:connections:production": "bun --env-file=.env.production ./src/utility/benchmark-connections.ts"
   },
   "type": "module"
 }
