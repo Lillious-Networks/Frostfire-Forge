@@ -420,9 +420,9 @@ async function runBenchmark(config: BenchmarkConfig) {
     clearInterval(progressInterval);
 
     // Draw final progress
-    const finalBar = chalk.green('█'.repeat(40));
+    const finalHoldingBar = chalk.green('█'.repeat(40));
     const connectionColor = stats.active === stats.opened ? chalk.green : chalk.yellow;
-    process.stdout.write(`\r  ${chalk.bold('Holding:')} [${finalBar}] ${chalk.bold('100%')} ${chalk.white(config.duration + 's')}${chalk.gray('/')}${chalk.white(config.duration + 's')} │ Active: ${connectionColor(stats.active)}${chalk.gray('/')}${chalk.white(stats.opened)}\n`);
+    process.stdout.write(`\r  ${chalk.bold('Holding:')} [${finalHoldingBar}] ${chalk.bold('100%')} ${chalk.white(config.duration + 's')}${chalk.gray('/')}${chalk.white(config.duration + 's')} │ Active: ${connectionColor(stats.active)}${chalk.gray('/')}${chalk.white(stats.opened)}\n`);
     console.log('');
 
     // Close all connections
@@ -441,7 +441,7 @@ async function runBenchmark(config: BenchmarkConfig) {
     console.log(chalk.bold.green('  Connection Test Complete'));
     console.log(chalk.bold.green('━'.repeat(70)) + '\n');
 
-    console.log(`  ${chalk.bold('Total Duration:')} ${chalk.white(totalTime + 's')}`);
+    console.log(`  ${chalk.bold('Total Duration:')} ${chalk.white(config.duration + 's')}`);
     console.log(`\n  ${chalk.bold('Connection Statistics:')}`);
     console.log(`    ${chalk.bold('Total Attempted:')} ${chalk.white(config.connections)}`);
     console.log(`    ${chalk.bold('Opened:')}         ${chalk.green(stats.opened)}`);

@@ -57,7 +57,6 @@ class LayerManager {
       players: new Set<string>(),
     });
 
-    log.debug(`[LAYER] Created new layer: ${newLayerId}`);
     return newLayerId;
   }
 
@@ -78,7 +77,6 @@ class LayerManager {
     layer.playerCount++;
     this.playerToLayer.set(playerId, layerId);
 
-    log.debug(`[LAYER] Assigned player ${playerId} to ${layerId} (${layer.playerCount}/${this.MAX_PLAYERS_PER_LAYER})`);
     return layerId;
   }
 
@@ -94,12 +92,9 @@ class LayerManager {
       layer.players.delete(playerId);
       layer.playerCount--;
 
-      log.debug(`[LAYER] Removed player ${playerId} from ${layerId} (${layer.playerCount}/${this.MAX_PLAYERS_PER_LAYER})`);
-
       // Clean up empty layers
       if (layer.playerCount === 0) {
         this.layers.delete(layerId);
-        log.debug(`[LAYER] Deleted empty layer: ${layerId}`);
       }
     }
 

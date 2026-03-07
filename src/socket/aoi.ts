@@ -1,6 +1,7 @@
 import AOI_CONFIG from "../config/aoi.json";
 import playerCache from "../services/playermanager";
 import layerManager from "../services/layermanager";
+import mapIndex from "../services/mapindex";
 import parties from "../systems/parties";
 import { packetManager } from "./packet_manager";
 import log from "../modules/logger";
@@ -532,10 +533,6 @@ export function despawnPlayerFromAllAOI(
     // Find all players who have this player in their AOI
     const affectedPlayers = findPlayersWithTargetInAOI(departingPlayer.id);
 
-    if (affectedPlayers.length > 0) {
-      log.debug(`[DESPAWN] Queuing ${departingPlayer.id} to ${affectedPlayers.length} players`);
-    }
-
     affectedPlayers.forEach((player) => {
       if (despawnBatchQueue) {
         // Queue despawn for batching
@@ -634,9 +631,15 @@ export async function handleMapChangeAOI(
     }
 
     // Update position and grid cell
+    const oldMapForIndex = player.location.map;
     player.location.map = newMapName;
     player.location.position.x = newPosition.x;
     player.location.position.y = newPosition.y;
+
+    // Update map index when player changes maps
+    if (oldMap !== newMap) {
+      mapIndex.movePlayer(player.id, oldMapForIndex, newMapName);
+    }
     player.aoi.gridX = Math.floor(newPosition.x / AOI_CONFIG.GRID_CELL_SIZE);
     player.aoi.gridY = Math.floor(newPosition.y / AOI_CONFIG.GRID_CELL_SIZE);
     player.aoi.lastAOIUpdatePosition = { x: newPosition.x, y: newPosition.y };

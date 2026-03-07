@@ -11,11 +11,13 @@ const event = new eventEmitter();
 import log from "../modules/logger.ts";
 import player from "../systems/player.ts";
 import playerCache from "../services/playermanager.ts";
+import mapIndex from "../services/mapindex";
+import gameLoop from "../services/gameloop";
 import packet from "../modules/packet.ts";
 import path from "node:path";
 import fs from "node:fs";
 import { generateKeyPair } from "../modules/cipher.ts";
-import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondensation } from "./aoi.ts";
+import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondensation, findPlayersWithTargetInAOI } from "./aoi.ts";
 
 // Load settings
 import * as settings from "../config/settings.json";
@@ -147,8 +149,6 @@ const Server = Bun.serve<Packet, any>({
       log.warn(`Connection attempt with expired token from: ${req.headers.get("x-forwarded-for") || "unknown"}`);
       return new Response("Unauthorized: Token expired", { status: 401 });
     }
-
-    log.debug(`Valid connection token from gateway for client: ${id}`);
 
     const success = Server.upgrade(req, { data: { id, useragent, chatDecryptionKey } as any });
     if (!success) {
@@ -321,6 +321,9 @@ if (settings?.gateway?.enabled) {
 listener.emit("onAwake");
 listener.emit("onStart");
 
+// Start centralized game loop for movement processing
+gameLoop.start();
+
 // Start auto party layer sync every 15 seconds
 startAutoPartyLayerSync(sendAnimationTo);
 
@@ -341,6 +344,67 @@ setInterval(() => {
 
 setInterval(() => {
   listener.emit("onServerTick");
+}, 1000);
+
+// Backpressure monitoring - logs every second
+setInterval(() => {
+  const allPlayers = Object.values(playerCache.list());
+  const connectedPlayers = allPlayers.filter((p: any) => p?.ws && p.ws.readyState === 1);
+
+  if (connectedPlayers.length === 0) return;
+
+  let totalBuffered = 0;
+  let maxBuffered = 0;
+  let playersWithBackpressure = 0;
+  let maxBufferedPlayer: any = null;
+  const BACKPRESSURE_THRESHOLD = 32 * 1024; // 32KB
+
+  for (const player of connectedPlayers) {
+    const buffered = player.ws.bufferedAmount || 0;
+    totalBuffered += buffered;
+
+    if (buffered > maxBuffered) {
+      maxBuffered = buffered;
+      maxBufferedPlayer = player;
+    }
+
+    if (buffered > BACKPRESSURE_THRESHOLD) {
+      playersWithBackpressure++;
+    }
+  }
+
+  const avgBufferedBytes = totalBuffered / connectedPlayers.length;
+  const movingPlayers = gameLoop.getStats().movingPlayers;
+
+  // Format buffer size intelligently
+  const formatBuffer = (bytes: number): string => {
+    if (bytes >= 1024) {
+      return `${(bytes / 1024).toFixed(1)}KB`;
+    }
+    return `${Math.round(bytes)}B`;
+  };
+
+  const avgBufferStr = formatBuffer(avgBufferedBytes);
+  const maxBufferStr = formatBuffer(maxBuffered);
+
+  // Always log if there's significant backpressure, otherwise log less frequently
+  if (playersWithBackpressure > 0 || avgBufferedBytes > 16 * 1024) {
+    log.warn(
+      `[BACKPRESSURE] Players: ${connectedPlayers.length} (${movingPlayers} moving) | ` +
+      `Avg buffer: ${avgBufferStr} | Max: ${maxBufferStr} | ` +
+      `${playersWithBackpressure} players over 32KB` +
+      (maxBufferedPlayer ? ` | Worst: ${maxBufferedPlayer.username || maxBufferedPlayer.id}` : '')
+    );
+  } else if (connectedPlayers.length > 50) {
+    // Light logging every 10 seconds for high player counts with no issues
+    const tick = Math.floor(Date.now() / 1000);
+    if (tick % 10 === 0) {
+      log.info(
+        `[BACKPRESSURE] Players: ${connectedPlayers.length} (${movingPlayers} moving) | ` +
+        `Avg buffer: ${avgBufferStr} | Max: ${maxBufferStr}`
+      );
+    }
+  }
 }, 1000);
 
 // Global rate limit window time management (replaces per-client intervals)
@@ -454,11 +518,12 @@ listener.on("onServerTick", async () => {
       playerData.ws.send(packetManager.updateStats(updateStatsData)[0])
     );
 
-    for (const other of players) {
+    // Use AOI system instead of O(n²) map-wide loop
+    // Only send updates to players who can actually see this player
+    const observers = findPlayersWithTargetInAOI(playerData.id);
+    for (const other of observers) {
       if (
         other &&
-        other.id !== playerData.id &&
-        other.location?.map === playerData.location?.map &&
         !inactiveSet.has(other.id) &&
         other.ws &&
         other.ws.readyState === WebSocket.OPEN
@@ -504,7 +569,6 @@ listener.on("onServerTick", async () => {
 
 listener.on("onConnection", (data) => {
   if (!data) return;
-  log.debug(`New connection: ${data}`);
 });
 
 listener.on("onDisconnect", async (data) => {
@@ -514,14 +578,14 @@ listener.on("onDisconnect", async (data) => {
     const playerData = playerCache.get(data.id);
     if (!playerData) return;
 
-    // CRITICAL: Clear movement interval FIRST to stop queuing new movements
-    if (playerData.movementInterval) {
-      clearInterval(playerData.movementInterval);
-      playerData.movementInterval = null;
-    }
+    // CRITICAL: Unregister from game loop FIRST to stop processing movement
+    gameLoop.unregisterMovingPlayer(playerData.id);
 
     // CRITICAL: Remove from cache IMMEDIATELY to prevent batch timers from processing this player
     playerCache.remove(playerData.id);
+
+    // Remove player from map index
+    mapIndex.removePlayer(playerData.id);
 
     // Clear all batch queue entries for this player
     clearBatchQueuesForPlayer(playerData.id, playerData.location.map);
@@ -573,8 +637,6 @@ listener.on("onDisconnect", async (data) => {
     }
 
     await player.clearSessionId(playerData.id);
-
-    log.debug(`Disconnected: ${playerData.username} Reason: ${data.reason}`);
   } catch (e) {
     log.error(e as string);
   }
@@ -683,6 +745,9 @@ function handleBackpressure(ws: any, action: () => void, retryCount = 0) {
 // Graceful shutdown handler
 async function gracefulShutdown(signal: string) {
   log.info(`Received ${signal}, shutting down gracefully...`);
+
+  // Stop game loop
+  gameLoop.stop();
 
   // Unregister from gateway if enabled
   if (gatewayClient) {

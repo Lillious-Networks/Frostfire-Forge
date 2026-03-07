@@ -28,6 +28,7 @@
  */
 
 import chalk from 'chalk';
+import crypto from 'crypto';
 
 // Parse command line arguments
 function parseArgs() {
@@ -42,10 +43,27 @@ function parseArgs() {
     const useSSL = process.env.WEB_SOCKET_USE_SSL === 'true';
     const defaultWebsocketUrl = `${useSSL ? 'wss' : 'ws'}://localhost:${wsPort}`;
 
+    // Build default HTTP host URL for API calls
+    const httpHost = process.env.PUBLIC_HOST || process.env.SERVER_HOST || 'localhost';
+    const httpProtocol = useSSL ? 'https' : 'http';
+    const defaultHost = `${httpProtocol}://${httpHost}`;
+
+    // Gateway has two components:
+    // 1. Gateway Webserver (has /guest-login, /login, etc.) - typically on standard HTTPS port
+    // 2. Gateway Server/Load Balancer (has /status, proxies requests) - on separate port (e.g., 9998)
+    // When gateway is enabled, extract the base URL for the webserver from the gateway URL
+    let effectiveHost = defaultHost;
+    if (gatewayEnabled && defaultGatewayUrl) {
+        // Extract hostname from gateway URL and use standard HTTPS port for webserver
+        const gatewayHostUrl = new URL(defaultGatewayUrl);
+        effectiveHost = `${gatewayHostUrl.protocol}//${gatewayHostUrl.hostname}`;
+    }
+
     const config = {
         clients: 50,
         duration: 60,
         websocketUrl: defaultWebsocketUrl,
+        host: effectiveHost,
         gatewayEnabled: gatewayEnabled,
         gatewayUrl: defaultGatewayUrl,
         realmId: undefined as string | undefined,
@@ -63,6 +81,9 @@ function parseArgs() {
                 break;
             case '--ws':
                 config.websocketUrl = args[++i] || defaultWebsocketUrl;
+                break;
+            case '--host':
+                config.host = args[++i] || effectiveHost;
                 break;
             case '--gateway':
                 config.gatewayEnabled = true;
@@ -94,6 +115,7 @@ Usage:
 Options:
   --clients <number>     Number of concurrent clients (min: 1, default: 50, no limit)
   --duration <number>    Test duration in seconds (min: 10, default: 60, no limit)
+  --host <url>          HTTP host URL for API calls (guest-login, etc.)
   --ws <url>            WebSocket URL (default: ws://localhost:3000 or wss:// if SSL enabled)
   --gateway             Enable gateway load balancer routing
   --gateway-url <url>   Gateway HTTP URL (default from GATEWAY_URL env or http://localhost:9999)
@@ -165,10 +187,12 @@ function log(message: string, level: 'info' | 'error' | 'success' | 'warn' = 'in
     console.log(`${timestamp} ${prefix} ${message}`);
 }
 
-// Fetch available servers from the API
-async function fetchAvailableServers(host: string): Promise<any[]> {
+// Fetch available servers from the API or gateway
+async function fetchAvailableServers(host: string, isGateway: boolean): Promise<any[]> {
     try {
-        const response = await fetch(`${host}/api/gateway/servers`, {
+        // Gateway uses /status endpoint, game server uses /api/gateway/servers
+        const endpoint = isGateway ? '/status' : '/api/gateway/servers';
+        const response = await fetch(`${host}${endpoint}`, {
             method: 'GET',
             headers: {
                 'Content-Type': 'application/json',
@@ -187,55 +211,6 @@ async function fetchAvailableServers(host: string): Promise<any[]> {
         log(`Failed to fetch server list: ${error.message}`, 'warn');
         return [];
     }
-}
-
-// Connect through gateway to get server assignment
-async function connectThroughGateway(gatewayUrl: string, clientId: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-            gatewayWs.close();
-            reject(new Error('Gateway connection timeout'));
-        }, 10000);
-
-        // Add clientId as query parameter
-        const url = new URL(gatewayUrl);
-        url.searchParams.set('clientId', clientId);
-
-        const gatewayWs = new WebSocket(url.toString());
-
-        gatewayWs.addEventListener('message', (event: any) => {
-            clearTimeout(timeout);
-
-            try {
-                const data = JSON.parse(event.data);
-
-                if (data.type === 'server_assignment') {
-                    // Build game server URL
-                    const gameUrl = `ws://${data.server.host}:${data.server.wsPort}`;
-                    gatewayWs.close();
-                    resolve(gameUrl);
-                } else if (data.type === 'error') {
-                    gatewayWs.close();
-                    reject(new Error(`Gateway error: ${data.message}`));
-                }
-            } catch (error) {
-                gatewayWs.close();
-                reject(new Error(`Failed to parse gateway message: ${error}`));
-            }
-        });
-
-        gatewayWs.addEventListener('error', (error) => {
-            clearTimeout(timeout);
-            reject(error);
-        });
-
-        gatewayWs.addEventListener('close', (event: any) => {
-            clearTimeout(timeout);
-            if (event.code !== 1000) {
-                reject(new Error(`Gateway closed: ${event.code}`));
-            }
-        });
-    });
 }
 
 // Progress bar with connection status
@@ -374,10 +349,33 @@ async function createClients(amount: number, host: string, websocketUrl: string,
     const allWebsockets: any[] = [];
     const loggedInWebsockets: any[] = [];
 
-    // Fetch available servers for realm selection
+    // Fetch available servers from gateway or game server
     let availableServers: any[] = [];
-    if (!config.gatewayEnabled) {
-        availableServers = await fetchAvailableServers(host);
+    if (config.gatewayEnabled) {
+        // When using gateway, fetch server list from gateway's /status endpoint
+        availableServers = await fetchAvailableServers(config.gatewayUrl, true);
+        if (availableServers.length > 0) {
+            log(`Found ${availableServers.length} server(s) from gateway`, 'info');
+            // Log first server details for debugging
+            const firstServer = availableServers[0];
+            log(`Server details: ${firstServer.id} - ${firstServer.useSSL ? 'wss' : 'ws'}://${firstServer.publicHost || firstServer.host}:${firstServer.wsPort}`, 'info');
+
+            // Filter to specific realm if requested
+            if (config.realmId) {
+                const specificServer = availableServers.find(s => s.id === config.realmId);
+                if (specificServer) {
+                    availableServers = [specificServer];
+                    log(`Using specific realm: ${config.realmId}`, 'info');
+                } else {
+                    log(`Realm '${config.realmId}' not found, using all available realms`, 'warn');
+                }
+            }
+        } else {
+            log('No servers found from gateway', 'warn');
+        }
+    } else {
+        // Direct connection: fetch from game server
+        availableServers = await fetchAvailableServers(host, false);
         if (availableServers.length > 0) {
             log(`Found ${availableServers.length} available realm(s)`, 'info');
 
@@ -456,7 +454,8 @@ async function createClients(amount: number, host: string, websocketUrl: string,
                 }
 
                 try {
-                const response = await fetch(`${host}/guest-login`, {
+                const guestLoginUrl = `${host}/guest-login`;
+                const response = await fetch(guestLoginUrl, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -465,41 +464,71 @@ async function createClients(amount: number, host: string, websocketUrl: string,
                     signal: AbortSignal.timeout(15000) // 15 second timeout for guest account creation
                 });
 
+                // Try to get response text first for better error diagnostics
+                const responseText = await response.text();
+
                 if (response.status !== 301) {
-                    const body = await response.json();
-                    log(`Failed to create guest account: ${body.message}`, 'error');
+                    try {
+                        const body = JSON.parse(responseText);
+                        log(`Failed to create guest account (${response.status}): ${body.message || 'Unknown error'}`, 'error');
+                    } catch (parseError) {
+                        log(`Failed to create guest account (${response.status}): ${responseText.substring(0, 100)}`, 'error');
+                    }
                     return;
                 }
 
-                const body = await response.json();
+                let body;
+                try {
+                    body = JSON.parse(responseText);
+                } catch (parseError) {
+                    log(`Failed to parse guest login response: ${responseText.substring(0, 100)}`, 'error');
+                    return;
+                }
+
                 const token = body.token;
                 if (!token) {
                     log('No token received from guest login', 'error');
                     return;
                 }
 
-                // Determine WebSocket URL (gateway, realm selection, or direct)
+                // Determine WebSocket URL (use server list from gateway or direct)
                 let finalWebsocketUrl = websocketUrl;
-                if (config.gatewayEnabled) {
-                    try {
-                        // Generate unique clientId for this benchmark client
-                        const clientId = `benchmark-${crypto.randomUUID()}`;
-                        finalWebsocketUrl = await connectThroughGateway(config.gatewayUrl, clientId);
-                    } catch (error: any) {
-                        log(`Gateway connection failed for client ${i + 1}, using direct: ${error.message}`, 'warn');
-                    }
-                } else if (availableServers.length > 0) {
-                    // Use realm selection - distribute clients across servers
+                if (availableServers.length > 0) {
+                    // Use realm/server selection - distribute clients across servers
                     const serverIndex = i % availableServers.length;
                     const selectedServer = availableServers[serverIndex];
 
                     // Build WebSocket URL from server info
-                    const protocol = selectedServer.publicHost?.startsWith('https') ? 'wss' : 'ws';
+                    const protocol = selectedServer.useSSL ? 'wss' : 'ws';
                     const host = selectedServer.publicHost?.replace(/^https?:\/\//, '') || selectedServer.host;
                     finalWebsocketUrl = `${protocol}://${host}:${selectedServer.wsPort}`;
                 }
 
-                const websocket = new WebSocket(finalWebsocketUrl, {
+                // Generate connection token (required by game server)
+                const wsUrlWithAuth = new URL(finalWebsocketUrl);
+                const connectionToken = crypto.randomBytes(32).toString('hex');
+                const timestamp = Date.now().toString();
+                const expiresAt = (Date.now() + 60000).toString(); // 60 second expiry
+
+                // Create HMAC signature using shared secret
+                const sharedSecret = process.env.GATEWAY_GAME_SERVER_SECRET || 'default-secret-change-me';
+                const signature = crypto
+                    .createHmac('sha256', sharedSecret)
+                    .update(`${connectionToken}:${timestamp}:${expiresAt}`)
+                    .digest('hex');
+
+                // Add connection authentication parameters to URL
+                wsUrlWithAuth.searchParams.set('token', connectionToken);
+                wsUrlWithAuth.searchParams.set('timestamp', timestamp);
+                wsUrlWithAuth.searchParams.set('expiresAt', expiresAt);
+                wsUrlWithAuth.searchParams.set('signature', signature);
+
+                // Log first connection for debugging
+                if (i === 0) {
+                    log(`Connecting to WebSocket: ${finalWebsocketUrl}`, 'info');
+                }
+
+                const websocket = new WebSocket(wsUrlWithAuth.toString(), {
                     headers: {
                         'User-Agent': 'Frostfire-Forge-Benchmark-CLI/1.0'
                     }
