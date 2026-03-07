@@ -10,6 +10,8 @@ const authentication_session_queue = new Set<string>();
 const pendingAuthentications = new Map<string, { ws: any; token: string; language: string }>();
 import playerCache from "../services/playermanager.ts";
 import layerManager from "../services/layermanager";
+import mapIndex from "../services/mapindex";
+import gameLoop from "../services/gameloop";
 import assetCache from "../services/assetCache";
 import { reloadMap } from "../modules/assetloader";
 import { clearMapCache } from "../systems/player.ts";
@@ -30,10 +32,10 @@ import { randomBytes } from "../modules/hash";
 import { saveMapChunks } from "../modules/assetloader";
 import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable } from "../modules/spriteSheetManager";
 import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers } from "./aoi";
-const defaultMap = settings.default_map?.replace(".json", "") || "main";
+const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
 // Animation system configuration
-const useSpriteSheets = settings.animation_system?.use_sprite_sheets ?? true;
+const useSpriteSheets = (settings as any).animation_system?.use_sprite_sheets ?? true;
 
 let restartScheduled: boolean;
 let restartTimers: ReturnType<typeof setTimeout>[];
@@ -47,10 +49,12 @@ export const movementBatchQueue = new Map<string, Map<string, any>>(); // Map of
 let currentBatchInterval = 40; // Start at 40ms (25 Hz)
 const BATCH_INTERVAL_NORMAL = 40; // 25 Hz for <300 players
 const BATCH_INTERVAL_MEDIUM = 50; // 20 Hz for 300-600 players
-const BATCH_INTERVAL_HIGH = 66; // 15 Hz for 600+ players
+const BATCH_INTERVAL_HIGH = 75; // 13 Hz for 600-800 players
+const BATCH_INTERVAL_EXTREME = 125; // 8 Hz for 800+ players (critical for network bandwidth)
 
-// Maximum buffered bytes before skipping updates (512KB - very aggressive)
-const MAX_BUFFER_BACKPRESSURE = 1024 * 512;
+// Maximum buffered bytes before skipping updates (32KB - extremely aggressive for snappy feel)
+// Lower threshold = more frame skipping but instant responsiveness and minimal lag buildup
+const MAX_BUFFER_BACKPRESSURE = 1024 * 32;
 
 // Adaptive load tracking
 let lastFlushTime = Date.now();
@@ -61,7 +65,9 @@ function adjustBatchInterval(): void {
   const playerCount = Object.keys(playerCache.list()).length;
 
   let newInterval = BATCH_INTERVAL_NORMAL;
-  if (playerCount >= 600) {
+  if (playerCount >= 800) {
+    newInterval = BATCH_INTERVAL_EXTREME;
+  } else if (playerCount >= 600) {
     newInterval = BATCH_INTERVAL_HIGH;
   } else if (playerCount >= 300) {
     newInterval = BATCH_INTERVAL_MEDIUM;
@@ -69,7 +75,7 @@ function adjustBatchInterval(): void {
 
   if (newInterval !== currentBatchInterval) {
     currentBatchInterval = newInterval;
-    log.debug(`[MOVEMENT] Adjusted batch interval to ${newInterval}ms for ${playerCount} players (${Math.round(1000/newInterval)} Hz)`);
+    log.info(`[MOVEMENT] ⚡ Adjusted batch interval to ${newInterval}ms for ${playerCount} players (${Math.round(1000/newInterval)} Hz)`);
   }
 }
 
@@ -159,8 +165,12 @@ function flushMovementBatches() {
       const receiver = allPlayers[receiverId];
       if (!receiver || !receiver.ws || receiver.ws.readyState !== 1) continue;
 
-      // Skip if too much backpressure (prevents buffer overflow and latency spikes)
-      if (receiver.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
+      const bufferedAmount = receiver.ws.bufferedAmount;
+
+      // Hard cutoff for snappy feel - no gradual frame skipping
+      // If buffer exceeds 32KB, drop the update entirely
+      // This prevents lag buildup and ensures animations stop immediately
+      if (bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
         skippedDueToLoad++;
         continue;
       }
@@ -182,8 +192,20 @@ function flushMovementBatches() {
   movementBatchQueue.clear();
 
   flushCount++;
-  if (flushCount % 100 === 0 && skippedDueToLoad > 0) {
-    log.debug(`[MOVEMENT] Skipped ${skippedDueToLoad} updates due to load (flush took ${Date.now() - startTime}ms)`);
+  if (flushCount % 100 === 0) {
+    const playerCount = Object.keys(playerCache.list()).length;
+
+    // Calculate average buffer usage across all connected players
+    const allPlayersForStats = playerCache.list();
+    const allPlayersList = Object.values(allPlayersForStats);
+    const connectedPlayers = allPlayersList.filter(p => p?.ws && p.ws.readyState === 1);
+    const avgBuffered = connectedPlayers.length > 0
+      ? Math.round(connectedPlayers.reduce((sum, p) => sum + (p.ws?.bufferedAmount || 0), 0) / connectedPlayers.length / 1024)
+      : 0;
+
+    if (skippedDueToLoad > 0 || avgBuffered > 24) {
+      log.warn(`[MOVEMENT] ${playerCount} players | Skipped ${skippedDueToLoad} updates | Avg buffer: ${avgBuffered}KB | Flush: ${Date.now() - startTime}ms | Rate: ${Math.round(1000/currentBatchInterval)}Hz`);
+    }
   }
 }
 
@@ -191,7 +213,7 @@ function flushMovementBatches() {
 export const spawnBatchQueue = new Map<string, Map<string, any>>(); // Map of receivingPlayerId -> Map of spawnedPlayerId -> spawnData
 
 // Flush and send batched spawn packets
-function flushSpawnBatches() {
+async function flushSpawnBatches() {
   if (spawnBatchQueue.size === 0) return;
 
   const allPlayers = playerCache.list();
@@ -203,7 +225,7 @@ function flushSpawnBatches() {
     // Skip if player or websocket is missing/closed
     if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
 
-    // Skip if too much backpressure
+    // Skip if too much backpressure (hard cutoff for snappy feel)
     if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) continue;
 
     const spawnsForThisPlayer = Array.from(spawnedPlayers.values());
@@ -216,10 +238,10 @@ function flushSpawnBatches() {
       };
       sendPacket(receivingPlayer.ws, packetManager.loadPlayers(loadPlayersData));
 
-      // Send animations for each spawned player
-      spawnsForThisPlayer.forEach(async (spawnData) => {
+      // Batch animations for all spawned players
+      const animationPromises = spawnsForThisPlayer.map(async (spawnData) => {
         const spawnedPlayer = allPlayers[spawnData.id];
-        if (!spawnedPlayer) return;
+        if (!spawnedPlayer) return null;
 
         const animationName = getAnimationNameForDirection(
           spawnedPlayer.location.position.direction,
@@ -229,8 +251,17 @@ function flushSpawnBatches() {
           spawnedPlayer.casting || false
         );
 
-        await sendAnimationTo(receivingPlayer.ws, animationName, spawnData.id);
+        // Return animation data instead of sending immediately
+        return await getAnimationData(animationName, spawnData.id);
       });
+
+      // Wait for all animations to be prepared
+      const animationDataArray = (await Promise.all(animationPromises)).filter(a => a !== null);
+
+      // Send all animations in a single batched packet (huge bandwidth savings!)
+      if (animationDataArray.length > 0) {
+        sendPacket(receivingPlayer.ws, packetManager.batchSpriteSheetAnimation(animationDataArray));
+      }
     }
   }
 
@@ -254,7 +285,7 @@ function flushDespawnBatches() {
     // Skip if player or websocket is missing/closed
     if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
 
-    // Skip if too much backpressure
+    // Skip if too much backpressure (hard cutoff for snappy feel)
     if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) continue;
 
     const despawnsArray = Array.from(despawnedPlayerIds);
@@ -271,9 +302,9 @@ function flushDespawnBatches() {
 }
 
 // Master flush function - flushes all batch types
-function flushAllBatches() {
+async function flushAllBatches() {
   flushMovementBatches();
-  flushSpawnBatches();
+  await flushSpawnBatches();
   flushDespawnBatches();
 }
 
@@ -442,7 +473,6 @@ authWorker.on("message", async (result: any) => {
         log.error(`Failed to update world player count: ${err}`)
       );
     }
-    log.info(`World: ${spawnLocation.map.replace(".json", "")} now has ${world?.players || 0} players.`);
 
     // Send weather data - use already-fetched world instead of redundant lookup
     const weather = world?.weather || "clear";
@@ -451,6 +481,12 @@ authWorker.on("message", async (result: any) => {
     }
 
     // Add player to cache
+    // Limit array sizes to prevent memory bloat
+    const limitedInventory = Array.isArray(playerData.inventory) ? playerData.inventory.slice(0, 30) : [];
+    const limitedFriends = Array.isArray(playerData.friends) ? playerData.friends.slice(0, 100) : [];
+    const limitedCollectables = Array.isArray(playerData.collectables) ? playerData.collectables.slice(0, 50) : [];
+    const limitedLearnedSpells = Array.isArray(playerData.learnedSpells) ? playerData.learnedSpells.slice(0, 100) : (playerData.learnedSpells || []);
+
     playerCache.add(ws.data.id, {
       username: playerData.username,
       animation: null,
@@ -471,11 +507,10 @@ authWorker.on("message", async (result: any) => {
       language: language || "en",
       ws,
       stats: playerData.stats || {},
-      friends: playerData.friends || [],
+      friends: limitedFriends,
       attackDelay: 0,
       lastMovementPacket: null,
       permissions: typeof playerData.permissions === "string" ? (playerData.permissions as string).split(",") : playerData.permissions || [],
-      movementInterval: null,
       pvp: false,
       last_attack: null,
       invitations: [],
@@ -487,17 +522,24 @@ authWorker.on("message", async (result: any) => {
       lastUpdated: performance.now(),
       mounted: false,
       mount_type: null,
-      collectables: playerData.collectables || [],
+      collectables: limitedCollectables,
       spellCooldowns: {},
       casting: false,
       lastInterruptTime: 0,
       interruptableSpell: false,
-      learnedSpells: playerData.learnedSpells || [],
-      inventory: playerData.inventory || [],
+      learnedSpells: limitedLearnedSpells,
+      inventory: limitedInventory,
       equipment: playerData.equipment || {},
     });
 
     const stats = await player.synchronizeStats(playerData.username);
+
+    // Handle case where stats synchronization fails
+    if (!stats) {
+      sendPacket(ws, packetManager.loginFailed());
+      ws.close(1008, "Failed to load player stats");
+      return;
+    }
 
     // Prevent health and stamina from exceeding max values
     if (stats.stamina > stats.total_max_stamina) {
@@ -517,6 +559,9 @@ authWorker.on("message", async (result: any) => {
       // Initialize AOI state for the player
       await initializePlayerAOI(_pcache);
       playerCache.set(_pcache.id, _pcache);
+
+      // Add player to map index for optimized map-based lookups
+      mapIndex.addPlayer(_pcache.id, _pcache.location.map);
     }
 
     const mapData = [
@@ -651,9 +696,6 @@ authWorker.on("message", async (result: any) => {
         });
         broadcastToAOI(currentPlayer, animationData, false);
       }
-
-      // Send music
-      sendPacket(ws, packetManager.music({ name: 'music_entry' }));
 
     });
     setImmediate(() => {
@@ -902,24 +944,22 @@ export default async function packetReceiver(
         ];
 
         if (direction === "abort") {
-          if (currentPlayer.movementInterval) {
-            clearInterval(currentPlayer.movementInterval);
-            currentPlayer.movementInterval = null;
-            currentPlayer.moving = false;
-        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
+          // Unregister from game loop instead of clearing interval
+          gameLoop.unregisterMovingPlayer(currentPlayer.id);
+          currentPlayer.moving = false;
+          // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
-            globalStateRevision++;
-            await sendPositionAnimation(
-              ws,
-              lastDirection,
-              false,
-              currentPlayer.mounted,
-              currentPlayer.mount_type || "unicorn",
-              undefined,
-              globalStateRevision,
-              currentPlayer.casting || false
-            );
-          }
+          globalStateRevision++;
+          await sendPositionAnimation(
+            ws,
+            lastDirection,
+            false,
+            currentPlayer.mounted,
+            currentPlayer.mount_type || "unicorn",
+            undefined,
+            globalStateRevision,
+            currentPlayer.casting || false
+          );
           return;
         }
 
@@ -967,38 +1007,17 @@ export default async function packetReceiver(
           currentPlayer.casting || false
         );
 
-        if (currentPlayer.movementInterval) {
-          clearInterval(currentPlayer.movementInterval);
+        // Unregister from game loop if already moving (will re-register below)
+        if (gameLoop.isPlayerMoving(currentPlayer.id)) {
+          gameLoop.unregisterMovingPlayer(currentPlayer.id);
         }
 
-        let lastTime = performance.now();
-        let running = false;
-        let aoiUpdateCounter = 0; // Rate-limit expensive AOI updates
-
         const movePlayer = async () => {
-          if (running) return;
-          running = true;
-          aoiUpdateCounter++;
-
           // Stop movement if websocket closed
           if (!ws || ws.readyState !== 1) {
-            if (currentPlayer.movementInterval) {
-              clearInterval(currentPlayer.movementInterval);
-              currentPlayer.movementInterval = null;
-            }
-            running = false;
+            gameLoop.unregisterMovingPlayer(currentPlayer.id);
             return;
           }
-
-          const currentTime = performance.now();
-          const deltaTime = currentTime - lastTime;
-
-          if (deltaTime < frameTime) {
-            running = false;
-            return;
-          }
-
-          lastTime = currentTime - (deltaTime % frameTime);
 
           const tempPosition = { ...currentPlayer.location.position };
           const playerHeight = 40;
@@ -1017,9 +1036,9 @@ export default async function packetReceiver(
 
           const offset = directionOffsets[direction];
           if (!offset) {
-            running = false;
             currentPlayer.moving = false;
-        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
+            gameLoop.unregisterMovingPlayer(currentPlayer.id);
+            // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
             return;
           }
 
@@ -1048,10 +1067,9 @@ export default async function packetReceiver(
           }
 
           if (isColliding && !currentPlayer.isNoclip) {
-            clearInterval(currentPlayer.movementInterval);
-            currentPlayer.movementInterval = null;
+            gameLoop.unregisterMovingPlayer(currentPlayer.id);
             currentPlayer.moving = false;
-        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
+            // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
             globalStateRevision++;
             await sendPositionAnimation(
@@ -1114,21 +1132,22 @@ export default async function packetReceiver(
                   sendPacket(ws, packetManager.reconnect());
                 } else {
                   globalStateRevision++;
+                  // Use short keys to reduce packet size
                   const movementData = {
-                    id: ws.data.id,
-                    _data: {
+                    i: ws.data.id,
+                    d: {
                       x: Number(currentPlayer.location.position.x),
                       y: Number(currentPlayer.location.position.y),
-                      direction: currentPlayer.location.position.direction
+                      dr: currentPlayer.location.position.direction
                     },
-                    revision: globalStateRevision
+                    r: globalStateRevision,
+                    s: currentPlayer.isStealth ? 1 : 0
                   };
                   sendPacket(ws, packetManager.moveXY(movementData));
                 }
               }
             }
 
-            running = false;
             return;
           }
 
@@ -1136,19 +1155,21 @@ export default async function packetReceiver(
 
           // Rate-limit AOI updates to every 10 frames (every 500ms at 20 FPS)
           // This reduces load dramatically with high player counts
+          const aoiUpdateCounter = gameLoop.getAOIUpdateCounter(currentPlayer.id);
           if (aoiUpdateCounter % 10 === 0 && shouldUpdateAOI(currentPlayer)) {
             await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
           }
 
+          // Use short keys to reduce packet size (40% smaller with compression)
           const movementData = {
-            id: ws.data.id,
-            _data: {
+            i: ws.data.id,  // id
+            d: {            // _data
               x: Number(currentPlayer.location.position.x),
               y: Number(currentPlayer.location.position.y),
-              direction: currentPlayer.location.position.direction
+              dr: currentPlayer.location.position.direction  // direction
             },
-            revision: globalStateRevision,
-            isStealth: currentPlayer.isStealth
+            r: globalStateRevision,  // revision
+            s: currentPlayer.isStealth ? 1 : 0  // isStealth as bit
           };
 
           // Add movement to batch queue for AOI-filtered broadcasting
@@ -1160,15 +1181,14 @@ export default async function packetReceiver(
             }
             movementBatchQueue.get(mapName)!.set(currentPlayer.id, movementData);
           }
-
-          running = false;
         };
 
-        movePlayer(); // Immediate first step
+        // Execute first movement step immediately
+        await movePlayer();
 
-        // Match movement update rate to batch broadcast rate (33ms = 30 FPS)
-        // Prevents queue buildup with high player counts
-        currentPlayer.movementInterval = setInterval(movePlayer, 33);
+        // Register with centralized game loop instead of per-player interval
+        // This replaces 100+ separate timers with a single game loop
+        gameLoop.registerMovingPlayer(currentPlayer.id, movePlayer);
         break;
       }
       case "TELEPORTXY": {
@@ -4700,11 +4720,8 @@ export default async function packetReceiver(
         );
 
         // If player is currently moving, restart the movement with new speed
-        if (currentPlayer.movementInterval) {
-          clearInterval(currentPlayer.movementInterval);
-          currentPlayer.movementInterval = null;
-
-          // Trigger a new MOVEXY to restart movement with the correct speed
+        if (gameLoop.isPlayerMoving(currentPlayer.id)) {
+          // Trigger a new MOVEXY to restart movement with the correct speed (will unregister and re-register)
           const moveDirection = currentPlayer.location.position?.direction || "down";
           // Send MOVEXY packet internally to restart movement
           await packetReceiver(server, ws, JSON.stringify({ type: "MOVEXY", data: moveDirection }));
@@ -5024,11 +5041,16 @@ export default async function packetReceiver(
 
 // Function to filter players by map
 function filterPlayersByMap(map: string) {
-  const players = playerCache.list();
-  return Object.values(players).filter(
-    (p) =>
-      p.location.map.replaceAll(".json", "") === map.replaceAll(".json", "")
-  );
+  // Use optimized map index for O(1) lookup instead of O(n) linear search
+  const playerIds = mapIndex.getPlayersOnMap(map);
+  const players: any[] = [];
+  for (const playerId of playerIds) {
+    const player = playerCache.get(playerId);
+    if (player) {
+      players.push(player);
+    }
+  }
+  return players;
 }
 
 // Function to filter players by distance and map
@@ -5053,13 +5075,16 @@ function tryParsePacket(data: any) {
 }
 
 function sendPacket(ws: any, packets: any[]) {
-  if (!ws || !ws.send || ws.readyState !== 1) return;
+  if (!ws || !ws.send || ws.readyState !== 1) {
+    // Silently skip - websocket not ready or closed
+    return;
+  }
   try {
     packets.forEach((packet) => {
       ws.send(packet);
     });
   } catch (error) {
-    // Silently ignore errors when sending to closed websockets
+    log.error(`Failed to send packet: ${error}`);
   }
 }
 
@@ -5232,6 +5257,74 @@ function normalizeDirection(direction: string): string {
     return direction;
   }
   return "down"; // safe fallback for invalid directions
+}
+
+// Get animation data without sending (for batching)
+async function getAnimationData(name: string, playerId: string, revision?: number): Promise<any | null> {
+  const targetPlayer = playerCache.get(playerId);
+  if (!targetPlayer) return null;
+
+  // Use sprite sheet system only
+  if (!useSpriteSheets || !(await isSpriteSheetSystemAvailable())) {
+    return null;
+  }
+
+  const playerEquipment = targetPlayer.equipment || null;
+  const spriteSheetData = await getPlayerSpriteSheetData(name, playerEquipment);
+
+  // Check if at least one layer is available to render
+  if (!spriteSheetData.bodySprite && !spriteSheetData.headSprite) {
+    return null;
+  }
+
+  const { getSpriteSheetImage, getSpriteSheetTemplate } = await import("../modules/spriteSheetManager");
+
+  const extractEquipmentName = (prefixedName: string) => {
+    const firstUnderscore = prefixedName.indexOf('_');
+    return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
+  };
+
+  // Get base64 image data for each sprite sheet (only if sprite exists)
+  const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
+  const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
+  const armorHelmetImageData = spriteSheetData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHelmetSprite.name)) : null;
+  const armorShoulderguardsImageData = spriteSheetData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorShoulderguardsSprite.name)) : null;
+  const armorNeckImageData = spriteSheetData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorNeckSprite.name)) : null;
+  const armorHandsImageData = spriteSheetData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHandsSprite.name)) : null;
+  const armorChestImageData = spriteSheetData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorChestSprite.name)) : null;
+  const armorFeetImageData = spriteSheetData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorFeetSprite.name)) : null;
+  const armorLegsImageData = spriteSheetData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorLegsSprite.name)) : null;
+  const armorWeaponImageData = spriteSheetData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorWeaponSprite.name)) : null;
+
+  // Get mount sprite sheet if player is mounted
+  let mountSprite = null;
+  let mountImageData = null;
+  if (targetPlayer.mounted && targetPlayer.mount_type) {
+    mountSprite = await getSpriteSheetTemplate('player_mount_base');
+    if (mountSprite) {
+      const mountImageName = targetPlayer.mount_type;
+      mountSprite.name = mountImageName;
+      mountSprite.imageSource = `mounts/${mountImageName}.png`;
+      mountImageData = await getSpriteSheetImage(mountImageName);
+    }
+  }
+
+  return {
+    id: targetPlayer.id,
+    mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
+    bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
+    headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
+    armorHelmetSprite: (spriteSheetData.armorHelmetSprite && armorHelmetImageData) ? { ...spriteSheetData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
+    armorShoulderguardsSprite: (spriteSheetData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...spriteSheetData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
+    armorNeckSprite: (spriteSheetData.armorNeckSprite && armorNeckImageData) ? { ...spriteSheetData.armorNeckSprite, imageData: armorNeckImageData } : null,
+    armorHandsSprite: (spriteSheetData.armorHandsSprite && armorHandsImageData) ? { ...spriteSheetData.armorHandsSprite, imageData: armorHandsImageData } : null,
+    armorChestSprite: (spriteSheetData.armorChestSprite && armorChestImageData) ? { ...spriteSheetData.armorChestSprite, imageData: armorChestImageData } : null,
+    armorFeetSprite: (spriteSheetData.armorFeetSprite && armorFeetImageData) ? { ...spriteSheetData.armorFeetSprite, imageData: armorFeetImageData } : null,
+    armorLegsSprite: (spriteSheetData.armorLegsSprite && armorLegsImageData) ? { ...spriteSheetData.armorLegsSprite, imageData: armorLegsImageData } : null,
+    armorWeaponSprite: (spriteSheetData.armorWeaponSprite && armorWeaponImageData) ? { ...spriteSheetData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
+    animationState: spriteSheetData.animationState,
+    revision: revision,
+  };
 }
 
 export async function sendAnimationTo(targetWs: any, name: string, playerId?: string, revision?: number) {

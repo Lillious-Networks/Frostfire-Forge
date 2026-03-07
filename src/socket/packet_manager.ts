@@ -296,11 +296,6 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "NOCLIP", data })),
     ] as any[];
   },
-  audio: (data: any) => {
-    return [
-      packet.encode(JSON.stringify({ type: "AUDIO", name: data.name, data: data.data, pitch: data.pitch, timestamp: data.timestamp || null })),
-    ] as any[];
-  },
   revive: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "REVIVE", data })),
@@ -314,11 +309,6 @@ export const packetManager = {
   questDetails: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "QUESTDETAILS", data })),
-    ] as any[];
-  },
-  music: (data: any) => {
-    return [
-      packet.encode(JSON.stringify({ type: "MUSIC", data })),
     ] as any[];
   },
   notify: (data: any) => {
@@ -349,6 +339,11 @@ export const packetManager = {
   spriteSheetAnimation: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "SPRITE_SHEET_ANIMATION", data })),
+    ] as any[];
+  },
+  batchSpriteSheetAnimation: (animations: any[]) => {
+    return [
+      packet.encode(JSON.stringify({ type: "BATCH_SPRITE_SHEET_ANIMATION", data: animations })),
     ] as any[];
   },
   updateFriends: (data: any) => {

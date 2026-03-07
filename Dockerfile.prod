@@ -1,4 +1,4 @@
-# Production Dockerfile for Frostfire Forge
+# Production Dockerfile for Frostfire Forge Game Server
 FROM oven/bun:canary AS base
 WORKDIR /app
 
@@ -27,15 +27,15 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app .
 COPY --from=envcopy /app/.env.production .env.production
 
-# This will result in an empty .env.production file being created if it does not exist
-# Note: create-config will also run as part of the setup-production script
 RUN bun create-config --environment production
+RUN bun setup-production
 
-# Expose required ports
-EXPOSE 80
-EXPOSE 443
+# Expose WebSocket port only (no webserver)
 EXPOSE 3000
 
-# Run production setup and start server
-# Note: create-config will run as part of the production script
+# Health check - verify WebSocket server is running
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD bun -e "fetch('http://localhost:3000').then(r => process.exit(0)).catch(() => process.exit(1))"
+
+# Start game server (WebSocket only)
 CMD ["bun", "run", "production"]

@@ -1,6 +1,7 @@
 const PROCESS_STARTED_AT = Date.now() - performance.now();
 const MAX_BUFFER_SIZE = 1024 * 1024 * 1024; // 1GB
 const packetQueue = new Map<string, (() => void)[]>();
+import "../utility/validate_config.ts";
 import crypto from "crypto";
 import { packetManager } from "./packet_manager.ts";
 import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, sendAnimationTo } from "./receiver.ts";
@@ -10,22 +11,26 @@ const event = new eventEmitter();
 import log from "../modules/logger.ts";
 import player from "../systems/player.ts";
 import playerCache from "../services/playermanager.ts";
+import mapIndex from "../services/mapindex";
+import gameLoop from "../services/gameloop";
 import packet from "../modules/packet.ts";
 import path from "node:path";
 import fs from "node:fs";
 import { generateKeyPair } from "../modules/cipher.ts";
-import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondensation } from "./aoi.ts";
+import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondensation, findPlayersWithTargetInAOI } from "./aoi.ts";
 
 // Load settings
 import * as settings from "../config/settings.json";
 import assetCache from "../services/assetCache.ts";
+import { GatewayClient } from "../modules/gateway-client.ts";
 
 const _cert = path.join(import.meta.dir, "../certs/cert.pem");
 const _key = path.join(import.meta.dir, "../certs/key.pem");
-const _https = process.env.WEBSRV_USESSL === "true";
+const _ca = path.join(import.meta.dir, "../certs/cert.ca-bundle");
+const useSSL = process.env.WEB_SOCKET_USE_SSL === "true";
 let options: Bun.TLSOptions | undefined = undefined;
 
-if (_https) {
+if (useSSL) {
   if (!fs.existsSync(_cert) || !fs.existsSync(_key)) {
     log.error(`Attempted to locate certificate and key but failed`);
     log.error(`Certificate: ${_cert}`);
@@ -33,11 +38,18 @@ if (_https) {
     throw new Error("SSL certificate or key is missing");
   }
   try {
+    // Read certificate and CA bundle, concatenate them for full chain
+    const cert = fs.readFileSync(_cert, 'utf-8');
+    const key = fs.readFileSync(_key, 'utf-8');
+    const ca = fs.existsSync(_ca) ? fs.readFileSync(_ca, 'utf-8') : '';
+    const fullChain = ca ? cert + "\n" + ca : cert;
+
     options = {
-      key: Bun.file(_key),
-      cert: Bun.file(_cert),
+      key: key,
+      cert: fullChain,
       ALPNProtocols: "http/1.1,h2",
     };
+    log.success(`SSL enabled for WebSocket with certificate chain`);
   } catch (e) {
     log.error(e as string);
   }
@@ -69,12 +81,73 @@ const Server = Bun.serve<Packet, any>({
   port: process.env.WEB_SOCKET_PORT || 3000,
   reusePort: false,
   fetch(req, Server) {
+    // Handle /ping endpoint for client latency measurement (no auth required)
+    const url = new URL(req.url, `http://${req.headers.get("host")}`);
+
+    // Handle CORS preflight for all requests
+    if (req.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "*",
+          "Access-Control-Allow-Headers": "*",
+          "Access-Control-Max-Age": "86400"
+        }
+      });
+    }
+
+    if (url.pathname === "/ping" && req.method === "GET") {
+      return new Response(JSON.stringify({ pong: Date.now() }), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "*",
+          "Access-Control-Allow-Headers": "*"
+        }
+      });
+    }
+
     const id = crypto.randomBytes(32).toString("hex");
     const useragent = req.headers.get("user-agent");
     const chatDecryptionKey = keyPair.publicKey;
+
     if (!useragent) {
       log.error(`User-Agent header is missing for client with id: ${id}`);
       return new Response("User-Agent header is missing", { status: 400 });
+    }
+
+    // Validate connection token from gateway
+    const token = url.searchParams.get("token");
+    const timestamp = url.searchParams.get("timestamp");
+    const expiresAt = url.searchParams.get("expiresAt");
+    const signature = url.searchParams.get("signature");
+
+    if (!token || !timestamp || !expiresAt || !signature) {
+      const ip = req.headers.get("x-forwarded-for") || req.headers.get("cf-connecting-ip") || "unknown";
+      const userAgent = req.headers.get("user-agent") || "no user-agent";
+      log.warn(`Connection attempt without valid token from: ${ip} (${userAgent})`);
+      return new Response("Unauthorized: Missing connection token", { status: 401 });
+    }
+
+    // Verify token signature
+    const sharedSecret = process.env.GATEWAY_GAME_SERVER_SECRET || "default-secret-change-me";
+    const expectedSignature = crypto
+      .createHmac("sha256", sharedSecret)
+      .update(`${token}:${timestamp}:${expiresAt}`)
+      .digest("hex");
+
+    if (signature !== expectedSignature) {
+      log.warn(`Connection attempt with invalid token signature from: ${req.headers.get("x-forwarded-for") || "unknown"}`);
+      return new Response("Unauthorized: Invalid token", { status: 401 });
+    }
+
+    // Check if token is expired
+    const now = Date.now();
+    if (now > parseInt(expiresAt)) {
+      log.warn(`Connection attempt with expired token from: ${req.headers.get("x-forwarded-for") || "unknown"}`);
+      return new Response("Unauthorized: Token expired", { status: 401 });
     }
 
     const success = Server.upgrade(req, { data: { id, useragent, chatDecryptionKey } as any });
@@ -87,9 +160,14 @@ const Server = Bun.serve<Packet, any>({
   },
   tls: options,
   websocket: {
-    perMessageDeflate: false,
+    perMessageDeflate: {
+      compress: true,
+      decompress: true,
+    },
     maxPayloadLength: 1024 * 1024 * settings?.websocket?.maxPayloadMB || 1024 * 1024,
     idleTimeout: settings?.websocket?.idleTimeout || 120,
+    sendPings: true,
+    backpressureLimit: 1024 * 512,
     async open(ws: any) {
       ws.binaryType = "arraybuffer";
 
@@ -217,8 +295,34 @@ listener.on("onStart", async () => {});
 
 event.emit("online");
 
+// Initialize gateway client if enabled
+let gatewayClient: GatewayClient | null = null;
+if (settings?.gateway?.enabled) {
+  const serverId = process.env.SERVER_ID || `server-${crypto.randomBytes(8).toString("hex")}`;
+  const serverHost = process.env.SERVER_HOST || "localhost";
+  const publicHost = process.env.PUBLIC_HOST || serverHost;
+  const wsPort = parseInt(process.env.WEB_SOCKET_PORT || "3000");
+
+  gatewayClient = new GatewayClient({
+    gatewayUrl: settings.gateway.url,
+    serverId,
+    host: serverHost,
+    publicHost: publicHost,
+    port: wsPort,  // WebSocket port (no separate HTTP port anymore)
+    wsPort: wsPort,
+    maxConnections: settings?.websocket?.maxConnections || 500,
+    heartbeatInterval: settings.gateway.heartbeatInterval || 5000,
+  });
+
+  // Block until connected to gateway (keeps retrying forever)
+  await gatewayClient.registerWithRetry();
+}
+
 listener.emit("onAwake");
 listener.emit("onStart");
+
+// Start centralized game loop for movement processing
+gameLoop.start();
 
 // Start auto party layer sync every 15 seconds
 startAutoPartyLayerSync(sendAnimationTo);
@@ -240,6 +344,67 @@ setInterval(() => {
 
 setInterval(() => {
   listener.emit("onServerTick");
+}, 1000);
+
+// Backpressure monitoring - logs every second
+setInterval(() => {
+  const allPlayers = Object.values(playerCache.list());
+  const connectedPlayers = allPlayers.filter((p: any) => p?.ws && p.ws.readyState === 1);
+
+  if (connectedPlayers.length === 0) return;
+
+  let totalBuffered = 0;
+  let maxBuffered = 0;
+  let playersWithBackpressure = 0;
+  let maxBufferedPlayer: any = null;
+  const BACKPRESSURE_THRESHOLD = 32 * 1024; // 32KB
+
+  for (const player of connectedPlayers) {
+    const buffered = player.ws.bufferedAmount || 0;
+    totalBuffered += buffered;
+
+    if (buffered > maxBuffered) {
+      maxBuffered = buffered;
+      maxBufferedPlayer = player;
+    }
+
+    if (buffered > BACKPRESSURE_THRESHOLD) {
+      playersWithBackpressure++;
+    }
+  }
+
+  const avgBufferedBytes = totalBuffered / connectedPlayers.length;
+  const movingPlayers = gameLoop.getStats().movingPlayers;
+
+  // Format buffer size intelligently
+  const formatBuffer = (bytes: number): string => {
+    if (bytes >= 1024) {
+      return `${(bytes / 1024).toFixed(1)}KB`;
+    }
+    return `${Math.round(bytes)}B`;
+  };
+
+  const avgBufferStr = formatBuffer(avgBufferedBytes);
+  const maxBufferStr = formatBuffer(maxBuffered);
+
+  // Always log if there's significant backpressure, otherwise log less frequently
+  if (playersWithBackpressure > 0 || avgBufferedBytes > 16 * 1024) {
+    log.warn(
+      `[BACKPRESSURE] Players: ${connectedPlayers.length} (${movingPlayers} moving) | ` +
+      `Avg buffer: ${avgBufferStr} | Max: ${maxBufferStr} | ` +
+      `${playersWithBackpressure} players over 32KB` +
+      (maxBufferedPlayer ? ` | Worst: ${maxBufferedPlayer.username || maxBufferedPlayer.id}` : '')
+    );
+  } else if (connectedPlayers.length > 50) {
+    // Light logging every 10 seconds for high player counts with no issues
+    const tick = Math.floor(Date.now() / 1000);
+    if (tick % 10 === 0) {
+      log.info(
+        `[BACKPRESSURE] Players: ${connectedPlayers.length} (${movingPlayers} moving) | ` +
+        `Avg buffer: ${avgBufferStr} | Max: ${maxBufferStr}`
+      );
+    }
+  }
 }, 1000);
 
 // Global rate limit window time management (replaces per-client intervals)
@@ -353,11 +518,12 @@ listener.on("onServerTick", async () => {
       playerData.ws.send(packetManager.updateStats(updateStatsData)[0])
     );
 
-    for (const other of players) {
+    // Use AOI system instead of O(n²) map-wide loop
+    // Only send updates to players who can actually see this player
+    const observers = findPlayersWithTargetInAOI(playerData.id);
+    for (const other of observers) {
       if (
         other &&
-        other.id !== playerData.id &&
-        other.location?.map === playerData.location?.map &&
         !inactiveSet.has(other.id) &&
         other.ws &&
         other.ws.readyState === WebSocket.OPEN
@@ -394,11 +560,15 @@ listener.on("onServerTick", async () => {
       ClientRateLimit.delete(id);
     }
   }
+
+  // Update gateway with current connection count
+  if (gatewayClient) {
+    gatewayClient.setActiveConnections(connections.size);
+  }
 });
 
 listener.on("onConnection", (data) => {
   if (!data) return;
-  log.debug(`New connection: ${data}`);
 });
 
 listener.on("onDisconnect", async (data) => {
@@ -408,14 +578,14 @@ listener.on("onDisconnect", async (data) => {
     const playerData = playerCache.get(data.id);
     if (!playerData) return;
 
-    // CRITICAL: Clear movement interval FIRST to stop queuing new movements
-    if (playerData.movementInterval) {
-      clearInterval(playerData.movementInterval);
-      playerData.movementInterval = null;
-    }
+    // CRITICAL: Unregister from game loop FIRST to stop processing movement
+    gameLoop.unregisterMovingPlayer(playerData.id);
 
     // CRITICAL: Remove from cache IMMEDIATELY to prevent batch timers from processing this player
     playerCache.remove(playerData.id);
+
+    // Remove player from map index
+    mapIndex.removePlayer(playerData.id);
 
     // Clear all batch queue entries for this player
     clearBatchQueuesForPlayer(playerData.id, playerData.location.map);
@@ -467,8 +637,6 @@ listener.on("onDisconnect", async (data) => {
     }
 
     await player.clearSessionId(playerData.id);
-
-    log.debug(`Disconnected: ${playerData.username} Reason: ${data.reason}`);
   } catch (e) {
     log.error(e as string);
   }
@@ -573,3 +741,23 @@ function handleBackpressure(ws: any, action: () => void, retryCount = 0) {
     }
   }
 }
+
+// Graceful shutdown handler
+async function gracefulShutdown(signal: string) {
+  log.info(`Received ${signal}, shutting down gracefully...`);
+
+  // Stop game loop
+  gameLoop.stop();
+
+  // Unregister from gateway if enabled
+  if (gatewayClient) {
+    await gatewayClient.unregister();
+  }
+
+  log.info("Shutdown complete");
+  process.exit(0);
+}
+
+// Register shutdown handlers
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));

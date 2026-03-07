@@ -58,9 +58,17 @@ export async function getSpriteSheetTemplate(name: string): Promise<SpriteSheetT
  * @param name - Sprite sheet template name
  * @returns Base64 encoded image data or null
  */
+// In-memory cache for decompressed sprite sheet images (reduces CPU and memory usage)
+const spriteImageCache = new Map<string, string>();
+
 export async function getSpriteSheetImage(name: string): Promise<string | null> {
   // Normalize name to lowercase for case-insensitive lookup
   const normalizedName = name.toLowerCase();
+
+  // Check cache first
+  if (spriteImageCache.has(normalizedName)) {
+    return spriteImageCache.get(normalizedName)!;
+  }
 
   const spriteSheetTemplates = await assetCache.get('spriteSheetTemplates') as any[];
   if (!spriteSheetTemplates) {
@@ -76,11 +84,20 @@ export async function getSpriteSheetImage(name: string): Promise<string | null> 
   try {
     // Decompress image
     const decompressed = zlib.inflateSync(templateData.image).toString();
+
+    // Cache the decompressed image to avoid repeated decompression
+    spriteImageCache.set(normalizedName, decompressed);
+
     return decompressed;
   } catch (error) {
     log.error(`Failed to decompress sprite sheet image "${name}": ${error}`);
     return null;
   }
+}
+
+// Clear sprite image cache (useful for hot reloads)
+export function clearSpriteImageCache() {
+  spriteImageCache.clear();
 }
 
 /**

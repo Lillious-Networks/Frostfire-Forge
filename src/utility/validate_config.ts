@@ -82,29 +82,6 @@ export default (async () => {
     );
   }
 
-  // Webserver HTTP Port
-  if (!process.env.WEBSRV_PORT) {
-    startUpWarnings.push(
-      "No webserver HTTP port is set, defaulting to 80. Please set the WEBSRV_PORT environment variable to suppress this message."
-    );
-    process.env.WEBSRV_PORT = "80";
-  }
-
-  // Webserver HTTPS Port
-  if (!process.env.WEBSRV_PORTSSL) {
-    startUpWarnings.push(
-      "No webserver HTTPS port is set, defaulting to 443. Please set the WEBSRV_PORTSSL environment variable to suppress this message."
-    );
-    process.env.WEBSRV_PORTSSL = "443";
-  }
-
-  // Webserver Use SSL
-  if (!process.env.WEBSRV_USESSL) {
-    startUpWarnings.push(
-      "No webserver SSL is set, defaulting to false. Please set the WEBSRV_USESSL environment variable to suppress this message."
-    );
-    process.env.WEBSRV_USESSL = "false";
-  }
 
   // Google Translation API Key
   if (!process.env.GOOGLE_TRANSLATE_API_KEY) {
@@ -113,26 +90,12 @@ export default (async () => {
     );
   }
 
-  // Websocket URL
-  if (!process.env.WEB_SOCKET_URL) {
-    startUpErrors.push(
-      "No websocket URL is set, aborting... Please set the WEB_SOCKET_URL environment variable to suppress this message."
-    );
-  }
-
   // Websocket Port
   if (!process.env.WEB_SOCKET_PORT) {
     startUpWarnings.push(
-      "No websocket port is set, defaulting to 3001. Please set the WEB_SOCKET_PORT environment variable to suppress this message."
+      "No websocket port is set, defaulting to 3000. Please set the WEB_SOCKET_PORT environment variable to suppress this message."
     );
-    process.env.WEB_SOCKET_PORT = "3001";
-  }
-
-  // Domain
-  if (!process.env.DOMAIN) {
-    startUpWarnings.push(
-      "No domain is set, skipping hostname check. Please set the DOMAIN environment variable to suppress this message."
-    );
+    process.env.WEB_SOCKET_PORT = "3000";
   }
 
   // Session Key

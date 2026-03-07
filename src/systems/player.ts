@@ -336,14 +336,15 @@ const player = {
 
     const existingSessionId = existingSessionResult[0]?.session_id;
     if (existingSessionId && existingSessionId !== sessionId) {
-      // Close the existing WebSocket connection
-      log.info(`Kicking existing session for ${username}`);
-
       // Import playerCache to get the WebSocket
       const playerCache = (await import("../services/playermanager.ts")).default;
       const existingPlayer = playerCache.get(existingSessionId);
 
+      // Only kick if the session exists on THIS server
+      // If it doesn't exist here, it's from another server (possibly dead) - just overwrite it
       if (existingPlayer && existingPlayer.ws) {
+        log.info(`Kicking existing session for ${username} on THIS server`);
+
         // Send a notification and close the connection
         const packetManager = (await import("../socket/packet_manager.ts")).packetManager;
         const sendPacket = (ws: any, packet: any) => {
@@ -377,13 +378,18 @@ const player = {
             existingPlayer.ws.close(1000, "Logged in from another location");
           }
         }, 500);
+
+        // Logout the session from database
+        await player.logout(existingSessionId);
+
+        // Wait a bit longer to ensure cleanup is complete before new session starts
+        await new Promise(resolve => setTimeout(resolve, 600));
+      } else {
+        // Session exists in database but not on this server - it's stale or from another server
+        log.info(`Found stale session for ${username} (from another server or dead session), overwriting with new session`);
+        // Just clear it from database without kicking
+        await player.clearSessionId(existingSessionId);
       }
-
-      // Logout the session from database
-      await player.logout(existingSessionId);
-
-      // Wait a bit longer to ensure cleanup is complete before new session starts
-      await new Promise(resolve => setTimeout(resolve, 600));
     }
 
     await query(

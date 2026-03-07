@@ -17,7 +17,7 @@ async function initializeWorkerPool(): Promise<void> {
   return new Promise((resolve, reject) => {
     const initTimeout = setTimeout(() => {
       reject(new Error("Worker pool initialization timeout"));
-    }, 10000);
+    }, 60000); // Increased from 10s to 60s
 
     for (let i = 0; i < WORKER_POOL_SIZE; i++) {
       const worker = new Worker(workerPath);
@@ -84,8 +84,8 @@ export default async function query<T>(sql: string, values?: any[]): Promise<T[]
     // Set timeout for query
     const timeout = setTimeout(() => {
       pendingQueries.delete(queryId);
-      reject(new Error('Query timeout after 10 seconds'));
-    }, 10000);
+      reject(new Error('Query timeout after 30 seconds'));
+    }, 30000); // Increased from 10s to 30s
 
     // Override resolve/reject to clear timeout
     const originalResolve = resolve;

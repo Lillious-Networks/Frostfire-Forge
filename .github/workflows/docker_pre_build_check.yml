@@ -1,4 +1,4 @@
-# Used to verify Docker image builds before pushing to main or development branches
+# Used to verify Docker image builds
 name: Docker Pre-Build Check
 
 permissions:
@@ -10,10 +10,13 @@ on:
 jobs:
   build:
     name: Build Docker Pre-Build Check Image
+    environment: development
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Update environment variables for Docker Pre-Build Check Image
         run: |
@@ -29,17 +32,42 @@ jobs:
             rm .env.development
           fi
 
-          echo 'DATABASE_ENGINE="sqlite"' >> .env.development
-          echo 'DATABASE_NAME="docker-pre-build"' >> .env.development
-          echo 'WEBSRV_PORT=8080' >> .env.development
-          echo 'WEBSRV_USESSL=false' >> .env.development
-          echo 'WEB_SOCKET_URL="ws://localhost"' >> .env.development
-          echo 'WEB_SOCKET_PORT=3001' >> .env.development
-          echo 'DOMAIN="http://localhost:8080"' >> .env.development
-          echo 'GAME_NAME="Docker Pre-Build"' >> .env.development
+          # Create game engine .env.development
+          echo 'DATABASE_ENGINE=mysql' >> .env.development
+          echo 'DATABASE_HOST="${{ secrets.DATABASE_HOST }}"' >> .env.development
+          echo 'DATABASE_NAME="${{ secrets.DATABASE_NAME }}"' >> .env.development
+          echo 'DATABASE_PASSWORD="${{ secrets.DATABASE_PASSWORD }}"' >> .env.development
+          echo 'DATABASE_USER="${{ secrets.DATABASE_USER }}"' >> .env.development
+          echo 'DATABASE_PORT="${{ secrets.DATABASE_PORT }}"' >> .env.development
+          echo 'SESSION_KEY=""' >> .env.development
+          echo 'SQL_SSL_MODE=DISABLED' >> .env.development
+          echo 'TRANSLATION_SERVICE="none"' >> .env.development
+          echo 'WEB_SOCKET_URL="wss://${{ secrets.SERVER_HOST }}"' >> .env.development
+          echo 'WEB_SOCKET_PORT=3000' >> .env.development
+          echo 'WEB_SOCKET_USE_SSL=true' >> .env.development
+          echo 'GATEWAY_URL="${{ secrets.GATEWAY_URL}}"' >> .env.development
+          echo 'GATEWAY_ENABLED=true' >> .env.development
+          echo 'GAME_NAME="Frostfire Forge Development"' >> .env.development
           echo 'CACHE="memory"' >> .env.development
-          echo 'VERSION="${{ github.run_number }}-pre-build"' >> .env.development
+          echo 'VERSION="${{ github.run_number }}-development"' >> .env.development
+          echo 'SERVER_ID="frostfire-forge-development"' >> .env.development
+          echo 'SERVER_HOST="${{ secrets.SERVER_HOST }}"' >> .env.development
+          echo 'PUBLIC_HOST="${{ secrets.PUBLIC_HOST }}"' >> .env.development
+          echo 'GATEWAY_AUTH_KEY="${{ secrets.GATEWAY_AUTH_KEY }}"' >> .env.development
+          echo 'GATEWAY_GAME_SERVER_SECRET="${{ secrets.GATEWAY_GAME_SERVER_SECRET }}"' >> .env.development
 
-      - name: Build Docker Pre-Build Check Image
+      - name: Create Certificate Chain
+        working-directory: src/certs
+        run: |
+          # Create CA Bundle using CERT_CA_BUNDLE secret
+          echo "${{ secrets.CERT_CA_BUNDLE }}" > cert.ca-bundle
+
+          # Create pem
+          echo "${{ secrets.CERT_PEM }}" > cert.pem
+
+          # Create private key
+          echo "${{ secrets.CERT_PRIVATE_KEY }}" > key.pem
+
+      - name: Build Docker Image
         run: |
           docker compose -f docker-compose.dev.yml build

@@ -5,11 +5,7 @@ services:
       dockerfile: Dockerfile.prod
     container_name: frostfire-forge-prod
     restart: unless-stopped
-    environment:
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
     ports:
-      - "80:80"
-      - "443:443"
       - "3000:3000"
     volumes:
       - ./.env.production:/app/.env.production:ro
@@ -17,23 +13,6 @@ services:
       - .env.production
     networks:
       - frostfire-network
-    depends_on:
-      - redis
-
-  redis:
-    image: redis:7-alpine
-    container_name: frostfire-redis-prod
-    restart: unless-stopped
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
-    environment:
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-    volumes:
-      - redis-data:/data
-    networks:
-      - frostfire-network
-
-volumes:
-  redis-data:
 
 networks:
   frostfire-network:

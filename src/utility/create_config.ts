@@ -4,40 +4,19 @@ const pwd = process.cwd();
 const args = process.argv.slice(2);
 const environment_index = args.indexOf("--environment");
 const environment = environment_index !== -1 ? args[environment_index + 1]?.toLowerCase() : 'local';
-const domain_index = args.indexOf("--domain");
-const domain = domain_index !== -1 ? args[domain_index + 1]?.toLowerCase() : null;
 
 const configPath = path.join(pwd, "src", "config");
 if (!fs.existsSync(configPath)) {
   fs.mkdirSync(configPath);
 }
 
-const getIp = async () => {
-  if (domain) return domain;
-  try {
-    const res = await fetch('https://api.ipify.org?format=json');
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data?.ip || null;
-  } catch (err) {
-    console.error(`Failed to fetch public IP address: ${err}`);
-    return null;
-  }
-};
-
-const ip = environment === "local"
-  ? "localhost"
-  : await getIp() || "localhost";
-
 const environment_variables = `DATABASE_ENGINE="sqlite"
 DATABASE_NAME="frostfire-forge-dev"
-WEBSRV_PORT=80
-WEBSRV_USESSL=false
-WEB_SOCKET_URL="ws://${ip}"
 WEB_SOCKET_PORT=3000
-DOMAIN="http://${ip}:80"
+WEB_SOCKET_USE_SSL=false
 GAME_NAME="Frostfire Forge - ${environment.charAt(0).toUpperCase() + environment.slice(1)} Environment"
 CACHE="memory"
+GATEWAY_ENABLED=true
 `;
 
 const production_environment_variables = `DATABASE_ENGINE=""
@@ -53,32 +32,39 @@ EMAIL_SERVICE=""
 EMAIL_USER=""
 EMAIL_TEST=""
 
-WEBSRV_PORT=""
-WEBSRV_PORTSSL=""
-WEBSRV_USESSL=""
 SESSION_KEY=""
+RSA_PASSPHRASE=""
 
 GOOGLE_TRANSLATE_API_KEY=""
 OPENAI_API_KEY=""
 TRANSLATION_SERVICE=""
 OPEN_AI_MODEL=""
 
-WEB_SOCKET_URL=""
 WEB_SOCKET_PORT=""
+WEB_SOCKET_USE_SSL=""
 ASSET_PATH=""
-DOMAIN=""
 GAME_NAME=""
+
+SERVER_ID=""
+SERVER_HOST=""
+PUBLIC_HOST=""
+GATEWAY_URL=""
+GATEWAY_ENABLED=""
+GATEWAY_AUTH_KEY=""
 
 CACHE=""
 REDIS_URL=""
+
+GATEWAY_ENABLED=""
+GATEWAY_URL=""
+SERVER_HOST=""
+
+GATEWAY_AUTH_KEY=""
 `;
 
 const assetConfig = {
   maps: {
     path: "/maps/",
-  },
-  tilesets: {
-    path: "/tilesets/",
   },
   sfx: {
     path: "/sfx/",
@@ -115,12 +101,15 @@ const settings = {
   "websocket": {
     "maxPayloadMB": 50,
     "benchmarkenabled": false,
-    "idleTimeout": 120
+    "idleTimeout": 120,
+    "maxConnections": 50000
   },
   "world": "overworld",
-  "default_map": "overworld",
-  "guest_mode": {
-    "enabled": true
+  "default_map": "overworld.json",
+  "gateway": {
+    "enabled": true,
+    "url": process.env.GATEWAY_URL,
+    "heartbeatInterval": 1000
   }
 };
 
