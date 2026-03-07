@@ -4,14 +4,14 @@ permissions:
   contents: read
 
 on:
-  push:
-    paths:
-      - 'src/**'
-      - 'docker-compose.dev.yml'
-      - 'Dockerfile.dev'
-      - '.github/workflows/development_release.yml'
-    branches:
-      - development
+  # push:
+  #   paths:
+  #     - 'src/**'
+  #     - 'docker-compose.dev.yml'
+  #     - 'Dockerfile.dev'
+  #     - '.github/workflows/development_release.yml'
+  #   branches:
+  #     - development
 
   workflow_dispatch:
 
