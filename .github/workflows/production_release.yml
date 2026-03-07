@@ -5,14 +5,14 @@ permissions:
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'src/**'
-      - 'docker-compose.prod.yml'
-      - 'Dockerfile.prod'
-      - '.github/workflows/production_release.yml'
-    branches:
-      - main
+  # push:
+  #   paths:
+  #     - 'src/**'
+  #     - 'docker-compose.prod.yml'
+  #     - 'Dockerfile.prod'
+  #     - '.github/workflows/production_release.yml'
+  #   branches:
+  #     - main
 
 concurrency:
   group: 'production-release'
