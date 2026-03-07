@@ -6,9 +6,6 @@ permissions:
 
 on:
   push:
-    branches-ignore:
-      - main
-      - development
 
 jobs:
   build:
