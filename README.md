@@ -37,7 +37,7 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
 > Teaser
 
 <p align="center">
-  <img src="../../blob/main/src/webserver/www/public/img/teaser.png?raw=true">
+  <img src="../../blob/main/src/assets/teaser/teaser.png?raw=true">
 </p>
 
 ## 📋 Table of Contents
