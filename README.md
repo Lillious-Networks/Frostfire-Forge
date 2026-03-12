@@ -73,56 +73,11 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
 
 ### Gateway Load Balancer
 
-Frostfire Forge includes an optional **Gateway Load Balancer** for horizontal scaling across multiple game servers.
-
-#### Features
-- **Sticky Sessions**: Players remain connected to the same game server
-- **Round-Robin Distribution**: New players are distributed evenly across available servers
-- **Automatic Failover**: Sessions migrate to healthy servers when a server goes down
-- **WebSocket Proxying**: Transparent bidirectional message forwarding between clients and game servers
-- **Health Monitoring**: Automatic detection and removal of unhealthy servers
-
-#### Architecture Overview
-```
-Client → Gateway (HTTP/WS) → Game Server(s)
-         :8000/:9000          :8080/:3001 (internal)
-```
-
-The gateway handles all external connections and proxies traffic to internal game servers. This allows:
-- Multiple game servers running on the same or different machines
-- Zero-downtime deployments with rolling updates
-- Horizontal scaling based on player load
+Frostfire Forge includes an optional [Gateway Load Balancer](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) for horizontal scaling across multiple game servers.
 
 #### Configuration
 
 Set `GATEWAY_ENABLED=true` in your environment to enable gateway mode. Game servers will automatically register with the gateway on startup.
-
-**Gateway Environment Variables:**
-```bash
-WEBSRV_PORT=8000           # Gateway HTTP port (external)
-WS_PORT=9000               # Gateway WebSocket port (external)
-GATEWAY_AUTH_KEY=secret    # Shared secret for server registration
-HEARTBEAT_INTERVAL=5000    # Server health check interval (ms)
-SERVER_TIMEOUT=15000       # Server considered dead after (ms)
-SESSION_TIMEOUT=1800000    # Session expiration time (ms)
-```
-
-**Game Server Environment Variables:**
-```bash
-GATEWAY_ENABLED=true                    # Enable gateway mode
-GATEWAY_URL=http://gateway:8000         # Gateway registration URL
-GATEWAY_AUTH_KEY=secret                 # Must match gateway's key
-SERVER_HOST=game-server-1               # Internal hostname
-PUBLIC_HOST=yourdomain.com              # External hostname for clients
-WEBSRV_PORT=8080                        # Internal HTTP port
-WEB_SOCKET_PORT=3001                    # Internal WebSocket port
-GATEWAY_WS_PORT=9000                    # Gateway WebSocket port (for client)
-```
-
-> [!NOTE]
-> When using Docker, game server ports (8080, 3001) should NOT be exposed externally. Only the gateway ports (8000, 9000) need to be exposed.
-
----
 
 ## 🚀 Quick Start
 
@@ -264,18 +219,6 @@ DATABASE_PORT="3306"
 DATABASE_USER="your_db_user"
 SQL_SSL_MODE="DISABLED" | "ENABLED"
 
-# Email Configuration
-EMAIL_PASSWORD="your_email_password"
-EMAIL_SERVICE="mail.example.com"
-EMAIL_USER="your_email@example.com"
-EMAIL_TEST="your_test_email@example.com"
-
-# Server Configuration
-WEBSRV_PORT="80"
-WEBSRV_PORTSSL="443"
-WEBSRV_USESSL="true"
-SESSION_KEY="your_session_secret_key"
-
 # Translation Services
 GOOGLE_TRANSLATE_API_KEY="your_google_api_key"
 OPENAI_API_KEY="your_openai_api_key"
@@ -283,18 +226,19 @@ TRANSLATION_SERVICE="google_translate" | "openai"
 OPEN_AI_MODEL="gpt-4"
 
 # Application Settings
-WEB_SOCKET_URL="wss://yourdomain.com"
-WEB_SOCKET_PORT="3001"                    # Internal WebSocket port
-DOMAIN="https://yourdomain.com"
+WEB_SOCKET_URL="ws://yourdomain.com"
+WEB_SOCKET_PORT="3000"                    # Internal WebSocket port
+DOMAIN="http://yourdomain.com"
 GAME_NAME="Your Game Name"
 
-# Gateway Load Balancer (Optional)
-GATEWAY_ENABLED="false"                   # Enable gateway mode
-GATEWAY_URL="http://gateway:8000"         # Gateway registration endpoint
-GATEWAY_WS_PORT="9000"                    # Gateway WebSocket port for clients
-GATEWAY_AUTH_KEY="your_secret_key"        # Shared secret for server registration
-SERVER_HOST="game-server-hostname"        # Internal server hostname
-PUBLIC_HOST="yourdomain.com"              # External hostname for clients
+# Gateway Reverse Proxy (Optional)
+GATEWAY_ENABLED="true"                          # Enable gateway mode
+GATEWAY_URL="http://gateway:9999"               # Gateway registration endpoint
+GATEWAY_AUTH_KEY="your_secret_key"              # Shared secret for server registration
+GATEWAY_GAME_SERVER_SECRET="another_secret_key" # Game server authentication token
+SERVER_HOST="game-server-hostname"              # Internal server hostname
+PUBLIC_HOST="yourdomain.com"                    # External hostname for clients
+SERVER_ID="server-1"                            # Game server identification
 
 # Caching
 CACHE="redis" | "memory"
@@ -302,12 +246,6 @@ REDIS_URL="redis://default@redis:6379"  # Required if CACHE=redis
 
 # Versioning (can be provided at runtime)
 VERSION="1.0.0"
-```
-
-> [!TIP]
-> **Gateway Configuration**: When `GATEWAY_ENABLED=true`, clients connect to the gateway on `GATEWAY_WS_PORT` (default: 9000). The gateway proxies traffic to game servers on their internal `WEB_SOCKET_PORT` (default: 3001).
-
----
 
 ## 📜 Commands Reference
 
