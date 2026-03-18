@@ -14,6 +14,7 @@ src/certs/*.ca-bundle
 src/logs/
 config/
 .env*
+!.env.development
 
 src/assets/maps/*
 !src/assets/maps/main.json
