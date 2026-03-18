@@ -8,8 +8,6 @@ on:
   push:
     branches:
       - main
-      - development
-      - '**'
     paths:
       - 'src/**'
       - 'package.json'
@@ -30,32 +28,9 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
+  IMAGE_NAME: frostfire-forge
 
 jobs:
-  determine-pipeline:
-    name: Determine Pipeline
-    runs-on: ubuntu-latest
-    outputs:
-      pipeline: ${{ steps.determine.outputs.pipeline }}
-      environment: ${{ steps.determine.outputs.environment }}
-      image_name: ${{ steps.determine.outputs.image_name }}
-    steps:
-      - name: Determine Pipeline Type
-        id: determine
-        run: |
-          IMAGE_NAME=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT
-
-          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
-            echo "pipeline=production" >> $GITHUB_OUTPUT
-            echo "environment=production" >> $GITHUB_OUTPUT
-            echo "🚀 Production Pipeline (main branch)"
-          elif [ "${{ github.ref }}" == "refs/heads/development" ]; then
-            echo "pipeline=development" >> $GITHUB_OUTPUT
-            echo "environment=development" >> $GITHUB_OUTPUT
-            echo "🔨 Development Pipeline (development branch)"
-          fi
-
   validate:
     name: Validate Code Quality
     runs-on: ubuntu-latest
@@ -129,8 +104,7 @@ jobs:
   build-development:
     name: Build Development Docker Image
     runs-on: ubuntu-latest
-    needs: [determine-pipeline, test]
-    if: needs.determine-pipeline.outputs.pipeline == 'development'
+    needs: [test]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v6
@@ -144,24 +118,6 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Prepare Development Environment
-        run: |
-          cat > .env.development << 'EOF'
-          DATABASE_ENGINE=sqlite
-          DATABASE_NAME=frostfire-forge-dev
-          WEB_SOCKET_PORT=3000
-          WEB_SOCKET_USE_SSL=false
-          GAME_NAME="Frostfire Forge Development"
-          CACHE="memory"
-          SESSION_KEY=""
-          GATEWAY_URL="http://gateway:9999"
-          GATEWAY_AUTH_KEY="dev-auth-key"
-          GATEWAY_GAME_SERVER_SECRET="dev-game-secret"
-          SERVER_ID="dev-server"
-          SERVER_HOST="localhost"
-          PUBLIC_HOST="localhost"
-          EOF
 
       - name: Build and Push Development Image
         uses: docker/build-push-action@v6
@@ -172,20 +128,16 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: |
-            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-dev:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-dev:development
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-dev:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-dev:latest
 
-  build-production:
-    name: Build Production Docker Image
+  test-integration:
+    name: Test Gateway and Game Server Integration
     runs-on: ubuntu-latest
-    needs: [determine-pipeline, test]
-    if: needs.determine-pipeline.outputs.pipeline == 'production'
+    needs: [build-development]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v6
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -194,114 +146,58 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Prepare Production Environment
+      - name: Start Services with Docker Compose
+        run: docker-compose up -d && sleep 10
+
+      - name: Verify Game Server Registration with Gateway
         run: |
-          cat > .env.production << 'EOF'
-          DATABASE_ENGINE=mysql
-          DATABASE_HOST=
-          DATABASE_NAME=
-          DATABASE_PASSWORD=
-          DATABASE_USER=
-          DATABASE_PORT=3306
-          SQL_SSL_MODE=DISABLED
-          WEB_SOCKET_PORT=3000
-          WEB_SOCKET_USE_SSL=true
-          GAME_NAME="Frostfire Forge"
-          GATEWAY_URL=
-          GATEWAY_AUTH_KEY=
-          GATEWAY_GAME_SERVER_SECRET=
-          SERVER_ID=
-          SERVER_HOST=
-          PUBLIC_HOST=
-          CACHE="redis"
-          REDIS_URL=
-          GOOGLE_TRANSLATE_API_KEY=
-          OPENAI_API_KEY=
-          TRANSLATION_SERVICE="openai"
-          OPENAI_MODEL="gpt-4.1-nano-2025-04-14"
-          EOF
+          echo "Checking if game server registered with gateway..."
+          RETRIES=0
+          MAX_RETRIES=10
+          while [ $RETRIES -lt $MAX_RETRIES ]; do
+            if curl -s http://localhost:8000/api/servers | grep -q "game-server"; then
+              echo "✅ Game server successfully registered with gateway"
+              exit 0
+            fi
+            RETRIES=$((RETRIES + 1))
+            echo "Attempt $RETRIES/$MAX_RETRIES: Waiting for registration..."
+            sleep 2
+          done
+          echo "❌ Game server failed to register with gateway"
+          docker-compose logs
+          exit 1
 
-      - name: Generate Release Version
-        id: version
+      - name: Test Gateway to Game Server Connection
         run: |
-          VERSION="v$(date +%Y.%m.%d)-$(git rev-parse --short HEAD)"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Testing gateway can reach game server..."
+          RESPONSE=$(curl -s http://localhost:8000/api/servers)
+          if echo "$RESPONSE" | jq . > /dev/null 2>&1; then
+            echo "✅ Gateway responding with server list"
+            echo "Server list:"
+            echo "$RESPONSE" | jq .
+          else
+            echo "❌ Gateway connection failed"
+            exit 1
+          fi
 
-      - name: Build and Push Production Image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./src/docker/Dockerfile.prod
-          push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          tags: |
-            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-prod:${{ steps.version.outputs.version }}
-            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-prod:latest
-            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-prod:${{ github.sha }}
-
-  create-production-release:
-    name: Create Production Release
-    runs-on: ubuntu-latest
-    needs: [determine-pipeline, build-production]
-    if: needs.determine-pipeline.outputs.pipeline == 'production'
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Generate Release Version
-        id: version
-        run: |
-          VERSION="v$(date +%Y.%m.%d)-$(git rev-parse --short HEAD)"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Generate Release Notes
-        id: release-notes
-        run: |
-          RELEASE_VERSION="${{ steps.version.outputs.version }}"
-          IMAGE_NAME=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-
-          echo "## Frostfire Forge Game Server Release $RELEASE_VERSION" >> release_notes.md
-          echo "" >> release_notes.md
-          echo "### Docker Image Published" >> release_notes.md
-          echo "- \`ghcr.io/$IMAGE_NAME-prod:$RELEASE_VERSION\`" >> release_notes.md
-          echo "" >> release_notes.md
-          echo "### Changes" >> release_notes.md
-          git log --oneline -10 >> release_notes.md
-          echo "" >> release_notes.md
-          echo "### Requirements" >> release_notes.md
-          echo "- [Frostfire Forge Gateway](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) running and accessible" >> release_notes.md
-          echo "- Database configured (MySQL for production)" >> release_notes.md
-          echo "- Environment variables properly configured" >> release_notes.md
-
-      - name: Create Release Tag
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          gh release create "$RELEASE_VERSION" \
-            --title "Release $RELEASE_VERSION" \
-            --notes-file release_notes.md \
-            --target ${{ github.sha }}
+      - name: Cleanup
+        if: always()
+        run: docker-compose down
 
   notify-completion:
     name: Pipeline Complete
     runs-on: ubuntu-latest
-    needs: [determine-pipeline]
+    needs: [test-integration]
     if: always()
     steps:
       - name: Notify Pipeline Complete
         run: |
-          PIPELINE="${{ needs.determine-pipeline.outputs.pipeline }}"
-          if [ "$PIPELINE" = "production" ]; then
-            echo "✅ Production Release Pipeline Complete"
-            echo "🐳 Docker images published to GHCR"
-            echo "🏷️  Release tag created"
-          elif [ "$PIPELINE" = "development" ]; then
+          INTEGRATION_STATUS="${{ needs.test-integration.result }}"
+
+          if [ "$INTEGRATION_STATUS" = "success" ]; then
+            echo "✅ Gateway and Game Server Integration Tests Passed"
             echo "✅ Development Pipeline Complete"
             echo "🐳 Development Docker image published to GHCR"
+          else
+            echo "⚠️  Integration tests did not complete successfully"
           fi
