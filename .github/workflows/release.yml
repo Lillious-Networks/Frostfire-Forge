@@ -151,7 +151,6 @@ jobs:
           WEB_SOCKET_USE_SSL=false
           GAME_NAME="Frostfire Forge Test Build"
           CACHE="memory"
-          SESSION_KEY="test-session-key-do-not-use-in-production"
           GATEWAY_URL="http://gateway:9999"
           GATEWAY_AUTH_KEY="test-auth-key"
           GATEWAY_GAME_SERVER_SECRET="test-game-secret"
@@ -253,7 +252,6 @@ jobs:
           DATABASE_USER=
           DATABASE_PORT=3306
           SQL_SSL_MODE=DISABLED
-          SESSION_KEY=
           WEB_SOCKET_PORT=3000
           WEB_SOCKET_USE_SSL=true
           GAME_NAME="Frostfire Forge"
