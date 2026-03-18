@@ -28,7 +28,6 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: frostfire-forge
 
 jobs:
   validate:
@@ -128,8 +127,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-dev:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-dev:latest
+            ${{ env.REGISTRY }}/${{ github.repository }}/frostfire-forge-dev:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ github.repository }}/frostfire-forge-dev:latest
 
   test-integration:
     name: Test Gateway and Game Server Integration
@@ -147,6 +146,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Start Services with Docker Compose
+        env:
+          GAME_SERVER_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/frostfire-forge-dev:latest
         run: docker-compose up -d && sleep 10
 
       - name: Verify Game Server Registration with Gateway
