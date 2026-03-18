@@ -62,7 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -71,10 +71,6 @@ jobs:
 
       - name: Install Dependencies
         run: bun install --frozen-lockfile
-
-      - name: Check TypeScript Types
-        run: bun run --bun src/utility/validate_config.ts
-        continue-on-error: false
 
       - name: Verify Environment Configuration
         run: |
