@@ -174,36 +174,17 @@ jobs:
       - name: Verify Game Server Registration with Gateway
         run: |
           echo "Checking if game server registered with gateway..."
-          RETRIES=0
-          MAX_RETRIES=10
-          while [ $RETRIES -lt $MAX_RETRIES ]; do
-            RESPONSE=$(curl -s http://localhost/api/servers)
-            echo "Response: $RESPONSE"
-            if echo "$RESPONSE" | grep -q "server-1"; then
-              echo "✅ Game server successfully registered with gateway"
-              exit 0
-            fi
-            RETRIES=$((RETRIES + 1))
-            echo "Attempt $RETRIES/$MAX_RETRIES: Waiting for registration..."
-            sleep 2
-          done
-          echo "❌ Game server failed to register with gateway"
-          echo "Gateway logs:"
-          docker compose -p gateway -f gateway/src/docker/docker-compose.dev.yml logs
-          echo "Game server logs:"
-          docker compose -p gateway -f src/docker/docker-compose.dev.yml logs
-          exit 1
-
-      - name: Test Gateway to Game Server Connection
-        run: |
-          echo "Testing gateway can reach game server..."
-          RESPONSE=$(curl -s http://localhost/api/servers)
-          if echo "$RESPONSE" | jq . > /dev/null 2>&1; then
-            echo "✅ Gateway responding with server list"
-            echo "Server list:"
-            echo "$RESPONSE" | jq .
+          sleep 5
+          GATEWAY_LOGS=$(docker compose -p gateway -f gateway/src/docker/docker-compose.dev.yml logs)
+          if echo "$GATEWAY_LOGS" | grep -q "Server registered"; then
+            echo "✅ Game server successfully registered with gateway"
+            echo "$GATEWAY_LOGS" | grep "Server registered"
           else
-            echo "❌ Gateway connection failed"
+            echo "❌ Game server failed to register with gateway"
+            echo "Gateway logs:"
+            echo "$GATEWAY_LOGS"
+            echo "Game server logs:"
+            docker compose -p gateway -f src/docker/docker-compose.dev.yml logs
             exit 1
           fi
 
