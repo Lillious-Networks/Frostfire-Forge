@@ -179,7 +179,7 @@ jobs:
           while [ $RETRIES -lt $MAX_RETRIES ]; do
             RESPONSE=$(curl -s http://localhost/api/servers)
             echo "Response: $RESPONSE"
-            if echo "$RESPONSE" | grep -q "game-server"; then
+            if echo "$RESPONSE" | grep -q "server-1"; then
               echo "✅ Game server successfully registered with gateway"
               exit 0
             fi
