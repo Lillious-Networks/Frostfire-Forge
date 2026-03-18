@@ -118,6 +118,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set lowercase image name
+        id: image
+        run: |
+          IMAGE_NAME=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+
       - name: Build and Push Development Image
         uses: docker/build-push-action@v6
         with:
@@ -127,8 +133,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: |
-            ${{ env.REGISTRY }}/${{ github.repository }}/frostfire-forge-dev:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ github.repository }}/frostfire-forge-dev:latest
+            ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:latest
 
   test-integration:
     name: Test Gateway and Game Server Integration
@@ -145,9 +151,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set lowercase image name
+        id: image
+        run: |
+          IMAGE_NAME=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+
       - name: Start Services with Docker Compose
         env:
-          GAME_SERVER_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/frostfire-forge-dev:latest
+          GAME_SERVER_IMAGE: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:latest
         run: docker-compose up -d && sleep 10
 
       - name: Verify Game Server Registration with Gateway
