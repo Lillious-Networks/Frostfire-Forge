@@ -411,6 +411,14 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "UPDATE_CHUNKS", data: chunks })),
     ] as any[];
   },
+  chunkData: (chunkX: number, chunkY: number, width: number, height: number, layers: any[], tilewidth?: number, tileheight?: number, startX?: number, startY?: number) => {
+    return [
+      packet.encode(JSON.stringify({
+        type: "CHUNK_DATA",
+        data: { chunkX, chunkY, width, height, layers, tilewidth, tileheight, startX, startY }
+      })),
+    ] as any[];
+  },
   custom: (data: any) => {
     return [
       packet.encode(JSON.stringify(data)),

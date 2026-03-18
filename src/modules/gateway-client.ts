@@ -103,6 +103,12 @@ class GatewayClient {
         }
         log.success(`Successfully registered with gateway as ${this.config.serverId}`);
         this.startHeartbeat();
+
+        // Sync map checksums with gateway (non-blocking)
+        this.syncMapChecksums().catch(error => {
+          log.warn(`Map sync failed on registration: ${error}`);
+        });
+
         return true;
       }
 
@@ -275,6 +281,102 @@ class GatewayClient {
    */
   setActiveConnections(count: number) {
     this.activeConnections = count;
+  }
+
+  /**
+   * Sync map checksums with gateway and apply updates
+   */
+  private async syncMapChecksums(): Promise<void> {
+    try {
+      const { calculateAllMapChecksums, writeMapContent } = await import("./checksums.ts");
+
+      // Calculate local map checksums
+      const localChecksums = calculateAllMapChecksums();
+
+      const gatewayUrl = await this.getGatewayUrl();
+      const response = await fetch(`${gatewayUrl}/map-checksums`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          checksums: localChecksums,
+          serverId: this.config.serverId,
+          authKey: process.env.GATEWAY_AUTH_KEY
+        })
+      });
+
+      if (!response.ok) {
+        log.error(`Map checksum sync failed with status ${response.status}`);
+        return;
+      }
+
+      const result = await response.json();
+
+      if (!result.success) {
+        log.error(`Map checksum sync failed: ${result.error}`);
+        return;
+      }
+
+      // Apply outdated maps
+      if (result.outdatedMaps && result.outdatedMaps.length > 0) {
+        log.info(`Syncing ${result.outdatedMaps.length} map(s) from gateway...`);
+
+        for (const mapUpdate of result.outdatedMaps) {
+          const success = writeMapContent(mapUpdate.name, mapUpdate.data);
+          if (success) {
+            log.success(`Updated map: ${mapUpdate.name}`);
+          } else {
+            log.error(`Failed to update map: ${mapUpdate.name}`);
+          }
+        }
+
+        // TODO: Reload all maps and collision data after sync
+      } else {
+        log.success("All maps are up to date");
+      }
+    } catch (error) {
+      log.error(`Map checksum sync error: ${error}`);
+    }
+  }
+
+  /**
+   * Send updated map to gateway (called after tile editor save)
+   */
+  async sendMapUpdateToGateway(mapName: string, mapData: any): Promise<boolean> {
+    if (!this.registered) {
+      log.warn("Not registered with gateway, cannot send map update");
+      return false;
+    }
+
+    try {
+      const gatewayUrl = await this.getGatewayUrl();
+      const response = await fetch(`${gatewayUrl}/update-map`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mapName,
+          mapData,
+          serverId: this.config.serverId,
+          authKey: process.env.GATEWAY_AUTH_KEY
+        })
+      });
+
+      if (!response.ok) {
+        log.error(`Failed to send map update to gateway: ${response.status}`);
+        return false;
+      }
+
+      const result = await response.json();
+      if (result.success) {
+        log.success(`Map update sent to gateway: ${mapName}`);
+        return true;
+      } else {
+        log.error(`Gateway rejected map update: ${result.error}`);
+        return false;
+      }
+    } catch (error) {
+      log.error(`Error sending map update to gateway: ${error}`);
+      return false;
+    }
   }
 
   /**

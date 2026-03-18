@@ -12,8 +12,6 @@
  *   gameLoop.unregisterMovingPlayer(playerId)
  */
 
-import log from "../modules/logger";
-
 interface MovingPlayer {
   playerId: string;
   moveCallback: () => Promise<void>;
@@ -25,7 +23,6 @@ interface MovingPlayer {
 class GameLoop {
   private movingPlayers: Map<string, MovingPlayer>;
   private loopInterval: ReturnType<typeof setInterval> | null;
-  private readonly FPS = 30;
   private readonly FRAME_TIME = 1000 / 30; // 33ms
 
   constructor() {
@@ -37,12 +34,8 @@ class GameLoop {
    * Start the game loop (called once on server start)
    */
   start(): void {
-    if (this.loopInterval) {
-      log.warn("[GameLoop] Already running");
-      return;
-    }
+    if (this.loopInterval) return;
 
-    log.success("[GameLoop] Starting centralized game loop at 30 FPS");
     this.loopInterval = setInterval(() => this.tick(), this.FRAME_TIME);
   }
 
@@ -53,7 +46,6 @@ class GameLoop {
     if (this.loopInterval) {
       clearInterval(this.loopInterval);
       this.loopInterval = null;
-      log.info("[GameLoop] Stopped");
     }
   }
 
@@ -106,7 +98,6 @@ class GameLoop {
 
       playerState.running = false;
     } catch (error) {
-      log.error(`[GameLoop] Error processing player ${playerId}: ${error}`);
       // Remove player from loop on error to prevent infinite error spam
       this.unregisterMovingPlayer(playerId);
     }

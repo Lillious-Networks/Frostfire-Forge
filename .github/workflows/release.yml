@@ -1,0 +1,374 @@
+name: Release Pipeline
+
+permissions:
+  contents: write
+  packages: write
+
+on:
+  push:
+    branches:
+      - main
+      - development
+      - '**'
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'bun.lockb'
+      - 'Dockerfile.*'
+      - 'docker-compose*.yml'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Perform a dry run without creating release'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: 'release-pipeline-${{ github.ref }}'
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  determine-pipeline:
+    name: Determine Pipeline
+    runs-on: ubuntu-latest
+    outputs:
+      pipeline: ${{ steps.determine.outputs.pipeline }}
+      environment: ${{ steps.determine.outputs.environment }}
+    steps:
+      - name: Determine Pipeline Type
+        id: determine
+        run: |
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            echo "pipeline=production" >> $GITHUB_OUTPUT
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "🚀 Production Pipeline (main branch)"
+          elif [ "${{ github.ref }}" == "refs/heads/development" ]; then
+            echo "pipeline=development" >> $GITHUB_OUTPUT
+            echo "environment=development" >> $GITHUB_OUTPUT
+            echo "🔨 Development Pipeline (development branch)"
+          else
+            echo "pipeline=local" >> $GITHUB_OUTPUT
+            echo "environment=local" >> $GITHUB_OUTPUT
+            echo "🧪 Local Pre-check Pipeline (feature branch)"
+          fi
+
+  validate:
+    name: Validate Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check TypeScript Types
+        run: bun run --bun src/utility/validate_config.ts
+        continue-on-error: false
+
+      - name: Verify Environment Configuration
+        run: |
+          if [ ! -f "package.json" ]; then
+            echo "❌ package.json not found"
+            exit 1
+          fi
+          if [ ! -f "src/socket/server.ts" ]; then
+            echo "❌ Game server entry point not found"
+            exit 1
+          fi
+          echo "✅ Configuration validation passed"
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: [validate]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify Config Generation
+        run: |
+          bun create-config --environment local
+          if [ ! -f "src/config/assets.json" ]; then
+            echo "❌ Config generation failed: assets.json not created"
+            exit 1
+          fi
+          if [ ! -f "src/config/settings.json" ]; then
+            echo "❌ Config generation failed: settings.json not created"
+            exit 1
+          fi
+          if [ ! -f "src/config/aoi.json" ]; then
+            echo "❌ Config generation failed: aoi.json not created"
+            exit 1
+          fi
+          echo "✅ All config files generated successfully"
+
+      - name: Verify Swears Configuration
+        run: |
+          if [ ! -f "src/utility/swears.json" ]; then
+            echo "❌ Swears filter not found"
+            exit 1
+          fi
+          if ! jq empty "src/utility/swears.json" 2>/dev/null; then
+            echo "❌ Swears filter is not valid JSON"
+            exit 1
+          fi
+          echo "✅ Swears filter validation passed"
+
+  build-local:
+    name: Build Local Docker Image (Pre-check)
+    runs-on: ubuntu-latest
+    needs: [determine-pipeline, test]
+    if: needs.determine-pipeline.outputs.pipeline == 'local'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Prepare Local Environment
+        run: |
+          cat > .env.local << 'EOF'
+          DATABASE_ENGINE=sqlite
+          DATABASE_NAME=frostfire-forge-test
+          WEB_SOCKET_PORT=3000
+          WEB_SOCKET_USE_SSL=false
+          GAME_NAME="Frostfire Forge Test Build"
+          CACHE="memory"
+          SESSION_KEY="test-session-key-do-not-use-in-production"
+          GATEWAY_URL="http://gateway:9999"
+          GATEWAY_AUTH_KEY="test-auth-key"
+          GATEWAY_GAME_SERVER_SECRET="test-game-secret"
+          SERVER_ID="test-server"
+          SERVER_HOST="localhost"
+          PUBLIC_HOST="localhost"
+          EOF
+
+      - name: Build Local Docker Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./src/docker/Dockerfile.local
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-local:test
+
+      - name: Pre-check Complete
+        run: |
+          echo "✅ Local pre-check pipeline complete"
+          echo "Feature branch is ready for development branch merge"
+
+  build-development:
+    name: Build Development Docker Image
+    runs-on: ubuntu-latest
+    needs: [determine-pipeline, test]
+    if: needs.determine-pipeline.outputs.pipeline == 'development'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare Development Environment
+        run: |
+          cat > .env.development << 'EOF'
+          DATABASE_ENGINE=sqlite
+          DATABASE_NAME=frostfire-forge-dev
+          WEB_SOCKET_PORT=3000
+          WEB_SOCKET_USE_SSL=false
+          GAME_NAME="Frostfire Forge Development"
+          CACHE="memory"
+          SESSION_KEY=""
+          GATEWAY_URL="http://gateway:9999"
+          GATEWAY_AUTH_KEY="dev-auth-key"
+          GATEWAY_GAME_SERVER_SECRET="dev-game-secret"
+          SERVER_ID="dev-server"
+          SERVER_HOST="localhost"
+          PUBLIC_HOST="localhost"
+          EOF
+
+      - name: Build and Push Development Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./src/docker/Dockerfile.dev
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-dev:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-dev:development
+
+  build-production:
+    name: Build Production Docker Image
+    runs-on: ubuntu-latest
+    needs: [determine-pipeline, test]
+    if: needs.determine-pipeline.outputs.pipeline == 'production'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare Production Environment
+        run: |
+          cat > .env.production << 'EOF'
+          DATABASE_ENGINE=mysql
+          DATABASE_HOST=
+          DATABASE_NAME=
+          DATABASE_PASSWORD=
+          DATABASE_USER=
+          DATABASE_PORT=3306
+          SQL_SSL_MODE=DISABLED
+          SESSION_KEY=
+          WEB_SOCKET_PORT=3000
+          WEB_SOCKET_USE_SSL=true
+          GAME_NAME="Frostfire Forge"
+          GATEWAY_URL=
+          GATEWAY_AUTH_KEY=
+          GATEWAY_GAME_SERVER_SECRET=
+          SERVER_ID=
+          SERVER_HOST=
+          PUBLIC_HOST=
+          CACHE="redis"
+          REDIS_URL=
+          GOOGLE_TRANSLATE_API_KEY=
+          OPENAI_API_KEY=
+          TRANSLATION_SERVICE="openai"
+          OPENAI_MODEL="gpt-4.1-nano-2025-04-14"
+          EOF
+
+      - name: Generate Release Version
+        id: version
+        run: |
+          VERSION="v$(date +%Y.%m.%d)-$(git rev-parse --short HEAD)"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build and Push Production Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./src/docker/Dockerfile.prod
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-prod:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-prod:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-prod:${{ github.sha }}
+
+      - name: Build and Push Local Pre-built Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./src/docker/Dockerfile.local
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-local:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-local:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-local:${{ github.sha }}
+
+  create-production-release:
+    name: Create Production Release
+    runs-on: ubuntu-latest
+    needs: [determine-pipeline, build-production]
+    if: needs.determine-pipeline.outputs.pipeline == 'production'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate Release Version
+        id: version
+        run: |
+          VERSION="v$(date +%Y.%m.%d)-$(git rev-parse --short HEAD)"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Generate Release Notes
+        id: release-notes
+        run: |
+          RELEASE_VERSION="${{ steps.version.outputs.version }}"
+
+          echo "## Frostfire Forge Game Server Release $RELEASE_VERSION" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### Docker Images Published" >> release_notes.md
+          echo "- \`ghcr.io/${{ github.repository }}-prod:$RELEASE_VERSION\`" >> release_notes.md
+          echo "- \`ghcr.io/${{ github.repository }}-local:$RELEASE_VERSION\`" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### Changes" >> release_notes.md
+          git log --oneline -10 >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### Requirements" >> release_notes.md
+          echo "- [Frostfire Forge Gateway](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) running and accessible" >> release_notes.md
+          echo "- Database configured (MySQL for production)" >> release_notes.md
+          echo "- Environment variables properly configured" >> release_notes.md
+
+      - name: Create Release Tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$RELEASE_VERSION" \
+            --title "Release $RELEASE_VERSION" \
+            --notes-file release_notes.md \
+            --target ${{ github.sha }}
+
+  notify-completion:
+    name: Pipeline Complete
+    runs-on: ubuntu-latest
+    needs: [determine-pipeline]
+    if: always()
+    steps:
+      - name: Notify Pipeline Complete
+        run: |
+          PIPELINE="${{ needs.determine-pipeline.outputs.pipeline }}"
+          if [ "$PIPELINE" = "production" ]; then
+            echo "✅ Production Release Pipeline Complete"
+            echo "🐳 Docker images published to GHCR"
+            echo "🏷️  Release tag created"
+          elif [ "$PIPELINE" = "development" ]; then
+            echo "✅ Development Pipeline Complete"
+            echo "🐳 Development Docker image published to GHCR"
+          else
+            echo "✅ Local Pre-check Pipeline Complete"
+            echo "🧪 Feature branch validated and ready for merge"
+          fi

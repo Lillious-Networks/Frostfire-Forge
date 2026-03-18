@@ -4,6 +4,9 @@ import log from "../modules/logger";
 import player from "../systems/player.ts";
 import permissions from "../systems/permissions";
 import { getAuthWorker } from "./authentication_pool.ts";
+import { gatewayClient } from "./server.ts";
+import fs from "fs";
+import path from "path";
 const authentication_queue = new Set<string>();
 const authentication_session_queue = new Set<string>();
 // Track pending authentications with their websocket, token, and language
@@ -2106,8 +2109,9 @@ export default async function packetReceiver(
         try {
           log.info(`Map save requested by ${currentPlayer.username} for map: ${saveData.mapName}, ${saveData.chunks.length} chunks modified`);
 
-          // Find the map in the cache
-          const mapIndex = (maps as any[]).findIndex((m: any) => m.name === saveData.mapName);
+          // Get fresh maps from cache
+          const cachedMaps = (await assetCache.get("maps")) as MapData[];
+          const mapIndex = cachedMaps.findIndex((m: any) => m.name === saveData.mapName);
 
           if (mapIndex === -1) {
             throw new Error(`Map ${saveData.mapName} not found`);
@@ -2118,11 +2122,11 @@ export default async function packetReceiver(
             const chunkKey = `${chunkData.chunkX}-${chunkData.chunkY}`;
 
             // Update the map's chunks
-            if (!maps[mapIndex].chunks) {
-              maps[mapIndex].chunks = {};
+            if (!cachedMaps[mapIndex].chunks) {
+              cachedMaps[mapIndex].chunks = {};
             }
 
-            maps[mapIndex].chunks[chunkKey] = {
+            cachedMaps[mapIndex].chunks[chunkKey] = {
               width: chunkData.width,
               height: chunkData.height,
               layers: chunkData.layers
@@ -2130,7 +2134,7 @@ export default async function packetReceiver(
           });
 
           // Update the asset cache
-          assetCache.add("maps", maps);
+          assetCache.add("maps", cachedMaps);
 
           // Write changes to disk for persistence (this also reprocesses collision/no-pvp maps)
           await saveMapChunks(saveData.mapName, saveData.chunks);
@@ -2141,10 +2145,22 @@ export default async function packetReceiver(
           // Reload the map to get updated collision data
           const reloadedMap = await reloadMap(saveData.mapName);
           if (reloadedMap) {
-            maps[mapIndex].compressed = reloadedMap.compressed;
-            maps[mapIndex].data = reloadedMap.data;
-            assetCache.add("maps", maps);
+            // Update both the local variable and cache
+            const updatedMaps = (await assetCache.get("maps")) as MapData[];
+            const index = updatedMaps.findIndex((m: any) => m.name === saveData.mapName);
+            if (index >= 0) {
+              updatedMaps[index].compressed = reloadedMap.compressed;
+              updatedMaps[index].data = reloadedMap.data;
+              await assetCache.add("maps", updatedMaps);
+            }
             log.info(`Reloaded collision data for map: ${saveData.mapName}`);
+          }
+
+          // Send map update to gateway (non-blocking)
+          if (gatewayClient && gatewayClient.isRegistered() && reloadedMap) {
+            gatewayClient.sendMapUpdateToGateway(saveData.mapName, reloadedMap.data).catch((error) => {
+              log.warn(`Failed to sync map update to gateway: ${error}`);
+            });
           }
 
           sendPacket(ws, packetManager.notify({
@@ -2167,6 +2183,75 @@ export default async function packetReceiver(
             message: 'Error saving map changes.'
           }));
         }
+        break;
+      }
+      case "LOAD_CHUNK": {
+        if (!currentPlayer) return;
+
+        const loadChunkData = data as unknown as { map: string, x: number, y: number };
+        const { map: mapName, x: chunkX, y: chunkY } = loadChunkData;
+
+        try {
+          // Read map directly from disk to ensure we always get the latest version
+          const mapFileName = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
+          const assetData = (await assetCache.get("mapAssetConfig") as any) || {
+            path: path.join(import.meta.dir, "../assets/maps")
+          };
+
+          const mapFilePath = path.join(assetData.path, mapFileName);
+
+          if (!fs.existsSync(mapFilePath)) {
+            sendPacket(ws, packetManager.notify({
+              message: `Map ${mapName} not found`
+            }));
+            return;
+          }
+
+          const mapData = JSON.parse(fs.readFileSync(mapFilePath, "utf-8"));
+
+          // Calculate chunk boundaries
+          const CHUNK_SIZE = mapData.tilewidth;
+          const startX = chunkX * CHUNK_SIZE;
+          const startY = chunkY * CHUNK_SIZE;
+          const chunkWidth = Math.min(CHUNK_SIZE, mapData.width - startX);
+          const chunkHeight = Math.min(CHUNK_SIZE, mapData.height - startY);
+
+          // Extract chunk data from layers
+          const chunkLayers = mapData.layers.map((layer: any, layerIndex: number) => {
+            const chunkData = new Array(chunkWidth * chunkHeight).fill(0);
+
+            // Copy only the chunk portion from the full layer
+            for (let y = 0; y < chunkHeight; y++) {
+              for (let x = 0; x < chunkWidth; x++) {
+                const sourceIndex = (startY + y) * mapData.width + (startX + x);
+                const destIndex = y * chunkWidth + x;
+                if (layer.data && layer.data[sourceIndex] !== undefined) {
+                  chunkData[destIndex] = layer.data[sourceIndex];
+                }
+              }
+            }
+
+            // Use explicit zIndex if present, otherwise use layer order
+            const zIndex = typeof layer.zIndex === 'number' ? layer.zIndex : layerIndex;
+
+            return {
+              name: layer.name,
+              zIndex: zIndex,
+              data: chunkData,
+              width: chunkWidth,
+              height: chunkHeight
+            };
+          });
+
+          // Send chunk data to client
+          sendPacket(ws, packetManager.chunkData(chunkX, chunkY, chunkWidth, chunkHeight, chunkLayers, mapData.tilewidth, mapData.tileheight, startX, startY));
+        } catch (error) {
+          log.error(`Error loading chunk ${chunkX},${chunkY} from map ${mapName}: ${error}`);
+          sendPacket(ws, packetManager.notify({
+            message: "Error loading chunk data"
+          }));
+        }
+
         break;
       }
       case "COMMAND": {

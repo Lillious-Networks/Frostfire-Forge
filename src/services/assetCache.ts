@@ -1,5 +1,3 @@
-import { redis } from "bun";
-
 type RedisValue = any;
 
 interface CacheService {
@@ -117,11 +115,20 @@ class MemoryCacheService implements CacheService {
 }
 
 class RedisCacheService implements CacheService {
-  private client = redis;
+  private client: any;
   private prefix: string;
 
   constructor(prefix = "asset:") {
     this.prefix = prefix;
+    try {
+      import("bun").then((mod: any) => {
+        this.client = mod.redis;
+      }).catch((e: any) => {
+        throw new Error(`Failed to initialize Redis client: ${e}`);
+      });
+    } catch (e) {
+      throw new Error(`Failed to initialize Redis client: ${e}`);
+    }
   }
 
   private prefixed(key: string) {

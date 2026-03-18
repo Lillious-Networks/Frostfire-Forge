@@ -1,7 +1,7 @@
 import path from "path";
 import fs from "fs";
-import * as settings from "../config/settings.json";
 
+const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 
 const types = {
   info: "\x1b[97m",
@@ -52,11 +52,11 @@ const log = {
     log.createLogFile(`✔  ${msg}`, "success");
   },
   debug: (msg: string) => {
-    if (settings.logging.level !== "debug" && settings.logging.level !== "trace") return;
+    if (LOG_LEVEL !== "debug" && LOG_LEVEL !== "trace") return;
     log.createLogFile(`🛠  ${msg}`, "debug");
   },
   trace: (msg: string) => {
-    if (settings.logging.level !== "trace") return;
+    if (LOG_LEVEL !== "trace") return;
     log.createLogFile(`🛠  ${msg}`, "trace");
   },
   object: (obj: any) => {

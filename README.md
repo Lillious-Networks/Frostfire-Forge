@@ -41,7 +41,7 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
 
 - [Requirements](#-requirements)
 - [Architecture](#-architecture)
-  - [Gateway Load Balancer](#gateway-load-balancer)
+  - [Gateway (Authentication & Reverse Proxy)](#gateway-authentication--reverse-proxy)
 - [Quick Start](#-quick-start)
   - [Development Setup](#development-setup)
   - [Production Setup](#production-setup)
@@ -65,39 +65,42 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
 > **Required Software**:
 > - [Bun](https://bun.sh/) - JavaScript runtime & package manager
 > - [MySQL](https://www.mysql.com/downloads/) - Database (or SQLite for development)
+> - [Frostfire Forge Gateway](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) - Authentication and reverse proxy gateway (required for all deployments)
 > - [Docker](https://www.docker.com/) (Optional) - For containerized deployment
 
 ---
 
 ## 🏗️ Architecture
 
-### Gateway Load Balancer
+### Gateway (Authentication & Reverse Proxy)
 
-Frostfire Forge includes an optional [Gateway Load Balancer](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) for horizontal scaling across multiple game servers.
+Frostfire Forge requires the [Frostfire Forge Gateway](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) for all deployments. The gateway handles centralized user authentication, game server registration and management, automatic failover, and request routing to game servers.
 
-#### Configuration
+#### Setup
 
-Set `GATEWAY_ENABLED=true` in your environment to enable gateway mode. Game servers will automatically register with the gateway on startup.
+The gateway must be running before game servers start. Game servers automatically register with the gateway on startup using the `GATEWAY_URL` and `GATEWAY_AUTH_KEY` environment variables.
 
 ## 🚀 Quick Start
 
 ### Development Setup
 
-#### 1. Update the `.env.development` file
+#### 1. Ensure Gateway is Running
+
+Start the Frostfire Forge Gateway before starting the game server. See [Frostfire Forge Gateway](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) for setup instructions.
+
+#### 2. Update the `.env.development` file
 
 Configure your development environment variables.
 
-#### 2. Run the setup script
-
-```bash
-bun setup-development
-```
-
 #### 3. Start the development server
+
+Configuration files will be automatically created if they don't exist:
 
 ```bash
 bun development
 ```
+
+> The server will automatically run `create-config --environment development` before starting, creating any missing config files.
 
 #### 4. Default Login Credentials
 
@@ -110,11 +113,9 @@ Password: Changeme123!
 
 ### Production Setup
 
-#### 1. Run the production setup script
+#### 1. Ensure Gateway is Running
 
-```bash
-bun setup-production
-```
+Start the Frostfire Forge Gateway before starting the game server. See [Frostfire Forge Gateway](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) for setup instructions.
 
 #### 2. Update the `.env.production` file
 
@@ -122,14 +123,30 @@ Configure your production environment variables.
 
 #### 3. Start the production server
 
-**Direct execution:**
+Configuration files will be automatically created if they don't exist:
+
 ```bash
 bun production
+```
+
+> The server will automatically run `create-config --environment production` before starting, creating any missing config files.
+
+**Optional: Run setup separately**
+
+If you prefer to set up the database manually before starting the server:
+```bash
+bun setup-production
 ```
 
 ---
 
 ### Docker Deployment
+
+#### Prerequisites
+
+- Docker and Docker Compose installed
+- Proper environment variable file configured
+- Frostfire Forge Gateway running and accessible
 
 #### Pull Pre-built Local Image
 
@@ -140,13 +157,8 @@ docker pull ghcr.io/lillious-networks/frostfire-forge-local:latest
 
 Run the pulled image:
 ```bash
-docker run -p 80:80 -p 3000:3000 --name frostfire-forge-local ghcr.io/lillious-networks/frostfire-forge-local:latest
+docker run -p 3000:3000 --name frostfire-forge-local ghcr.io/lillious-networks/frostfire-forge-local:latest
 ```
-
-#### Prerequisites
-
-- Docker and Docker Compose installed
-- Proper environment variable file configured
 
 #### Development Environment
 
@@ -154,6 +166,8 @@ docker run -p 80:80 -p 3000:3000 --name frostfire-forge-local ghcr.io/lillious-n
 ```bash
 bun run docker:dev
 ```
+
+Note: Ensure the Frostfire Forge Gateway is running before starting this container.
 
 **View logs:**
 ```bash
@@ -170,12 +184,38 @@ bun run docker:dev:down
 bun run docker:dev:build
 ```
 
+#### Local Environment
+
+**Start the local container:**
+```bash
+bun run docker:local
+```
+
+Note: Ensure the Frostfire Forge Gateway is running before starting this container.
+
+**View logs:**
+```bash
+bun run docker:local:logs
+```
+
+**Stop the container:**
+```bash
+bun run docker:local:down
+```
+
+**Rebuild the container:**
+```bash
+bun run docker:local:rebuild
+```
+
 #### Production Environment
 
 **Start the production container:**
 ```bash
 bun run docker:prod
 ```
+
+Note: Ensure the Frostfire Forge Gateway is running before starting this container.
 
 **View logs:**
 ```bash
@@ -198,10 +238,9 @@ bun run docker:prod:build
 - **Production**: Multi-stage build with optimized dependencies
 - **Environment Files**: `.env.production`, `.env.development` or `.env.local` is automatically loaded
 - **Ports Exposed**:
-  - **With Gateway**: 8000 (HTTP), 9000 (WebSocket)
-  - **Without Gateway**: 80 (HTTP), 443 (HTTPS), 3000 (WebSocket)
+  - 3000 (WebSocket)
 - **Redis**: If `CACHE=redis`, configure `REDIS_URL` and `REDIS_PASSWORD` in your `.env` file
-- **Gateway**: Development environment includes gateway by default. Configure via `GATEWAY_ENABLED` environment variable
+- **Gateway**: Ensure the Frostfire Forge Gateway is running before starting game servers
 
 ---
 
@@ -223,16 +262,16 @@ SQL_SSL_MODE="DISABLED" | "ENABLED"
 GOOGLE_TRANSLATE_API_KEY="your_google_api_key"
 OPENAI_API_KEY="your_openai_api_key"
 TRANSLATION_SERVICE="google_translate" | "openai"
-OPEN_AI_MODEL="gpt-4"
+OPENAI_MODEL="gpt-4.1-nano-2025-04-14"
 
 # Application Settings
-WEB_SOCKET_URL="ws://yourdomain.com"
 WEB_SOCKET_PORT="3000"                    # Internal WebSocket port
-DOMAIN="http://yourdomain.com"
+WEB_SOCKET_USE_SSL="true" | "false"       # Enable SSL/TLS for WebSocket
 GAME_NAME="Your Game Name"
+LOG_LEVEL="info"                          # Logging level: trace, debug, info, warn, error
+SESSION_KEY="your_session_secret_key"     # Session encryption key
 
-# Gateway Reverse Proxy (Optional)
-GATEWAY_ENABLED="true"                          # Enable gateway mode
+# Gateway (Required)
 GATEWAY_URL="http://gateway:9999"               # Gateway registration endpoint
 GATEWAY_AUTH_KEY="your_secret_key"              # Shared secret for server registration
 GATEWAY_GAME_SERVER_SECRET="another_secret_key" # Game server authentication token
@@ -243,9 +282,6 @@ SERVER_ID="server-1"                            # Game server identification
 # Caching
 CACHE="redis" | "memory"
 REDIS_URL="redis://default@redis:6379"  # Required if CACHE=redis
-
-# Versioning (can be provided at runtime)
-VERSION="1.0.0"
 
 ## 📜 Commands Reference
 

@@ -61,27 +61,6 @@ export default (async () => {
     process.env.SQL_SSL_MODE = "false";
   }
 
-  // Email Service
-  if (!process.env.EMAIL_SERVICE) {
-    startUpWarnings.push(
-      "No email service is set, email functionality will be disabled. Please set the EMAIL_SERVICE environment variable to suppress this message."
-    );
-  }
-
-  // Email User
-  if (!process.env.EMAIL_USER) {
-    startUpWarnings.push(
-      "No email user is set, email functionality will be disabled. Please set the EMAIL_USER environment variable to suppress this message."
-    );
-  }
-
-  // Email Password
-  if (!process.env.EMAIL_PASSWORD) {
-    startUpWarnings.push(
-      "No email password is set, email functionality will be disabled. Please set the EMAIL_PASSWORD environment variable to suppress this message."
-    );
-  }
-
 
   // Google Translation API Key
   if (!process.env.GOOGLE_TRANSLATE_API_KEY) {
@@ -101,10 +80,22 @@ export default (async () => {
   // Session Key
   if (!process.env.SESSION_KEY) {
     startUpWarnings.push(
-      "No session key is set, setting to a random value. Please set the SESSION_KEY environment variable to suppress this message."
+      "Session key is set. Do not set this manually. It will be overwritten with a random value. Please remove the SESSION_KEY environment variable to suppress this message."
     );
-    process.env.SESSION_KEY = crypto.randomBytes(20).toString("hex");
   }
+
+  // Generate a random SESSION_KEY
+  process.env.SESSION_KEY = crypto.randomBytes(20).toString("hex");
+
+  // RSA Passphrase
+  if (process.env.RSA_PASSPHRASE) {
+    startUpWarnings.push(
+      "RSA passphrase is set. Do not set this manually. It will be overwritten with a random value. Please remove the RSA_PASSPHRASE environment variable to suppress this message."
+    );
+  }
+
+  // Generate a random RSA passphrase
+  process.env.RSA_PASSPHRASE = crypto.randomBytes(32).toString("hex");
 
   const assetPath = path.join(import.meta.dir, "..", "config", "assets.json");
   if (!fs.existsSync(assetPath)) {
@@ -122,15 +113,18 @@ export default (async () => {
     );
   }
 
-  // RSA Passphrase
-  if (process.env.RSA_PASSPHRASE) {
+  // Log Level
+  if (!process.env.LOG_LEVEL) {
     startUpWarnings.push(
-      "RSA passphrase is set. Do not set this manually. It will be overwritten with a random value. Please remove the RSA_PASSPHRASE environment variable to suppress this message."
+      "No log level is set, defaulting to info. Please set the LOG_LEVEL environment variable (trace, debug, info, warn, error) to suppress this message."
     );
+    process.env.LOG_LEVEL = "info";
+  } else if (!["trace", "debug", "info", "warn", "error"].includes(process.env.LOG_LEVEL)) {
+    startUpWarnings.push(
+      `Invalid LOG_LEVEL '${process.env.LOG_LEVEL}'. Valid values are: trace, debug, info, warn, error. Defaulting to info.`
+    );
+    process.env.LOG_LEVEL = "info";
   }
-
-  // Generate a random RSA passphrase
-  process.env.RSA_PASSPHRASE = crypto.randomBytes(32).toString("hex");
 
   // Test redis connection if redis cache is selected
   if (process.env.CACHE?.toLowerCase() === "redis") {

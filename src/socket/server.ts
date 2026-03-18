@@ -297,26 +297,24 @@ event.emit("online");
 
 // Initialize gateway client if enabled
 let gatewayClient: GatewayClient | null = null;
-if (settings?.gateway?.enabled) {
-  const serverId = process.env.SERVER_ID || `server-${crypto.randomBytes(8).toString("hex")}`;
-  const serverHost = process.env.SERVER_HOST || "localhost";
-  const publicHost = process.env.PUBLIC_HOST || serverHost;
-  const wsPort = parseInt(process.env.WEB_SOCKET_PORT || "3000");
+const serverId = process.env.SERVER_ID || `server-${crypto.randomBytes(8).toString("hex")}`;
+const serverHost = process.env.SERVER_HOST || "localhost";
+const publicHost = process.env.PUBLIC_HOST || serverHost;
+const wsPort = parseInt(process.env.WEB_SOCKET_PORT || "3000");
 
-  gatewayClient = new GatewayClient({
-    gatewayUrl: settings.gateway.url,
-    serverId,
-    host: serverHost,
-    publicHost: publicHost,
-    port: wsPort,  // WebSocket port (no separate HTTP port anymore)
-    wsPort: wsPort,
-    maxConnections: settings?.websocket?.maxConnections || 500,
-    heartbeatInterval: settings.gateway.heartbeatInterval || 5000,
-  });
+gatewayClient = new GatewayClient({
+  gatewayUrl: process.env.GATEWAY_URL || "http://localhost:9999",
+  serverId,
+  host: serverHost,
+  publicHost: publicHost,
+  port: wsPort,
+  wsPort: wsPort,
+  maxConnections: settings?.websocket?.maxConnections || 500,
+  heartbeatInterval: settings?.gateway?.heartbeatInterval || 5000,
+});
 
-  // Block until connected to gateway (keeps retrying forever)
-  await gatewayClient.registerWithRetry();
-}
+// Block until connected to gateway (keeps retrying forever with reduced logging)
+await gatewayClient.registerWithRetry();
 
 listener.emit("onAwake");
 listener.emit("onStart");
@@ -761,3 +759,6 @@ async function gracefulShutdown(signal: string) {
 // Register shutdown handlers
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+
+// Export gateway client for use in receiver
+export { gatewayClient };

@@ -621,12 +621,15 @@ export async function saveMapChunks(mapName: string, chunks: any[]): Promise<voi
 
     // Read the original map file
     const mapData = JSON.parse(fs.readFileSync(fullPath, "utf-8"));
-    const chunkSize = 25; // Default chunk size
+    const CHUNK_SIZE = mapData.tilewidth;
+    const chunkSize = CHUNK_SIZE;
 
     // Apply each chunk's changes to the map data
     for (const chunk of chunks) {
       const startX = chunk.chunkX * chunkSize;
       const startY = chunk.chunkY * chunkSize;
+
+      log.debug(`Saving chunk (${chunk.chunkX}, ${chunk.chunkY}) - startX: ${startX}, startY: ${startY}, mapData.width: ${mapData.width}`);
 
       // Update each layer in the chunk
       for (const chunkLayer of chunk.layers) {
@@ -634,13 +637,15 @@ export async function saveMapChunks(mapName: string, chunks: any[]): Promise<voi
         const mapLayer = mapData.layers.find((l: any) => l.name === chunkLayer.name);
 
         if (mapLayer && mapLayer.data) {
+          log.debug(`  Layer: ${chunkLayer.name}, layer width: ${mapLayer.width}, layer height: ${mapLayer.height}`);
+
           // Write chunk data back to the full map layer
           for (let y = 0; y < chunk.height; y++) {
             for (let x = 0; x < chunk.width; x++) {
               const chunkIndex = y * chunk.width + x;
               const mapX = startX + x;
               const mapY = startY + y;
-              const mapIndex = mapY * mapData.width + mapX;
+              const mapIndex = mapY * mapLayer.width + mapX;
 
               if (mapIndex < mapLayer.data.length) {
                 mapLayer.data[mapIndex] = chunkLayer.data[chunkIndex];
@@ -816,42 +821,6 @@ function tryParse(data: string): any {
     return null;
   }
 }
-
-function loadSoundEffects() {
-  const now = performance.now();
-  const soundEffects = [] as SoundData[];
-  const soundEffectDir = path.join(assetPath, assetData.sfx.path);
-
-  if (!fs.existsSync(soundEffectDir)) {
-    throw new Error(`Sound effects directory not found at ${soundEffectDir}`);
-  }
-
-  const soundEffectFiles = fs.readdirSync(soundEffectDir).filter((file) => file.endsWith(".mp3"));
-
-  soundEffectFiles.forEach((file) => {
-    const name = file.replace(".mp3", "");
-    const data = fs.readFileSync(path.join(soundEffectDir, file), "base64");
-    const compressedData = zlib.gzipSync(data);
-
-    const originalSize = data.length;
-    const compressedSize = compressedData.length;
-    const ratio = (originalSize / compressedSize).toFixed(2);
-    const savings = (((originalSize - compressedSize) / originalSize) * 100).toFixed(2);
-
-    log.debug(`Loaded sound effect: ${name}`);
-    log.debug(`Compressed sound effect: ${name}
-  - Original: ${originalSize} bytes
-  - Compressed: ${compressedSize} bytes
-  - Compression Ratio: ${ratio}x
-  - Compression Savings: ${savings}%`);
-
-    soundEffects.push({ name, data: compressedData });
-  });
-
-  assetCache.add("audio", soundEffects);
-  log.success(`Loaded ${soundEffects.length} sound effect(s) in ${(performance.now() - now).toFixed(2)}ms`);
-}
-loadSoundEffects();
 
 function parseAnimations() {
   const animationFiles = fs
