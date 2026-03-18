@@ -144,6 +144,12 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v6
 
+      - name: Checkout Gateway Repository
+        uses: actions/checkout@v6
+        with:
+          repository: Lillious-Networks/Frostfire-Forge-Gateway
+          path: gateway
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -157,7 +163,10 @@ jobs:
           IMAGE_NAME=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "name=$IMAGE_NAME" >> $GITHUB_OUTPUT
 
-      - name: Start Services with Docker Compose
+      - name: Start Gateway with Docker Compose
+        run: docker compose -f gateway/src/docker/docker-compose.dev.yml up -d && sleep 10
+
+      - name: Start Game Server with Docker Compose
         env:
           GAME_SERVER_IMAGE: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:latest
         run: docker compose -f src/docker/docker-compose.dev.yml up -d && sleep 10
@@ -177,6 +186,7 @@ jobs:
             sleep 2
           done
           echo "❌ Game server failed to register with gateway"
+          docker compose -f gateway/src/docker/docker-compose.dev.yml logs
           docker compose -f src/docker/docker-compose.dev.yml logs
           exit 1
 
@@ -195,7 +205,9 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: docker compose -f src/docker/docker-compose.dev.yml down
+        run: |
+          docker compose -f src/docker/docker-compose.dev.yml down
+          docker compose -f gateway/src/docker/docker-compose.dev.yml down
 
   notify-completion:
     name: Pipeline Complete

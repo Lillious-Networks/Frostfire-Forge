@@ -1,8 +1,6 @@
 services:
   frostfire-forge-dev:
-    build:
-      context: ../..
-      dockerfile: src/docker/Dockerfile.dev
+    image: ${GAME_SERVER_IMAGE}
     container_name: frostfire-forge-dev
     restart: unless-stopped
     ports:
@@ -15,8 +13,8 @@ services:
     env_file:
       - ../../.env.development
     networks:
-      - docker_gateway-network-dev
+      - gateway-network-dev
 
 networks:
-  docker_gateway-network-dev:
+  gateway-network-dev:
     external: true
