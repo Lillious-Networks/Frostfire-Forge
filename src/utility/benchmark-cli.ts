@@ -528,22 +528,18 @@ async function createClients(amount: number, host: string, websocketUrl: string,
                     log(`Connecting to WebSocket: ${finalWebsocketUrl}`, 'info');
                 }
 
-                const websocket = new WebSocket(wsUrlWithAuth.toString(), {
-                    headers: {
-                        'User-Agent': 'Frostfire-Forge-Benchmark-CLI/1.0'
-                    }
-                });
+                const websocket = new WebSocket(wsUrlWithAuth.toString());
 
                 websocket.addEventListener('open', () => {
                     allWebsockets.push(websocket);
                     openedCount++;
                     updateConnectionStatus();
 
-                    websocket.send(packet.encode(JSON.stringify({
+                    websocket.send(Buffer.from(packet.encode(JSON.stringify({
                         type: "AUTH",
                         data: token,
                         language: "en"
-                    })));
+                    }))));
 
                     if (openedCount === amount && !stopped) {
                         startLoginTimeout();

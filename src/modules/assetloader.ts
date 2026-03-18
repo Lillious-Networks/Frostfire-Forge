@@ -422,7 +422,7 @@ function processMapFile(file: string): MapData | null {
     name: file,
     data: parsed,
     compressed: compressedData,
-  };
+  } as any;
 }
 
 function extractAndCompressLayers(map: MapData) {

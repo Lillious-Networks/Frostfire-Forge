@@ -7,13 +7,16 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
+    environment:
+      DATABASE_HOST: mysql-dev
+      DATABASE_PORT: 3306
     volumes:
-      - ./.env.development:/app/.env.development:ro
+      - ../../.env.development:/app/.env.development:ro
     env_file:
-      - .env.development
+      - ../../.env.development
     networks:
-      - frostfire-network-dev
+      - docker_gateway-network-dev
 
 networks:
-  frostfire-network-dev:
-    driver: bridge
+  docker_gateway-network-dev:
+    external: true

@@ -64,7 +64,7 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
 > [!IMPORTANT]
 > **Required Software**:
 > - [Bun](https://bun.sh/) - JavaScript runtime & package manager
-> - [MySQL](https://www.mysql.com/downloads/) - Database (or SQLite for development)
+> - [MySQL](https://www.mysql.com/downloads/) - Database
 > - [Frostfire Forge Gateway](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) - Authentication and reverse proxy gateway (required for all deployments)
 > - [Docker](https://www.docker.com/) (Optional) - For containerized deployment
 
@@ -148,18 +148,6 @@ bun setup-production
 - Proper environment variable file configured
 - Frostfire Forge Gateway running and accessible
 
-#### Pull Pre-built Local Image
-
-Pull the latest pre-built local Docker image:
-```bash
-docker pull ghcr.io/lillious-networks/frostfire-forge-local:latest
-```
-
-Run the pulled image:
-```bash
-docker run -p 3000:3000 --name frostfire-forge-local ghcr.io/lillious-networks/frostfire-forge-local:latest
-```
-
 #### Development Environment
 
 **Start the development container:**
@@ -182,30 +170,6 @@ bun run docker:dev:down
 **Rebuild the container:**
 ```bash
 bun run docker:dev:build
-```
-
-#### Local Environment
-
-**Start the local container:**
-```bash
-bun run docker:local
-```
-
-Note: Ensure the Frostfire Forge Gateway is running before starting this container.
-
-**View logs:**
-```bash
-bun run docker:local:logs
-```
-
-**Stop the container:**
-```bash
-bun run docker:local:down
-```
-
-**Rebuild the container:**
-```bash
-bun run docker:local:rebuild
 ```
 
 #### Production Environment
@@ -236,7 +200,7 @@ bun run docker:prod:build
 
 - **Development**: Source code is mounted as a volume for hot-reload
 - **Production**: Multi-stage build with optimized dependencies
-- **Environment Files**: `.env.production`, `.env.development` or `.env.local` is automatically loaded
+- **Environment Files**: `.env.production` or `.env.development` is automatically loaded
 - **Ports Exposed**:
   - 3000 (WebSocket)
 - **Redis**: If `CACHE=redis`, configure `REDIS_URL` and `REDIS_PASSWORD` in your `.env` file
@@ -250,7 +214,7 @@ bun run docker:prod:build
 > The following environment variables are required for production.
 
 ```bash
-DATABASE_ENGINE="mysql" | "sqlite"
+DATABASE_ENGINE="mysql"
 DATABASE_HOST="your_db_host"
 DATABASE_NAME="your_db_name"
 DATABASE_PASSWORD="your_db_password"

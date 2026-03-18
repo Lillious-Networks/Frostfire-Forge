@@ -10,11 +10,16 @@ if (!fs.existsSync(configPath)) {
   fs.mkdirSync(configPath);
 }
 
-const environment_variables = `DATABASE_ENGINE="sqlite"
+const development_environment_variables = `DATABASE_ENGINE="mysql"
+DATABASE_HOST="localhost"
 DATABASE_NAME="frostfire-forge-dev"
+DATABASE_PASSWORD=""
+DATABASE_PORT="3306"
+DATABASE_USER="root"
+SQL_SSL_MODE=""
 WEB_SOCKET_PORT=3000
 WEB_SOCKET_USE_SSL=false
-GAME_NAME="Frostfire Forge - ${environment.charAt(0).toUpperCase() + environment.slice(1)} Environment"
+GAME_NAME="Frostfire Forge - Development Environment"
 LOG_LEVEL="info"
 CACHE="memory"
 GATEWAY_URL="http://gateway:9999"
@@ -91,18 +96,16 @@ const settings = {
     "idleTimeout": 120,
     "maxConnections": 50000
   },
+  "gateway": {
+    "heartbeatInterval": 5000
+  },
   "world": "overworld",
   "default_map": "overworld.json"
 };
 
-if (!fs.existsSync(path.join(".env.local")) && environment === "local") {
-  console.info("Creating .env.local file for local environment...");
-  fs.writeFileSync(path.join(".env.local"), environment_variables);
-}
-
 if (!fs.existsSync(path.join(".env.development")) && environment === "development") {
   console.info("Creating .env.development file for development environment...");
-  fs.writeFileSync(path.join(".env.development"), environment_variables);
+  fs.writeFileSync(path.join(".env.development"), development_environment_variables);
 }
 
 if (!fs.existsSync(path.join(".env.production")) && environment === "production") {

@@ -54,10 +54,6 @@ jobs:
             echo "pipeline=development" >> $GITHUB_OUTPUT
             echo "environment=development" >> $GITHUB_OUTPUT
             echo "🔨 Development Pipeline (development branch)"
-          else
-            echo "pipeline=local" >> $GITHUB_OUTPUT
-            echo "environment=local" >> $GITHUB_OUTPUT
-            echo "🧪 Local Pre-check Pipeline (feature branch)"
           fi
 
   validate:
@@ -129,50 +125,6 @@ jobs:
             exit 1
           fi
           echo "✅ Swears filter validation passed"
-
-  build-local:
-    name: Build Local Docker Image (Pre-check)
-    runs-on: ubuntu-latest
-    needs: [determine-pipeline, test]
-    if: needs.determine-pipeline.outputs.pipeline == 'local'
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v6
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Prepare Local Environment
-        run: |
-          cat > .env.local << 'EOF'
-          DATABASE_ENGINE=sqlite
-          DATABASE_NAME=frostfire-forge-test
-          WEB_SOCKET_PORT=3000
-          WEB_SOCKET_USE_SSL=false
-          GAME_NAME="Frostfire Forge Test Build"
-          CACHE="memory"
-          GATEWAY_URL="http://gateway:9999"
-          GATEWAY_AUTH_KEY="test-auth-key"
-          GATEWAY_GAME_SERVER_SECRET="test-game-secret"
-          SERVER_ID="test-server"
-          SERVER_HOST="localhost"
-          PUBLIC_HOST="localhost"
-          EOF
-
-      - name: Build Local Docker Image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./src/docker/Dockerfile.local
-          push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          tags: ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-local:test
-
-      - name: Pre-check Complete
-        run: |
-          echo "✅ Local pre-check pipeline complete"
-          echo "Feature branch is ready for development branch merge"
 
   build-development:
     name: Build Development Docker Image
@@ -288,19 +240,6 @@ jobs:
             ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-prod:latest
             ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-prod:${{ github.sha }}
 
-      - name: Build and Push Local Pre-built Image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./src/docker/Dockerfile.local
-          push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          tags: |
-            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-local:${{ steps.version.outputs.version }}
-            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-local:latest
-            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-local:${{ github.sha }}
-
   create-production-release:
     name: Create Production Release
     runs-on: ubuntu-latest
@@ -328,9 +267,8 @@ jobs:
 
           echo "## Frostfire Forge Game Server Release $RELEASE_VERSION" >> release_notes.md
           echo "" >> release_notes.md
-          echo "### Docker Images Published" >> release_notes.md
+          echo "### Docker Image Published" >> release_notes.md
           echo "- \`ghcr.io/$IMAGE_NAME-prod:$RELEASE_VERSION\`" >> release_notes.md
-          echo "- \`ghcr.io/$IMAGE_NAME-local:$RELEASE_VERSION\`" >> release_notes.md
           echo "" >> release_notes.md
           echo "### Changes" >> release_notes.md
           git log --oneline -10 >> release_notes.md
@@ -366,7 +304,4 @@ jobs:
           elif [ "$PIPELINE" = "development" ]; then
             echo "✅ Development Pipeline Complete"
             echo "🐳 Development Docker image published to GHCR"
-          else
-            echo "✅ Local Pre-check Pipeline Complete"
-            echo "🧪 Feature branch validated and ready for merge"
           fi

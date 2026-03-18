@@ -39,5 +39,5 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD bun -e "fetch('http://localhost:3000').then(r => process.exit(0)).catch(() => process.exit(1))"
 
-# Start game server (WebSocket only)
-CMD ["bun", "run", "development"]
+# Start game server - first initialize database, then start server
+CMD ["sh", "-c", "bun --env-file=.env.development ./src/utility/database_setup.ts && bun run development"]

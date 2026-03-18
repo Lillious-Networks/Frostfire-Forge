@@ -928,8 +928,6 @@ export default async function packetReceiver(
         const baseSpeed = 6; // Balanced for 30Hz update rate (6 * 30 = 180 pixels/sec)
         const mountSpeedMultiplier = 1.35;
         const speed = currentPlayer.mounted ? baseSpeed * mountSpeedMultiplier : baseSpeed;
-        const targetFPS = 30; // Matches 33ms broadcast interval
-        const frameTime = 1000 / targetFPS;
         const lastDirection =
           currentPlayer.location.position?.direction || "down";
 

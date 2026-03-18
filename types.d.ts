@@ -57,6 +57,7 @@ declare interface MapData {
   name: string;
   data: any;
   compressed: Buffer;
+  chunks: any;
 }
 
 // Define tileset data

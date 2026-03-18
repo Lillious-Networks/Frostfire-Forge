@@ -202,11 +202,7 @@ async function createConnection(index: number, config: BenchmarkConfig): Promise
         // Generate token for direct connection to game server
         const wsUrl = generateConnectionToken(config);
 
-        const ws = new WebSocket(wsUrl, {
-            headers: {
-                'User-Agent': 'Frostfire-Forge-Connection-Benchmark/1.0'
-            }
-        });
+        const ws = new WebSocket(wsUrl);
 
         ws.addEventListener('open', () => {
             stats.opened++;
@@ -216,13 +212,14 @@ async function createConnection(index: number, config: BenchmarkConfig): Promise
             // Send one BENCHMARK packet to register with server, then just hold the connection
             const sendTime = Date.now();
             connectionTimestamps.set(ws, sendTime);
-            ws.send(packet.encode(JSON.stringify({
+            ws.send(Buffer.from(packet.encode(JSON.stringify({
                 type: 'BENCHMARK',
                 data: {
                     connectionId: index,
                     timestamp: sendTime
                 }
-            })));
+            }))));
+
             stats.benchmarkPacketsSent++;
         });
 
@@ -264,53 +261,6 @@ async function createConnection(index: number, config: BenchmarkConfig): Promise
         stats.failed++;
         log(`Connection ${index} failed: ${error.message}`, 'error');
     }
-}
-
-// Progress bar
-function drawProgress(elapsed: number, total: number, stats: ConnectionStats, barLength: number = 40) {
-    const percentage = Math.min(100, Math.round((elapsed / total) * 100));
-    const filledLength = Math.round((barLength * elapsed) / total);
-
-    let barColor = chalk.green;
-    if (percentage < 33) barColor = chalk.yellow;
-    else if (percentage < 66) barColor = chalk.cyan;
-
-    const filledBar = barColor('█'.repeat(filledLength));
-    const emptyBar = chalk.gray('░'.repeat(barLength - filledLength));
-    const bar = filledBar + emptyBar;
-
-    // Connection status
-    const connectionRatio = stats.active / (stats.opened || 1);
-    let connectionColor = chalk.green;
-    if (connectionRatio < 0.8) connectionColor = chalk.yellow;
-    if (connectionRatio < 0.5) connectionColor = chalk.red;
-
-    const connectionStatus = connectionColor(`${stats.active}`);
-    const failedStatus = stats.failed > 0 ? chalk.red(` (-${stats.failed})`) : '';
-
-    // Time display
-    const timeDisplay = chalk.white(`${elapsed}s`) + chalk.gray('/') + chalk.white(`${total}s`);
-
-    // Latency display
-    let latencyDisplay = '';
-    if (stats.latencies.length > 0) {
-        const avg = Math.round(stats.latencies.reduce((a, b) => a + b, 0) / stats.latencies.length);
-        const min = Math.round(Math.min(...stats.latencies));
-        const max = Math.round(Math.max(...stats.latencies));
-
-        let latencyColor = chalk.green;
-        if (avg > 100) latencyColor = chalk.yellow;
-        if (avg > 200) latencyColor = chalk.red;
-
-        latencyDisplay = ` │ Latency: ${latencyColor(avg + 'ms')} ${chalk.gray(`(${min}-${max}ms)`)}`;
-    } else {
-        latencyDisplay = ` │ ${chalk.gray('Waiting for latency data...')}`;
-    }
-
-    // Packet stats
-    const packetDisplay = ` │ Packets: ${chalk.cyan(stats.benchmarkPacketsSent)}↑ ${chalk.cyan(stats.benchmarkPacketsReceived)}↓`;
-
-    process.stdout.write(`\r  ${chalk.bold('Progress:')} [${bar}] ${chalk.bold(percentage + '%')} ${timeDisplay} │ Connections: ${connectionStatus}${failedStatus}${latencyDisplay}${packetDisplay}`);
 }
 
 // Main benchmark function

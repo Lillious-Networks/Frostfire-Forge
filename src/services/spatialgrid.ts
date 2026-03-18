@@ -151,7 +151,6 @@ export class SpatialGrid {
    * where k is players in nearby cells (~20-100) vs n is all players (~1000+)
    */
   getPlayersInRadius(x: number, y: number, radius: number, map: string): string[] {
-    const radiusSquared = radius * radius;
     const cells = this.getCellsInRadius(x, y, radius, map);
     const candidates: string[] = [];
 

@@ -145,11 +145,7 @@ const player = {
       "UPDATE accounts SET session_id = NULL, online = 0, token = NULL, verified = 0, verification_code = NULL, party_id = NULL"
     );
     // Truncate the parties table
-    if (process.env.DATABASE_ENGINE === "sqlite") {
-      await query("DELETE FROM parties");
-    } else {
-      await query("TRUNCATE TABLE parties");
-    }
+    await query("TRUNCATE TABLE parties");
 
     // Clear stats of guest accounts
     await query("DELETE FROM stats WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
