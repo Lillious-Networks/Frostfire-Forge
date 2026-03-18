@@ -164,12 +164,12 @@ jobs:
           echo "name=$IMAGE_NAME" >> $GITHUB_OUTPUT
 
       - name: Start Gateway with Docker Compose
-        run: docker compose -f gateway/src/docker/docker-compose.dev.yml up -d && sleep 10
+        run: docker compose -p gateway -f gateway/src/docker/docker-compose.dev.yml up -d && sleep 10
 
       - name: Start Game Server with Docker Compose
         env:
           GAME_SERVER_IMAGE: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:latest
-        run: docker compose -f src/docker/docker-compose.dev.yml up -d && sleep 10
+        run: docker compose -p gateway -f src/docker/docker-compose.dev.yml up -d && sleep 10
 
       - name: Verify Game Server Registration with Gateway
         run: |
@@ -186,8 +186,8 @@ jobs:
             sleep 2
           done
           echo "❌ Game server failed to register with gateway"
-          docker compose -f gateway/src/docker/docker-compose.dev.yml logs
-          docker compose -f src/docker/docker-compose.dev.yml logs
+          docker compose -p gateway -f gateway/src/docker/docker-compose.dev.yml logs
+          docker compose -p gateway -f src/docker/docker-compose.dev.yml logs
           exit 1
 
       - name: Test Gateway to Game Server Connection
@@ -206,8 +206,8 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          docker compose -f src/docker/docker-compose.dev.yml down
-          docker compose -f gateway/src/docker/docker-compose.dev.yml down
+          docker compose -p gateway -f src/docker/docker-compose.dev.yml down
+          docker compose -p gateway -f gateway/src/docker/docker-compose.dev.yml down
 
   notify-completion:
     name: Pipeline Complete
