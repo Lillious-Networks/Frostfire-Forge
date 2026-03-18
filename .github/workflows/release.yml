@@ -205,6 +205,8 @@ jobs:
 
       - name: Cleanup
         if: always()
+        env:
+          GAME_SERVER_IMAGE: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:latest
         run: |
           docker compose -p gateway -f src/docker/docker-compose.dev.yml down
           docker compose -p gateway -f gateway/src/docker/docker-compose.dev.yml down

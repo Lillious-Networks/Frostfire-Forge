@@ -1,6 +1,6 @@
 services:
   frostfire-forge-dev:
-    image: ${GAME_SERVER_IMAGE}
+    image: ${GAME_SERVER_IMAGE:-ghcr.io/lillious-networks/frostfire-forge-dev:latest}
     container_name: frostfire-forge-dev
     restart: unless-stopped
     ports:
@@ -17,4 +17,4 @@ services:
 
 networks:
   gateway-network-dev:
-    external: true
+    driver: bridge
