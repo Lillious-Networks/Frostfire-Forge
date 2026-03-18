@@ -177,7 +177,9 @@ jobs:
           RETRIES=0
           MAX_RETRIES=10
           while [ $RETRIES -lt $MAX_RETRIES ]; do
-            if curl -s http://localhost/api/servers | grep -q "game-server"; then
+            RESPONSE=$(curl -s http://localhost/api/servers)
+            echo "Response: $RESPONSE"
+            if echo "$RESPONSE" | grep -q "game-server"; then
               echo "✅ Game server successfully registered with gateway"
               exit 0
             fi
@@ -186,7 +188,9 @@ jobs:
             sleep 2
           done
           echo "❌ Game server failed to register with gateway"
+          echo "Gateway logs:"
           docker compose -p gateway -f gateway/src/docker/docker-compose.dev.yml logs
+          echo "Game server logs:"
           docker compose -p gateway -f src/docker/docker-compose.dev.yml logs
           exit 1
 
