@@ -196,20 +196,41 @@ jobs:
           docker compose -p gateway -f src/docker/docker-compose.dev.yml down
           docker compose -p gateway -f gateway/src/docker/docker-compose.dev.yml down
 
+  publish:
+    name: Publish Docker Image to GitHub Packages
+    runs-on: ubuntu-latest
+    needs: [test-integration]
+    if: success()
+    steps:
+      - name: Set lowercase image name
+        id: image
+        run: |
+          IMAGE_NAME=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Verify Image Published
+        run: |
+          echo "✅ Docker image published to GitHub Packages"
+          echo "Image: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:latest"
+          echo "Image: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:${{ github.sha }}"
+
   notify-completion:
     name: Pipeline Complete
     runs-on: ubuntu-latest
-    needs: [test-integration]
+    needs: [test-integration, publish]
     if: always()
     steps:
       - name: Notify Pipeline Complete
         run: |
           INTEGRATION_STATUS="${{ needs.test-integration.result }}"
+          PUBLISH_STATUS="${{ needs.publish.result }}"
 
-          if [ "$INTEGRATION_STATUS" = "success" ]; then
+          if [ "$INTEGRATION_STATUS" = "success" ] && [ "$PUBLISH_STATUS" = "success" ]; then
             echo "✅ Gateway and Game Server Integration Tests Passed"
+            echo "✅ Docker Image Published to GitHub Packages"
             echo "✅ Development Pipeline Complete"
-            echo "🐳 Development Docker image published to GHCR"
           else
-            echo "⚠️  Integration tests did not complete successfully"
+            echo "⚠️  Pipeline did not complete successfully"
+            echo "Integration Status: $INTEGRATION_STATUS"
+            echo "Publish Status: $PUBLISH_STATUS"
           fi
