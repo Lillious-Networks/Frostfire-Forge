@@ -30,7 +30,6 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   determine-pipeline:
@@ -39,10 +38,14 @@ jobs:
     outputs:
       pipeline: ${{ steps.determine.outputs.pipeline }}
       environment: ${{ steps.determine.outputs.environment }}
+      image_name: ${{ steps.determine.outputs.image_name }}
     steps:
       - name: Determine Pipeline Type
         id: determine
         run: |
+          IMAGE_NAME=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+
           if [ "${{ github.ref }}" == "refs/heads/main" ]; then
             echo "pipeline=production" >> $GITHUB_OUTPUT
             echo "environment=production" >> $GITHUB_OUTPUT
@@ -165,7 +168,7 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-local:test
+          tags: ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-local:test
 
       - name: Pre-check Complete
         run: |
@@ -218,8 +221,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-dev:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-dev:development
+            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-dev:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-dev:development
 
   build-production:
     name: Build Production Docker Image
@@ -283,9 +286,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-prod:${{ steps.version.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-prod:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-prod:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-prod:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-prod:latest
+            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-prod:${{ github.sha }}
 
       - name: Build and Push Local Pre-built Image
         uses: docker/build-push-action@v6
@@ -296,9 +299,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-local:${{ steps.version.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-local:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-local:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-local:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-local:latest
+            ${{ env.REGISTRY }}/${{ needs.determine-pipeline.outputs.image_name }}-local:${{ github.sha }}
 
   create-production-release:
     name: Create Production Release
@@ -323,12 +326,13 @@ jobs:
         id: release-notes
         run: |
           RELEASE_VERSION="${{ steps.version.outputs.version }}"
+          IMAGE_NAME=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
 
           echo "## Frostfire Forge Game Server Release $RELEASE_VERSION" >> release_notes.md
           echo "" >> release_notes.md
           echo "### Docker Images Published" >> release_notes.md
-          echo "- \`ghcr.io/${{ github.repository }}-prod:$RELEASE_VERSION\`" >> release_notes.md
-          echo "- \`ghcr.io/${{ github.repository }}-local:$RELEASE_VERSION\`" >> release_notes.md
+          echo "- \`ghcr.io/$IMAGE_NAME-prod:$RELEASE_VERSION\`" >> release_notes.md
+          echo "- \`ghcr.io/$IMAGE_NAME-local:$RELEASE_VERSION\`" >> release_notes.md
           echo "" >> release_notes.md
           echo "### Changes" >> release_notes.md
           git log --oneline -10 >> release_notes.md
