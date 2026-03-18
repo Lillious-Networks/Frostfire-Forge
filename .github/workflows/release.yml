@@ -177,7 +177,7 @@ jobs:
           RETRIES=0
           MAX_RETRIES=10
           while [ $RETRIES -lt $MAX_RETRIES ]; do
-            if curl -s http://localhost:8000/api/servers | grep -q "game-server"; then
+            if curl -s http://localhost/api/servers | grep -q "game-server"; then
               echo "✅ Game server successfully registered with gateway"
               exit 0
             fi
@@ -193,7 +193,7 @@ jobs:
       - name: Test Gateway to Game Server Connection
         run: |
           echo "Testing gateway can reach game server..."
-          RESPONSE=$(curl -s http://localhost:8000/api/servers)
+          RESPONSE=$(curl -s http://localhost/api/servers)
           if echo "$RESPONSE" | jq . > /dev/null 2>&1; then
             echo "✅ Gateway responding with server list"
             echo "Server list:"
