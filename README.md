@@ -78,140 +78,11 @@ Frostfire Forge requires the [Frostfire Forge Gateway](https://github.com/Lillio
 
 #### Setup
 
-The gateway must be running before game servers start. Game servers automatically register with the gateway on startup using the `GATEWAY_URL` and `GATEWAY_AUTH_KEY` environment variables.
-
-## 🚀 Quick Start
-
-### Development Setup
-
-#### 1. Ensure Gateway is Running
-
-Start the Frostfire Forge Gateway before starting the game server. See [Frostfire Forge Gateway](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) for setup instructions.
-
-#### 2. Update the `.env.development` file
-
-Configure your development environment variables.
-
-#### 3. Start the development server
-
-Configuration files will be automatically created if they don't exist:
-
-```bash
-bun development
-```
-
-> The server will automatically run `create-config --environment development` before starting, creating any missing config files.
-
-#### 4. Default Login Credentials
-
-```
-Username: demo_user
-Password: Changeme123!
-```
-
----
-
-### Production Setup
-
-#### 1. Ensure Gateway is Running
-
-Start the Frostfire Forge Gateway before starting the game server. See [Frostfire Forge Gateway](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) for setup instructions.
-
-#### 2. Update the `.env.production` file
-
-Configure your production environment variables.
-
-#### 3. Start the production server
-
-Configuration files will be automatically created if they don't exist:
-
-```bash
-bun production
-```
-
-> The server will automatically run `create-config --environment production` before starting, creating any missing config files.
-
-**Optional: Run setup separately**
-
-If you prefer to set up the database manually before starting the server:
-```bash
-bun setup-production
-```
-
----
-
-### Docker Deployment
-
-#### Prerequisites
-
-- Docker and Docker Compose installed
-- Proper environment variable file configured
-- Frostfire Forge Gateway running and accessible
-
-#### Development Environment
-
-**Start the development container:**
-```bash
-bun run docker:dev
-```
-
-Note: Ensure the Frostfire Forge Gateway is running before starting this container.
-
-**View logs:**
-```bash
-bun run docker:dev:logs
-```
-
-**Stop the container:**
-```bash
-bun run docker:dev:down
-```
-
-**Rebuild the container:**
-```bash
-bun run docker:dev:build
-```
-
-#### Production Environment
-
-**Start the production container:**
-```bash
-bun run docker:prod
-```
-
-Note: Ensure the Frostfire Forge Gateway is running before starting this container.
-
-**View logs:**
-```bash
-bun run docker:prod:logs
-```
-
-**Stop the container:**
-```bash
-bun run docker:prod:down
-```
-
-**Rebuild the container:**
-```bash
-bun run docker:prod:build
-```
-
-#### Docker Configuration Notes
-
-- **Development**: Source code is mounted as a volume for hot-reload
-- **Production**: Multi-stage build with optimized dependencies
-- **Environment Files**: `.env.production` or `.env.development` is automatically loaded
-- **Ports Exposed**:
-  - 3000 (WebSocket)
-- **Redis**: If `CACHE=redis`, configure `REDIS_URL` and `REDIS_PASSWORD` in your `.env` file
-- **Gateway**: Ensure the Frostfire Forge Gateway is running before starting game servers
+Game servers automatically register with the gateway on startup using the `GATEWAY_URL`, `GATEWAY_AUTH_KEY`, and `GATEWAY_GAME_SERVER_SECRET` environment variables. The server will continuously poll until the gateway is available.
 
 ---
 
 ## ⚙️ Environment Variables
-
-> [!IMPORTANT]
-> The following environment variables are required for production.
 
 ```bash
 DATABASE_ENGINE="mysql"
@@ -233,7 +104,6 @@ WEB_SOCKET_PORT="3000"                    # Internal WebSocket port
 WEB_SOCKET_USE_SSL="true" | "false"       # Enable SSL/TLS for WebSocket
 GAME_NAME="Your Game Name"
 LOG_LEVEL="info"                          # Logging level: trace, debug, info, warn, error
-SESSION_KEY="your_session_secret_key"     # Session encryption key
 
 # Gateway (Required)
 GATEWAY_URL="http://gateway:9999"               # Gateway registration endpoint
@@ -242,10 +112,53 @@ GATEWAY_GAME_SERVER_SECRET="another_secret_key" # Game server authentication tok
 SERVER_HOST="game-server-hostname"              # Internal server hostname
 PUBLIC_HOST="yourdomain.com"                    # External hostname for clients
 SERVER_ID="server-1"                            # Game server identification
+```
 
-# Caching
-CACHE="redis" | "memory"
-REDIS_URL="redis://default@redis:6379"  # Required if CACHE=redis
+---
+
+## 🚀 Quick Start
+
+### Development Setup
+
+**Option 1: Use prebuilt Docker image:**
+```bash
+docker run -d --name frostfire-forge-dev -p 3000:3000 ghcr.io/lillious-networks/frostfire-forge-dev:latest
+```
+
+**Option 2: Build and run from source:**
+```bash
+bun development
+```
+
+**Optional: Update `.env.development` before running**
+
+Default admin login credentials:
+```
+Username: demo_user
+Password: Changeme123!
+```
+
+---
+
+### Production Setup
+
+**Update the `.env.production` file**
+
+Configure your production environment variables.
+
+**Start the production server:**
+```bash
+bun production
+```
+
+**Optional: Run setup separately**
+
+If you prefer to set up the database manually before starting the server:
+```bash
+bun setup-production
+```
+
+---
 
 ## 📜 Commands Reference
 
@@ -520,24 +433,6 @@ Listener.on("onServerTick", (data) => {
   console.log(`Server tick: ${data}`);
 });
 ```
-
----
-
-## 📖 System API Reference
-
-> [!NOTE]
-> **Complete system API documentation is available on port `5000`**
->
-> The documentation includes detailed information about all system modules:
-> - **Player Management** - Authentication, stats, inventory, and more
-> - **World Systems** - Worlds, maps, weather, and NPCs
-> - **Combat & Skills** - Weapons, spells, and combat mechanics
-> - **Social Features** - Friends, parties, and permissions
-> - **Economy** - Currency and item management
-> - **Quest System** - Quests and quest logs
-> - **Effects** - Particles, audio, and visual effects
-
----
 
 <p align="center">
   <sub>Built with ❤️ by the Frostfire Forge Team</sub>
