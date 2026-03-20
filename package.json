@@ -20,7 +20,6 @@
   },
   "scripts": {
     "production": "bun create-config --environment production && bun --env-file=.env.production ./src/socket/server.ts --sql-preconnect",
-    "docs": "cd ./frostfiredocs && bun run preview",
     "development": "bun create-config --environment development && bun --env-file=.env.development ./src/socket/server.ts",
     "setup": "bun --env-file=.env.production ./src/utility/database_setup.ts",
     "create-config": "bun ./src/utility/create_config.ts",
