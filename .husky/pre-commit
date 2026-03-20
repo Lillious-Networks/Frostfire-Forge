@@ -1,2 +1,4 @@
 echo "Running ESLint..."
 bun eslint
+echo "Running Unit Tests..."
+bun test
