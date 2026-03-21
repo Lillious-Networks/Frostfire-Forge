@@ -27,19 +27,19 @@ const permissions = {
     add: async (username: string, permission: string) => {
 
         const response = await permissions.get(username) as string;
-        const access = response.includes(",") ? response.split(",") : response.length ? [response] : [];
-        if (access.includes(permission)) return;
-        access.push(permission);
-        await permissions.set(username, access);
+        const accessSet = new Set(response.split(",").filter(Boolean));
+        if (accessSet.has(permission)) return;
+        accessSet.add(permission);
+        await permissions.set(username, Array.from(accessSet));
         log.info(`Permission ${permission} added to ${username}`);
     },
     remove: async (username: string, permission: string) => {
 
         const response = await permissions.get(username) as string;
-        const access = response.includes(",") ? response.split(",") : response.length ? [response] : [];
-        if (!access.includes(permission)) return;
-        access.splice(access.indexOf(permission), 1);
-        await permissions.set(username, access);
+        const accessSet = new Set(response.split(",").filter(Boolean));
+        if (!accessSet.has(permission)) return;
+        accessSet.delete(permission);
+        await permissions.set(username, Array.from(accessSet));
         log.info(`Permission ${permission} removed from ${username}`);
     },
     list: async() => {

@@ -4346,14 +4346,10 @@ export default async function packetReceiver(
           return;
         }
 
-        const inviteIndex = inviter.invitations.findIndex(
-          (invite: any) =>
-            invite.action === action &&
-            invite.originator === originator &&
-            invite.authorization === authorization
-        );
+        const invitationByAuth = new Map<any, any>(inviter.invitations.map((inv: any) => [inv.authorization, inv]));
+        const invite = invitationByAuth.get(authorization);
 
-        if (inviteIndex === -1) {
+        if (!invite || invite.action !== action || invite.originator !== originator) {
 
           const notifyData = {
             message: "Invitation not found or has already been processed",
@@ -4362,7 +4358,7 @@ export default async function packetReceiver(
           return;
         }
 
-        inviter.invitations.splice(inviteIndex, 1);
+        inviter.invitations = inviter.invitations.filter((inv: any) => inv.authorization !== authorization);
         playerCache.set(inviter.id, inviter);
 
         switch (action.toUpperCase()) {

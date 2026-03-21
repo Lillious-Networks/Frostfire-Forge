@@ -38,8 +38,9 @@ export async function initializePlayerAOI(player: any): Promise<void> {
     const isLeader = partyLeader?.toLowerCase() === player.username?.toLowerCase();
 
     const allPlayers = playerCache.list();
+    const memberSet = new Set(partyMembers.map((m: string) => m.toLowerCase()));
     const onlinePartyPlayers = Object.values(allPlayers).filter((p: any) =>
-      p.username && partyMembers.some((m: string) => m.toLowerCase() === p.username.toLowerCase()) &&
+      p.username && memberSet.has(p.username.toLowerCase()) &&
       p.aoi?.layerId &&
       p.location.map.replaceAll(".json", "") === mapName
     );
@@ -293,19 +294,8 @@ export async function updatePlayerAOI(
 
     log.info(`[AOI] Player ${player.id}: oldAOI has ${oldAOISet.size} players, newAOI has ${newAOISet.size} players`);
 
-    const enteredAOI: string[] = [];
-    newAOISet.forEach((playerId) => {
-      if (!oldAOISet.has(playerId)) {
-        enteredAOI.push(playerId);
-      }
-    });
-
-    const exitedAOI: string[] = [];
-    oldAOISet.forEach((playerId: string) => {
-      if (!newAOISet.has(playerId)) {
-        exitedAOI.push(playerId);
-      }
-    });
+    const enteredAOI: string[] = [...newAOISet].filter(id => !oldAOISet.has(id));
+    const exitedAOI: string[] = [...oldAOISet].filter(id => !newAOISet.has(id));
 
     log.info(`[AOI] Player ${player.id}: ${enteredAOI.length} entered, ${exitedAOI.length} exited`);
     if (enteredAOI.length > 0) {
@@ -655,14 +645,20 @@ export async function syncPartyLayers(
     const onlineMembers: any[] = [];
     const memberPlayerIds: string[] = [];
 
+    const usernameIndex = new Map<string, any>();
+    for (const player of Object.values(allPlayers)) {
+      if (player.username) {
+        usernameIndex.set(player.username.toLowerCase(), player);
+      }
+    }
+
+    const leaderLower = partyLeaderUsername.toLowerCase();
     for (const memberUsername of partyMemberUsernames) {
-      if (memberUsername.toLowerCase() === partyLeaderUsername.toLowerCase()) {
+      if (memberUsername.toLowerCase() === leaderLower) {
         continue;
       }
 
-      const memberPlayer = Object.values(allPlayers).find((p: any) =>
-        p.username && p.username.toLowerCase() === memberUsername.toLowerCase()
-      );
+      const memberPlayer = usernameIndex.get(memberUsername.toLowerCase());
 
       if (memberPlayer && memberPlayer.aoi) {
         onlineMembers.push(memberPlayer);
@@ -826,14 +822,19 @@ export function startAutoPartyLayerSync(
 
       const allPlayers = playerCache.list();
 
+      const usernameIndex = new Map<string, any>();
+      for (const player of Object.values(allPlayers)) {
+        if (player.username) {
+          usernameIndex.set(player.username.toLowerCase(), player);
+        }
+      }
+
       for (const party of allParties) {
         if (!party.leader || !party.members || party.members.length === 0) {
           continue;
         }
 
-        const leaderPlayer = Object.values(allPlayers).find((p: any) =>
-          p.username && p.username.toLowerCase() === party.leader.toLowerCase()
-        );
+        const leaderPlayer = usernameIndex.get(party.leader.toLowerCase());
 
         if (!leaderPlayer || !leaderPlayer.aoi?.layerId) {
           continue;
@@ -844,15 +845,14 @@ export function startAutoPartyLayerSync(
 
         const onlineMembers: any[] = [];
         let needsSync = false;
+        const leaderLower = party.leader.toLowerCase();
 
         for (const memberUsername of party.members) {
-          if (memberUsername.toLowerCase() === party.leader.toLowerCase()) {
+          if (memberUsername.toLowerCase() === leaderLower) {
             continue;
           }
 
-          const memberPlayer = Object.values(allPlayers).find((p: any) =>
-            p.username && p.username.toLowerCase() === memberUsername.toLowerCase()
-          );
+          const memberPlayer = usernameIndex.get(memberUsername.toLowerCase());
 
           if (memberPlayer && memberPlayer.aoi?.layerId) {
             const memberMapName = memberPlayer.location.map.replaceAll(".json", "");

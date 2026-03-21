@@ -80,11 +80,12 @@ const inventory = {
     if (!_items || _items.length === 0) return [];
 
     const items = await getItems();
+    const itemsByName = new Map(items.map((i: any) => [i.name, i]));
 
     const details = await Promise.all(
       _items.map(async (item: any) => {
 
-        const itemDetails = (items as any).find((i: any) => i.name === item.item);
+        const itemDetails = itemsByName.get(item.item);
         if (itemDetails) {
           return {
             ...itemDetails,

@@ -440,12 +440,13 @@ function extractAndCompressLayers(map: MapData) {
           log.warn(`Object in map ${map.name} has no type or class: ${JSON.stringify(obj)}`);
           return;
         }
+        const propsMap = new Map(obj.properties?.map((p: any) => [p.name, p.value]));
         switch (type) {
 
           case "warp": {
-            const _map = obj.properties?.find((p: any) => p.name === "map")?.value;
-            const x = obj.properties?.find((p: any) => p.name === "x")?.value;
-            const y = obj.properties?.find((p: any) => p.name === "y")?.value;
+            const _map = propsMap.get("map");
+            const x = propsMap.get("x");
+            const y = propsMap.get("y");
 
             if (_map && x !== undefined && y !== undefined) {
               warps.push({
