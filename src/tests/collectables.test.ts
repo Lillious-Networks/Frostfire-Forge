@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { createMockCollectable } from "./setup";
 
-// Mock database
 const collectablesDatabase: Record<string, any[]> = {
   user1: [
     { username: "user1", item: "rare_sword", type: "weapon" },
@@ -139,7 +138,7 @@ test("collectables.find requires all fields", async () => {
 });
 
 test("collectables.find returns collectable", async () => {
-  // Re-add a collectable since previous test may have deleted it
+
   const collectable = createMockCollectable({ username: "user3", item: "test_gem", type: "gem" });
   await collectables.add(collectable);
   const result = await collectables.find(collectable);

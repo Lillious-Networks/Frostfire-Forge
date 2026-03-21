@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 
-// Mock database
 const permissionsDatabase: Record<string, any> = {
   user1: { permissions: "admin,moderator" },
   user2: { permissions: "player" },

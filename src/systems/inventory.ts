@@ -2,7 +2,6 @@ import query from "../controllers/sqldatabase";
 import assetCache from "../services/assetCache";
 import log from "../modules/logger";
 
-// Helper function to get items from cache dynamically
 async function getItems(): Promise<Item[]> {
   return await assetCache.get("items") as Item[] || [];
 }
@@ -76,24 +75,23 @@ const inventory = {
   async get(name: string) {
     if (!name) return [];
 
-    // Fetch items for the user
     const _items = await query("SELECT item, quantity, equipped FROM inventory WHERE username = ?", [name]) as any[];
 
-    if (!_items || _items.length === 0) return []; // Return if no items found
+    if (!_items || _items.length === 0) return [];
 
     const items = await getItems();
-    // Fetch and process details for each item
+
     const details = await Promise.all(
       _items.map(async (item: any) => {
-        // Fetch item details from cache
+
         const itemDetails = (items as any).find((i: any) => i.name === item.item);
         if (itemDetails) {
           return {
-            ...itemDetails, // Item details from cache
-            ...item, // Inventory item details (includes equipped and quantity)
+            ...itemDetails,
+            ...item,
           };
         } else {
-          // If item details are not found, return the item with blank details
+
           log.error(`Item details not found for: ${item.item}`);
           return {
             ...item,

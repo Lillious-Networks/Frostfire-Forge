@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { mockAssetCache } from "./setup";
 
-// Mock database
 const weatherDatabase: Record<string, any> = {
   clear: {
     name: "clear",

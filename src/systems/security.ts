@@ -12,7 +12,7 @@ query("SELECT * FROM blocked_ips", [])
   })
   .catch((err: any) => {
     if (err) {
-      // Do nothing, we don't want to spam the console with errors
+      console.error("Error loading blocked IPs:", err);
     }
   });
 
@@ -24,13 +24,13 @@ query("SELECT * FROM allowed_ips", [])
   })
   .catch((err: any) => {
     if (err) {
-      // Do nothing, we don't want to spam the console with errors
+      console.error("Error loading allowed IPs:", err);
     }
   });
 
   export const blacklistAdd = async (ip: string) => {
     const result = await query("INSERT INTO blocked_ips (ip) VALUES (?)", [ip]) as any;
-    // Check if the ip is already in the database
+
     if (result.affectedRows > 0) {
       log.info(`Added ${ip} to the blacklist`);
       service.blacklistAdd(ip);
@@ -39,7 +39,7 @@ query("SELECT * FROM allowed_ips", [])
 
   export const whitelistAdd = async (ip: string) => {
     const result = await query("INSERT INTO allowed_ips (ip) VALUES (?)", [ip]) as any;
-    // Check if the ip is already in the database
+
     if (result.affectedRows > 0) {
       log.info(`Added ${ip} to the whitelist`);
       service.whitelistAdd(ip);
@@ -48,7 +48,7 @@ query("SELECT * FROM allowed_ips", [])
 
   export const blacklistRemove = async (ip: string) => {
     const result = await query("DELETE FROM blocked_ips WHERE ip = ?", [ip]) as any;
-    // Check if the ip is already in the database
+
     if (result.affectedRows > 0) {
       log.info(`Removed ${ip} from the blacklist`);
       service.blacklistRemove(ip);
@@ -57,7 +57,7 @@ query("SELECT * FROM allowed_ips", [])
 
   export const whitelistRemove = async (ip: string) => {
     const result = await query("DELETE FROM allowed_ips WHERE ip = ?", [ip]) as any;
-    // Check if the ip is already in the database
+
     if (result.affectedRows > 0) {
       log.info(`Removed ${ip} from the whitelist`);
       service.whitelistRemove(ip);

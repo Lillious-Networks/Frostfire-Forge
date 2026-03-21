@@ -4,27 +4,22 @@ import path from "path";
 import fs from "fs";
 
 export default (async () => {
-  // Track start up errors and warnings
+
   const startUpErrors = [];
   const startUpWarnings = [];
 
-  // Validate environment variables
-
-  // Database Engine
   if (!process.env.DATABASE_ENGINE) {
     startUpErrors.push(
       "No database engine is set, aborting... Please set the DATABASE_ENGINE environment variable to suppress this message."
     );
   }
 
-  // Database Host
   if (!process.env.DATABASE_HOST) {
     startUpErrors.push(
       "No database host is set, aborting... Please set the DATABASE_HOST environment variable to suppress this message."
     );
   }
 
-  // Database Port
   if (!process.env.DATABASE_PORT) {
     startUpWarnings.push(
       "No database port is set, defaulting to 3306. Please set the DATABASE_PORT environment variable to suppress this message."
@@ -32,28 +27,24 @@ export default (async () => {
     process.env.DATABASE_PORT = "3306";
   }
 
-  // Database Username
   if (!process.env.DATABASE_USER) {
     startUpErrors.push(
       "No database username is set, aborting... Please set the DATABASE_USER environment variable to suppress this message."
     );
   }
 
-  // Database Password
   if (!process.env.DATABASE_PASSWORD) {
     startUpErrors.push(
       "No database password is set, aborting... Please set the DATABASE_PASSWORD environment variable to suppress this message."
     );
   }
 
-  // Database Name
   if (!process.env.DATABASE_NAME) {
     startUpErrors.push(
       "No database name is set, aborting... Please set the DATABASE_NAME environment variable to suppress this message."
     );
   }
 
-  // Database SSL
   if (!process.env.SQL_SSL_MODE) {
     startUpWarnings.push(
       "No database SSL is set, defaulting to false. Please set the SQL_SSL_MODE environment variable to suppress this message."
@@ -61,15 +52,12 @@ export default (async () => {
     process.env.SQL_SSL_MODE = "false";
   }
 
-
-  // Google Translation API Key
   if (!process.env.GOOGLE_TRANSLATE_API_KEY) {
     startUpWarnings.push(
       "No Google Translation API key is set, translation functionality will be disabled. Please set the GOOGLE_TRANSLATE_API_KEY environment variable to suppress this message."
     );
   }
 
-  // Websocket Port
   if (!process.env.WEB_SOCKET_PORT) {
     startUpWarnings.push(
       "No websocket port is set, defaulting to 3000. Please set the WEB_SOCKET_PORT environment variable to suppress this message."
@@ -77,24 +65,20 @@ export default (async () => {
     process.env.WEB_SOCKET_PORT = "3000";
   }
 
-  // Session Key
   if (process.env.SESSION_KEY) {
     startUpWarnings.push(
       "Session key is set. Do not set this manually. It will be overwritten with a random value. Please remove the SESSION_KEY environment variable to suppress this message."
     );
   }
 
-  // Generate a random SESSION_KEY
   process.env.SESSION_KEY = crypto.randomBytes(20).toString("hex");
 
-  // RSA Passphrase
   if (process.env.RSA_PASSPHRASE) {
     startUpWarnings.push(
       "RSA passphrase is set. Do not set this manually. It will be overwritten with a random value. Please remove the RSA_PASSPHRASE environment variable to suppress this message."
     );
   }
 
-  // Generate a random RSA passphrase
   process.env.RSA_PASSPHRASE = crypto.randomBytes(32).toString("hex");
 
   const assetPath = path.join(import.meta.dir, "..", "config", "assets.json");
@@ -106,14 +90,12 @@ export default (async () => {
     log.info(`Asset config found at ${assetPath}`);
   }
 
-  // Game Name
   if (!process.env.GAME_NAME) {
     startUpErrors.push(
       "No game name is set, aborting... Please set the GAME_NAME environment variable to suppress this message."
     );
   }
 
-  // Log Level
   if (!process.env.LOG_LEVEL) {
     startUpWarnings.push(
       "No log level is set, defaulting to info. Please set the LOG_LEVEL environment variable (trace, debug, info, warn, error) to suppress this message."
@@ -126,7 +108,6 @@ export default (async () => {
     process.env.LOG_LEVEL = "info";
   }
 
-  // Test redis connection if redis cache is selected
   if (process.env.CACHE?.toLowerCase() === "redis") {
     if (!process.env.REDIS_URL) {
       startUpWarnings.push(
@@ -136,14 +117,12 @@ export default (async () => {
     }
   }
 
-  // Check if there are any warnings
   if (startUpWarnings.length > 0) {
     for (const warning of startUpWarnings) {
       log.warn(warning);
     }
   }
 
-  // Check if there are any errors
   if (startUpErrors.length > 0) {
     for (const error of startUpErrors) {
       log.error(error);

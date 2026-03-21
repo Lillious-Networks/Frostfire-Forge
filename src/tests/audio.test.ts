@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { mockAssetCache } from "./setup";
 
-// Test audio system
 const audio = {
   list: async () => {
     return await mockAssetCache.get("audio");

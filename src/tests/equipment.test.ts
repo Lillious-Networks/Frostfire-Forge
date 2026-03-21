@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { mockAssetCache } from "./setup";
 
-// Mock database
 const equipmentDatabase: Record<string, any> = {
   user1: {
     username: "user1",
@@ -110,9 +109,9 @@ test("equipment.equipItem requires item name for equipping", async () => {
 });
 
 test("equipment.equipItem fails for mismatched equipment slot", async () => {
-  // test_item is mocked with equipment_slot="helmet", so it should match
+
   const result = await equipment.equipItem("user1", "helmet", "test_item");
-  // The result depends on if the item matches the slot in mock cache
+
   expect(typeof result).toBe("boolean");
 });
 

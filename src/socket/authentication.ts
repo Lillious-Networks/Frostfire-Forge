@@ -5,8 +5,6 @@ import log from "../modules/logger.ts";
 import parties from "../systems/parties.ts";
 import collectables from "../systems/collectables.ts";
 
-// Assets are passed once via workerData when worker is created
-// Keep as plain objects - they get JSON.stringified again when sent back to main thread
 const items = workerData?.assets?.items ? JSON.parse(workerData.assets.items) : [];
 const spells = workerData?.assets?.spells ? JSON.parse(workerData.assets.spells) : [];
 const mounts = workerData?.assets?.mounts ? JSON.parse(workerData.assets.mounts) : [];
@@ -14,11 +12,9 @@ const mounts = workerData?.assets?.mounts ? JSON.parse(workerData.assets.mounts)
 const authentication = {
     async process(token: string, id: string): Promise<Authentication> {
         try {
-            // Set the session ID for the player
+
             const session = await player.setSessionId(token, id);
 
-            // Check if session is valid
-            // If not, return an error
             if (!session) {
                 return {
                     authenticated: false,
@@ -32,10 +28,8 @@ const authentication = {
             const playerData = await player.GetPlayerLoginData(username) as unknown as PlayerData;
             const equipmentItems = items.filter((i: Item) => i.type === "equipment" && i.equipment_slot && i.name);
 
-            // Remove invalid equipment items that do not exist in items cache
-            // BUT: Skip armor sprite fields - these are sprite sheet template names, not item names
             for (const slot in playerData.equipment) {
-                // Skip validation for sprite sheet template fields - they're not item names
+
                 if (slot === 'body' || slot === 'head' || slot === 'helmet' || slot === 'necklace' ||
                     slot === 'gloves' || slot === 'chestplate' || slot === 'boots' || slot === 'pants' || slot === 'weapon') {
                     continue;
@@ -53,12 +47,11 @@ const authentication = {
             const inventoryData = await query("SELECT item, quantity, equipped FROM inventory WHERE username = ?", [username]) as any[];
             const collectablesData = await collectables.list(username) as unknown as Collectable[];
             const learnedSpellsData = await query("SELECT spell FROM learned_spells WHERE username = ?", [username]) as any[];
-            // Fetch all types of collectables that are mounts and validate against mounts cache to see if they exist
+
             collectablesData.filter((c) => c.type === "mount" && !mounts.some((m: Mount) => m.name === c.item)).forEach((invalidMount) => {
                 collectablesData.splice(collectablesData.indexOf(invalidMount), 1);
             });
 
-            // Add icon property to each collectable from mounts cache
             collectablesData.forEach((c) => {
                 if (c.type === "mount") {
                     const mountDetails = (mounts as any).find((m: Mount) => m.name === c.item);
@@ -66,22 +59,20 @@ const authentication = {
                 }
             });
 
-            // Attach collectables to player data and map the item and type
             playerData.collectables = collectablesData.map((c) => ({ type: c.type, item: c.item, icon: c.icon }));
 
-            // Fetch and process details for each item
             const playerInventoryData = await Promise.all(
                 inventoryData.map(async (item: any) => {
-                    // Fetch item details from cache
+
                     const itemDetails = (items as any).find((i: any) => i.name === item.item);
 
                     if (itemDetails) {
                     return {
-                        ...itemDetails, // Item details from cache
-                        ...item, // Inventory item details (includes equipped and quantity)
+                        ...itemDetails,
+                        ...item,
                     };
                     } else {
-                    // If item details are not found, return the item with blank details
+
                     log.error(`Item details not found for: ${item.item}`);
                     return {
                         ...item,
@@ -99,20 +90,17 @@ const authentication = {
             playerData.inventory = playerInventoryData;
             playerData.party = partyMembers || [];
 
-            // Build a fast lookup map for spells cache: name -> spell details
             const spellsByName: Record<string, SpellData> = Object.create(null);
             for (const sp of spells) {
                 spellsByName[sp.name] = sp;
             }
 
-            // Build learnedSpells as an object keyed by spell name (O(n))
             const learnedSpells: Record<string, { sprite: SpellData["sprite"] | null }> = Object.create(null);
 
             for (const row of learnedSpellsData) {
                 const name = row.spell;
                 const spellDetails = spellsByName[name];
 
-                // Only keep valid spells that exist in cache
                 if (!spellDetails) continue;
 
                 learnedSpells[name] = {
@@ -146,7 +134,6 @@ const authentication = {
     }
 }
 
-// Listen for authentication requests
 parentPort?.on("message", async (data: { token: string, id: string }) => {
     const result = await authentication.process(data.token, data.id);
     parentPort?.postMessage({ ...result, token: data.token, id: data.id });

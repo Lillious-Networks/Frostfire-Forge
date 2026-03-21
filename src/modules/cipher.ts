@@ -18,22 +18,20 @@ export function decryptRsa(
   privateKeyPem: string
 ): string | null {
   try {
-    // Ensure the encrypted message is a Buffer or Uint8Array
+
     if (!(encryptedMessage instanceof Buffer)) {
       encryptedMessage = Buffer.from(encryptedMessage);
     }
 
-    // Decrypt the message using the RSA private key
     const decrypted = crypto.privateDecrypt(
       {
         key: privateKeyPem,
-        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, // Make sure to use OAEP padding if you used RSA-OAEP for encryption
-        oaepHash: "sha256", // Ensure the hash matches your encryption's hash algorithm
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: "sha256",
       },
       encryptedMessage as any
     );
 
-    // Return the decrypted message as a string
     return decrypted.toString("utf8");
   } catch (error) {
     console.error("Decryption failed:", error);

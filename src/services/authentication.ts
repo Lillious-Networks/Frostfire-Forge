@@ -5,7 +5,7 @@ export const checkSession = (session: string, ip: string) => {
     query("SELECT * FROM sessions WHERE session = ? AND ip = ?", [session, ip])
       .then((results: any) => {
         if (results.length > 0) {
-          // Check if account needs a password reset
+
           query("SELECT passwordreset FROM accounts WHERE email = ?", [
             results[0].email,
           ])

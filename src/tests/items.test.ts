@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { createMockItem, mockAssetCache } from "./setup";
 
-// Mock database
 const itemsDatabase: Record<string, any> = {
   test_item: createMockItem({ name: "test_item" }),
   sword: createMockItem({ name: "sword", stat_damage: 15 }),

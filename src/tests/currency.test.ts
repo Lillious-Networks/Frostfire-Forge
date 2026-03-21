@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { createMockCurrency, createMockQueryResult } from "./setup";
 
-// Mock implementation for testing
 const currencyDatabase: Record<string, any> = {
   test_user: createMockCurrency(50, 30, 100),
 };

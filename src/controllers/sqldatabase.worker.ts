@@ -13,7 +13,6 @@ function sqlWrapper(query: string, params: any[]): string {
   for (let i = 0; i < params.length; i++) {
     const param = params[i];
 
-    // Handle array (for IN clauses)
     if (Array.isArray(param)) {
       if (param.length === 0) {
         throw new Error("Cannot use empty array as SQL parameter");
@@ -62,7 +61,7 @@ async function createSQLController(): Promise<any> {
       max: 10,
       idleTimeout: 60000,
       maxLifetime: 0,
-      connectionTimeout: 60000 // Increased from 30s to 60s
+      connectionTimeout: 60000
     });
 
     return db;
@@ -81,8 +80,8 @@ async function createSQLController(): Promise<any> {
       password: process.env.DATABASE_PASSWORD,
       database: process.env.DATABASE_NAME,
       tls: getSqlCert(),
-      connectionTimeout: 60, // Increased from 30s to 60s
-      idleTimeout: 60, // Increased from 30s to 60s
+      connectionTimeout: 60,
+      idleTimeout: 60,
       maxLifetime: 0,
       max: 20,
     });
@@ -92,7 +91,7 @@ async function createSQLController(): Promise<any> {
 }
 
 async function createSQLControllerWithRetry(): Promise<any> {
-  const maxRetryTime = 30000; // Increased from 5s to 30s
+  const maxRetryTime = 30000;
   const retryDelay = 1000;
   const startTime = Date.now();
   let lastError: Error | null = null;
@@ -103,7 +102,7 @@ async function createSQLControllerWithRetry(): Promise<any> {
 
       const testPromise = controller.unsafe("SELECT 1 AS test");
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Connection test query timeout")), 10000) // Increased from 3s to 10s
+        setTimeout(() => reject(new Error("Connection test query timeout")), 10000)
       );
 
       const result = await Promise.race([testPromise, timeoutPromise]);
@@ -127,7 +126,6 @@ async function createSQLControllerWithRetry(): Promise<any> {
   throw new Error(`Database connection timeout: ${lastError?.message}`);
 }
 
-// Initialize connection when worker starts
 createSQLControllerWithRetry().then(controller => {
   sqlController = controller;
   self.postMessage({ type: 'ready' });
@@ -135,12 +133,11 @@ createSQLControllerWithRetry().then(controller => {
   self.postMessage({ type: 'error', error: error.message });
 });
 
-// Listen for query messages
 self.onmessage = async (event: MessageEvent) => {
   const { id, sql, values } = event.data;
   const maxRetries = 3;
   const retryDelay = 1000;
-  const queryTimeout = 15000; // Increased from 5s to 15s
+  const queryTimeout = 15000;
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {

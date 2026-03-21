@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 
-// Mock database
 const questLogDatabase: Record<string, any> = {
   user1: { completed_quests: "1,2", incomplete_quests: "3,4" },
   user2: { completed_quests: "", incomplete_quests: "1" },

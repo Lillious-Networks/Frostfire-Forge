@@ -1,36 +1,8 @@
 #!/usr/bin/env bun
-/**
- * Connection Hold Tool for Frostfire Forge
- *
- * Opens and holds X number of WebSocket connections to stress-test connection capacity.
- * Does NOT create guest accounts or perform authentication - just opens
- * connections, sends one BENCHMARK packet to register, then holds them open.
- *
- * This tool is designed to test the server's ability to handle many concurrent
- * WebSocket connections without the overhead of player accounts, login, movement, etc.
- *
- * Usage:
- *   bun --env-file=.env.production src/utility/benchmark-connections.ts [options]
- *
- * Options:
- *   --connections <number>  Number of concurrent connections (default: 100)
- *   --duration <number>     How long to hold connections in seconds (default: 60, min: 10)
- *   --server-secret <key>  Shared secret for token generation
- *   --ws <url>             WebSocket URL (overrides environment detection)
- *   --help                 Show this help message
- *
- * Examples:
- *   # Hold 10,000 connections for 5 minutes
- *   bun --env-file=.env.production src/utility/benchmark-connections.ts --connections 10000 --duration 300
- *
- *   # Hold 500 connections indefinitely (use Ctrl+C to stop)
- *   bun --env-file=.env.local src/utility/benchmark-connections.ts --connections 500 --duration 999999
- */
 
 import chalk from 'chalk';
 import crypto from 'crypto';
 
-// Configuration interface
 interface BenchmarkConfig {
     connections: number;
     duration: number;
@@ -39,11 +11,9 @@ interface BenchmarkConfig {
     help: boolean;
 }
 
-// Parse command line arguments
 function parseArgs(): BenchmarkConfig {
     const args = process.argv.slice(2);
 
-    // Build default WebSocket URL based on environment
     const useSSL = process.env.WEB_SOCKET_USE_SSL === 'true';
     const host = process.env.PUBLIC_HOST || process.env.SERVER_HOST || 'localhost';
     const port = process.env.WEB_SOCKET_PORT || '3000';
@@ -81,7 +51,6 @@ function parseArgs(): BenchmarkConfig {
     return config;
 }
 
-// Show help message
 function showHelp() {
     console.log(`
 ${chalk.bold.cyan('Frostfire Forge - Connection Hold Tool')}
@@ -122,7 +91,6 @@ ${chalk.bold('Notes:')}
 `);
 }
 
-// Packet encoding utility
 const packet = {
     encode(data: string): Uint8Array {
         const encoder = new TextEncoder();
@@ -134,7 +102,6 @@ const packet = {
     }
 };
 
-// Connection statistics
 interface ConnectionStats {
     opened: number;
     failed: number;
@@ -155,14 +122,11 @@ const stats: ConnectionStats = {
     latencies: []
 };
 
-// Connection tracking
 const activeConnections = new Set<WebSocket>();
 const connectionTimestamps = new Map<WebSocket, number>();
 
-// Test running flag
 let testRunning = true;
 
-// Logging utility
 function log(message: string, level: 'info' | 'error' | 'success' | 'warn' = 'info') {
     const timestamp = chalk.gray(new Date().toLocaleTimeString());
     const prefix = {
@@ -174,19 +138,16 @@ function log(message: string, level: 'info' | 'error' | 'success' | 'warn' = 'in
     console.log(`${timestamp} ${prefix} ${message}`);
 }
 
-// Generate connection token for direct connection
 function generateConnectionToken(config: BenchmarkConfig): string {
     const token = crypto.randomBytes(32).toString('hex');
     const timestamp = Date.now().toString();
-    const expiresAt = (Date.now() + 60000).toString(); // 60 second expiry
+    const expiresAt = (Date.now() + 60000).toString();
 
-    // Create HMAC signature
     const signature = crypto
         .createHmac('sha256', config.serverSecret)
         .update(`${token}:${timestamp}:${expiresAt}`)
         .digest('hex');
 
-    // Build URL with query parameters
     const url = new URL(config.websocketUrl);
     url.searchParams.set('token', token);
     url.searchParams.set('timestamp', timestamp);
@@ -196,10 +157,9 @@ function generateConnectionToken(config: BenchmarkConfig): string {
     return url.toString();
 }
 
-// Create a single connection
 async function createConnection(index: number, config: BenchmarkConfig): Promise<void> {
     try {
-        // Generate token for direct connection to game server
+
         const wsUrl = generateConnectionToken(config);
 
         const ws = new WebSocket(wsUrl);
@@ -209,7 +169,6 @@ async function createConnection(index: number, config: BenchmarkConfig): Promise
             stats.active++;
             activeConnections.add(ws);
 
-            // Send one BENCHMARK packet to register with server, then just hold the connection
             const sendTime = Date.now();
             connectionTimestamps.set(ws, sendTime);
             ws.send(Buffer.from(packet.encode(JSON.stringify({
@@ -235,14 +194,13 @@ async function createConnection(index: number, config: BenchmarkConfig): Promise
                         const latency = Date.now() - sentTime;
                         stats.latencies.push(latency);
 
-                        // Keep only last 1000 latency samples
                         if (stats.latencies.length > 1000) {
                             stats.latencies.shift();
                         }
                     }
                 }
-            } catch (e) {
-                // Ignore parse errors
+            } catch (e: any) {
+                console.error(chalk.red(`Error processing message for connection ${index}: ${e.message}`));
             }
         });
 
@@ -263,7 +221,6 @@ async function createConnection(index: number, config: BenchmarkConfig): Promise
     }
 }
 
-// Main benchmark function
 async function runBenchmark(config: BenchmarkConfig) {
     console.log('\n' + chalk.bold.cyan('━'.repeat(70)));
     console.log(chalk.bold.cyan('  Frostfire Forge - Connection Hold Test'));
@@ -278,15 +235,13 @@ async function runBenchmark(config: BenchmarkConfig) {
 
     log('Opening connections...', 'info');
 
-    // Create all connections (staggered to avoid overwhelming the server)
-    const batchSize = 10; // Create 10 connections at a time
-    const batchDelay = 100; // 100ms between batches
+    const batchSize = 10;
+    const batchDelay = 100;
 
-    // Start a progress update interval
     let lastUpdateTime = 0;
     const progressUpdateInterval = setInterval(() => {
         const now = Date.now();
-        if (now - lastUpdateTime < 100) return; // Throttle updates
+        if (now - lastUpdateTime < 100) return;
         lastUpdateTime = now;
 
         const total = stats.opened + stats.failed;
@@ -301,21 +256,18 @@ async function runBenchmark(config: BenchmarkConfig) {
     for (let i = 0; i < config.connections; i++) {
         createConnection(i, config);
 
-        // Stagger connection creation
         if ((i + 1) % batchSize === 0 && i + 1 < config.connections) {
             await new Promise(resolve => setTimeout(resolve, batchDelay));
         }
     }
 
-    // Wait for ALL connections to establish (or timeout)
     const startWaitTime = Date.now();
-    const maxWaitTime = 60000; // Max 60 seconds
+    const maxWaitTime = 60000;
 
     while (true) {
         const total = stats.opened + stats.failed;
         const elapsedWait = Date.now() - startWaitTime;
 
-        // Stop if ALL connections are done (opened or failed) or max wait time
         if (total >= config.connections || elapsedWait >= maxWaitTime) {
             break;
         }
@@ -325,7 +277,6 @@ async function runBenchmark(config: BenchmarkConfig) {
 
     clearInterval(progressUpdateInterval);
 
-    // Final connection status
     const finalPercentage = Math.round((stats.opened / config.connections) * 100);
     const finalBar = stats.opened === config.connections
         ? chalk.green('█'.repeat(50))
@@ -344,7 +295,6 @@ async function runBenchmark(config: BenchmarkConfig) {
     log(`Holding ${stats.opened} connections for ${config.duration} seconds...`, 'info');
     console.log('');
 
-    // Simple progress tracking - just show time and active connections
     let elapsedSeconds = 0;
     const progressInterval = setInterval(() => {
         if (!testRunning) {
@@ -363,19 +313,16 @@ async function runBenchmark(config: BenchmarkConfig) {
         process.stdout.write(`\r  ${chalk.bold('Holding:')} [${bar}] ${chalk.bold(percentage + '%')} ${timeDisplay} │ Active: ${connectionColor(stats.active)}${chalk.gray('/')}${chalk.white(stats.opened)}`);
     }, 1000);
 
-    // Wait for test duration
     await new Promise(resolve => setTimeout(resolve, config.duration * 1000));
 
     testRunning = false;
     clearInterval(progressInterval);
 
-    // Draw final progress
     const finalHoldingBar = chalk.green('█'.repeat(40));
     const connectionColor = stats.active === stats.opened ? chalk.green : chalk.yellow;
     process.stdout.write(`\r  ${chalk.bold('Holding:')} [${finalHoldingBar}] ${chalk.bold('100%')} ${chalk.white(config.duration + 's')}${chalk.gray('/')}${chalk.white(config.duration + 's')} │ Active: ${connectionColor(stats.active)}${chalk.gray('/')}${chalk.white(stats.opened)}\n`);
     console.log('');
 
-    // Close all connections
     log('Closing connections...', 'info');
     for (const ws of activeConnections) {
         if (ws.readyState === WebSocket.OPEN) {
@@ -383,10 +330,8 @@ async function runBenchmark(config: BenchmarkConfig) {
         }
     }
 
-    // Wait a bit for close events
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    // Display results
     console.log('\n' + chalk.bold.green('━'.repeat(70)));
     console.log(chalk.bold.green('  Connection Test Complete'));
     console.log(chalk.bold.green('━'.repeat(70)) + '\n');
@@ -407,7 +352,6 @@ async function runBenchmark(config: BenchmarkConfig) {
     console.log('\n' + chalk.gray('━'.repeat(70)) + '\n');
 }
 
-// Main execution
 const config = parseArgs();
 
 if (config.help) {
@@ -415,12 +359,10 @@ if (config.help) {
     process.exit(0);
 }
 
-// Handle Ctrl+C gracefully
 process.on('SIGINT', () => {
     console.log('\n\n' + chalk.yellow('⚠ Benchmark interrupted by user') + '\n');
     testRunning = false;
 
-    // Close all connections
     for (const ws of activeConnections) {
         if (ws.readyState === WebSocket.OPEN) {
             ws.close();
@@ -430,7 +372,6 @@ process.on('SIGINT', () => {
     process.exit(0);
 });
 
-// Run the benchmark
 runBenchmark(config).then(() => {
     process.exit(0);
 }).catch((error) => {

@@ -27,7 +27,6 @@ const npcs = {
       ]
     );
 
-    // Update asset cache
     assetCache.set("npcs", response);
 
     return response;
@@ -37,7 +36,6 @@ const npcs = {
     if (!npc?.id) return;
     const response = await query("DELETE FROM npcs WHERE id = ?", [npc.id]);
 
-    // Update asset cache
     assetCache.set("npcs", response);
 
     return response;
@@ -46,7 +44,7 @@ const npcs = {
   async list() {
     const response = (await query("SELECT * FROM npcs")) as any[];
     const npcs: Npc[] = [];
-    
+
     for (const npc of response) {
       const map = npc?.map as string;
       const position: PositionData = {
@@ -75,7 +73,6 @@ const npcs = {
     if (!npc?.id) return;
     const response = await query("SELECT * FROM npcs WHERE id = ?", [npc.id]);
 
-    // Update asset cache
     assetCache.set("npcs", response);
 
     return response;
@@ -107,7 +104,6 @@ const npcs = {
       ]
     );
 
-    // Update asset cache
     assetCache.set("npcs", response);
 
     return response;
@@ -122,7 +118,6 @@ const npcs = {
       [last_updated, JSON.stringify(npc.position), npc.id]
     );
 
-    // Update asset cache
     assetCache.set("npcs", response);
 
     return response;

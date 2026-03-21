@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { mockAssetCache } from "./setup";
 
-// Mock database
 const questsDatabase: Record<number, any> = {
   1: { id: 1, name: "Kill 10 rats", description: "Kill 10 rats", reward: 100, xp_gain: 50, required_quest: 0, required_level: 1 },
   2: { id: 2, name: "Collect 5 gems", description: "Collect 5 gems", reward: 200, xp_gain: 100, required_quest: 1, required_level: 5 },

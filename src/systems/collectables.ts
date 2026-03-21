@@ -6,7 +6,7 @@ const collectables = {
     },
     async add(collectable: Collectable) {
         if (!collectable?.type || !collectable?.item || !collectable?.username) return;
-        // Check if collectable already exists for user
+
         const existing = await query(
             "SELECT * FROM collectables WHERE type = ? AND item = ? AND username = ?",
             [collectable.type, collectable.item, collectable.username]

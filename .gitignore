@@ -16,10 +16,6 @@ config/
 .env*
 !.env.development
 
-src/assets/maps/*
-!src/assets/maps/main.json
-!src/assets/maps/overworld.json
-
 src/assets/sfx/*
 !src/assets/sfx/attack_sword.mp3
 !src/assets/sfx/music_morning_dew.mp3
@@ -42,3 +38,4 @@ bun.lockb
 .claude/
 swark-output/
 CLAUDE.md
+/src/assets/maps

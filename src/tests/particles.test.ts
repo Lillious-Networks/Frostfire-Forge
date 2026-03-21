@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { mockAssetCache } from "./setup";
 
-// Mock database
 const particlesDatabase: Record<string, any> = {
   test_particle: {
     name: "test_particle",
@@ -131,7 +130,7 @@ test("particles.find returns particle by name", async () => {
 
 test("particles.find returns null for non-existent particle", async () => {
   const result = await particles.find({ name: "unique_nonexistent_name_12345" });
-  // The find method should return null for empty response
+
   expect(result === null || result === undefined).toBe(true);
 });
 

@@ -7,7 +7,6 @@ import * as settings from "../config/settings.json";
 const worldList = await worlds.list();
 const world = worldList.find((w) => w.name === settings.world);
 
-// Load weather data
 const weatherNow = performance.now();
 await assetCache.add("weather", await weather.list());
 const weathers = await assetCache.get("weather") as WeatherData[];
@@ -74,7 +73,7 @@ const particles = {
     await assetCache.set("particles", particles);
     return particles;
   },
-  
+
   async find(particle: Particle) {
     const response = await query("SELECT * FROM particles WHERE name = ?", [particle.name]) as any[];
     const weather = weathers.find((w) => w.name === world?.weather) || 'none';

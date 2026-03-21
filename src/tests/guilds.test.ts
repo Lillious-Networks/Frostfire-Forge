@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 
-// Mock database
 const accountsDatabase: Record<string, any> = {
   user1: { username: "user1", guild_id: 1 },
   user2: { username: "user2", guild_id: 1 },

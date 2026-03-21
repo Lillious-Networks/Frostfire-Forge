@@ -7,7 +7,7 @@ import npc from "../systems/npcs";
 import particle from "../systems/particles";
 import worlds from "../systems/worlds";
 import quest from "../systems/quests";
-// import NPC from "../systems/npc_scripting";
+
 import assetCache from "../services/assetCache";
 import zlib from "zlib";
 import * as settings from "../config/settings.json";
@@ -22,7 +22,6 @@ if (!assetConfig.getAssetConfig()) {
   throw new Error("Asset path not found");
 }
 
-// Start total asset loading timer
 const assetLoadingStartTime = performance.now();
 
 function loadAnimations() {
@@ -99,34 +98,32 @@ function loadSprites() {
 }
 loadSprites();
 
-function loadSpriteSheetTemplates() {
+async function loadSpriteSheetTemplates() {
   const now = performance.now();
   const templates = [] as any[];
 
-  // Animation templates (.json) are stored in animations folder
   const animationsDir = path.join(assetPath, 'animations');
-  // Sprite sheet images (.png) are stored in spritesheets folder
+
   const spriteSheetDir = path.join(assetPath, 'spritesheets');
 
   if (!fs.existsSync(animationsDir)) {
     log.warn('Animations directory not found at ' + animationsDir + ', skipping animation template loading');
-    assetCache.add('spriteSheetTemplates', []);
+    await assetCache.add('spriteSheetTemplates', []);
     return;
   }
 
   if (!fs.existsSync(spriteSheetDir)) {
     log.warn('Sprite sheets directory not found at ' + spriteSheetDir + ', skipping sprite sheet image loading');
-    assetCache.add('spriteSheetTemplates', []);
+    await assetCache.add('spriteSheetTemplates', []);
     return;
   }
 
-  // Load JSON template files from animations folder
   const templateFiles = fs.readdirSync(animationsDir)
     .filter(file => file.endsWith('.json'));
 
   if (templateFiles.length === 0) {
     log.warn('No animation templates found in ' + animationsDir);
-    assetCache.add('spriteSheetTemplates', []);
+    await assetCache.add('spriteSheetTemplates', []);
     return;
   }
 
@@ -134,17 +131,15 @@ function loadSpriteSheetTemplates() {
     const templatePath = path.join(animationsDir, file);
     const templateData = JSON.parse(fs.readFileSync(templatePath, 'utf-8'));
 
-    // Compress template JSON (always load the template)
     const templateJson = JSON.stringify(templateData);
     const compressedTemplate = zlib.deflateSync(templateJson);
 
-    // Try to load corresponding PNG (optional - base templates may not have images)
     const pngFile = templateData.imageSource;
     const pngPath = path.join(spriteSheetDir, pngFile);
     let compressedImage = null;
 
     if (fs.existsSync(pngPath)) {
-      // Load and compress PNG
+
       const imageBuffer = fs.readFileSync(pngPath);
       const base64Image = imageBuffer.toString('base64');
       compressedImage = zlib.deflateSync(base64Image);
@@ -165,11 +160,10 @@ function loadSpriteSheetTemplates() {
     templates.push({
       name: file.replace('.json', ''),
       template: compressedTemplate,
-      image: compressedImage // null if image doesn't exist
+      image: compressedImage
     });
   });
 
-  // Recursively load all PNG files from subdirectories (for armor pieces, mounts, etc.)
   function getAllPngFilesRecursive(dir: string, baseDir: string = dir): string[] {
     let results: string[] = [];
     const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -177,10 +171,10 @@ function loadSpriteSheetTemplates() {
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        // Recursively search subdirectories
+
         results = results.concat(getAllPngFilesRecursive(fullPath, baseDir));
       } else if (entry.name.endsWith('.png')) {
-        // Store relative path from spriteSheetDir
+
         const relativePath = path.relative(baseDir, fullPath);
         results.push(relativePath);
       }
@@ -188,10 +182,8 @@ function loadSpriteSheetTemplates() {
     return results;
   }
 
-  // Get all PNG files (including subdirectories)
   const allPngFiles = getAllPngFilesRecursive(spriteSheetDir);
 
-  // Get set of PNG files that already have templates
   const templatePngFiles = new Set(templateFiles.map(f => {
     const templatePath = path.join(animationsDir, f);
     const templateData = JSON.parse(fs.readFileSync(templatePath, 'utf-8'));
@@ -199,7 +191,7 @@ function loadSpriteSheetTemplates() {
   }));
 
   allPngFiles.forEach(pngFile => {
-    // Skip if this PNG already has a template
+
     if (templatePngFiles.has(pngFile)) {
       return;
     }
@@ -209,23 +201,21 @@ function loadSpriteSheetTemplates() {
     const base64Image = imageBuffer.toString('base64');
     const compressedImage = zlib.deflateSync(base64Image);
 
-    // Use filename without extension as the name (not the full path)
     const filename = path.basename(pngFile, '.png');
 
-    // Add as a template entry with null template (image only)
     templates.push({
       name: filename,
-      template: null, // No template, just the image
+      template: null,
       image: compressedImage
     });
 
     log.debug(`Loaded sprite sheet image only: ${pngFile} (name: ${filename})`);
   });
 
-  assetCache.add('spriteSheetTemplates', templates);
+  await assetCache.add('spriteSheetTemplates', templates);
   log.success(`Loaded ${templates.length} sprite sheet(s) (${templateFiles.length} with templates, ${templates.length - templateFiles.length} images only) in ${(performance.now() - now).toFixed(2)}ms`);
 }
-loadSpriteSheetTemplates();
+await loadSpriteSheetTemplates();
 
 function loadIcons() {
   const now = performance.now();
@@ -267,13 +257,11 @@ function loadIcons() {
 }
 loadIcons();
 
-// Load world data
 const worldNow = performance.now();
 await assetCache.add("worlds", await worlds.list());
 const world = await assetCache.get("worlds") as WorldData[];
 log.success(`Loaded ${world.length} world(s) from the database in ${(performance.now() - worldNow).toFixed(2)}ms`);
 
-// Check if the world name in the config is in the asset cache
 const worldName = settings.world;
 if (!world.find((w) => w.name === worldName)) {
   throw new Error(`World name ${worldName} was not loaded correctly from the database\nFound the following worlds: ${world.map((w) => w.name).join(", ")}`);
@@ -281,15 +269,14 @@ if (!world.find((w) => w.name === worldName)) {
   log.success(`World: ${worldName} was loaded correctly from the database`);
 }
 
-// Load item data
 const itemnow = performance.now();
 const itemList = await item.list();
 const missingIcon = await assetCache.get("missing_icon");
-// For each item, find the icon data and add the compressed data to the item object
+
 await Promise.all(itemList.map(async (item: any) => {
   if (item.icon) {
     const iconData = await assetCache.get(item.icon);
-    item.icon = iconData || missingIcon || null; // Use missing_icon as fallback
+    item.icon = iconData || missingIcon || null;
   }
 }));
 await assetCache.add("items", itemList);
@@ -297,11 +284,9 @@ const items = await assetCache.get("items") as Item[];
 
 log.success(`Loaded ${items.length} item(s) from the database in ${(performance.now() - itemnow).toFixed(2)}ms`);
 
-// Load mount data
 const mountNow = performance.now();
 const unfilteredMounts = await mounts.list();
-// Filter out mounts that have no sprite sheet image file
-// Mounts now use player_mount_base.json template with individual mount images in mounts/ subdirectory
+
 const filteredMounts = unfilteredMounts.filter((m) => {
   const spriteSheetDir = path.join(assetPath, 'spritesheets');
   const mountImageName = `${m.name.toLowerCase()}.png`;
@@ -316,7 +301,7 @@ const filteredMounts = unfilteredMounts.filter((m) => {
 await Promise.all(filteredMounts.map(async (mount: any) => {
   if (mount.icon) {
     const iconData = await assetCache.get(mount.icon);
-    mount.icon = iconData || missingIcon || null; // Use missing_icon as fallback
+    mount.icon = iconData || missingIcon || null;
   }
 }));
 
@@ -326,15 +311,14 @@ const mountList = await assetCache.get("mounts") as Mount[];
 log.success(`Loaded ${mountList.length} mount(s) from the database in ${(performance.now() - mountNow).toFixed(2)}ms`);
 log.info(`Mounts loaded: ${mountList.map((m) => m.name).join(", ")}`);
 
-// Load spell data
 const spellnow = performance.now();
 const spellList = await spell.list();
 await Promise.all(spellList.map(async (spell: any) => {
   if (spell.icon) {
     const iconData = await assetCache.get(spell.icon);
     const spriteData = await assetCache.get(`sprite_${spell.icon}`);
-    spell.icon = iconData || null; // Use missing_icon as fallback
-    spell.sprite = spriteData || missingIcon || null; // Use missing_icon as fallback for sprite too
+    spell.icon = iconData || null;
+    spell.sprite = spriteData || missingIcon || null;
   }
 }));
 await assetCache.add("spells", spellList);
@@ -343,25 +327,21 @@ const spells = await assetCache.get("spells") as SpellData[];
 log.success(`Loaded ${spells.length} spell(s) from the database in ${(performance.now() - spellnow).toFixed(2)}ms`);
 log.info(`Spells loaded: ${spells.map((s) => s.name).join(", ")}`);
 
-// Load npc data
 const npcnow = performance.now();
 await assetCache.add("npcs", await npc.list());
 const npcs = await assetCache.get("npcs") as Npc[];
 log.success(`Loaded ${npcs.length} npc(s) from the database in ${(performance.now() - npcnow).toFixed(2)}ms`);
 
-// Load particle data
 const particleNow = performance.now();
 await assetCache.add("particles", await particle.list());
 const particles = await assetCache.get("particles") as Particle[];
 log.success(`Loaded ${particles.length} particle(s) from the database in ${(performance.now() - particleNow).toFixed(2)}ms`);
 
-// Load quest data
 const questNow = performance.now();
 await assetCache.add("quests", await quest.list());
 const quests = await assetCache.get("quests") as Quest[];
 log.success(`Loaded ${quests.length} quest(s) from the database in ${(performance.now() - questNow).toFixed(2)}ms`);
 
-// Load maps
 const mapProperties: MapProperties[] = [];
 function loadAllMaps() {
   const now = performance.now();
@@ -383,8 +363,8 @@ function loadAllMaps() {
         height: map.data.layers[0].height,
         tileWidth: map.data.tilewidth,
         tileHeight: map.data.tileheight,
-        warps: null, // Will be set later
-        graveyards: null // Will be set later
+        warps: null,
+        graveyards: null
       });
       extractAndCompressLayers(map);
     }
@@ -432,39 +412,36 @@ function extractAndCompressLayers(map: MapData) {
   const graveyards: any[] = [];
 
   map.data.layers.forEach((layer: any) => {
-    // Skip object groups
+
     if (layer.type === "objectgroup") {
       return;
     }
 
     const layerName = layer.name ? layer.name.toLowerCase() : "";
 
-    // Collisions - check both property and layer name
     if ((layer.properties?.[0]?.name.toLowerCase() === "collision" && layer.properties[0].value === true) ||
         layerName.includes("collision")) {
       collisions.push(layer.data);
     }
-    // No PvP zones - check both property and layer name
+
     if ((layer.properties?.[0]?.name.toLowerCase() === "nopvp" && layer.properties[0].value === true) ||
         layerName.includes("nopvp") || layerName.includes("no-pvp")) {
       noPvpZones.push(layer.data);
     }
   });
 
-  // Process object groups for warps
   map.data.layers.forEach((layer: any) => {
     if (layer.type === "objectgroup") {
       const objects = layer.objects;
       objects.forEach((obj: any) => {
-        // UI references "class" but JSON references "type"
-        // They are the same thing in Tiled, but we check both for compatibility
+
         const type = obj?.class?.toLowerCase() || obj?.type?.toLowerCase();
         if (!type) {
           log.warn(`Object in map ${map.name} has no type or class: ${JSON.stringify(obj)}`);
           return;
         }
         switch (type) {
-          // Warp objects
+
           case "warp": {
             const _map = obj.properties?.find((p: any) => p.name === "map")?.value;
             const x = obj.properties?.find((p: any) => p.name === "x")?.value;
@@ -490,7 +467,7 @@ function extractAndCompressLayers(map: MapData) {
             }
             break;
           }
-          // Graveyard objects (point)
+
           case "graveyard": {
             graveyards.push({
               name: obj.name,
@@ -542,7 +519,6 @@ function extractAndCompressLayers(map: MapData) {
   let width: number | null = null;
   let height: number | null = null;
 
-  // Find the first layer that has a defined width and height
   for (const layer of map.data.layers) {
     if (layer.type !== "objectgroup") {
       if (layer.width && layer.height) {
@@ -619,27 +595,23 @@ export async function saveMapChunks(mapName: string, chunks: any[]): Promise<voi
       throw new Error(`Map ${file} not found`);
     }
 
-    // Read the original map file
     const mapData = JSON.parse(fs.readFileSync(fullPath, "utf-8"));
     const CHUNK_SIZE = mapData.tilewidth;
     const chunkSize = CHUNK_SIZE;
 
-    // Apply each chunk's changes to the map data
     for (const chunk of chunks) {
       const startX = chunk.chunkX * chunkSize;
       const startY = chunk.chunkY * chunkSize;
 
       log.debug(`Saving chunk (${chunk.chunkX}, ${chunk.chunkY}) - startX: ${startX}, startY: ${startY}, mapData.width: ${mapData.width}`);
 
-      // Update each layer in the chunk
       for (const chunkLayer of chunk.layers) {
-        // Find the corresponding layer in the map
+
         const mapLayer = mapData.layers.find((l: any) => l.name === chunkLayer.name);
 
         if (mapLayer && mapLayer.data) {
           log.debug(`  Layer: ${chunkLayer.name}, layer width: ${mapLayer.width}, layer height: ${mapLayer.height}`);
 
-          // Write chunk data back to the full map layer
           for (let y = 0; y < chunk.height; y++) {
             for (let x = 0; x < chunk.width; x++) {
               const chunkIndex = y * chunk.width + x;
@@ -656,16 +628,13 @@ export async function saveMapChunks(mapName: string, chunks: any[]): Promise<voi
       }
     }
 
-    // Write the updated map back to disk
     fs.writeFileSync(fullPath, JSON.stringify(mapData, null, 2), "utf-8");
     log.success(`Saved ${chunks.length} chunk(s) to ${file}`);
 
-    // Reprocess collision and no-pvp maps
     try {
       const collisions: number[][] = [];
       const noPvpZones: number[][] = [];
 
-      // Extract collision and no-pvp layers
       mapData.layers.forEach((layer: any) => {
         if (layer.type !== "objectgroup") {
           const layerName = layer.name ? layer.name.toLowerCase() : "";
@@ -677,7 +646,6 @@ export async function saveMapChunks(mapName: string, chunks: any[]): Promise<voi
         }
       });
 
-      // Get map dimensions
       let width: number | null = null;
       let height: number | null = null;
 
@@ -692,7 +660,6 @@ export async function saveMapChunks(mapName: string, chunks: any[]): Promise<voi
       if (width && height) {
         const tileCount = width * height;
 
-        // Compress collision layer
         if (collisions.length > 0) {
           const rawMap = new Array(tileCount).fill(0);
           collisions.forEach(layer => {
@@ -719,7 +686,6 @@ export async function saveMapChunks(mapName: string, chunks: any[]): Promise<voi
           log.success(`Reprocessed collision map for ${mapName}`);
         }
 
-        // Compress no-pvp layer
         if (noPvpZones.length > 0) {
           const rawMap = new Array(tileCount).fill(0);
           noPvpZones.forEach(layer => {
@@ -748,7 +714,7 @@ export async function saveMapChunks(mapName: string, chunks: any[]): Promise<voi
       }
     } catch (collisionError) {
       log.error(`Failed to reprocess collision maps for ${mapName}: ${collisionError}`);
-      // Don't throw - the map data was still saved successfully
+
     }
   } catch (error) {
     log.error(`Failed to save map chunks: ${mapName}: ${error}`);
@@ -786,8 +752,8 @@ export async function reloadMap(mapName: string): Promise<MapData> {
       height: newMap.data.layers[0].height,
       tileWidth: newMap.data.tilewidth,
       tileHeight: newMap.data.tileheight,
-      warps: null, // Will be set later
-      graveyards: null, // Will be set later
+      warps: null,
+      graveyards: null,
     };
 
     if (index >= 0) {
@@ -805,13 +771,11 @@ export async function reloadMap(mapName: string): Promise<MapData> {
     return newMap;
   } catch (error) {
     log.error(`Failed to reload map: ${mapName}: ${error}`);
-    throw error; // Let the caller handle the error
+    throw error;
   }
 }
 
 loadAllMaps();
-
-// Tilesets are now served by the gateway via HTTP, not by the game server
 
 function tryParse(data: string): any {
   try {
@@ -830,7 +794,7 @@ function parseAnimations() {
 }
 
 function validateAnimationFile(file: string) {
-  // Check for PNG byte
+
   const buffer = fs.readFileSync(
     path.join(assetPath, assetData.animations.path, file)
   );
@@ -845,7 +809,6 @@ function validateAnimationFile(file: string) {
   return true;
 }
 
-// Log total asset loading time
 const assetLoadingEndTime = performance.now();
 const totalAssetLoadingTime = (assetLoadingEndTime - assetLoadingStartTime).toFixed(2);
 log.success(`✔ All assets loaded successfully in ${totalAssetLoadingTime}ms`);

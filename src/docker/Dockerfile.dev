@@ -1,6 +1,6 @@
 # Development Dockerfile for Frostfire Forge Game Server
 # Requires Frostfire Forge Gateway to be running before starting this container
-FROM oven/bun:canary AS base
+FROM oven/bun:canary-slim AS base
 WORKDIR /app
 
 # Copy .env file stage

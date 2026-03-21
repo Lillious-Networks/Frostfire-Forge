@@ -1,9 +1,8 @@
-// This file is used to create the database and tables if they don't exist
+
 import query from "../controllers/sqldatabase";
 import log from "../modules/logger";
 const database = process.env.DATABASE_NAME || "TEMP_Mystika";
 
-// Create TEMP_Mystika Database if it doesn't exist
 const createDatabase = async () => {
   log.info("Creating database...");
   const sql = `CREATE DATABASE IF NOT EXISTS ${database};`;
@@ -15,7 +14,6 @@ const useDatabase = async () => {
   await query(useDatabaseSql);
 };
 
-// Create accounts table if it doesn't exist
 const createAccountsTable = async () => {
   log.info("Creating accounts table...");
   const sql = `
@@ -48,7 +46,6 @@ const createAccountsTable = async () => {
   await query(sql);
 };
 
-// Create allowed_ips table if it doesn't exist
 const createAllowedIpsTable = async () => {
   log.info("Creating allowed_ips table...");
   const sql = `
@@ -60,7 +57,6 @@ const createAllowedIpsTable = async () => {
   await query(sql);
 };
 
-// Create blocked_ips table if it doesn't exist
 const createBlockedIpsTable = async () => {
   log.info("Creating blocked_ips table...");
   const sql = `
@@ -72,7 +68,6 @@ const createBlockedIpsTable = async () => {
   await query(sql);
 };
 
-// Insert 127.0.0.1 and ::1 as allowed IPs if they doesn't exist
 const insertLocalhost = async () => {
   log.info("Inserting localhost and ::1 as allowed IPs...");
   const sql = `
@@ -81,7 +76,6 @@ const insertLocalhost = async () => {
   await query(sql);
 };
 
-// Create inventory table if it doesn't exist
 const createInventoryTable = async () => {
   log.info("Creating inventory table...");
   const sql = `
@@ -96,7 +90,6 @@ const createInventoryTable = async () => {
   await query(sql);
 };
 
-// Create items table if it doesn't exist
 const createItemsTable = async () => {
   log.info("Creating items table...");
   const sql = `
@@ -205,8 +198,7 @@ const createPermissionsTable = async () => {
 
 const createPermissionTypesTable = async () => {
   log.info("Creating permission_types table...");
-  
-  // First create the table
+
   const createTableSql = `
     CREATE TABLE IF NOT EXISTS permission_types (
       name VARCHAR(255) NOT NULL UNIQUE PRIMARY KEY
@@ -214,7 +206,6 @@ const createPermissionTypesTable = async () => {
   `;
   await query(createTableSql);
 
-  // Then insert the default permissions
   const insertPermissionsSql = `
     INSERT IGNORE INTO permission_types (name) VALUES
       ('admin.*'),
@@ -481,7 +472,6 @@ const createEquipmentTable = async () => {
   await query(sql);
 };
 
-// Insert demo account if doesn't exist
 const insertDemoAccount = async () => {
   log.info("Inserting demo account...");
   const sql = `
@@ -586,19 +576,17 @@ const insertDemoMount = async () => {
   await query(sql);
 }
 
-// Create indexes for performance optimization
 const createIndexes = async () => {
   log.info("Creating performance indexes...");
 
   const indexes = [
-    // Accounts table indexes (most critical for auth queries)
+
     { name: "idx_accounts_token", sql: "CREATE INDEX idx_accounts_token ON accounts(token)" },
     { name: "idx_accounts_session_id", sql: "CREATE INDEX idx_accounts_session_id ON accounts(session_id)" },
     { name: "idx_accounts_username", sql: "CREATE INDEX idx_accounts_username ON accounts(username)" },
     { name: "idx_accounts_party_id", sql: "CREATE INDEX idx_accounts_party_id ON accounts(party_id)" },
     { name: "idx_accounts_guild_id", sql: "CREATE INDEX idx_accounts_guild_id ON accounts(guild_id)" },
 
-    // Indexes for JOIN queries in GetPlayerLoginData
     { name: "idx_permissions_username", sql: "CREATE INDEX idx_permissions_username ON permissions(username)" },
     { name: "idx_stats_username", sql: "CREATE INDEX idx_stats_username ON stats(username)" },
     { name: "idx_currency_username", sql: "CREATE INDEX idx_currency_username ON currency(username)" },
@@ -606,38 +594,30 @@ const createIndexes = async () => {
     { name: "idx_clientconfig_username", sql: "CREATE INDEX idx_clientconfig_username ON clientconfig(username)" },
     { name: "idx_quest_log_username", sql: "CREATE INDEX idx_quest_log_username ON quest_log(username)" },
 
-    // Inventory query optimization
     { name: "idx_inventory_username", sql: "CREATE INDEX idx_inventory_username ON inventory(username)" },
     { name: "idx_inventory_item", sql: "CREATE INDEX idx_inventory_item ON inventory(item)" },
 
-    // Party query optimization
     { name: "idx_parties_id", sql: "CREATE INDEX idx_parties_id ON parties(id)" },
     { name: "idx_parties_leader", sql: "CREATE INDEX idx_parties_leader ON parties(leader)" },
 
-    // Guild query optimization
     { name: "idx_guilds_id", sql: "CREATE INDEX idx_guilds_id ON guilds(id)" },
     { name: "idx_guilds_name", sql: "CREATE INDEX idx_guilds_name ON guilds(name)" },
     { name: "idx_guilds_leader", sql: "CREATE INDEX idx_guilds_leader ON guilds(leader)" },
 
-    // Mounts table index
     { name: "idx_mounts_name", sql: "CREATE INDEX idx_mounts_name ON mounts(name)" },
 
-    // Collectables table index
     { name: "idx_collectables_username", sql: "CREATE INDEX idx_collectables_username ON collectables(username)" },
 
-    // Spells table index
     { name: "idx_spells_name", sql: "CREATE INDEX idx_spells_name ON spells(name)" }
 
-    // Learned Spells table index
     ,{ name: "idx_learned_spells_username", sql: "CREATE INDEX idx_learned_spells_username ON learned_spells(username)" }
 
-    // Equipment table index
     ,{ name: "idx_equipment_username", sql: "CREATE INDEX idx_equipment_username ON equipment(username)" }
   ];
 
   for (const index of indexes) {
     try {
-      // Check if index exists
+
       const checkIndexSql = `
         SELECT COUNT(*) as count
         FROM INFORMATION_SCHEMA.STATISTICS
@@ -662,7 +642,6 @@ const createIndexes = async () => {
   log.success("Index creation complete!");
 };
 
-// Run the database setup
 const setupDatabase = async () => {
   await createDatabase();
   await useDatabase();
@@ -703,7 +682,7 @@ const setupDatabase = async () => {
   await insertDefaultLearnedSpell();
   await addPermissionsToDemoAccount();
   await insertDemoMount();
-  await createIndexes(); // Add indexes after all tables are created
+  await createIndexes();
 };
 
 try {

@@ -17,7 +17,6 @@ const equipment = {
             return false;
         }
 
-        // Check if we are replacing an item with another item. If we are, un-equip the current item first.
         try {
             const currentEquipment = await equipment.list(username);
             if (currentEquipment && currentEquipment[slot as keyof Equipment] && item && currentEquipment[slot as keyof Equipment] !== item) {

@@ -18,19 +18,15 @@ const mapCache: Map<
   }
 > = new Map();
 
-// Helper function to query RLE data directly without decompressing entire array
-// RLE format: [width, height, value1, count1, value2, count2, ...]
 function queryRLE(rleData: number[], targetIndex: number): number {
   if (!rleData || rleData.length < 2) return 0;
 
   let currentIndex = 0;
 
-  // Skip width and height, start at index 2
   for (let i = 2; i < rleData.length; i += 2) {
     const value = rleData[i];
     const count = rleData[i + 1];
 
-    // Check if target index falls within this RLE segment
     if (currentIndex + count > targetIndex) {
       return value;
     }
@@ -38,31 +34,27 @@ function queryRLE(rleData: number[], targetIndex: number): number {
     currentIndex += count;
   }
 
-  return 0; // Out of bounds or not found
+  return 0;
 }
 
-// Bresenham's line algorithm to check for direct line-of-sight between two points
-// This checks if there are any collision tiles directly blocking the straight line path
 async function hasLineOfSight(
   startX: number,
   startY: number,
   endX: number,
   endY: number,
   map: string,
-  maxDistance: number = 200 // Max search distance in pixels
+  maxDistance: number = 200
 ): Promise<boolean> {
   const mapKey = map.replace(".json", "");
 
-  // Check if distance exceeds max
   const distance = Math.sqrt(Math.pow(endX - startX, 2) + Math.pow(endY - startY, 2));
   if (distance > maxDistance) return false;
 
-  // Load map from cache
   let mapDataCached = mapCache.get(mapKey);
   if (!mapDataCached) {
     const mapProperties = (await assetCache.get("mapProperties")) as MapProperties[];
     const mapData = mapProperties?.find((m: any) => m.name.replace(".json", "") === mapKey);
-    if (!mapData) return false; // No map data, can't determine path
+    if (!mapData) return false;
 
     const collisionData = await assetCache.getNested(mapKey, "collision");
     if (!collisionData || !Array.isArray(collisionData)) return false;
@@ -87,17 +79,14 @@ async function hasLineOfSight(
 
   if (!collisionRLE) return false;
 
-  // Convert world coordinates to tile coordinates
   const startTileX = Math.floor(startX / tileWidth);
   const startTileY = Math.floor(startY / tileHeight);
   const endTileX = Math.floor(endX / tileWidth);
   const endTileY = Math.floor(endY / tileHeight);
 
-  // Check if start or end tiles are out of bounds
   if (startTileX < 0 || startTileY < 0 || startTileX >= width || startTileY >= height) return false;
   if (endTileX < 0 || endTileY < 0 || endTileX >= width || endTileY >= height) return false;
 
-  // Bresenham's line algorithm to check all tiles along the straight line
   const dx = Math.abs(endTileX - startTileX);
   const dy = Math.abs(endTileY - startTileY);
   const sx = startTileX < endTileX ? 1 : -1;
@@ -108,18 +97,16 @@ async function hasLineOfSight(
   let currentY = startTileY;
 
   while (true) {
-    // Check if current tile has collision
+
     if (currentX >= 0 && currentX < width && currentY >= 0 && currentY < height) {
       const tileIndex = currentY * width + currentX;
       const tileValue = queryRLE(collisionRLE, tileIndex);
 
-      // If we hit a collision tile (non-zero), line of sight is blocked
       if (tileValue !== 0) {
         return false;
       }
     }
 
-    // Check if we reached the end
     if (currentX === endTileX && currentY === endTileY) {
       break;
     }
@@ -135,33 +122,32 @@ async function hasLineOfSight(
     }
   }
 
-  return true; // No collisions found along the line
+  return true;
 }
 
 const player = {
   clear: async () => {
-    // Clear all session_ids, set online to 0, and clear all tokens
+
     await query(
       "UPDATE accounts SET session_id = NULL, online = 0, token = NULL, verified = 0, verification_code = NULL, party_id = NULL"
     );
-    // Truncate the parties table
+
     await query("TRUNCATE TABLE parties");
 
-    // Clear stats of guest accounts
     await query("DELETE FROM stats WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
-    // Clear client configs of guest accounts
+
     await query("DELETE FROM clientconfig WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
-    // Clear quest logs of guest accounts
+
     await query("DELETE FROM quest_log WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
-    // Clear currency of guest accounts
+
     await query("DELETE FROM currency WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
-    // Clear collectables of guest accounts
+
     await query("DELETE FROM collectables WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
-    // Clear equipment of guest accounts
+
     await query("DELETE FROM equipment WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
-    // Clear learned spells of guest accounts
+
     await query("DELETE FROM learned_spells WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
-    // Clear all guest accounts
+
     await query("DELETE FROM accounts WHERE guest_mode = 1");
   },
   register: async (
@@ -179,12 +165,10 @@ const player = {
     if (!guest && username.startsWith("guest_"))
       return { error: "Username cannot start with 'guest_'" };
 
-    // Check if the user exists by username
     const usernameExists = (await player.findByUsername(username)) as string[];
     if (usernameExists && usernameExists.length != 0)
       return { error: "Username already exists" };
 
-    // Check if the user exists by email
     const emailExists = (await player.findByEmail(email)) as string[];
     if (emailExists && emailExists.length != 0)
       return { error: "Email already exists" };
@@ -194,7 +178,7 @@ const player = {
       [
         email,
         username,
-        null, // token will be set during login
+        null,
         password_hash,
         req.ip,
         req.headers["cf-ipcountry"],
@@ -208,41 +192,38 @@ const player = {
     });
     if (!response) return { error: "An unexpected error occurred" };
 
-    // Create stats
     await query(
       "INSERT INTO stats (username, health, max_health, stamina, max_stamina, xp, max_xp, level, stat_critical_damage, stat_critical_chance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [username, 100, 100, 100, 100, 0, 100, 1, 10, 10]
     );
-    // Create client config
+
     await query(
       "INSERT INTO clientconfig (username, fps, music_volume, effects_volume, muted) VALUES (?, ?, ?, ?, ?)",
       [username, 60, 50, 50, 0]
     );
-    // Create quest log
+
     await query("INSERT INTO quest_log (username) VALUES (?)", [username]);
-    // Create currency
+
     await query(
       "INSERT INTO currency (username, copper, silver, gold) VALUES (?, ?, ?, ?)",
       [username, 0, 0, 0]
     );
 
-    // Create equipment
     await query(
       "INSERT INTO equipment (username) VALUES (?)",
       [username]
     );
 
-    // Insert default mount
     await query("INSERT INTO collectables (type, item, username) VALUES (?, ?, ?)", ["mount", "horse", username]);
     return username;
   },
   verify: async (session_id: string) => {
-    // Check if there is a verification code
+
     const response = (await query(
       "SELECT verified FROM accounts WHERE session_id = ?",
       [session_id]
     )) as any[];
-    // If a verification code exists, prevent the user from logging in until they verify their account
+
     if (response[0]?.verified) return true;
     return false;
   },
@@ -324,7 +305,6 @@ const player = {
       return false;
     }
 
-    // Check if there's an existing session and kick it
     const existingSessionResult = await query(
       "SELECT session_id FROM accounts WHERE username = ?",
       [username]
@@ -332,27 +312,22 @@ const player = {
 
     const existingSessionId = existingSessionResult[0]?.session_id;
     if (existingSessionId && existingSessionId !== sessionId) {
-      // Import playerCache to get the WebSocket
+
       const playerCache = (await import("../services/playermanager.ts")).default;
       const existingPlayer = playerCache.get(existingSessionId);
 
-      // Only kick if the session exists on THIS server
-      // If it doesn't exist here, it's from another server (possibly dead) - just overwrite it
       if (existingPlayer && existingPlayer.ws) {
         log.info(`Kicking existing session for ${username} on THIS server`);
 
-        // Send a notification and close the connection
         const packetManager = (await import("../socket/packet_manager.ts")).packetManager;
         const sendPacket = (ws: any, packet: any) => {
           if (ws.readyState === 1) ws.send(packet);
         };
 
-        // Notify the existing player they're being kicked
         sendPacket(existingPlayer.ws, packetManager.notify({
           message: "You have been logged in from another location."
         }));
 
-        // Notify all other players to remove this player (prevent ghost)
         const map = existingPlayer.location?.map;
         if (map) {
           const playersInMap = Object.values(playerCache.list()).filter(
@@ -364,26 +339,22 @@ const player = {
           });
         }
 
-        // Close and cleanup after a delay to ensure all packets are sent
         setTimeout(() => {
-          // Remove from playerCache
+
           playerCache.remove(existingSessionId);
 
-          // Close the WebSocket
           if (existingPlayer.ws && existingPlayer.ws.readyState === 1) {
             existingPlayer.ws.close(1000, "Logged in from another location");
           }
         }, 500);
 
-        // Logout the session from database
         await player.logout(existingSessionId);
 
-        // Wait a bit longer to ensure cleanup is complete before new session starts
         await new Promise(resolve => setTimeout(resolve, 600));
       } else {
-        // Session exists in database but not on this server - it's stale or from another server
+
         log.info(`Found stale session for ${username} (from another server or dead session), overwriting with new session`);
-        // Just clear it from database without kicking
+
         await player.clearSessionId(existingSessionId);
       }
     }
@@ -422,7 +393,7 @@ const player = {
   login: async (username: string, password: string) => {
     if (!username || !password) return;
     username = username.toLowerCase();
-    // Validate credentials
+
     const response = (await query(
       "SELECT username, banned, token, password_hash FROM accounts WHERE username = ?",
       [username]
@@ -437,18 +408,16 @@ const player = {
       return;
     }
 
-    // Verify password
     const isValid = await verify(password, response[0].password_hash);
     if (!isValid) {
       log.debug(`User ${username} failed to login`);
       return;
     }
 
-    // Use existing token and check validity or generate new one
     const token = response[0].token || (await player.setToken(username));
 
     log.debug(`User ${username} logged in`);
-    // Update last_login
+
     await query(
       "UPDATE accounts SET last_login = CURRENT_TIMESTAMP WHERE username = ?",
       [username]
@@ -509,13 +478,13 @@ const player = {
   setToken: async (username: string) => {
     const token = randomBytes(32);
     if (!username || !token) return;
-    // Store the token value in the database
+
     const response = await query(
       "UPDATE accounts SET token = ? WHERE username = ?",
       [token, username]
     );
     if (!response) return;
-    // Return the hashed token for client use
+
     return token;
   },
   isOnline: async (username: string) => {
@@ -579,7 +548,7 @@ const player = {
     )) as any;
     if (!response) return;
     const admin = await player.isAdmin(username);
-    // Remove stealth status if the player is not an admin and is stealth
+
     if (!admin)
       (await query(
         "UPDATE accounts SET stealth = 0, noclip = 0 WHERE username = ?",
@@ -686,10 +655,10 @@ const player = {
   increaseXp: async (username: string, xp: number) => {
     if (!username) return;
     username = username.toLowerCase();
-    // Get the current xp, level and max_xp
+
     const stats = (await player.getStats(username)) as StatsData;
     let leveledUp = false;
-    // Loop to handle multiple level-ups
+
     while (xp > 0) {
       const xpToLevel = stats.max_xp - stats.xp;
       if (xp >= xpToLevel) {
@@ -697,12 +666,12 @@ const player = {
         xp -= xpToLevel;
         stats.xp = 0;
         leveledUp = true;
-        // Update the max_xp required to level up dynamically
+
         stats.max_xp = player.getNewMaxXp(stats.level);
-        // Calculate new max health and stamina based on level
+
         stats.max_health = player.getMaxHealthForLevel(stats.level);
         stats.max_stamina = player.getMaxStaminaForLevel(stats.level);
-        // Restore health and stamina to full on level up
+
         stats.health = stats.max_health;
         stats.stamina = stats.max_stamina;
       } else {
@@ -710,7 +679,7 @@ const player = {
         xp = 0;
       }
     }
-    // Update the xp, level, and stats in the database
+
     const response = await query(
       leveledUp
         ? "UPDATE stats SET xp = ?, max_xp = ?, level = ?, max_health = ?, health = ?, max_stamina = ?, stamina = ? WHERE username = ?"
@@ -733,18 +702,12 @@ const player = {
     return Math.floor(100 * Math.pow(1.1, level - 1));
   },
   getMaxHealthForLevel: (level: number) => {
-    // Formula: base_hp + (level^1.5 * 5)
-    // At level 1: 100 + (1^1.5 * 5) = 105
-    // At level 5: 100 + (5^1.5 * 5) = 156
-    // At level 10: 100 + (10^1.5 * 5) = 258
+
     const baseHealth = 100;
     return Math.floor(baseHealth + Math.pow(level, 1.5) * 5);
   },
   getMaxStaminaForLevel: (level: number) => {
-    // Formula: base_mana + (level^1.5 * 3)
-    // At level 1: 100 + (1^1.5 * 3) = 103
-    // At level 5: 100 + (5^1.5 * 3) = 134
-    // At level 10: 100 + (10^1.5 * 3) = 195
+
     const baseStamina = 100;
     return Math.floor(baseStamina + Math.pow(level, 1.5) * 3);
   },
@@ -803,65 +766,56 @@ const player = {
 
     const mapKey = map.replace(".json", "");
 
-    // Fetch PvP tile data from Redis hash
     const pvpData = await assetCache.getNested(mapKey, "nopvp");
-    // If no nopvp data exists, PVP is allowed by default
+
     if (!pvpData || !Array.isArray(pvpData) || pvpData.length < 3) return true;
 
-    // Fetch map properties (can be stored as a hash or a string)
     const mapPropertiesRaw = await assetCache.get("mapProperties") as MapProperties[];
-    if (!mapPropertiesRaw) return true; // Allow PVP if map properties not found
+    if (!mapPropertiesRaw) return true;
 
     const mapData = mapPropertiesRaw.find(m => m.name.replace(".json", "") === mapKey);
-    if (!mapData) return true; // Allow PVP if specific map data not found
+    if (!mapData) return true;
     const tileWidth = mapData.tileWidth;
     const tileHeight = mapData.tileHeight;
 
-    // Convert world coordinates to tile coordinates
-    // position.x and position.y are the CENTER of the player sprite
-    // Player sprite: 24px wide, 40px tall
     const margin = 0.1;
 
-    // Horizontal collision: center ± half width
     const left = Math.floor((position.x - playerWidth / 2 + margin) / tileWidth);
     const right = Math.floor((position.x + playerWidth / 2 - margin) / tileWidth);
 
-    // Vertical collision: top half can overlap (start from middle), bottom at feet
-    const top = Math.floor((position.y - playerHeight / 2 + playerHeight / 2 + margin) / tileHeight); // Start from vertical center
-    const bottom = Math.floor((position.y + playerHeight / 2 - margin) / tileHeight); // End at bottom
+    const top = Math.floor((position.y - playerHeight / 2 + playerHeight / 2 + margin) / tileHeight);
+    const bottom = Math.floor((position.y + playerHeight / 2 - margin) / tileHeight);
 
     for (let tileY = top; tileY <= bottom; tileY++) {
       for (let tileX = left; tileX <= right; tileX++) {
-        // Validate tile is within map bounds
+
         if (tileX < 0 || tileY < 0 || tileX >= mapData.width || tileY >= mapData.height) continue;
 
         const targetIndex = tileY * mapData.width + tileX;
 
-        // Query RLE data directly without decompressing
         const tileValue = queryRLE(pvpData, targetIndex);
 
         if (tileValue !== 0) {
-          return false; // No-PvP tile → cannot attack here
+          return false;
         }
       }
     }
 
-    return true; // All tiles under player are PvP-enabled
+    return true;
   },
   checkIfWouldCollide: async function (
     map: string,
     position: PositionData,
     playerProperties: PlayerProperties,
-    mapPropertiesCache?: any // Optional cached mapProperties to avoid Redis calls
+    mapPropertiesCache?: any
   ) {
     const playerWidth = playerProperties.width || 32;
     const playerHeight = playerProperties.height || 32;
     const mapKey = map.replace(".json", "");
 
-    // Load map from cache or Redis
     let mapDataCached = mapCache.get(mapKey);
     if (!mapDataCached) {
-      // Use provided cache or fall back to Redis
+
       const mapProperties = mapPropertiesCache || (await assetCache.get("mapProperties")) as MapProperties[];
       const mapData = mapProperties.find((m: any) => m.name.replace(".json", "") === mapKey);
       if (!mapData) return { value: true, reason: "no_map_data" };
@@ -875,16 +829,15 @@ const player = {
         return { value: true, reason: "redis_error" };
       }
 
-      // Store RLE data directly, no decompression
       mapDataCached = {
         warps: Array.isArray(mapData.warps)
           ? Object.fromEntries(
               (mapData.warps as WarpObject[]).map((warp, idx) => [warp.name ?? String(idx), warp])
             )
           : (mapData.warps || {}),
-        collisionRLE: collisionData, // Store RLE data directly
-        width: collisionData[0], // Width from RLE header
-        height: collisionData[1], // Height from RLE header
+        collisionRLE: collisionData,
+        width: collisionData[0],
+        height: collisionData[1],
         tileWidth: mapData.tileWidth,
         tileHeight: mapData.tileHeight,
       };
@@ -894,7 +847,6 @@ const player = {
 
     const { warps, collisionRLE, width, height, tileWidth, tileHeight } = mapDataCached;
 
-    // Warp collision
     for (const key in warps) {
       const warp = warps[key];
       if (
@@ -911,26 +863,19 @@ const player = {
       }
     }
 
-    // Tile collision - Convert world coordinates to tile coordinates
-    // position.x and position.y are the CENTER of the player sprite
-    // Player sprite: 24px wide, 40px tall
-    // Collision box should be centered on sprite with pixel-perfect accuracy
     const margin = 0.1;
 
-    // Horizontal collision: center ± half width
     const left = Math.floor((position.x - playerWidth / 2 + margin) / tileWidth);
     const right = Math.floor((position.x + playerWidth / 2 - margin) / tileWidth);
 
-    // Vertical collision: top half can overlap (start from middle), bottom at feet
-    const top = Math.floor((position.y - playerHeight / 2 + playerHeight / 2 + margin) / tileHeight); // Start from vertical center
-    const bottom = Math.floor((position.y + playerHeight / 2 - margin) / tileHeight); // End at bottom
+    const top = Math.floor((position.y - playerHeight / 2 + playerHeight / 2 + margin) / tileHeight);
+    const bottom = Math.floor((position.y + playerHeight / 2 - margin) / tileHeight);
 
     for (let tileY = top; tileY <= bottom; tileY++) {
       for (let tileX = left; tileX <= right; tileX++) {
-        // Validate tile is within map bounds
+
         if (tileX < 0 || tileY < 0 || tileX >= width || tileY >= height) continue;
 
-        // Query RLE data directly without decompressing entire grid
         const tileIndex = tileY * width + tileX;
         const tileValue = collisionRLE ? queryRLE(collisionRLE, tileIndex) : 0;
 
@@ -979,20 +924,16 @@ const player = {
     playerProperties: PlayerProperties,
     maxPathfindingDistance: number = 300
   ): Promise<{ value: boolean; reason?: string }> => {
-    // No self or target or no range
+
     if (!self || !target) return { value: false, reason: "invalid" };
 
-    // Check if target or self is in stealth mode
     if (target.isStealth || self.isStealth) return { value: false, reason: "path_blocked" };
 
-    // Prevent attacks on self
     if (self.id === target.id) return { value: false, reason: "self" };
 
-    // Ensure self is not dead
     if (!self.stats || self.stats.health <= 0)
       return { value: false, reason: "dead" };
 
-    // Check if the target is in the same map
     if (
       !self.location ||
       !target.location ||
@@ -1003,28 +944,22 @@ const player = {
     if (self.isStealth || target.isStealth)
       return { value: false, reason: "stealth" };
 
-    // Check if facing the right direction
     const targetPosition = target.location.position as unknown as PositionData;
     const selfPosition = self.location.position as unknown as PositionData;
     const direction = selfPosition.direction;
 
-    // Check if direction exists
     if (!direction) {
       return { value: false, reason: "invalid_direction" };
     }
 
-    // Calculate angle between players (in degrees)
-    // 0° = right, 90° = down, ±180° = left, -90° = up
     const dx = targetPosition.x - selfPosition.x;
     const dy = targetPosition.y - selfPosition.y;
     const angle = Math.atan2(dy, dx) * (180 / Math.PI);
 
-    // Check if player is facing the target based on direction (with 45-degree tolerance)
     const isFacingTarget = (targetAngle: number, tolerance: number = 45): boolean => {
       const minAngle = targetAngle - tolerance;
       const maxAngle = targetAngle + tolerance;
 
-      // Handle wrapping around ±180
       if (minAngle < -180) {
         return angle >= (minAngle + 360) || angle <= maxAngle;
       } else if (maxAngle > 180) {
@@ -1050,7 +985,6 @@ const player = {
       return { value: false, reason: "direction" };
     }
 
-    // Check if the target is in PvP zone
     const isPvpAllowedTarget = await player.isInPvPZone(
       self.location.map,
       targetPosition,
@@ -1064,7 +998,6 @@ const player = {
     );
     if (!isPvpAllowedSelf) return { value: false, reason: "nopvp" };
 
-    // Check if there's a clear path (no collision blocking) between players using A* pathfinding
     const hasPath = await hasLineOfSight(
       selfPosition.x,
       selfPosition.y,
@@ -1108,11 +1041,9 @@ const player = {
     return closestPlayer;
   },
   canMount: (player: Player): boolean => {
-    // Don't allow guest players to mount
-    // if (player.isGuest) return false;
+
     if (!player || !player.stats) return false;
-    // Optional level requirement to mount
-    // if (player.stats.level < 5) return false;
+
     return true;
   },
   saveHotBarConfig: async (username: string, hotbar: any) => {
@@ -1129,7 +1060,6 @@ const player = {
     if (!username) return;
     username = username.toLowerCase();
 
-    // JSON.stringify the config before saving to the JSON column
     const inventoryString = JSON.stringify(inventoryConfig);
 
     const response = await query(
@@ -1138,18 +1068,16 @@ const player = {
     );
     return response;
   },
-  // Sync stats in cache whenever anything has changed like equipment, buffs, etc.
+
   synchronizeStats: async (username: string) => {
     const id = await player.getSessionIdByUsername(username);
     const pcache = playerCache.get(id);
     if (!pcache) return;
     const currentStats = { ...pcache.stats };
 
-    // Reset all stats to base values before adding equipment bonuses
     currentStats.total_max_health = currentStats.max_health;
     currentStats.total_max_stamina = currentStats.max_stamina;
 
-    // Get base stat values from database (these are stored without equipment bonuses)
     const baseStats = await player.getStats(username) as StatsData;
     if (baseStats) {
       currentStats.stat_critical_chance = baseStats.stat_critical_chance || 0;
@@ -1159,7 +1087,6 @@ const player = {
       currentStats.stat_avoidance = baseStats.stat_avoidance || 0;
     }
 
-    // Get all equipped items and synchronize stats
     const equippedItems = Object.values(pcache.equipment).filter((eqItem: any) => eqItem !== null);
     const items = [];
     for (const equippedItemName of equippedItems) {
@@ -1171,7 +1098,6 @@ const player = {
       }
     }
 
-    // Apply equipment bonuses on top of base stats
     if (pcache.equipment) {
       for (const slot in pcache.equipment) {
         const item = pcache.equipment[slot];
@@ -1193,7 +1119,6 @@ const player = {
     if (!username) return null;
     username = username.toLowerCase();
 
-    // Single optimized query to get all player data using JOINs
     const mainQuery = `
       SELECT
         a.id,
@@ -1340,7 +1265,6 @@ const player = {
   },
 };
 
-// Export function to clear map cache (used when maps are updated)
 export function clearMapCache(mapName?: string) {
   if (mapName) {
     const mapKey = mapName.replace(".json", "");

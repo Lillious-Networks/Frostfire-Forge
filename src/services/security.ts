@@ -42,7 +42,7 @@ export function addSecurityRule(rule: string): Promise<any> {
         reject("Rule already exists");
       })
       .catch(() => {
-        // Check if file ends in newline
+
         fs.readFile(security, (err: any, data: Buffer) => {
           if (err) {
             log.error(err);

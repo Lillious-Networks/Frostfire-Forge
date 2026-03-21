@@ -3,13 +3,10 @@ import path from "path";
 import crypto from "crypto";
 import assetConfig from "../services/assetConfig";
 
-/**
- * Calculate SHA256 checksum of a file (normalized JSON)
- */
 export function calculateFileChecksum(filePath: string): string {
   try {
     const fileContent = fs.readFileSync(filePath, "utf-8");
-    // Parse and re-stringify with consistent formatting for deterministic checksums
+
     const jsonData = JSON.parse(fileContent);
     const normalizedContent = JSON.stringify(jsonData);
     return crypto.createHash("sha256").update(normalizedContent).digest("hex");
@@ -19,9 +16,6 @@ export function calculateFileChecksum(filePath: string): string {
   }
 }
 
-/**
- * Calculate checksums for all map files
- */
 export function calculateAllMapChecksums(): Record<string, string> {
   const checksums: Record<string, string> = {};
   const assetPath = assetConfig.getAssetConfig() as string;
@@ -43,9 +37,6 @@ export function calculateAllMapChecksums(): Record<string, string> {
   return checksums;
 }
 
-/**
- * Get a specific map file content
- */
 export function getMapContent(mapName: string): any | null {
   try {
     const assetPath = assetConfig.getAssetConfig() as string;
@@ -65,9 +56,6 @@ export function getMapContent(mapName: string): any | null {
   }
 }
 
-/**
- * Write updated map content to file
- */
 export function writeMapContent(mapName: string, mapData: any): boolean {
   try {
     const assetPath = assetConfig.getAssetConfig() as string;

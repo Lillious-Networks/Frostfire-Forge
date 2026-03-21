@@ -1,7 +1,6 @@
 import log from "../modules/logger";
 import path from "node:path";
 
-// Worker pool configuration
 const WORKER_POOL_SIZE = 4;
 const workerPool: Worker[] = [];
 const pendingQueries = new Map<string, { resolve: (value: any) => void; reject: (error: any) => void }>();
@@ -9,7 +8,6 @@ let nextWorkerId = 0;
 let queryIdCounter = 0;
 let workersReady = 0;
 
-// Initialize worker pool
 async function initializeWorkerPool(): Promise<void> {
   log.info("Initializing database worker pool...");
   const workerPath = path.join(import.meta.dir, "sqldatabase.worker.ts");
@@ -17,7 +15,7 @@ async function initializeWorkerPool(): Promise<void> {
   return new Promise((resolve, reject) => {
     const initTimeout = setTimeout(() => {
       reject(new Error("Worker pool initialization timeout"));
-    }, 60000); // Increased from 10s to 60s
+    }, 60000);
 
     for (let i = 0; i < WORKER_POOL_SIZE; i++) {
       const worker = new Worker(workerPath);
@@ -63,10 +61,8 @@ async function initializeWorkerPool(): Promise<void> {
   });
 }
 
-// Initialize the worker pool
 await initializeWorkerPool();
 
-// Round-robin worker selection
 function getNextWorker(): Worker {
   const worker = workerPool[nextWorkerId];
   nextWorkerId = (nextWorkerId + 1) % WORKER_POOL_SIZE;
@@ -78,16 +74,13 @@ export default async function query<T>(sql: string, values?: any[]): Promise<T[]
     const queryId = `query_${++queryIdCounter}_${Date.now()}`;
     const worker = getNextWorker();
 
-    // Store promise handlers
     pendingQueries.set(queryId, { resolve, reject });
 
-    // Set timeout for query
     const timeout = setTimeout(() => {
       pendingQueries.delete(queryId);
       reject(new Error('Query timeout after 30 seconds'));
-    }, 30000); // Increased from 10s to 30s
+    }, 30000);
 
-    // Override resolve/reject to clear timeout
     const originalResolve = resolve;
     const originalReject = reject;
 
@@ -102,7 +95,6 @@ export default async function query<T>(sql: string, values?: any[]): Promise<T[]
       }
     });
 
-    // Send query to worker
     worker.postMessage({ id: queryId, sql, values: values || [] });
   });
 }

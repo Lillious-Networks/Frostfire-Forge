@@ -135,21 +135,17 @@ class RedisCacheService implements CacheService {
     return `${this.prefix}${key}`;
   }
 
-  /** Recursively reconstruct all Buffer objects in parsed JSON */
   private reconstructBuffers(obj: any, depth: number = 0): any {
     if (!obj || typeof obj !== 'object') return obj;
 
-    // Check if this object is a serialized Buffer
     if (obj.type === 'Buffer' && Array.isArray(obj.data)) {
       return Buffer.from(obj.data);
     }
 
-    // Recursively process arrays
     if (Array.isArray(obj)) {
       return obj.map(item => this.reconstructBuffers(item, depth + 1));
     }
 
-    // Recursively process object properties
     const result: any = {};
     for (const key in obj) {
       if (Object.prototype.hasOwnProperty.call(obj, key)) {
@@ -159,7 +155,6 @@ class RedisCacheService implements CacheService {
     return result;
   }
 
-  /** Helper to send commands with debug info */
   private async safeSend<T = any>(cmd: string, args: string[]): Promise<T> {
     const key = args[0];
     try {
@@ -180,7 +175,6 @@ class RedisCacheService implements CacheService {
     }
   }
 
-  /** Ensure key is cleared if type mismatch occurs */
   private async ensureHashKey(key: string): Promise<void> {
     const type = await this.safeSend("TYPE", [this.prefixed(key)]);
     if (type !== "none" && type !== "hash") {
@@ -198,7 +192,7 @@ class RedisCacheService implements CacheService {
     if (!data) return null;
     try {
       const parsed = JSON.parse(data);
-      // Recursively reconstruct all Buffers
+
       return this.reconstructBuffers(parsed);
     } catch {
       return data;
@@ -240,14 +234,13 @@ class RedisCacheService implements CacheService {
         out[shortKey] = undefined;
       } else {
         const parsed = JSON.parse(values[i] as string);
-        // Recursively reconstruct all Buffers
+
         out[shortKey] = this.reconstructBuffers(parsed);
       }
     }
     return out;
   }
 
-  /** Nested hash helpers */
   async addNested(key: string, nestedKey: string, value: RedisValue): Promise<void> {
     await this.ensureHashKey(key);
     await this.safeSend("HSET", [this.prefixed(key), nestedKey, JSON.stringify(value)]);
@@ -258,7 +251,7 @@ class RedisCacheService implements CacheService {
     const raw = await this.safeSend<string | null>("HGET", [this.prefixed(key), nestedKey]);
     if (raw === null) return undefined;
     const parsed = JSON.parse(raw);
-    // Recursively reconstruct all Buffers
+
     return this.reconstructBuffers(parsed);
   }
 

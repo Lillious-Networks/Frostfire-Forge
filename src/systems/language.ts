@@ -3,7 +3,7 @@ import swears from "../utility/swears.json";
 const GOOGLE_TRANSLATE_API_KEY = process.env.GOOGLE_TRANSLATE_API_KEY;
 const TRANSLATION_SERVICE = process.env.TRANSLATION_SERVICE || "google_translate";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-nano-2025-04-14"; // Default to cheapest model
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-nano-2025-04-14";
 import OpenAI from "openai";
 let openai: OpenAI | null = null;
 
@@ -36,19 +36,17 @@ const language = {
                 return response;
             })();
 
-            // Set 3 second timeout
             const timeoutPromise = new Promise((_, reject) => {
                 setTimeout(() => reject(new Error('Translation timeout')), 1000);
             });
 
             response = await Promise.race([translationPromise, timeoutPromise]) as string;
         } catch (error) {
-            // Default to google translate if error
+
             log.error(`Error translating text: ${error}`);
             return language.translate_google({ text, lang }) as any;
         }
 
-        // Replace any HTML entities
         const htmlEntities: { [key: string]: string } = {
             "&amp;": "&",
             "&lt;": "<",
@@ -64,12 +62,11 @@ const language = {
     translate_google: async (data: any) => {
         log.debug(`Translating text: ${data.text} to ${data.lang} using Google Translate`);
         const url = new URL("https://translation.googleapis.com/language/translate/v2");
-        // API Key
+
         url.searchParams.append('key', GOOGLE_TRANSLATE_API_KEY as string);
-        // Text to translate
+
         url.searchParams.append('q', data.text);
-        
-        // Target language
+
         url.searchParams.append('target', data.lang);
 
         const response = await fetch(url, {
@@ -79,8 +76,7 @@ const language = {
                 "Content-Type": "application/json",
             },
         }).then((res) => res.json());
-        
-        // Get any errors
+
         if (response.error) {
             log.error(`Error translating text: ${response.error.message}`);
             return;
@@ -88,7 +84,6 @@ const language = {
 
         let translatedText = response.data.translations[0].translatedText;
 
-        // If translating to English, check for swear words
         if (data.lang === "en") {
             for (const swear of swears) {
                 const swearRegex = new RegExp(swear.id, "gi");

@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 
-// Mock EventEmitter
 type EventCallback = (...args: any[]) => void;
 
 const eventListeners: Record<string, EventCallback[]> = {};

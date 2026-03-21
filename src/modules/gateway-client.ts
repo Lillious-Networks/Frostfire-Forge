@@ -1,8 +1,4 @@
-/**
- * Gateway Client Module
- *
- * Handles registration and communication with the gateway/load balancer
- */
+
 
 import log from "./logger.ts";
 import os from "os";
@@ -11,7 +7,7 @@ interface ServerRegistrationConfig {
   gatewayUrl: string;
   serverId: string;
   host: string;
-  publicHost?: string;  // External hostname for clients (optional, defaults to host)
+  publicHost?: string;
   port: number;
   wsPort: number;
   maxConnections: number;
@@ -25,42 +21,35 @@ class GatewayClient {
   private registered: boolean = false;
   private reconnectTimer?: Timer;
   private reconnectAttempts: number = 0;
-  private maxReconnectDelay: number = 30000; // Max 30 seconds between retries
+  private maxReconnectDelay: number = 30000;
 
   constructor(config: ServerRegistrationConfig) {
     this.config = config;
   }
 
-  /**
-   * Get the gateway URL, upgrading HTTP to HTTPS if gateway supports SSL
-   */
   private async getGatewayUrl(): Promise<string> {
     let url = this.config.gatewayUrl;
 
-    // If using HTTP, check if HTTPS is available and upgrade
     if (url.startsWith("http://")) {
       const httpsUrl = url.replace("http://", "https://").replace(":9999", ":9998");
       try {
-        // Try a simple HEAD request to see if HTTPS is available
+
         const testResponse = await fetch(httpsUrl, {
           method: "HEAD",
-          signal: AbortSignal.timeout(2000) // 2 second timeout
+          signal: AbortSignal.timeout(2000)
         });
         if (testResponse.ok || testResponse.status === 404) {
-          // HTTPS is available (404 is fine, just means the endpoint exists)
+
           url = httpsUrl;
         }
       } catch {
-        // HTTPS not available, stick with HTTP
+        console.warn(`HTTPS gateway not available at ${httpsUrl}, falling back to HTTP`);
       }
     }
 
     return url;
   }
 
-  /**
-   * Register this server with the gateway
-   */
   async register(quiet: boolean = false): Promise<boolean> {
     try {
       const gatewayUrl = await this.getGatewayUrl();
@@ -96,7 +85,7 @@ class GatewayClient {
 
       if (result.success) {
         this.registered = true;
-        this.reconnectAttempts = 0; // Reset counter on success
+        this.reconnectAttempts = 0;
         if (this.reconnectTimer) {
           clearTimeout(this.reconnectTimer);
           this.reconnectTimer = undefined;
@@ -104,7 +93,6 @@ class GatewayClient {
         log.success(`Successfully registered with gateway as ${this.config.serverId}`);
         this.startHeartbeat();
 
-        // Sync map checksums with gateway (non-blocking)
         this.syncMapChecksums().catch(error => {
           log.warn(`Map sync failed on registration: ${error}`);
         });
@@ -124,10 +112,6 @@ class GatewayClient {
     }
   }
 
-  /**
-   * Register with automatic retry using exponential backoff
-   * Blocks until successfully registered
-   */
   async registerWithRetry(): Promise<void> {
     log.info(`Connecting to gateway at ${this.config.gatewayUrl}...`);
 
@@ -140,13 +124,11 @@ class GatewayClient {
 
       this.reconnectAttempts++;
 
-      // Calculate exponential backoff: 1s, 2s, 4s, 8s, 16s, up to max (30s)
       const delay = Math.min(
         1000 * Math.pow(2, Math.min(this.reconnectAttempts - 1, 5)),
         this.maxReconnectDelay
       );
 
-      // Only log every 10 attempts to avoid spam
       if (this.reconnectAttempts === 1) {
         log.warn(`Failed to connect to gateway. Retrying...`);
       } else if (this.reconnectAttempts % 10 === 0) {
@@ -157,16 +139,13 @@ class GatewayClient {
     }
   }
 
-  /**
-   * Start automatic reconnection on disconnect
-   */
   private startReconnect() {
     if (this.reconnectTimer) {
-      return; // Already reconnecting
+      return;
     }
 
     const attemptReconnect = async () => {
-      const success = await this.register(true); // Quiet retry
+      const success = await this.register(true);
 
       if (!success) {
         this.reconnectAttempts++;
@@ -176,7 +155,6 @@ class GatewayClient {
           this.maxReconnectDelay
         );
 
-        // Only log every 10 attempts
         if (this.reconnectAttempts % 10 === 0) {
           log.warn(`Attempting to reconnect to gateway (attempt ${this.reconnectAttempts})...`);
         }
@@ -189,9 +167,6 @@ class GatewayClient {
     this.reconnectTimer = setTimeout(attemptReconnect, 1000);
   }
 
-  /**
-   * Get system CPU usage percentage
-   */
   private getCpuUsage(): number {
     const cpus = os.cpus();
     let totalIdle = 0;
@@ -211,19 +186,12 @@ class GatewayClient {
     return Math.max(0, Math.min(100, usage));
   }
 
-
-  /**
-   * Get process RAM usage (RSS - Resident Set Size) in MB
-   */
   private getProcessRamUsage(): number {
     const memUsage = process.memoryUsage();
-    // RSS = Resident Set Size (total memory allocated for the process)
-    return Math.round(memUsage.rss / (1024 * 1024) * 10) / 10; // Round to 1 decimal
+
+    return Math.round(memUsage.rss / (1024 * 1024) * 10) / 10;
   }
 
-  /**
-   * Send periodic heartbeats to the gateway
-   */
   private startHeartbeat() {
     let previousRtt: number | null = null;
 
@@ -244,7 +212,7 @@ class GatewayClient {
             ramUsage: ramUsage,
             authKey: process.env.GATEWAY_AUTH_KEY,
             timestamp: sendTime,
-            rtt: previousRtt // Send previous RTT for gateway to use
+            rtt: previousRtt
           })
         });
 
@@ -261,7 +229,7 @@ class GatewayClient {
           }
           this.startReconnect();
         } else {
-          // Store RTT for next heartbeat
+
           previousRtt = currentRtt;
         }
       } catch (error) {
@@ -276,21 +244,14 @@ class GatewayClient {
     }, this.config.heartbeatInterval);
   }
 
-  /**
-   * Update the active connection count
-   */
   setActiveConnections(count: number) {
     this.activeConnections = count;
   }
 
-  /**
-   * Sync map checksums with gateway and apply updates
-   */
   private async syncMapChecksums(): Promise<void> {
     try {
       const { calculateAllMapChecksums, writeMapContent } = await import("./checksums.ts");
 
-      // Calculate local map checksums
       const localChecksums = calculateAllMapChecksums();
 
       const gatewayUrl = await this.getGatewayUrl();
@@ -316,7 +277,6 @@ class GatewayClient {
         return;
       }
 
-      // Apply outdated maps
       if (result.outdatedMaps && result.outdatedMaps.length > 0) {
         log.info(`Syncing ${result.outdatedMaps.length} map(s) from gateway...`);
 
@@ -329,7 +289,6 @@ class GatewayClient {
           }
         }
 
-        // TODO: Reload all maps and collision data after sync
       } else {
         log.success("All maps are up to date");
       }
@@ -338,9 +297,6 @@ class GatewayClient {
     }
   }
 
-  /**
-   * Send updated map to gateway (called after tile editor save)
-   */
   async sendMapUpdateToGateway(mapName: string, mapData: any): Promise<boolean> {
     if (!this.registered) {
       log.warn("Not registered with gateway, cannot send map update");
@@ -379,16 +335,10 @@ class GatewayClient {
     }
   }
 
-  /**
-   * Check if registered with gateway
-   */
   isRegistered(): boolean {
     return this.registered;
   }
 
-  /**
-   * Unregister from the gateway (call on shutdown)
-   */
   async unregister() {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);

@@ -9,7 +9,7 @@ import fs from "fs";
 import path from "path";
 const authentication_queue = new Set<string>();
 const authentication_session_queue = new Set<string>();
-// Track pending authentications with their websocket, token, and language
+
 const pendingAuthentications = new Map<string, { ws: any; token: string; language: string }>();
 import playerCache from "../services/playermanager.ts";
 import layerManager from "../services/layermanager";
@@ -29,41 +29,44 @@ const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const mapPropertiesCache = await assetCache.get("mapProperties");
 import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
-// Load settings
+
 import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks } from "../modules/assetloader";
-import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable } from "../modules/spriteSheetManager";
+import { getPlayerSpriteSheetData, getSpriteSheetImage, isSpriteSheetSystemAvailable } from "../modules/spriteSheetManager";
 import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers } from "./aoi";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
-// Animation system configuration
 const useSpriteSheets = (settings as any).animation_system?.use_sprite_sheets ?? true;
+
+async function waitForSpritesReady() {
+  if (!useSpriteSheets || !(await isSpriteSheetSystemAvailable())) {
+    log.warn("Sprite sheet system not available");
+    return;
+  }
+  log.success("Sprite system ready");
+}
+
+export const spriteDataCacheReady = waitForSpritesReady();
 
 let restartScheduled: boolean;
 let restartTimers: ReturnType<typeof setTimeout>[];
 
 let globalStateRevision: number = 0;
 
-// Movement batching system
-export const movementBatchQueue = new Map<string, Map<string, any>>(); // Map of map -> Map of playerId -> movement
+export const movementBatchQueue = new Map<string, Map<string, any>>();
 
-// Adaptive batch interval based on player count
-let currentBatchInterval = 40; // Start at 40ms (25 Hz)
-const BATCH_INTERVAL_NORMAL = 40; // 25 Hz for <300 players
-const BATCH_INTERVAL_MEDIUM = 50; // 20 Hz for 300-600 players
-const BATCH_INTERVAL_HIGH = 75; // 13 Hz for 600-800 players
-const BATCH_INTERVAL_EXTREME = 125; // 8 Hz for 800+ players (critical for network bandwidth)
+let currentBatchInterval = 40;
+const BATCH_INTERVAL_NORMAL = 40;
+const BATCH_INTERVAL_MEDIUM = 50;
+const BATCH_INTERVAL_HIGH = 75;
+const BATCH_INTERVAL_EXTREME = 125;
 
-// Maximum buffered bytes before skipping updates (32KB - extremely aggressive for snappy feel)
-// Lower threshold = more frame skipping but instant responsiveness and minimal lag buildup
 const MAX_BUFFER_BACKPRESSURE = 1024 * 32;
 
-// Adaptive load tracking
 let lastFlushTime = Date.now();
 let flushCount = 0;
 
-// Function to adjust batch interval based on player count
 function adjustBatchInterval(): void {
   const playerCount = Object.keys(playerCache.list()).length;
 
@@ -82,20 +85,15 @@ function adjustBatchInterval(): void {
   }
 }
 
-// Flush and send batched movements with AOI filtering
-// OPTIMIZED: Pre-compute receiver sets to avoid O(n*m) complexity
 function flushMovementBatches() {
   const startTime = Date.now();
 
-  // Adaptive rate limiting based on flush performance
   const timeSinceLastFlush = startTime - lastFlushTime;
   lastFlushTime = startTime;
 
-  // If previous flush took >30ms, we're overloaded - skip some receivers
   const isOverloaded = timeSinceLastFlush > 30;
   let skippedDueToLoad = 0;
 
-  // Check if queue is too large and drop oldest entries
   const MAX_BATCH_QUEUE_SIZE = 1000;
   if (movementBatchQueue.size > MAX_BATCH_QUEUE_SIZE) {
     const toDrop = Math.floor(MAX_BATCH_QUEUE_SIZE * 0.1);
@@ -109,18 +107,14 @@ function flushMovementBatches() {
   for (const [_mapName, playerMovements] of movementBatchQueue.entries()) {
     if (playerMovements.size === 0) continue;
 
-    // Direct access to cache object - avoid Map overhead
     const allPlayers = playerCache.list();
 
-    // OPTIMIZATION: Pre-compute receiver sets for all players ONCE
-    // This reduces complexity from O(n*m) to O(n+m) where n=players, m=movements
     const receiverSets = new Map<string, Set<string>>();
 
     for (const playerId in allPlayers) {
       const player = allPlayers[playerId];
       if (!player || !player.aoi) continue;
 
-      // Each player can receive from: self + players in their AOI
       const receivers = new Set<string>([playerId]);
       if (player.aoi.playersInAOI) {
         for (const aoiPlayerId of player.aoi.playersInAOI) {
@@ -130,20 +124,15 @@ function flushMovementBatches() {
       receiverSets.set(playerId, receivers);
     }
 
-    // Build per-receiver movement lists by iterating movements once
-    // Now O(m*k) where k is average AOI size (~30) instead of O(n*m) where n=all players (~1000)
     const receiverMovements = new Map<string, any[]>();
 
     for (const [movingPlayerId, movementData] of playerMovements.entries()) {
       const movingPlayer = allPlayers[movingPlayerId];
       if (!movingPlayer || !movingPlayer.aoi) continue;
 
-      // Find all players who can see this mover
-      // Player can see mover if mover is in their receiver set
       for (const [potentialReceiverId, receiversForPlayer] of receiverSets.entries()) {
         if (!receiversForPlayer.has(movingPlayerId)) continue;
 
-        // Apply stealth visibility rules
         if (movementData.isStealth) {
           const receiver = allPlayers[potentialReceiverId];
           if (!receiver || !receiver.isAdmin) continue;
@@ -156,12 +145,9 @@ function flushMovementBatches() {
       }
     }
 
-    // Send batched movements to each receiver with backpressure check
     let sentCount = 0;
     const receiverArray = Array.from(receiverMovements.entries());
 
-    // Prioritize: send to fewer receivers first (they're less loaded)
-    // This ensures at least some players get smooth updates
     receiverArray.sort((a, b) => a[1].length - b[1].length);
 
     for (const [receiverId, movements] of receiverArray) {
@@ -170,9 +156,6 @@ function flushMovementBatches() {
 
       const bufferedAmount = receiver.ws.bufferedAmount;
 
-      // Hard cutoff for snappy feel - no gradual frame skipping
-      // If buffer exceeds 32KB, drop the update entirely
-      // This prevents lag buildup and ensures animations stop immediately
       if (bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
         skippedDueToLoad++;
         continue;
@@ -182,8 +165,6 @@ function flushMovementBatches() {
       sendPacket(receiver.ws, batchPacket);
       sentCount++;
 
-      // Adaptive throttling: if overloaded and taking too long, stop processing
-      // But ensure we send to at least 100 receivers for minimum service level
       if (isOverloaded && sentCount > 100 && Date.now() - startTime > 25) {
         skippedDueToLoad += receiverArray.length - sentCount;
         break;
@@ -191,14 +172,12 @@ function flushMovementBatches() {
     }
   }
 
-  // Clear all batches
   movementBatchQueue.clear();
 
   flushCount++;
   if (flushCount % 100 === 0) {
     const playerCount = Object.keys(playerCache.list()).length;
 
-    // Calculate average buffer usage across all connected players
     const allPlayersForStats = playerCache.list();
     const allPlayersList = Object.values(allPlayersForStats);
     const connectedPlayers = allPlayersList.filter(p => p?.ws && p.ws.readyState === 1);
@@ -212,39 +191,97 @@ function flushMovementBatches() {
   }
 }
 
-// Spawn player batching system
-export const spawnBatchQueue = new Map<string, Map<string, any>>(); // Map of receivingPlayerId -> Map of spawnedPlayerId -> spawnData
+export const spawnBatchQueue = new Map<string, Map<string, any>>();
 
-// Flush and send batched spawn packets
 async function flushSpawnBatches() {
   if (spawnBatchQueue.size === 0) return;
+
+  log.info(`[BATCH] flushSpawnBatches: queue has ${spawnBatchQueue.size} entries`);
 
   const allPlayers = playerCache.list();
 
   for (const [receivingPlayerId, spawnedPlayers] of spawnBatchQueue.entries()) {
-    if (spawnedPlayers.size === 0) continue;
+    if (spawnedPlayers.size === 0) {
+      log.info(`[BATCH] Skipping ${receivingPlayerId}: empty spawn set`);
+      continue;
+    }
 
     const receivingPlayer = allPlayers[receivingPlayerId];
-    // Skip if player or websocket is missing/closed
-    if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
+    log.warn(`[BATCH] Processing spawns for ${receivingPlayerId} - player in cache: ${!!receivingPlayer}`);
 
-    // Skip if too much backpressure (hard cutoff for snappy feel)
-    if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) continue;
+    if (!receivingPlayer) {
+      log.warn(`[BATCH] Skipping ${receivingPlayerId}: player not in cache`);
+      continue;
+    }
+    if (!receivingPlayer.ws) {
+      log.warn(`[BATCH] Skipping ${receivingPlayerId}: no websocket`);
+      continue;
+    }
+    log.warn(`[BATCH] Websocket readyState: ${receivingPlayer.ws.readyState}`);
+    if (receivingPlayer.ws.readyState !== 1) {
+      log.warn(`[BATCH] Skipping ${receivingPlayerId}: websocket not open (state=${receivingPlayer.ws.readyState})`);
+      continue;
+    }
+
+    if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
+      log.warn(`[BATCH] Skipping ${receivingPlayerId}: backpressure too high (${receivingPlayer.ws.bufferedAmount} > ${MAX_BUFFER_BACKPRESSURE})`);
+      continue;
+    }
 
     const spawnsForThisPlayer = Array.from(spawnedPlayers.values());
 
     if (spawnsForThisPlayer.length > 0) {
-      // Send as LOAD_PLAYERS packet format (array of player data)
+
+      const playersWithSprites = await Promise.all(
+        spawnsForThisPlayer.map(async (queuedPlayer) => {
+
+          const fullPlayer = allPlayers[queuedPlayer.id];
+          if (!fullPlayer) {
+            return { ...queuedPlayer, spriteData: null };
+          }
+
+          const animationName = getAnimationNameForDirection(
+            fullPlayer.location.position?.direction || "down",
+            !!fullPlayer.moving,
+            false,
+            undefined,
+            !!fullPlayer.casting
+          );
+          const playerSpriteData = await getPlayerSpriteSheetData(animationName, fullPlayer.equipment || null);
+
+          let spriteData = null;
+          if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite) {
+            const bodyImageData = playerSpriteData.bodySprite ? await getSpriteSheetImage(playerSpriteData.bodySprite.name) : null;
+            const headImageData = playerSpriteData.headSprite ? await getSpriteSheetImage(playerSpriteData.headSprite.name) : null;
+
+            spriteData = {
+              bodySprite: playerSpriteData.bodySprite ? { ...playerSpriteData.bodySprite, imageData: bodyImageData } : null,
+              headSprite: playerSpriteData.headSprite ? { ...playerSpriteData.headSprite, imageData: headImageData } : null,
+              animationState: playerSpriteData.animationState,
+            };
+          }
+
+          return {
+            ...queuedPlayer,
+            spriteData: spriteData,
+          };
+        })
+      );
+
       const loadPlayersData = {
-        players: spawnsForThisPlayer,
+        players: playersWithSprites,
         snapshotRevision: globalStateRevision
       };
-      sendPacket(receivingPlayer.ws, packetManager.loadPlayers(loadPlayersData));
 
-      // Batch animations for all spawned players
-      const animationPromises = spawnsForThisPlayer.map(async (spawnData) => {
+      const packets = packetManager.loadPlayers(loadPlayersData);
+      sendPacket(receivingPlayer.ws, packets);
+
+      const animationPromises = playersWithSprites.map(async (spawnData) => {
         const spawnedPlayer = allPlayers[spawnData.id];
-        if (!spawnedPlayer) return null;
+        if (!spawnedPlayer) {
+          log.warn(`[BATCH] spawnedPlayer null for ${spawnData.id}`);
+          return null;
+        }
 
         const animationName = getAnimationNameForDirection(
           spawnedPlayer.location.position.direction,
@@ -254,28 +291,23 @@ async function flushSpawnBatches() {
           spawnedPlayer.casting || false
         );
 
-        // Return animation data instead of sending immediately
-        return await getAnimationData(animationName, spawnData.id);
+        const animData = await getAnimationData(animationName, spawnData.id);
+        return animData;
       });
 
-      // Wait for all animations to be prepared
       const animationDataArray = (await Promise.all(animationPromises)).filter(a => a !== null);
 
-      // Send all animations in a single batched packet (huge bandwidth savings!)
       if (animationDataArray.length > 0) {
         sendPacket(receivingPlayer.ws, packetManager.batchSpriteSheetAnimation(animationDataArray));
       }
     }
   }
 
-  // Clear all batches
   spawnBatchQueue.clear();
 }
 
-// Despawn/disconnect batching system
-export const despawnBatchQueue = new Map<string, Set<string>>(); // Map of receivingPlayerId -> Set of despawnedPlayerIds
+export const despawnBatchQueue = new Map<string, Set<string>>();
 
-// Flush and send batched despawn packets
 function flushDespawnBatches() {
   if (despawnBatchQueue.size === 0) return;
 
@@ -285,54 +317,56 @@ function flushDespawnBatches() {
     if (despawnedPlayerIds.size === 0) continue;
 
     const receivingPlayer = allPlayers[receivingPlayerId];
-    // Skip if player or websocket is missing/closed
+
     if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
 
-    // Skip if too much backpressure (hard cutoff for snappy feel)
     if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) continue;
 
     const despawnsArray = Array.from(despawnedPlayerIds);
 
     if (despawnsArray.length > 0) {
-      // Send as array of disconnect/despawn packets
+
       const despawnData = despawnsArray.map(playerId => ({ id: playerId, reason: "disconnect" }));
       sendPacket(receivingPlayer.ws, packetManager.batchDisconnectPlayer(despawnData));
     }
   }
 
-  // Clear all batches
   despawnBatchQueue.clear();
 }
 
-// Master flush function - flushes all batch types
 async function flushAllBatches() {
   flushMovementBatches();
   await flushSpawnBatches();
   flushDespawnBatches();
 }
 
-// Start the unified batching timer with adaptive interval
-// Initial interval, will be adjusted based on player count
-let batchTimer = setInterval(flushAllBatches, currentBatchInterval);
+let batchTimer: ReturnType<typeof setTimeout> | null = null;
 
-// Adjust batch interval every 5 seconds based on player count
+async function scheduleBatchFlush() {
+  try {
+    await flushAllBatches();
+  } catch (error) {
+    log.error(`[BATCH] Error during batch flush: ${error}`);
+  } finally {
+
+    batchTimer = setTimeout(scheduleBatchFlush, currentBatchInterval);
+  }
+}
+
+batchTimer = setTimeout(scheduleBatchFlush, currentBatchInterval);
+
 setInterval(() => {
   const oldInterval = currentBatchInterval;
   adjustBatchInterval();
 
-  // Restart timer if interval changed
   if (currentBatchInterval !== oldInterval) {
-    clearInterval(batchTimer);
-    batchTimer = setInterval(flushAllBatches, currentBatchInterval);
+    if (batchTimer) clearTimeout(batchTimer);
+    batchTimer = setTimeout(scheduleBatchFlush, currentBatchInterval);
   }
 }, 5000);
 
-/**
- * Clear all queued batch data for a disconnecting player
- * This prevents packets from being sent to/about disconnected players
- */
 export function clearBatchQueuesForPlayer(playerId: string, mapName: string) {
-  // Clear movement data for this player
+
   const mapMovements = movementBatchQueue.get(mapName);
   if (mapMovements) {
     mapMovements.delete(playerId);
@@ -341,14 +375,12 @@ export function clearBatchQueuesForPlayer(playerId: string, mapName: string) {
     }
   }
 
-  // Clear any spawns queued TO this player
   const spawnsToPlayer = spawnBatchQueue.get(playerId);
   if (spawnsToPlayer && spawnsToPlayer.size > 0) {
     log.debug(`[CLEAR] Removing ${spawnsToPlayer.size} queued spawns TO ${playerId}`);
   }
   spawnBatchQueue.delete(playerId);
 
-  // Clear spawns queued FROM this player (to others)
   let clearedSpawnsFrom = 0;
   for (const [receivingPlayerId, spawnedPlayers] of spawnBatchQueue.entries()) {
     if (spawnedPlayers.has(playerId)) {
@@ -363,33 +395,27 @@ export function clearBatchQueuesForPlayer(playerId: string, mapName: string) {
     log.debug(`[CLEAR] Removed spawn of ${playerId} FROM ${clearedSpawnsFrom} player queues`);
   }
 
-  // Clear any despawns queued TO this player
   despawnBatchQueue.delete(playerId);
 
-  // Clear despawns queued FROM this player (to others) - not needed as despawn already happened
 }
 
 const npcs = await assetCache.get("npcs");
 const particles = await assetCache.get("particles");
 
-// Set up worker message listener ONCE at module level
 const authWorker = await getAuthWorker();
 authWorker.on("message", async (result: any) => {
   const status = result as Authentication;
   const sessionId = result.id;
 
-  // Look up the pending authentication
   const pending = pendingAuthentications.get(sessionId);
-  if (!pending) return; // No matching session found
+  if (!pending) return;
 
   const { ws, token, language } = pending;
 
-  // Clean up
   pendingAuthentications.delete(sessionId);
   authentication_queue.delete(token);
   authentication_session_queue.delete(sessionId);
 
-  // An error occurred during authentication
   if (status.error && !status.authenticated) {
     sendPacket(ws, packetManager.loginFailed());
     ws.close(1008, status.error);
@@ -406,7 +432,7 @@ authWorker.on("message", async (result: any) => {
 
   const playerData = status.data as PlayerData;
   if (status.authenticated && status.completed && playerData) {
-    // Reset noclip/stealth in background (fire and forget - don't block login)
+
     if (!playerData.isAdmin && playerData.isNoclip) {
       player.toggleNoclip(playerData.username).catch(err =>
         log.error(`Failed to toggle noclip: ${err}`)
@@ -446,13 +472,11 @@ authWorker.on("message", async (result: any) => {
     const incompleteQuest = (playerData.questlog?.incomplete as unknown as Quest[]) || [];
     const completedQuest = (playerData.questlog?.completed as unknown as Quest[]) || [];
 
-    // Fetch fresh worlds from Redis with fallback to cache
     const worldsResult = await assetCache.get("worlds").catch(err => {
       log.error(`[WorldsFetchError] Failed to fetch worlds: ${err}`);
       return worldsCache;
     });
 
-    // Parse worlds data
     const worldData: WorldData[] = Array.isArray(worldsResult)
       ? worldsResult
       : JSON.parse(worldsResult);
@@ -470,21 +494,17 @@ authWorker.on("message", async (result: any) => {
 
     if (world) {
       world.players = (world.players || 0) + 1;
-      // Don't await - let Redis write happen in background
-      // Use JSON.stringify for consistency with onDisconnect handler
+
       assetCache.set("worlds", JSON.stringify(worldData)).catch(err =>
         log.error(`Failed to update world player count: ${err}`)
       );
     }
 
-    // Send weather data - use already-fetched world instead of redundant lookup
     const weather = world?.weather || "clear";
     if (weather) {
       sendPacket(ws, packetManager.weather({ weather }));
     }
 
-    // Add player to cache
-    // Limit array sizes to prevent memory bloat
     const limitedInventory = Array.isArray(playerData.inventory) ? playerData.inventory.slice(0, 30) : [];
     const limitedFriends = Array.isArray(playerData.friends) ? playerData.friends.slice(0, 100) : [];
     const limitedCollectables = Array.isArray(playerData.collectables) ? playerData.collectables.slice(0, 50) : [];
@@ -537,14 +557,12 @@ authWorker.on("message", async (result: any) => {
 
     const stats = await player.synchronizeStats(playerData.username);
 
-    // Handle case where stats synchronization fails
     if (!stats) {
       sendPacket(ws, packetManager.loginFailed());
       ws.close(1008, "Failed to load player stats");
       return;
     }
 
-    // Prevent health and stamina from exceeding max values
     if (stats.stamina > stats.total_max_stamina) {
       stats.stamina = stats.total_max_stamina;
     }
@@ -553,17 +571,14 @@ authWorker.on("message", async (result: any) => {
       stats.health = stats.total_max_health;
     }
 
-    // Update the player cache with synchronized stats (use session ID, not database user ID)
     const _pcache = playerCache.get(ws.data.id);
     if (_pcache) {
       _pcache.stats = stats;
       playerCache.set(_pcache.id, _pcache);
 
-      // Initialize AOI state for the player
       await initializePlayerAOI(_pcache);
       playerCache.set(_pcache.id, _pcache);
 
-      // Add player to map index for optimized map-based lookups
       mapIndex.addPlayer(_pcache.id, _pcache.location.map);
     }
 
@@ -578,14 +593,26 @@ authWorker.on("message", async (result: any) => {
     sendPacket(ws, packetManager.loadMap(mapData));
 
     setImmediate(async () => {
-      // Get current player from cache
+
       const currentPlayer = playerCache.get(ws.data.id);
       if (!currentPlayer) return;
 
-      // Update AOI to discover nearby players and queue spawn/despawn packets for batching
       await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
 
-      // Send self spawn packet
+      const animationName = getAnimationNameForDirection(position?.direction || "down", false, false, undefined, false);
+      const selfSpriteData = await getPlayerSpriteSheetData(animationName, _pcache?.equipment || null);
+
+      let spriteDataForSelf = null;
+      if (selfSpriteData.bodySprite || selfSpriteData.headSprite) {
+        const bodyImageData = selfSpriteData.bodySprite ? await getSpriteSheetImage(selfSpriteData.bodySprite.name) : null;
+        const headImageData = selfSpriteData.headSprite ? await getSpriteSheetImage(selfSpriteData.headSprite.name) : null;
+        spriteDataForSelf = {
+          bodySprite: selfSpriteData.bodySprite ? { ...selfSpriteData.bodySprite, imageData: bodyImageData } : null,
+          headSprite: selfSpriteData.headSprite ? { ...selfSpriteData.headSprite, imageData: headImageData } : null,
+          animationState: selfSpriteData.animationState,
+        };
+      }
+
       const spawnDataForAll = {
         id: ws.data.id,
         userid: playerData.id,
@@ -602,6 +629,7 @@ authWorker.on("message", async (result: any) => {
         isNoclip: playerData.isNoclip,
         stats: stats || {},
         animation: null,
+        spriteData: spriteDataForSelf,
         friends: playerData.friends || [],
         party_id: playerData.party_id ? Number(playerData.party_id) : null,
         party: playerData.party || [],
@@ -609,23 +637,36 @@ authWorker.on("message", async (result: any) => {
       };
       sendPacket(ws, packetManager.spawnPlayer(spawnDataForAll));
 
-      // Capture snapshot revision RIGHT BEFORE reading positions to ensure consistency
-      // This prevents race conditions where positions are read after players have moved
       const snapshotRevision = globalStateRevision;
 
-      // Build LOAD_PLAYERS data from players in AOI
       const playerDataForLoad: any[] = [];
       const playersInAOI = Array.from(currentPlayer.aoi.playersInAOI)
         .map(id => playerCache.get(id as string))
         .filter(p => p && p.ws);
 
       for (const p of playersInAOI) {
+
+        const animationName = getAnimationNameForDirection(p.location.position?.direction || "down", !!p.moving, false, undefined, !!p.casting);
+        const playerSpriteData = await getPlayerSpriteSheetData(animationName, p.equipment || null);
+
+        let spriteData = null;
+        if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite) {
+          const bodyImageData = playerSpriteData.bodySprite ? await getSpriteSheetImage(playerSpriteData.bodySprite.name) : null;
+          const headImageData = playerSpriteData.headSprite ? await getSpriteSheetImage(playerSpriteData.headSprite.name) : null;
+
+          spriteData = {
+            bodySprite: playerSpriteData.bodySprite ? { ...playerSpriteData.bodySprite, imageData: bodyImageData } : null,
+            headSprite: playerSpriteData.headSprite ? { ...playerSpriteData.headSprite, imageData: headImageData } : null,
+            animationState: playerSpriteData.animationState,
+          };
+        }
+
         const loadPlayerData = {
           id: p.id,
           userid: p.userid,
           location: {
             map: p.location.map,
-            // Clone position to prevent it from being updated while building packet
+
             x: Number(p.location.position.x) || 0,
             y: Number(p.location.position.y) || 0,
             direction: p.location.position?.direction || "down",
@@ -638,6 +679,7 @@ authWorker.on("message", async (result: any) => {
           isNoclip: p.isNoclip,
           stats: p.stats,
           animation: null,
+          spriteData: spriteData,
           mounted: p.mounted,
         }
         playerDataForLoad.push(loadPlayerData);
@@ -650,7 +692,6 @@ authWorker.on("message", async (result: any) => {
 
       sendPacket(ws, packetManager.loadPlayers(loadPlayersData));
 
-      // Send animations for players in AOI
       if (playerDataForLoad.length > 0) {
         playerDataForLoad.forEach(async (pl) => {
           if (pl.id !== ws.data.id && pl.location.direction) {
@@ -664,14 +705,11 @@ authWorker.on("message", async (result: any) => {
         });
       }
 
-      // Force immediate position sync: collect movements from the queue and send to new player
-      // This ensures the new player gets current positions even if they arrive during client loading
       const mapName = currentPlayer.location.map;
       const queuedMovements = movementBatchQueue.get(mapName);
       if (queuedMovements && queuedMovements.size > 0) {
         const movementsForNewPlayer: any[] = [];
 
-        // Get all movements for players in this player's AOI
         for (const playerId of currentPlayer.aoi.playersInAOI) {
           const movement = queuedMovements.get(playerId as string);
           if (movement) {
@@ -679,20 +717,18 @@ authWorker.on("message", async (result: any) => {
           }
         }
 
-        // Send immediate position update if we have any movements queued
         if (movementsForNewPlayer.length > 0) {
           sendPacket(ws, packetManager.batchMoveXY(movementsForNewPlayer));
         }
       }
 
-      // Send initial animation for self
       if (position?.direction) {
         await sendAnimationTo(
           ws,
           getAnimationNameForDirection(position.direction, false, false, undefined, false),
           ws.data.id
         );
-        // Broadcast to players in AOI using AOI broadcast
+
         const animationData = packetManager.animation({
           id: ws.data.id,
           name: getAnimationNameForDirection(position.direction, false, false, undefined, false)
@@ -702,12 +738,10 @@ authWorker.on("message", async (result: any) => {
 
     });
     setImmediate(() => {
-      // Get fresh player data at send time
+
       const currentPlayerData = playerCache.get(ws.data.id);
       if (!currentPlayerData) return;
 
-      // Build username index for O(1) lookups instead of O(n) find operations
-      // This changes complexity from O(f*n) to O(n + f)
       const allPlayers = playerCache.list();
       const usernameIndex = new Map<string, any>();
 
@@ -717,15 +751,14 @@ authWorker.on("message", async (result: any) => {
         }
       }
 
-      // Only iterate through the new player's friends list instead of all players
       const newPlayerFriends = currentPlayerData.friends || [];
 
       for (const friendUsername of newPlayerFriends) {
-        // O(1) lookup instead of O(n) find
+
         const onlineFriend = usernameIndex.get(friendUsername.toLowerCase());
 
         if (onlineFriend) {
-          // Notify the friend that the new player is online
+
           sendPacket(
             onlineFriend.ws,
             packetManager.updateOnlineStatus({
@@ -734,7 +767,6 @@ authWorker.on("message", async (result: any) => {
             })
           );
 
-          // Notify the new player that this friend is online
           sendPacket(
             currentPlayerData.ws,
             packetManager.updateOnlineStatus({
@@ -793,7 +825,6 @@ authWorker.on("message", async (result: any) => {
       }
     });
 
-    // Send client config BEFORE inventory so the config is loaded first
     sendPacket(ws, packetManager.clientConfig(playerData.config || []));
     sendPacket(ws, packetManager.inventory(playerData.inventory));
     sendPacket(ws, packetManager.equipment(playerData.equipment || {}));
@@ -809,9 +840,9 @@ export default async function packetReceiver(
   message: string
 ) {
   try {
-    // Check if the message is empty
+
     if (!message) return ws.close(1008, "Empty message");
-    // Check if the message is too large
+
     const parsedMessage: Packet = tryParsePacket(message) as Packet;
     if (
       message.length >
@@ -820,14 +851,14 @@ export default async function packetReceiver(
       !settings?.websocket?.benchmarkenabled
     )
       return ws.close(1009, "Message too large");
-    // Check if the packet is malformed
+
     if (!parsedMessage) return ws.close(1007, "Malformed message");
     const data = parsedMessage?.data;
     const type = parsedMessage?.type;
-    // Check if the packet has a type and data
+
     if (!type || (!data && data != null))
       return ws.close(1007, "Malformed message");
-    // Check if the packet type is valid
+
     if (
       Object.values(packetTypes).indexOf(
         parsedMessage?.type as unknown as string
@@ -838,7 +869,6 @@ export default async function packetReceiver(
 
     const currentPlayer = playerCache.get(ws.data.id) || null;
 
-    // Handle the packet
     switch (type) {
       case "BENCHMARK": {
         (data as any)["returned_timestamp"] = Date.now();
@@ -859,17 +889,15 @@ export default async function packetReceiver(
       }
       case "TIME_SYNC": {
         if (!currentPlayer) return;
-        // Update timestamp in memory only - no need to call playerCache.set()
-        // since currentPlayer is already a reference to the cached object
+
         currentPlayer.lastUpdated = performance.now();
-        // Echo back TIME_SYNC for latency measurement
+
         sendPacket(ws, packetManager.timeSync(data));
         break;
       }
       case "AUTH": {
         const token = data?.toString() as string;
 
-        // No token provided
         if (!token) {
           sendPacket(ws, packetManager.loginFailed());
           ws.close(1008, "Invalid token");
@@ -882,26 +910,22 @@ export default async function packetReceiver(
           break;
         }
 
-        // Check if this session is already authenticating
         if (authentication_session_queue.has(ws.data.id)) {
           sendPacket(ws, packetManager.loginFailed());
           ws.close(1008, "Session authentication already in progress");
           break;
         }
 
-        // Add token and session to the authentication queues
         authentication_queue.add(token);
         authentication_session_queue.add(ws.data.id);
 
-        // Register this pending authentication
         pendingAuthentications.set(ws.data.id, { ws, token, language: parsedMessage?.language || "en" });
 
-        // Send authentication request to worker (handler is set up at module level)
         authWorker.postMessage({ token, id: ws.data.id });
 
         break;
       }
-      // TODO:Move this to the logout packet
+
       case "LOGOUT": {
         if (!currentPlayer) return;
         player.setLocation(
@@ -925,7 +949,7 @@ export default async function packetReceiver(
       case "MOVEXY": {
         if (!currentPlayer) return;
 
-        const baseSpeed = 6; // Balanced for 30Hz update rate (6 * 30 = 180 pixels/sec)
+        const baseSpeed = 6;
         const mountSpeedMultiplier = 1.35;
         const speed = currentPlayer.mounted ? baseSpeed * mountSpeedMultiplier : baseSpeed;
         const lastDirection =
@@ -945,10 +969,9 @@ export default async function packetReceiver(
         ];
 
         if (direction === "abort") {
-          // Unregister from game loop instead of clearing interval
+
           gameLoop.unregisterMovingPlayer(currentPlayer.id);
           currentPlayer.moving = false;
-          // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
           globalStateRevision++;
           await sendPositionAnimation(
@@ -967,7 +990,7 @@ export default async function packetReceiver(
         if (currentPlayer.casting && currentPlayer.interruptableSpell) {
           currentPlayer.casting = false;
           currentPlayer.lastInterruptTime = performance.now();
-        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
+
           const playersInMap = filterPlayersByMap(currentPlayer.location.map);
           playersInMap.forEach((player) => {
             sendPacket(
@@ -976,7 +999,6 @@ export default async function packetReceiver(
             );
           });
 
-          // Update animation to revert from casting immediately
           globalStateRevision++;
           await sendPositionAnimation(
             ws,
@@ -994,7 +1016,6 @@ export default async function packetReceiver(
 
         currentPlayer.location.position.direction = direction || "down";
         currentPlayer.moving = true;
-        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
         globalStateRevision++;
         await sendPositionAnimation(
@@ -1008,13 +1029,12 @@ export default async function packetReceiver(
           currentPlayer.casting || false
         );
 
-        // Unregister from game loop if already moving (will re-register below)
         if (gameLoop.isPlayerMoving(currentPlayer.id)) {
           gameLoop.unregisterMovingPlayer(currentPlayer.id);
         }
 
         const movePlayer = async () => {
-          // Stop movement if websocket closed
+
           if (!ws || ws.readyState !== 1) {
             gameLoop.unregisterMovingPlayer(currentPlayer.id);
             return;
@@ -1039,14 +1059,13 @@ export default async function packetReceiver(
           if (!offset) {
             currentPlayer.moving = false;
             gameLoop.unregisterMovingPlayer(currentPlayer.id);
-            // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
+
             return;
           }
 
           tempPosition.x = Math.round(tempPosition.x + offset.dx);
           tempPosition.y = Math.round(tempPosition.y + offset.dy);
 
-          // Always check collision to prevent getting stuck in walls
           const collision = await player.checkIfWouldCollide(
             currentPlayer.location.map,
             {
@@ -1058,7 +1077,7 @@ export default async function packetReceiver(
               width: playerWidth,
               height: playerHeight,
             },
-            mapPropertiesCache // Pass cached mapProperties to avoid Redis calls
+            mapPropertiesCache
           );
 
           const isColliding = collision?.value === true;
@@ -1070,7 +1089,6 @@ export default async function packetReceiver(
           if (isColliding && !currentPlayer.isNoclip) {
             gameLoop.unregisterMovingPlayer(currentPlayer.id);
             currentPlayer.moving = false;
-            // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
             globalStateRevision++;
             await sendPositionAnimation(
@@ -1086,7 +1104,6 @@ export default async function packetReceiver(
 
             const reason = collision?.reason;
 
-            // Send collision tile for debugging
             if (reason === "tile_collision" && collision?.tile) {
               sendPacket(ws, packetManager.collisionDebug({
                 tileX: collision.tile.x,
@@ -1111,7 +1128,6 @@ export default async function packetReceiver(
                 }
               );
 
-              // Only proceed if result is an object with affectedRows property
               if (
                 result &&
                 typeof result === "object" &&
@@ -1124,7 +1140,6 @@ export default async function packetReceiver(
                   y: warp.position.y || 0
                 };
 
-                // Handle AOI for map change
                 await handleMapChangeAOI(currentPlayer, newMap, newPosition, sendAnimationTo, spawnBatchQueue);
 
                 currentPlayer.location.position.direction = currentPlayer.location.position?.direction || "down";
@@ -1133,7 +1148,7 @@ export default async function packetReceiver(
                   sendPacket(ws, packetManager.reconnect());
                 } else {
                   globalStateRevision++;
-                  // Use short keys to reduce packet size
+
                   const movementData = {
                     i: ws.data.id,
                     d: {
@@ -1154,27 +1169,22 @@ export default async function packetReceiver(
 
           globalStateRevision++;
 
-          // Rate-limit AOI updates to every 10 frames (every 500ms at 20 FPS)
-          // This reduces load dramatically with high player counts
           const aoiUpdateCounter = gameLoop.getAOIUpdateCounter(currentPlayer.id);
           if (aoiUpdateCounter % 10 === 0 && shouldUpdateAOI(currentPlayer)) {
             await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
           }
 
-          // Use short keys to reduce packet size (40% smaller with compression)
           const movementData = {
-            i: ws.data.id,  // id
-            d: {            // _data
+            i: ws.data.id,
+            d: {
               x: Number(currentPlayer.location.position.x),
               y: Number(currentPlayer.location.position.y),
-              dr: currentPlayer.location.position.direction  // direction
+              dr: currentPlayer.location.position.direction
             },
-            r: globalStateRevision,  // revision
-            s: currentPlayer.isStealth ? 1 : 0  // isStealth as bit
+            r: globalStateRevision,
+            s: currentPlayer.isStealth ? 1 : 0
           };
 
-          // Add movement to batch queue for AOI-filtered broadcasting
-          // Check websocket is still open before queuing
           if (ws.readyState === 1) {
             const mapName = currentPlayer.location.map;
             if (!movementBatchQueue.has(mapName)) {
@@ -1184,11 +1194,8 @@ export default async function packetReceiver(
           }
         };
 
-        // Execute first movement step immediately
         await movePlayer();
 
-        // Register with centralized game loop instead of per-player interval
-        // This replaces 100+ separate timers with a single game loop
         gameLoop.registerMovingPlayer(currentPlayer.id, movePlayer);
         break;
       }
@@ -1196,7 +1203,7 @@ export default async function packetReceiver(
         if (!currentPlayer?.isAdmin) return;
         currentPlayer.location.position = data;
         currentPlayer.location.position.direction = "down";
-        // Round position values to nearest tenth
+
         currentPlayer.location.position.x = Math.round(
           Number(currentPlayer.location.position.x) * 10
         ) / 10;
@@ -1205,12 +1212,10 @@ export default async function packetReceiver(
         ) / 10;
         globalStateRevision++;
 
-        // Update AOI after teleport
         if (shouldUpdateAOI(currentPlayer)) {
           await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
         }
 
-        // Broadcast movement using AOI
         const movementData = {
           id: ws.data.id,
           _data: {
@@ -1238,7 +1243,6 @@ export default async function packetReceiver(
         const message = messageData?.message;
         const mode = messageData?.mode;
 
-        // Send message to the sender
         const sendMessageToPlayer = (playerWs: any, message: string) => {
           const chatData = {
             id: ws.data.id,
@@ -1273,7 +1277,6 @@ export default async function packetReceiver(
           decryptedMessage = message;
         }
 
-        // Send the message to the sender
         sendMessageToPlayer(ws, decryptedMessage as string);
 
         const cache = playerCache.list();
@@ -1283,18 +1286,17 @@ export default async function packetReceiver(
         );
 
         if (currentPlayer.isStealth) {
-          // Filter only admins in the same map
+
           playersInMap = playersInMap.filter((p) => p.isAdmin);
         }
 
-        // If there are no players in the map, return
         if (playersInMap.length === 0) return;
 
         const translations: Record<string, string> = {};
 
         playersInMap.forEach(async (player) => {
           if (!translations[player.language]) {
-            // Skip translation if target language matches source language
+
             translations[player.language] =
               player.language === currentPlayer.language
                 ? decryptedMessage
@@ -1334,12 +1336,11 @@ export default async function packetReceiver(
         if (!currentPlayer) return;
         const location = data as unknown as LocationData;
         const cache = playerCache.list();
-        // Get current player data from cache
-        // only get players that are in the same map
+
         const players = Object.values(cache).filter(
           (p) => p.location.map === currentPlayer.location.map
         );
-        // Find the first player that is closest to the selected location within a 25px radius
+
         const selectedPlayer = players.find(
           (p) =>
             Math.abs(p.location.position.x - Math.floor(Number(location.x))) <
@@ -1372,7 +1373,7 @@ export default async function packetReceiver(
           ws,
           500,
           currentPlayer.location.map
-        ).filter((p) => !p.isStealth && p.id !== currentPlayer.id); // Filter out stealth players and self
+        ).filter((p) => !p.isStealth && p.id !== currentPlayer.id);
 
         const closestPlayer = player.findClosestPlayer(
           currentPlayer,
@@ -1394,7 +1395,7 @@ export default async function packetReceiver(
       case "INSPECTPLAYER": {
         if (currentPlayer) {
           const targetId = (data as any)?.id;
-          // If no target ID is provided, inspect self
+
           const targetPlayer = targetId
             ? playerCache.get(targetId)
             : currentPlayer;
@@ -1492,28 +1493,24 @@ export default async function packetReceiver(
           return;
         }
 
-        // Check if we're currently in an interrupt grace period (1.5 seconds)
         const timeSinceInterrupt = performance.now() - (currentPlayer.lastInterruptTime || 0);
         if (timeSinceInterrupt < 1500) {
-          // Still showing interrupt, ignore this cast attempt
+
           return;
         }
 
-        // Check if the player is casting already - reject the new cast attempt
         const casting = playerCache.get(currentPlayer.id)?.casting;
         if (casting) {
-          // Don't interrupt, just reject the new cast
+
           return;
         }
 
-        // Global cast delay - prevent spamming casts too quickly
-        // Get fresh player data from cache to check the actual last cast time
         const freshPlayerForDelay = playerCache.get(currentPlayer.id);
         const lastCastTime = freshPlayerForDelay?.lastCastTime || 0;
         const timeSinceLastCast = performance.now() - lastCastTime;
-        const globalCastDelay = 500; // 500ms delay between all casts
+        const globalCastDelay = 500;
         if (timeSinceLastCast < globalCastDelay) {
-          return; // Reject cast if too soon after previous cast
+          return;
         }
 
         const spell_identifier = (data as any).spell;
@@ -1528,7 +1525,6 @@ export default async function packetReceiver(
           break;
         }
 
-        // Check if spell identifier is provided
         if (!spell_identifier) {
           sendPacket(
             ws,
@@ -1560,7 +1556,6 @@ export default async function packetReceiver(
           return;
         }
 
-        // Check if spell is on cooldown (get fresh data from cache)
         const freshPlayerForCooldown = playerCache.get(currentPlayer.id);
         if (!freshPlayerForCooldown) return;
         freshPlayerForCooldown.spellCooldowns = freshPlayerForCooldown.spellCooldowns || {};
@@ -1572,12 +1567,11 @@ export default async function packetReceiver(
         const spell_range = spell.range || 100;
         const spell_damage = spell?.damage;
         const spell_mana = spell?.mana || 0;
-        // Set interruptable spell flag so we can check later if movement interrupts it
+
         currentPlayer.interruptableSpell = !spell?.can_move || false;
 
-        // If spell can't be cast while moving and player is currently moving, reject cast
         if (!spell?.can_move && currentPlayer.moving) {
-          // Send interrupted notification to all players in map
+
           const playersInMap = filterPlayersByMap(currentPlayer.location.map);
           playersInMap.forEach((player) => {
             sendPacket(
@@ -1586,45 +1580,34 @@ export default async function packetReceiver(
             );
           });
           currentPlayer.lastInterruptTime = performance.now();
-        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
+
           return;
         }
 
-        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
-
-        // If not enough mana, return
-        // Get fresh stats from cache to avoid race condition with rapid casts
         const freshPlayerForMana = playerCache.get(currentPlayer.id);
         if (!freshPlayerForMana) return;
 
-        // Calculate actual mana cost as percentage of max stamina
         const actualManaCost = Math.floor(freshPlayerForMana.stats.total_max_stamina * (spell_mana / 100));
         if ((freshPlayerForMana.stats.stamina || 0) < actualManaCost) {
           return;
         }
 
-        // Return if no damage is set
         if (!spell_damage) return;
 
-        // Set lastCastTime IMMEDIATELY to start global cast delay and prevent concurrent casts
         freshPlayerForMana.lastCastTime = performance.now();
 
-        // Set spell on cooldown NOW (includes cast time + cooldown)
         freshPlayerForMana.spellCooldowns = freshPlayerForMana.spellCooldowns || {};
         const totalCooldownTime = (spell.cast_time * 1000) + (spell.cooldown * 1000);
         freshPlayerForMana.spellCooldowns[spell_id] = performance.now() + totalCooldownTime;
 
         playerCache.set(freshPlayerForMana.id, freshPlayerForMana);
 
-        // Update currentPlayer stats with fresh stats
         currentPlayer.stats = freshPlayerForMana.stats;
         currentPlayer.lastCastTime = freshPlayerForMana.lastCastTime;
         currentPlayer.spellCooldowns = freshPlayerForMana.spellCooldowns;
 
         const isInParty = currentPlayer?.party?.includes(target?.username) || null;
 
-        // Check if in the same party and spell does damage
-        // We can heal party members, but not damage them
         if (isInParty && spell_damage > 0) {
           sendPacket(
             ws,
@@ -1635,7 +1618,6 @@ export default async function packetReceiver(
           return;
         }
 
-        // If damage is negative, only allow on self or party members (healing)
         if (spell_damage < 0 && target.id !== currentPlayer.id && !isInParty) return;
 
         const playersInMap = filterPlayersByMap(currentPlayer.location.map);
@@ -1654,11 +1636,10 @@ export default async function packetReceiver(
           spell_range
         );
 
-        // Don't check range if targetting self and it's a healing spell
         if (target.id === currentPlayer.id && spell_damage < 0) {
           playersInAttackRange.push(target);
         } else if (!playersInAttackRange.includes(target) || !canAttack?.value) {
-          // Check if target is in range and can be attacked
+
           if (canAttack?.reason == "nopvp") {
             sendPacket(
               ws,
@@ -1674,30 +1655,23 @@ export default async function packetReceiver(
           return;
         }
 
-        // Distance between players
         const distance = Math.sqrt(
           Math.pow(currentPlayer.location.position.x - target.location.position.x, 2) +
           Math.pow(currentPlayer.location.position.y - target.location.position.y, 2)
         );
 
-        // No travel time if targeting self
         let delay = 0;
         if (target.id !== currentPlayer.id) {
-          const maxTravelTime = 500; // Maximum travel time in ms
-          const speedMultiplier = 1000; // Adjust this to control base travel speed
-          // Calculate dynamic travel time based on distance
-          // Formula: (distance / speedMultiplier) * 1000 for milliseconds
+          const maxTravelTime = 500;
+          const speedMultiplier = 1000;
+
           const calculatedDelay = (distance / speedMultiplier) * 1000;
 
-          // Apply maximum travel time cap, no minimum
           delay = Math.min(calculatedDelay, maxTravelTime);
         }
 
-        // Set an async timeout to simulate spell casting time
         currentPlayer.casting = true;
-        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
-        // Update animation to show casting
         globalStateRevision++;
         await sendPositionAnimation(
           ws,
@@ -1718,7 +1692,7 @@ export default async function packetReceiver(
         });
         await new Promise((resolve) => setTimeout(resolve, spell.cast_time * 1000));
         if (!spell.can_move && !playerCache.get(currentPlayer.id)?.casting) {
-          // Cast was interrupted, reset cooldown
+
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
             delete resetPlayer.spellCooldowns[spell_id];
@@ -1729,7 +1703,6 @@ export default async function packetReceiver(
         currentPlayer.casting = false;
         playerCache.set(currentPlayer.id, currentPlayer);
 
-        // Update animation to revert from casting
         globalStateRevision++;
         await sendPositionAnimation(
           ws,
@@ -1750,7 +1723,6 @@ export default async function packetReceiver(
           spell_range
         );
 
-        // Re-validate attack conditions after casting because players may have moved behind cover
         if (canAttack2?.reason == "nopvp") {
           playersInMap.forEach((player) => {
             sendPacket(
@@ -1758,7 +1730,7 @@ export default async function packetReceiver(
               packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
             );
           });
-          // Reset cooldown since spell failed
+
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
             delete resetPlayer.spellCooldowns[spell_id];
@@ -1774,7 +1746,7 @@ export default async function packetReceiver(
               packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
             );
           });
-          // Reset cooldown since spell failed
+
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
             delete resetPlayer.spellCooldowns[spell_id];
@@ -1790,7 +1762,7 @@ export default async function packetReceiver(
               packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
             );
           });
-          // Reset cooldown since spell failed
+
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
             delete resetPlayer.spellCooldowns[spell_id];
@@ -1799,8 +1771,6 @@ export default async function packetReceiver(
           return;
         }
 
-        // Set another timeout to simulate spell travel time on the server
-        // If target is self, no travel time
         if (target.id !== currentPlayer.id) {
           playersInMap.forEach((player) => {
             sendPacket(
@@ -1813,7 +1783,6 @@ export default async function packetReceiver(
 
         const playerLevel = currentPlayer.stats.level || 1;
 
-        // Calculate base spell damage with level scaling
         const minDamage = spell_damage < 0 ?
           spell_damage - (playerLevel - 1) * 2 :
           spell_damage + (playerLevel - 1) * 2;
@@ -1822,25 +1791,20 @@ export default async function packetReceiver(
           spell_damage + (playerLevel - 1) * 5;
         const spellDamage = Math.floor(Math.random() * (Math.abs(maxDamage - minDamage) + 1)) + Math.min(minDamage, maxDamage);
 
-        // Add attacker's stat_damage as flat bonus
         const attackerDamageBonus = currentPlayer.stats.stat_damage || 0;
         const baseDamage = spellDamage + attackerDamageBonus;
 
-        // Calculate crit
         const critChance = currentPlayer.stats.stat_critical_chance || 0;
         const critDamage = currentPlayer.stats.stat_critical_damage || 0;
         const critRoll = Math.random() * 100;
         const isCrit = critRoll < critChance;
 
-        // Apply crit multiplier if crit lands
         let finalDamage = baseDamage;
         if (isCrit) {
-          // For healing (negative damage), crit increases the healing amount (makes it more negative)
-          // For damage (positive), crit increases the damage amount
+
           finalDamage = Math.floor(baseDamage * (1 + critDamage / 100));
         }
 
-        // Check targets avoidance stat for damage spells only
         if (finalDamage > 0) {
           const targetAvoidance = target.stats.stat_avoidance || 0;
           const avoidanceRoll = Math.random() * 100;
@@ -1848,19 +1812,16 @@ export default async function packetReceiver(
             finalDamage = 0;
           }
 
-          // Apply target's armor reduction if attack was not avoided
-          // Armor is a % damage reduction (e.g., 25 armor = 25% damage reduction)
           if (finalDamage > 0) {
             const targetArmor = target.stats.stat_armor || 0;
-            const armorReduction = Math.min(targetArmor, 75) / 100; // Cap at 75% reduction
+            const armorReduction = Math.min(targetArmor, 75) / 100;
             finalDamage = Math.floor(finalDamage * (1 - armorReduction));
           }
         }
 
-        // Re-check mana right before deduction (mana might have changed during cast/projectile delays)
         const finalManaCheck = playerCache.get(currentPlayer.id);
         if (!finalManaCheck || (finalManaCheck.stats.stamina || 0) < actualManaCost) {
-          // Reset cooldown since not enough mana
+
           if (finalManaCheck && finalManaCheck.spellCooldowns) {
             delete finalManaCheck.spellCooldowns[spell_id];
             playerCache.set(finalManaCheck.id, finalManaCheck);
@@ -1868,43 +1829,36 @@ export default async function packetReceiver(
           return;
         }
 
-        // Update currentPlayer with fresh mana value
         currentPlayer.stats.stamina = finalManaCheck.stats.stamina;
 
         target.stats.health = Math.round(target.stats.health - finalDamage);
         currentPlayer.stats.stamina -= actualManaCost;
 
-        // Ensure stamina doesn't go below 0
         if (currentPlayer.stats.stamina < 0) {
           currentPlayer.stats.stamina = 0;
         }
 
-        // Update cache immediately so concurrent casts see the reduced mana
         playerCache.set(currentPlayer.id, currentPlayer);
 
-        // Handle overhealing
         if (target.stats.health > target.stats.total_max_health) {
           target.stats.health = target.stats.total_max_health;
         }
 
-        // Handle death
         if (target.stats.health <= 0) {
-          // Store the death stats before restoration for showing damage numbers
+
           const deathStats = { ...target.stats };
 
           target.stats.health = target.stats.total_max_health;
           target.stats.stamina = target.stats.total_max_stamina;
 
-          // Find closest graveyard or use default worldspawn
           const currentMapName = target.location.map;
           const respawnMapProps = mapPropertiesCache.find((m: any) => m.name === `${currentMapName}.json`);
 
-          // Search for graveyards in the map
           let respawnX: number;
           let respawnY: number;
 
           if (respawnMapProps?.graveyards && Array.isArray(respawnMapProps.graveyards) && respawnMapProps.graveyards.length > 0) {
-            // Find closest graveyard to death location
+
             let closestGraveyard = respawnMapProps.graveyards[0];
             let closestDistance = Math.sqrt(
               Math.pow(target.location.position.x - closestGraveyard.position.x, 2) +
@@ -1926,7 +1880,7 @@ export default async function packetReceiver(
             respawnX = closestGraveyard.position.x;
             respawnY = closestGraveyard.position.y;
           } else {
-            // No graveyards found, use default worldspawn
+
             const defaultMapProps = mapPropertiesCache.find((m: any) => m.name === `${defaultMap}.json`);
             respawnX = defaultMapProps
               ? (defaultMapProps.width * defaultMapProps.tileWidth) / 2
@@ -1938,29 +1892,23 @@ export default async function packetReceiver(
 
           target.location.position = { x: respawnX, y: respawnY, direction: "down" };
 
-          // Give the attacker xp
           const xp = 10;
           const xpResult = await player.increaseXp(currentPlayer.username, xp);
 
-          // Synchronize stats with equipment bonuses after level up
           const syncedStats = await player.synchronizeStats(currentPlayer.username);
 
-          // Update all stats in memory
           if (syncedStats) {
             currentPlayer.stats = syncedStats;
           }
 
-          // Update XP values from increaseXp result
           if (xpResult && typeof xpResult === 'object' && 'xp' in xpResult) {
             currentPlayer.stats.xp = xpResult.xp;
             currentPlayer.stats.level = xpResult.level;
             currentPlayer.stats.max_xp = xpResult.max_xp;
           }
 
-          // Update the player cache with the new stats including XP
           playerCache.set(currentPlayer.id, currentPlayer);
 
-          // Send XP update to attacker
           sendPacket(
             ws,
             packetManager.updateXp({
@@ -1971,7 +1919,6 @@ export default async function packetReceiver(
             })
           );
 
-          // Send full stats update to sync HP/stamina changes
           sendPacket(
             ws,
             packetManager.updateStats({
@@ -1982,13 +1929,13 @@ export default async function packetReceiver(
 
           globalStateRevision++;
           playersInMap.forEach((player) => {
-            // Send damage numbers for the killing blow BEFORE revive
+
             sendPacket(
               player.ws,
               packetManager.updateStats({
                 id: ws.data.id,
                 target: target.id,
-                stats: deathStats, // Use the stats from before restoration
+                stats: deathStats,
                 isCrit: isCrit,
                 damage: finalDamage,
               })
@@ -2007,7 +1954,6 @@ export default async function packetReceiver(
               })
             );
 
-            // Send REVIVE packet to restore health after showing the killing blow
             sendPacket(
               player.ws,
               packetManager.revive({
@@ -2018,11 +1964,10 @@ export default async function packetReceiver(
             );
           });
 
-          // Send stats to party members who are not in the same map
           sendStatsToPartyMembers(currentPlayer.username, currentPlayer.id, currentPlayer.stats);
           sendStatsToPartyMembers(target.username, target.id, target.stats);
         } else {
-          // Always send updated stats to all players in map
+
           playersInMap.forEach((player) => {
             sendPacket(
               player.ws,
@@ -2045,24 +1990,17 @@ export default async function packetReceiver(
             );
           });
 
-          // Send stats to party members who are not in the same map
           sendStatsToPartyMembers(target.username, target.id, target.stats);
           sendStatsToPartyMembers(currentPlayer.username, currentPlayer.id, currentPlayer.stats);
         }
 
-        // PVP flags + cooldown
-        // If healing a party member, don't set pvp flags
         if (!isInParty) {
           currentPlayer.pvp = true;
           target.pvp = true;
         }
 
-        // Update last attack time
         currentPlayer.last_attack = performance.now();
         target.last_attack = performance.now();
-
-        // Spell cooldown was already set at cast start (includes cast time + cooldown)
-        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
         break;
       }
@@ -2089,7 +2027,6 @@ export default async function packetReceiver(
       case "SAVE_MAP": {
         if (!currentPlayer) return;
 
-        // Check permissions
         const userPermissions = await permissions.get(currentPlayer.username) as string;
         const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
         const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
@@ -2103,11 +2040,9 @@ export default async function packetReceiver(
 
         const saveData = data as unknown as { mapName: string, chunks: any[] };
 
-        // Process map save
         try {
           log.info(`Map save requested by ${currentPlayer.username} for map: ${saveData.mapName}, ${saveData.chunks.length} chunks modified`);
 
-          // Get fresh maps from cache
           const cachedMaps = (await assetCache.get("maps")) as MapData[];
           const mapIndex = cachedMaps.findIndex((m: any) => m.name === saveData.mapName);
 
@@ -2115,11 +2050,9 @@ export default async function packetReceiver(
             throw new Error(`Map ${saveData.mapName} not found`);
           }
 
-          // Update each chunk in the map data (in-memory cache)
           saveData.chunks.forEach((chunkData: any) => {
             const chunkKey = `${chunkData.chunkX}-${chunkData.chunkY}`;
 
-            // Update the map's chunks
             if (!cachedMaps[mapIndex].chunks) {
               cachedMaps[mapIndex].chunks = {};
             }
@@ -2131,19 +2064,15 @@ export default async function packetReceiver(
             };
           });
 
-          // Update the asset cache
           assetCache.add("maps", cachedMaps);
 
-          // Write changes to disk for persistence (this also reprocesses collision/no-pvp maps)
           await saveMapChunks(saveData.mapName, saveData.chunks);
 
-          // Clear the map cache to force reload of collision data
           clearMapCache(saveData.mapName);
 
-          // Reload the map to get updated collision data
           const reloadedMap = await reloadMap(saveData.mapName);
           if (reloadedMap) {
-            // Update both the local variable and cache
+
             const updatedMaps = (await assetCache.get("maps")) as MapData[];
             const index = updatedMaps.findIndex((m: any) => m.name === saveData.mapName);
             if (index >= 0) {
@@ -2154,7 +2083,6 @@ export default async function packetReceiver(
             log.info(`Reloaded collision data for map: ${saveData.mapName}`);
           }
 
-          // Send map update to gateway (non-blocking)
           if (gatewayClient && gatewayClient.isRegistered() && reloadedMap) {
             gatewayClient.sendMapUpdateToGateway(saveData.mapName, reloadedMap.data).catch((error) => {
               log.warn(`Failed to sync map update to gateway: ${error}`);
@@ -2165,7 +2093,6 @@ export default async function packetReceiver(
             message: `Map saved successfully! ${saveData.chunks.length} chunks updated.`
           }));
 
-          // Broadcast chunk updates to all players on this map
           const playersInMap = filterPlayersByMap(currentPlayer.location.map);
           const chunkCoords = saveData.chunks.map((chunk: any) => ({
             chunkX: chunk.chunkX,
@@ -2190,7 +2117,7 @@ export default async function packetReceiver(
         const { map: mapName, x: chunkX, y: chunkY } = loadChunkData;
 
         try {
-          // Read map directly from disk to ensure we always get the latest version
+
           const mapFileName = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
           const assetData = (await assetCache.get("mapAssetConfig") as any) || {
             path: path.join(import.meta.dir, "../assets/maps")
@@ -2207,18 +2134,15 @@ export default async function packetReceiver(
 
           const mapData = JSON.parse(fs.readFileSync(mapFilePath, "utf-8"));
 
-          // Calculate chunk boundaries
           const CHUNK_SIZE = mapData.tilewidth;
           const startX = chunkX * CHUNK_SIZE;
           const startY = chunkY * CHUNK_SIZE;
           const chunkWidth = Math.min(CHUNK_SIZE, mapData.width - startX);
           const chunkHeight = Math.min(CHUNK_SIZE, mapData.height - startY);
 
-          // Extract chunk data from layers
           const chunkLayers = mapData.layers.map((layer: any, layerIndex: number) => {
             const chunkData = new Array(chunkWidth * chunkHeight).fill(0);
 
-            // Copy only the chunk portion from the full layer
             for (let y = 0; y < chunkHeight; y++) {
               for (let x = 0; x < chunkWidth; x++) {
                 const sourceIndex = (startY + y) * mapData.width + (startX + x);
@@ -2229,7 +2153,6 @@ export default async function packetReceiver(
               }
             }
 
-            // Use explicit zIndex if present, otherwise use layer order
             const zIndex = typeof layer.zIndex === 'number' ? layer.zIndex : layerIndex;
 
             return {
@@ -2241,7 +2164,6 @@ export default async function packetReceiver(
             };
           });
 
-          // Send chunk data to client
           sendPacket(ws, packetManager.chunkData(chunkX, chunkY, chunkWidth, chunkHeight, chunkLayers, mapData.tilewidth, mapData.tileheight, startX, startY));
         } catch (error) {
           log.error(`Error loading chunk ${chunkX},${chunkY} from map ${mapName}: ${error}`);
@@ -2293,7 +2215,7 @@ export default async function packetReceiver(
           .map((arg: any) => (arg.startsWith('"') ? arg.slice(1, -1) : arg));
 
         switch (commandName) {
-          // Party chat
+
           case "P":
           case "PARTY": {
             if (!currentPlayer) return;
@@ -2306,7 +2228,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Get the party members
             const partyId = await player.getPartyIdByUsername(
               currentPlayer.username
             );
@@ -2346,7 +2267,7 @@ export default async function packetReceiver(
 
             break;
           }
-          // Whisper a player that is online
+
           case "W":
           case "WHISPER": {
             const username = args[0]?.toLowerCase() || null;
@@ -2358,8 +2279,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Find player by username
-            // Search by username
             const players = Object.values(playerCache.list());
             const targetPlayer = players.find(
               (p) => p.username.toLowerCase() === username.toLowerCase()
@@ -2378,7 +2297,7 @@ export default async function packetReceiver(
               packetManager.whisper({
                 id: ws.data.id,
                 message: args.slice(1).join(" "),
-                // Uppercase the first letter of the username
+
                 username: `<- ${currentPlayer.username.charAt(0).toUpperCase() +
                   currentPlayer.username.slice(1)
                   }`,
@@ -2398,7 +2317,7 @@ export default async function packetReceiver(
 
             break;
           }
-          // Invite a player to party
+
           case "INVITE": {
             const username = args[0]?.toLowerCase() || null;
             if (!username) {
@@ -2411,7 +2330,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Find the target player
             const players = Object.values(playerCache.list());
             const targetPlayer = players.find(
               (p: any) => p.username && p.username.toLowerCase() === username.toLowerCase()
@@ -2427,7 +2345,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Check if trying to invite self
             if (targetPlayer.id === currentPlayer.id) {
               sendPacket(
                 ws,
@@ -2438,7 +2355,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Check for existing invite
             const existingInvite = targetPlayer.invitations?.find(
               (invite: any) => invite?.type === "party" && invite?.from === currentPlayer.username
             );
@@ -2453,7 +2369,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Create the invitation data
             const player_username =
               currentPlayer.username.charAt(0).toUpperCase() +
               currentPlayer.username.slice(1);
@@ -2465,7 +2380,6 @@ export default async function packetReceiver(
               authorization: randomBytes(16).toString(),
             };
 
-            // Store invitation in cache
             if (!currentPlayer.invitations) {
               currentPlayer.invitations = [];
             }
@@ -2478,10 +2392,8 @@ export default async function packetReceiver(
 
             playerCache.set(currentPlayer.id, currentPlayer);
 
-            // Send invitation packet to target player
             sendPacket(targetPlayer.ws, packetManager.invitation(invite_data));
 
-            // Notify sender
             sendPacket(
               ws,
               packetManager.notify({
@@ -2493,9 +2405,9 @@ export default async function packetReceiver(
 
             break;
           }
-          // Summon a player
+
           case "SUMMON": {
-            // admin.summon or admin.*
+
             if (
               !currentPlayer.permissions.some(
                 (p: string) => p === "admin.summon" || p === "admin.*"
@@ -2517,16 +2429,15 @@ export default async function packetReceiver(
               break;
             }
 
-            // Find player by ID or username
             let targetPlayer;
             if (isNaN(Number(identifier))) {
-              // Search by username
+
               const players = Object.values(playerCache.list());
               targetPlayer = players.find(
                 (p) => p.username.toLowerCase() === identifier.toLowerCase()
               );
             } else {
-              // Search by ID
+
               targetPlayer = playerCache.get(identifier);
             }
 
@@ -2538,7 +2449,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Prevent summoning yourself
             if (targetPlayer.id === currentPlayer.id) {
               const notifyData = {
                 message: "You cannot summon yourself",
@@ -2547,7 +2457,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Prevent summoning admins
             if (targetPlayer.isAdmin) {
               const notifyData = {
                 message: "You cannot summon other admins",
@@ -2556,9 +2465,8 @@ export default async function packetReceiver(
               break;
             }
 
-            // Check if target player is in a different map
             if (targetPlayer.location.map !== currentPlayer.location.map) {
-              // Move target player to admin's map
+
               const result = await player.setLocation(
                 targetPlayer.id,
                 currentPlayer.location.map,
@@ -2569,14 +2477,13 @@ export default async function packetReceiver(
                 }
               );
 
-              // Check if location update was successful
               if (
                 result &&
                 typeof result === "object" &&
                 "affectedRows" in result &&
                 (result as { affectedRows: number }).affectedRows != 0
               ) {
-                // Update player's location in cache
+
                 targetPlayer.location.map = currentPlayer.location.map;
                 targetPlayer.location.position = {
                   x: currentPlayer.location.position.x,
@@ -2584,15 +2491,11 @@ export default async function packetReceiver(
                   direction: targetPlayer.location.position?.direction || "down",
                 };
 
-                // Mark admin to see target after reconnect (admin can see summoned player)
-                // Target should NOT see admin if admin is in stealth
                 if (!currentPlayer.forceVisibleTo) currentPlayer.forceVisibleTo = new Set();
                 currentPlayer.forceVisibleTo.add(targetPlayer.id);
 
                 playerCache.set(targetPlayer.id, targetPlayer);
-        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
 
-                // Clear force visibility flag after 5 seconds
                 setTimeout(() => {
                   const admin = playerCache.get(currentPlayer.id);
                   if (admin?.forceVisibleTo) {
@@ -2601,10 +2504,8 @@ export default async function packetReceiver(
                   }
                 }, 5000);
 
-                // Send reconnect packet to force map reload
                 sendPacket(targetPlayer.ws, packetManager.reconnect());
 
-                // Notify the target player
                 sendPacket(
                   targetPlayer.ws,
                   packetManager.notify({
@@ -2612,7 +2513,6 @@ export default async function packetReceiver(
                   })
                 );
 
-                // Notify the admin
                 sendPacket(
                   ws,
                   packetManager.notify({
@@ -2628,20 +2528,19 @@ export default async function packetReceiver(
                 sendPacket(ws, packetManager.notify(notifyData));
               }
             } else {
-              // Same map - move position and sync to admin's layer
+
               targetPlayer.location.position = {
                 x: currentPlayer.location.position.x,
                 y: currentPlayer.location.position.y,
                 direction: targetPlayer.location.position?.direction || "down",
               };
 
-              // Sync target to admin's layer
               if (currentPlayer.aoi?.layerId && targetPlayer.aoi) {
                 const adminLayerId = currentPlayer.aoi.layerId;
                 const adminLayerInfo = layerManager.getLayerInfo(adminLayerId);
 
-                if (adminLayerInfo && adminLayerInfo.playerCount < 100) { // AOI_CONFIG.MAX_PLAYERS_PER_LAYER
-                  // Move target to admin's layer
+                if (adminLayerInfo && adminLayerInfo.playerCount < 100) {
+
                   layerManager.removePlayerFromLayer(targetPlayer.id);
                   const layer = layerManager.getLayerInfo(adminLayerId);
                   if (layer) {
@@ -2653,14 +2552,11 @@ export default async function packetReceiver(
                 }
               }
 
-              // Update the target player's position in the cache
               playerCache.set(targetPlayer.id, targetPlayer);
 
-              // Update AOI for both players to refresh visibility
               await updatePlayerAOI(targetPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
               await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
 
-              // Ensure admin can see the summoned player (bypasses stealth for admin's view only)
               const targetSpawnData = {
                 id: targetPlayer.id,
                 userid: targetPlayer.userid,
@@ -2681,13 +2577,11 @@ export default async function packetReceiver(
                 mounted: targetPlayer.mounted,
               };
 
-              // Send target spawn to admin so admin can see them
               sendPacket(ws, packetManager.loadPlayers({
                 players: [targetSpawnData],
                 snapshotRevision: globalStateRevision
               }));
 
-              // Send target animation to admin
               const targetAnimationName = getAnimationNameForDirection(
                 targetPlayer.location.position?.direction || "down",
                 !!targetPlayer.moving,
@@ -2697,11 +2591,8 @@ export default async function packetReceiver(
               );
               await sendAnimationTo(ws, targetAnimationName, targetPlayer.id);
 
-              // Increment revision before sending movement
               globalStateRevision++;
 
-              // Send position update to the summoned player so they see themselves move
-              // Admin remains invisible if in stealth
               const targetMovementData = {
                 id: targetPlayer.id,
                 _data: {
@@ -2713,24 +2604,19 @@ export default async function packetReceiver(
               };
               sendPacket(targetPlayer.ws, packetManager.moveXY(targetMovementData));
 
-              // Send position update to the admin so they see the summoned player move
               sendPacket(ws, packetManager.moveXY(targetMovementData));
 
-              // Broadcast the summoned player's new position to all players in admin's AOI
-              // This ensures other players see the summoned player appear/move
               const allPlayers = playerCache.list();
               for (const playerId of currentPlayer.aoi.playersInAOI) {
                 const otherPlayer = allPlayers[playerId as string];
                 if (!otherPlayer || !otherPlayer.ws || otherPlayer.id === targetPlayer.id || otherPlayer.id === currentPlayer.id) continue;
 
-                // Check if other player can see the summoned target (stealth visibility)
                 const canSeeTarget = !targetPlayer.isStealth || otherPlayer.isAdmin;
                 if (canSeeTarget) {
                   sendPacket(otherPlayer.ws, packetManager.moveXY(targetMovementData));
                 }
               }
 
-              // Notify the target player
               sendPacket(
                 targetPlayer.ws,
                 packetManager.notify({
@@ -2738,7 +2624,6 @@ export default async function packetReceiver(
                 })
               );
 
-              // Notify the admin
               sendPacket(
                 ws,
                 packetManager.notify({
@@ -2750,10 +2635,10 @@ export default async function packetReceiver(
             }
             break;
           }
-          // Teleport to a player
+
           case "GOTO":
           case "TELEPORT": {
-            // admin.summon or admin.*
+
             if (
               !currentPlayer.permissions.some(
                 (p: string) => p === "admin.summon" || p === "admin.*"
@@ -2775,16 +2660,15 @@ export default async function packetReceiver(
               break;
             }
 
-            // Find player by ID or username
             let targetPlayer;
             if (isNaN(Number(identifier))) {
-              // Search by username
+
               const players = Object.values(playerCache.list());
               targetPlayer = players.find(
                 (p) => p.username.toLowerCase() === identifier.toLowerCase()
               );
             } else {
-              // Search by ID
+
               targetPlayer = playerCache.get(identifier);
             }
 
@@ -2796,7 +2680,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Prevent teleporting to yourself
             if (targetPlayer.id === currentPlayer.id) {
               const notifyData = {
                 message: "You cannot teleport to yourself",
@@ -2805,9 +2688,8 @@ export default async function packetReceiver(
               break;
             }
 
-            // Check if target player is in a different map
             if (targetPlayer.location.map !== currentPlayer.location.map) {
-              // Move admin to target player's map
+
               const result = await player.setLocation(
                 currentPlayer.id,
                 targetPlayer.location.map,
@@ -2818,14 +2700,13 @@ export default async function packetReceiver(
                 }
               );
 
-              // Check if location update was successful
               if (
                 result &&
                 typeof result === "object" &&
                 "affectedRows" in result &&
                 (result as { affectedRows: number }).affectedRows != 0
               ) {
-                // Update admin's location in cache
+
                 currentPlayer.location.map = targetPlayer.location.map;
                 currentPlayer.location.position = {
                   x: targetPlayer.location.position.x,
@@ -2833,15 +2714,12 @@ export default async function packetReceiver(
                   direction: currentPlayer.location.position?.direction || "down",
                 };
 
-                // Mark admin to see target after reconnect (admin can see target player)
-                // Target should NOT see admin if admin is in stealth
                 if (!currentPlayer.forceVisibleTo) currentPlayer.forceVisibleTo = new Set();
                 currentPlayer.forceVisibleTo.add(targetPlayer.id);
 
                 playerCache.set(currentPlayer.id, currentPlayer);
                 playerCache.set(targetPlayer.id, targetPlayer);
 
-                // Clear force visibility flag after 5 seconds
                 setTimeout(() => {
                   const admin = playerCache.get(currentPlayer.id);
                   if (admin?.forceVisibleTo) {
@@ -2850,10 +2728,8 @@ export default async function packetReceiver(
                   }
                 }, 5000);
 
-                // Send reconnect packet to force map reload
                 sendPacket(ws, packetManager.reconnect());
 
-                // Notify the admin
                 sendPacket(
                   ws,
                   packetManager.notify({
@@ -2869,20 +2745,19 @@ export default async function packetReceiver(
                 sendPacket(ws, packetManager.notify(notifyData));
               }
             } else {
-              // Same map - move position and sync to target's layer
+
               currentPlayer.location.position = {
                 x: targetPlayer.location.position.x,
                 y: targetPlayer.location.position.y,
                 direction: currentPlayer.location.position?.direction || "down",
               };
 
-              // Sync admin to target's layer
               if (targetPlayer.aoi?.layerId && currentPlayer.aoi) {
                 const targetLayerId = targetPlayer.aoi.layerId;
                 const targetLayerInfo = layerManager.getLayerInfo(targetLayerId);
 
-                if (targetLayerInfo && targetLayerInfo.playerCount < 100) { // AOI_CONFIG.MAX_PLAYERS_PER_LAYER
-                  // Move admin to target's layer
+                if (targetLayerInfo && targetLayerInfo.playerCount < 100) {
+
                   layerManager.removePlayerFromLayer(currentPlayer.id);
                   const layer = layerManager.getLayerInfo(targetLayerId);
                   if (layer) {
@@ -2894,14 +2769,11 @@ export default async function packetReceiver(
                 }
               }
 
-              // Update the admin's position in the cache
               playerCache.set(currentPlayer.id, currentPlayer);
 
-              // Update AOI for both players to refresh visibility
               await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
               await updatePlayerAOI(targetPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
 
-              // Ensure admin can see the target player (bypasses stealth for admin's view only)
               const targetSpawnDataTeleport = {
                 id: targetPlayer.id,
                 userid: targetPlayer.userid,
@@ -2922,13 +2794,11 @@ export default async function packetReceiver(
                 mounted: targetPlayer.mounted,
               };
 
-              // Send target spawn to admin so admin can see them
               sendPacket(ws, packetManager.loadPlayers({
                 players: [targetSpawnDataTeleport],
                 snapshotRevision: globalStateRevision
               }));
 
-              // Send target animation to admin
               const targetAnimationNameTeleport = getAnimationNameForDirection(
                 targetPlayer.location.position?.direction || "down",
                 !!targetPlayer.moving,
@@ -2938,11 +2808,8 @@ export default async function packetReceiver(
               );
               await sendAnimationTo(ws, targetAnimationNameTeleport, targetPlayer.id);
 
-              // Increment revision before sending movement
               globalStateRevision++;
 
-              // Send admin's position update to themselves
-              // Admin remains invisible to non-admin target player
               const adminMovementData = {
                 id: currentPlayer.id,
                 _data: {
@@ -2954,21 +2821,18 @@ export default async function packetReceiver(
               };
               sendPacket(ws, packetManager.moveXY(adminMovementData));
 
-              // Broadcast the admin's position to other admins in target's AOI (if admin is in stealth)
-              // Non-admin players won't see the admin if admin is in stealth
               if (currentPlayer.isStealth) {
                 const allPlayers = playerCache.list();
                 for (const playerId of targetPlayer.aoi.playersInAOI) {
                   const otherPlayer = allPlayers[playerId as string];
                   if (!otherPlayer || !otherPlayer.ws || otherPlayer.id === currentPlayer.id) continue;
 
-                  // Only send to other admins if current player is in stealth
                   if (otherPlayer.isAdmin) {
                     sendPacket(otherPlayer.ws, packetManager.moveXY(adminMovementData));
                   }
                 }
               } else {
-                // If not in stealth, broadcast to all players in target's AOI
+
                 const allPlayers = playerCache.list();
                 for (const playerId of targetPlayer.aoi.playersInAOI) {
                   const otherPlayer = allPlayers[playerId as string];
@@ -2977,7 +2841,6 @@ export default async function packetReceiver(
                 }
               }
 
-              // Notify the admin
               sendPacket(
                 ws,
                 packetManager.notify({
@@ -2989,10 +2852,10 @@ export default async function packetReceiver(
             }
             break;
           }
-          // Kick a player
+
           case "KICK":
           case "DISCONNECT": {
-            // admin.kick or admin.*
+
             if (
               !currentPlayer.permissions.some(
                 (p: string) => p === "admin.kick" || p === "admin.*"
@@ -3013,20 +2876,18 @@ export default async function packetReceiver(
               break;
             }
 
-            // Find player by ID or username
             let targetPlayer;
             if (isNaN(Number(identifier))) {
-              // Search by username
+
               const players = Object.values(playerCache.list());
               targetPlayer = players.find(
                 (p) => p.username.toLowerCase() === identifier.toLowerCase()
               );
             } else {
-              // Search by ID
+
               targetPlayer = playerCache.get(identifier);
             }
 
-            // Prevent disconnecting yourself
             if (targetPlayer?.id === currentPlayer.id) {
               const notifyData = {
                 message: "You cannot disconnect yourself",
@@ -3043,7 +2904,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Prevent disconnecting admins
             if (targetPlayer.isAdmin) {
               const notifyData = {
                 message: "You cannot disconnect other admins",
@@ -3061,10 +2921,10 @@ export default async function packetReceiver(
             sendPacket(ws, packetManager.notify(notifyData));
             break;
           }
-          // Send a message to all players in the current map
+
           case "NOTIFY":
           case "BROADCAST": {
-            // server.notify or server.*
+
             if (
               !currentPlayer.permissions.some(
                 (p: string) => p === "server.notify" || p === "server.*"
@@ -3079,7 +2939,6 @@ export default async function packetReceiver(
             let message;
             let audience = "ALL";
 
-            // If no audience provided, treat first arg as the message
             if (!args[0]) return;
             if (!["ALL", "ADMINS", "MAP"].includes(args[0].toUpperCase())) {
               message = args.join(" ");
@@ -3131,9 +2990,9 @@ export default async function packetReceiver(
             }
             break;
           }
-          // Ban a player
+
           case "BAN": {
-            // admin.ban or admin.*
+
             if (
               !currentPlayer.permissions.some(
                 (p: string) => p === "admin.ban" || p === "admin.*"
@@ -3154,20 +3013,18 @@ export default async function packetReceiver(
               break;
             }
 
-            // Find player by ID or username in cache first
             let targetPlayer;
             if (isNaN(Number(identifier))) {
-              // Search by username
+
               const players = Object.values(playerCache.list());
               targetPlayer = players.find(
                 (p) => p.username.toLowerCase() === identifier.toLowerCase()
               );
             } else {
-              // Search by ID
+
               targetPlayer = playerCache.get(identifier);
             }
 
-            // If not found in cache, check database
             if (!targetPlayer) {
               const dbPlayer = (await player.findPlayerInDatabase(
                 identifier
@@ -3183,7 +3040,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Prevent banning yourself
             if (targetPlayer.id === currentPlayer.id) {
               const notifyData = {
                 message: "You cannot ban yourself",
@@ -3192,7 +3048,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Prevent banning admins
             if (targetPlayer.isAdmin) {
               const notifyData = {
                 message: "You cannot ban other admins",
@@ -3201,7 +3056,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Check if the player is already banned
             if (targetPlayer.banned) {
               const notifyData = {
                 message: `${targetPlayer.username.charAt(0).toUpperCase() +
@@ -3212,7 +3066,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Ban the player
             await player.ban(targetPlayer.username, targetPlayer.ws);
             const notifyData = {
               message: `Banned ${targetPlayer.username.charAt(0).toUpperCase() +
@@ -3223,7 +3076,7 @@ export default async function packetReceiver(
             break;
           }
           case "UNBAN": {
-            // admin.unban or admin.*
+
             if (
               !currentPlayer.permissions.some(
                 (p: string) => p === "admin.unban" || p === "admin.*"
@@ -3255,7 +3108,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Prevent unbanning yourself
             if (targetPlayer[0].id === currentPlayer.id) {
               const notifyData = {
                 message: "You cannot unban yourself",
@@ -3264,7 +3116,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Unban the player
             await player.unban(targetPlayer[0].username);
             const notifyData = {
               message: `Unbanned ${targetPlayer[0].username} from the server`,
@@ -3272,10 +3123,10 @@ export default async function packetReceiver(
             sendPacket(ws, packetManager.notify(notifyData));
             break;
           }
-          // Toggle admin status
+
           case "ADMIN":
           case "SETADMIN": {
-            // server.admin or server.*
+
             if (
               !currentPlayer.permissions.some(
                 (p: string) => p === "server.admin" || p === "server.*"
@@ -3296,20 +3147,18 @@ export default async function packetReceiver(
               break;
             }
 
-            // Find player by ID or username in cache first
             let targetPlayer;
             if (isNaN(Number(identifier))) {
-              // Search by username
+
               const players = Object.values(playerCache.list());
               targetPlayer = players.find(
                 (p) => p.username.toLowerCase() === identifier.toLowerCase()
               );
             } else {
-              // Search by ID
+
               targetPlayer = playerCache.get(identifier);
             }
 
-            // If not found in cache, check database
             if (!targetPlayer) {
               const dbPlayer = (await player.findPlayerInDatabase(
                 identifier
@@ -3317,7 +3166,6 @@ export default async function packetReceiver(
               targetPlayer = dbPlayer.length > 0 ? dbPlayer[0] : null;
             }
 
-            // Prevent toggling your own admin status
             if (targetPlayer?.id === currentPlayer.id) {
               const notifyData = {
                 message: "You cannot toggle your own admin status",
@@ -3326,9 +3174,8 @@ export default async function packetReceiver(
               break;
             }
 
-            // Toggle admin status
             const admin = await player.toggleAdmin(targetPlayer.username);
-            // Update player cache if the player is in the cache
+
             if (targetPlayer) {
               targetPlayer.isAdmin = admin;
               playerCache.set(targetPlayer.id, targetPlayer);
@@ -3338,16 +3185,16 @@ export default async function packetReceiver(
                 targetPlayer.username.slice(1)
                 } is now ${admin ? "an admin" : "not an admin"}`,
             };
-            // Reconnect the player if they are in the cache
+
             if (targetPlayer?.ws) {
               sendPacket(targetPlayer.ws, packetManager.reconnect());
             }
             sendPacket(ws, packetManager.notify(notifyData));
             break;
           }
-          // Shutdown the server
+
           case "SHUTDOWN": {
-            // server.shutdown or server.*
+
             if (
               !currentPlayer.permissions.some(
                 (p: string) => p === "server.shutdown" || p === "server.*"
@@ -3368,12 +3215,11 @@ export default async function packetReceiver(
               sendPacket(player.ws, packetManager.notify(notifyData));
             });
 
-            // Wait for 5 seconds
             await new Promise((resolve) => setTimeout(resolve, 5000));
             players.forEach((player) => {
               player.ws.close(1000, "Server is restarting");
             });
-            // Keep checking until all players are disconnected
+
             const checkInterval = setInterval(async () => {
               const remainingPlayers = Object.values(playerCache.list());
               remainingPlayers.forEach((player) => {
@@ -3388,10 +3234,10 @@ export default async function packetReceiver(
             }, 100);
             break;
           }
-          // Toggle tile editor
+
           case "TE":
           case "TILEEDITOR": {
-            // server.admin or server.*
+
             if (
               !currentPlayer.permissions.some(
                 (p: string) => p === "server.admin" || p === "server.*"
@@ -3404,13 +3250,12 @@ export default async function packetReceiver(
               break;
             }
 
-            // Send command to toggle editor
             sendPacket(ws, packetManager.toggleTileEditor());
             break;
           }
-          // Restart the server
+
           case "RESTART": {
-            // server.restart or server.*
+
             if (
               !currentPlayer.permissions.some(
                 (p: string) => p === "server.restart" || p === "server.*"
@@ -3423,7 +3268,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Check if restart is already scheduled
             if (restartScheduled) {
               restartTimers.forEach((timer) => clearTimeout(timer));
               restartTimers = [];
@@ -3439,7 +3283,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Set restart flag
             restartScheduled = true;
             restartTimers = [];
 
@@ -3456,7 +3299,6 @@ export default async function packetReceiver(
               (_, i) => 30 - i
             );
 
-            // Minute notifications
             minuteIntervals.forEach((minutes) => {
               restartTimers.push(
                 setTimeout(() => {
@@ -3472,7 +3314,6 @@ export default async function packetReceiver(
               );
             });
 
-            // Second notifications
             secondIntervals.forEach((seconds) => {
               restartTimers.push(
                 setTimeout(() => {
@@ -3488,14 +3329,13 @@ export default async function packetReceiver(
               );
             });
 
-            // Final exit timeout
             restartTimers.push(
               setTimeout(() => {
                 const players = Object.values(playerCache.list());
                 players.forEach((player) => {
                   player.ws.close(1000, "Server is restarting");
                 });
-                // Keep checking until all players are disconnected
+
                 const checkInterval = setInterval(async () => {
                   const remainingPlayers = Object.values(playerCache.list());
                   remainingPlayers.forEach((player) => {
@@ -3512,9 +3352,9 @@ export default async function packetReceiver(
             );
             break;
           }
-          // Respawn player by username or ID
+
           case "RESPAWN": {
-            // admin.respawn or admin.*
+
             if (
               !currentPlayer.permissions.some(
                 (p: string) => p === "admin.respawn" || p === "admin.*"
@@ -3533,19 +3373,18 @@ export default async function packetReceiver(
             if (!identifier) {
               targetPlayer = currentPlayer;
             } else {
-              // Find player by ID or username in cache first
+
               const players = Object.values(playerCache.list());
               if (isNaN(Number(identifier))) {
-                // Search by username
+
                 targetPlayer = players.find(
                   (p) => p.username.toLowerCase() === identifier.toLowerCase()
                 );
               } else {
-                // Search by ID
+
                 targetPlayer = playerCache.get(identifier);
               }
 
-              // If not found in cache, check database
               if (!targetPlayer) {
                 const dbPlayer = (await player.findPlayerInDatabase(
                   identifier
@@ -3562,8 +3401,6 @@ export default async function packetReceiver(
               }
             }
 
-            // Respawn the player
-            // Calculate center of map for spawn position
             const defaultMapProps = mapPropertiesCache.find(
               (m: any) => m.name === `${defaultMap}.json`
             );
@@ -3580,7 +3417,6 @@ export default async function packetReceiver(
               direction: "down",
             });
 
-            // Update cache if player is online
             if (playerCache.get(targetPlayer.id)) {
               targetPlayer.location.position = {
                 x: centerX,
@@ -3614,10 +3450,10 @@ export default async function packetReceiver(
             sendPacket(ws, packetManager.notify(notifyData));
             break;
           }
-          // Update permissions for a player
+
           case "PERMISSION":
           case "PERMISSIONS": {
-            // admin.permission or admin.*
+
             if (
               !currentPlayer.permissions.some(
                 (p: string) => p === "admin.permission" || p === "admin.*"
@@ -3662,19 +3498,17 @@ export default async function packetReceiver(
               break;
             }
 
-            // Find player by ID or username in cache first
             const players = Object.values(playerCache.list());
             if (isNaN(Number(identifier))) {
-              // Search by username
+
               targetPlayer = players.find(
                 (p) => p.username.toLowerCase() === identifier.toLowerCase()
               );
             } else {
-              // Search by ID
+
               targetPlayer = playerCache.get(identifier);
             }
 
-            // If not found in cache, check database
             if (!targetPlayer) {
               const dbPlayer = (await player.findPlayerInDatabase(
                 identifier
@@ -3690,14 +3524,13 @@ export default async function packetReceiver(
               break;
             }
 
-            // Permissions is what ever is after the mode unless it's clear or list
             let access;
             let permissionsArray;
             if (mode !== "CLEAR" && mode !== "LIST") {
               access = args.slice(2).join(" ");
-              // Check if each permission is valid
+
               const validPermissions = await permissions.list();
-              // Ensure permissions is split by commas
+
               permissionsArray = access.split(",");
               permissionsArray.forEach((permission: string) => {
                 if (!validPermissions.includes(permission)) {
@@ -3718,7 +3551,7 @@ export default async function packetReceiver(
                       p === "permission.add" || p === "permission.*"
                   )
                 ) {
-                  // Prevent setting permissions for yourself
+
                   if (targetPlayer?.id === currentPlayer.id) {
                     const notifyData = {
                       message: "You cannot set permissions for yourself",
@@ -3733,7 +3566,7 @@ export default async function packetReceiver(
                   break;
                 }
                 await permissions.add(targetPlayer.username, permissionsArray);
-                // Update the player cache
+
                 if (targetPlayer.ws) {
                   targetPlayer.permissions = permissionsArray;
                   playerCache.set(targetPlayer.id, targetPlayer);
@@ -3755,7 +3588,7 @@ export default async function packetReceiver(
                       p === "permission.remove" || p === "permission.*"
                   )
                 ) {
-                  // Prevent setting permissions for yourself
+
                   if (targetPlayer?.id === currentPlayer.id) {
                     const notifyData = {
                       message: "You cannot set permissions for yourself",
@@ -3773,7 +3606,7 @@ export default async function packetReceiver(
                   targetPlayer.username,
                   permissionsArray
                 );
-                // Update the player cache
+
                 if (targetPlayer.ws) {
                   targetPlayer.permissions = permissionsArray;
                   playerCache.set(targetPlayer.id, targetPlayer);
@@ -3793,7 +3626,7 @@ export default async function packetReceiver(
                       p === "permission.add" || p === "permission.*"
                   )
                 ) {
-                  // Prevent setting permissions for yourself
+
                   if (targetPlayer?.id === currentPlayer.id) {
                     const notifyData = {
                       message: "You cannot set permissions for yourself",
@@ -3808,7 +3641,7 @@ export default async function packetReceiver(
                   break;
                 }
                 await permissions.set(targetPlayer.username, permissionsArray);
-                // Update the player cache
+
                 if (targetPlayer.ws) {
                   targetPlayer.permissions = permissionsArray;
                   playerCache.set(targetPlayer.id, targetPlayer);
@@ -3828,7 +3661,7 @@ export default async function packetReceiver(
                       p === "permission.remove" || p === "permission.*"
                   )
                 ) {
-                  // Prevent setting permissions for yourself
+
                   if (targetPlayer?.id === currentPlayer.id) {
                     const notifyData = {
                       message: "You cannot set permissions for yourself",
@@ -3843,7 +3676,7 @@ export default async function packetReceiver(
                   break;
                 }
                 await permissions.clear(targetPlayer.username);
-                // Update the player cache
+
                 targetPlayer.permissions = [];
                 const p = playerCache.get(targetPlayer.id);
                 if (p.ws) {
@@ -3885,7 +3718,7 @@ export default async function packetReceiver(
             break;
           }
           case "RELOADMAP": {
-            // admin.reloadmap or admin.*
+
             if (
               !currentPlayer.permissions.some(
                 (p: string) => p === "admin.reloadmap" || p === "admin.*"
@@ -3906,7 +3739,6 @@ export default async function packetReceiver(
               break;
             }
 
-            // Check if the map exists
             const map = (maps as any[]).find(
               (m) => m.name === `${mapName}.json`
             );
@@ -3928,7 +3760,6 @@ export default async function packetReceiver(
               map.compressed = result.compressed;
               map.data = result.data;
 
-              // Only reload for players currently on the reloaded map
               const playersInMap = filterPlayersByMap(mapName);
               playersInMap.forEach((player) => {
                 const mapData = [
@@ -3951,8 +3782,7 @@ export default async function packetReceiver(
             break;
           }
           case "WARP": {
-            // Warp to another map
-            // admin.warp or admin.*
+
             if (
               !currentPlayer.permissions.some(
                 (p: string) => p === "admin.warp" || p === "admin.*"
@@ -3996,10 +3826,9 @@ export default async function packetReceiver(
             }
 
             const identifier = args[1]?.toLowerCase() || null;
-            // If no identifier is provided, warp the current player
+
             if (!identifier) {
-              // Calculate center of map for spawn position
-              // Player coordinates are now centered on the sprite
+
               const mapProps = mapPropertiesCache.find((m: any) => m.name === `${mapName}.json`);
               const centerX = mapProps
                 ? (mapProps.width * mapProps.tileWidth) / 2
@@ -4008,7 +3837,6 @@ export default async function packetReceiver(
                 ? (mapProps.height * mapProps.tileHeight) / 2
                 : 0;
 
-              // Warp the current player
               const result = await player.setLocation(
                 currentPlayer.id,
                 mapName,
@@ -4018,7 +3846,7 @@ export default async function packetReceiver(
                   direction: currentPlayer.location.position?.direction || "down",
                 }
               );
-              // Check affected rows only if result is an object with affectedRows property
+
               if (
                 result &&
                 typeof result === "object" &&
@@ -4056,7 +3884,7 @@ export default async function packetReceiver(
       }
       case "KICK_PARTY_MEMBER": {
         if (!currentPlayer) return;
-        // Get the player's party ID
+
         const partyId = await parties.getPartyId(currentPlayer.username);
         if (!partyId) {
           sendPacket(
@@ -4084,7 +3912,6 @@ export default async function packetReceiver(
           return;
         }
 
-        // Check if the member is in the party
         const members = await parties.getPartyMembers(partyId);
         if (!members || members?.length === 0) {
           sendPacket(
@@ -4105,7 +3932,6 @@ export default async function packetReceiver(
           return;
         }
 
-        // Kick the member from the party
         const result = await parties.remove(member);
 
         if (typeof result === "boolean" && !result) {
@@ -4120,7 +3946,7 @@ export default async function packetReceiver(
         }
 
         if (typeof result === "boolean" && result) {
-          // Party was disbanded
+
           members.forEach(async (m: string) => {
             const session_id = await player.getSessionIdByUsername(m);
             const p = session_id && playerCache.get(session_id);
@@ -4151,7 +3977,6 @@ export default async function packetReceiver(
           playerCache.set(currentPlayer.id, currentPlayer);
           sendPacket(ws, packetManager.updateParty({ members: [] }));
 
-          // Send the updated party members to all party members
           result.forEach(async (m: string) => {
             const session_id = await player.getSessionIdByUsername(m);
             const p = session_id && playerCache.get(session_id);
@@ -4185,7 +4010,6 @@ export default async function packetReceiver(
             }
           });
 
-          // Sync remaining party members to leader's layer
           const partyLeader = await parties.getPartyLeader(currentPlayer.party_id as number);
           if (partyLeader && result.length > 0) {
             await syncPartyLayers(partyLeader, result, playerCache, sendAnimationTo);
@@ -4196,7 +4020,7 @@ export default async function packetReceiver(
       }
       case "LEAVE_PARTY": {
         if (!currentPlayer) return;
-        // Get the player's party ID
+
         const partyId = await parties.getPartyId(currentPlayer.username);
         if (!partyId) {
           sendPacket(
@@ -4226,7 +4050,6 @@ export default async function packetReceiver(
           return;
         }
 
-        // Party was deleted
         if (type === "boolean" && result) {
           members.forEach(async (member: string) => {
             const session_id = await player.getSessionIdByUsername(member);
@@ -4255,7 +4078,6 @@ export default async function packetReceiver(
           playerCache.set(currentPlayer.id, currentPlayer);
           sendPacket(ws, packetManager.updateParty({ members: [] }));
 
-          // Send the updated party members to all party members
           (result as string[]).forEach(async (member: string) => {
             const session_id = await player.getSessionIdByUsername(member);
             const p = session_id && playerCache.get(session_id);
@@ -4274,7 +4096,6 @@ export default async function packetReceiver(
             }
           });
 
-          // Sync remaining party members to leader's layer
           if ((result as string[]).length > 0) {
             const remainingPartyId = await parties.getPartyId((result as string[])[0]);
             if (remainingPartyId) {
@@ -4315,10 +4136,9 @@ export default async function packetReceiver(
           return;
         }
 
-        // Get the leaders party ID
         const partyId = await parties.getPartyId(currentPlayer.username);
         if (partyId) {
-          // Check if they are the leader
+
           const isLeader = await parties.isPartyLeader(currentPlayer.username);
           if (!isLeader) {
             sendPacket(
@@ -4329,7 +4149,6 @@ export default async function packetReceiver(
           }
         }
 
-        // Check if the invited user is already in a party
         const invitedUserPartyId = await parties.getPartyId(
           invitedUserUsername
         );
@@ -4346,7 +4165,6 @@ export default async function packetReceiver(
           return;
         }
 
-        // Check if the invited user is a party leader
         const invitedUserLeader = await parties.isPartyLeader(
           invitedUserUsername
         );
@@ -4392,7 +4210,7 @@ export default async function packetReceiver(
         });
 
         playerCache.set(currentPlayer.id, currentPlayer);
-        // Send the invitation notification to the invited user
+
         sendPacket(invitedUser.ws, packetManager.invitation(invite_data));
         sendPacket(
           ws,
@@ -4420,7 +4238,6 @@ export default async function packetReceiver(
           return;
         }
 
-        // Uppercase the first letter of the username
         const player_username =
           currentPlayer.username.charAt(0).toUpperCase() +
           currentPlayer.username.slice(1);
@@ -4447,8 +4264,6 @@ export default async function packetReceiver(
           authorization: randomBytes(16).toString(),
         };
 
-        // Add the invitation to the player's invitations
-        // This is used for authentication and verification for the friend request so that we can't force add friends
         currentPlayer.invitations.push({
           action: invite_data.action,
           originator: invite_data.originator,
@@ -4457,7 +4272,6 @@ export default async function packetReceiver(
 
         playerCache.set(currentPlayer.id, currentPlayer);
 
-        // Send the invitation notification to the friend
         sendPacket(get_friend.ws, packetManager.invitation(invite_data));
         break;
       }
@@ -4468,11 +4282,11 @@ export default async function packetReceiver(
         log.info(
           `Invitation response received: ${action}, ${originator}, ${authorization}, ${response}`
         );
-        // Find the current player in the cache
+
         const inviter = playerCache.get(originator);
 
         if (!inviter) {
-          // If the inviter is not found, we can't process the invitation because they might have disconnected
+
           sendPacket(
             ws,
             packetManager.notify({
@@ -4483,7 +4297,6 @@ export default async function packetReceiver(
           return;
         }
 
-        // Find the invitation in the inviter's invitations
         const inviteIndex = inviter.invitations.findIndex(
           (invite: any) =>
             invite.action === action &&
@@ -4491,9 +4304,8 @@ export default async function packetReceiver(
             invite.authorization === authorization
         );
 
-        // If we found the invitation, we can process it
         if (inviteIndex === -1) {
-          // If the invitation is not found, we can't process it
+
           const notifyData = {
             message: "Invitation not found or has already been processed",
           };
@@ -4501,23 +4313,19 @@ export default async function packetReceiver(
           return;
         }
 
-        // Remove the invitation from the inviter's invitations
         inviter.invitations.splice(inviteIndex, 1);
         playerCache.set(inviter.id, inviter);
 
         switch (action.toUpperCase()) {
-          // Process friend request
+
           case "FRIEND_REQUEST": {
             if (response.toUpperCase() === "ACCEPT") {
-              /* Windows mysql bug */
-              // If the response is accept, we need to add each other as friends
+
               const updatedCurrentPlayersFriendsList = await friends.add(
                 currentPlayer.username.toLowerCase(),
                 inviter.username.toLowerCase()
               );
 
-              // Add the inviter to the current player's friends list as well
-              // This is done so that both players can see each other as friends
               const updatedFriendsList = await friends.add(
                 inviter.username.toLowerCase(),
                 currentPlayer.username.toLowerCase()
@@ -4555,12 +4363,12 @@ export default async function packetReceiver(
             break;
           }
           case "INVITE_PARTY": {
-            // Check if the the party exists
+
             const partyId = await parties.getPartyId(inviter.username);
             if (response.toUpperCase() === "ACCEPT") {
-              // Party already exists, add the player to the party
+
               if (partyId) {
-                // If the party exists, add the player to the party
+
                 const updatedPartyMembers = await parties.add(
                   currentPlayer.username.toLowerCase(),
                   partyId
@@ -4588,7 +4396,7 @@ export default async function packetReceiver(
                       } has joined your party`,
                   })
                 );
-                // Send the updated party members to all party members
+
                 updatedPartyMembers.forEach(async (member: string) => {
                   const session_id = await player.getSessionIdByUsername(
                     member
@@ -4606,13 +4414,12 @@ export default async function packetReceiver(
                   }
                 });
 
-                // Sync party members to leader's layer
                 const partyLeader = await parties.getPartyLeader(partyId);
                 if (partyLeader && updatedPartyMembers.length > 0) {
                   await syncPartyLayers(partyLeader, updatedPartyMembers as string[], playerCache, sendAnimationTo);
                 }
               } else {
-                // If the party does not exist, create a new one
+
                 const updatedPartyMembers = await parties.create(
                   inviter.username.toLowerCase(),
                   currentPlayer.username.toLowerCase()
@@ -4667,7 +4474,6 @@ export default async function packetReceiver(
                   }
                 );
 
-                // Sync party members to leader's layer (inviter is the leader for new parties)
                 if (Array.isArray(updatedPartyMembers) && updatedPartyMembers.length > 0) {
                   await syncPartyLayers(inviter.username.toLowerCase(), updatedPartyMembers as string[], playerCache, sendAnimationTo);
                 }
@@ -4683,39 +4489,37 @@ export default async function packetReceiver(
         const username = (data as any).username;
 
         if (!currentPlayer) return;
-        // Only fetch from cache if ID is provided, otherwise use username
+
         let get_friend;
         if (id) {
           get_friend = playerCache.get(id);
         } else if (username) {
-          // Try to find in cache by username (case-insensitive)
+
           get_friend = Object.values(playerCache.list()).find(
             (p: any) => p.username.toLowerCase() === username.toLowerCase()
           );
-          // If not found in cache, fallback to database
+
           if (!get_friend) {
             get_friend = await player.findPlayerInDatabase(username);
-            // If database returns array, get the first result
+
             if (Array.isArray(get_friend) && get_friend.length > 0) {
               get_friend = get_friend[0];
             }
           }
         }
 
-        // Remove the friend from the current player's friends list
         const updatedFriendsList = await friends.remove(
           currentPlayer.username.toLowerCase(),
           get_friend?.username?.toLowerCase() || username.toLowerCase()
         );
-        // Update the current player's friends list
+
         const updatedCurrentPlayersFriendsList = await friends.remove(
           get_friend?.username?.toLowerCase() || username.toLowerCase(),
           currentPlayer.username.toLowerCase()
         );
 
-        // If the friend is online, notify them and update their friends list
         if (get_friend?.ws) {
-          // Only send an update to the removed friend if they are online
+
           sendPacket(
             get_friend.ws,
             packetManager.updateFriends({
@@ -4760,11 +4564,8 @@ export default async function packetReceiver(
           break;
         }
 
-
-        // Don't validate if unmounting
         if (!currentPlayer.mounted) {
-          // Check if the player has the specified mount in their collection
-          // Search currentPlayer.collectables for type mount where item matches the requested mount
+
           const hasMount = currentPlayer.collectables.some((c: any) => c.type === "mount" && c.item === mount);
           if (!hasMount) {
             sendPacket(
@@ -4783,8 +4584,6 @@ export default async function packetReceiver(
           currentPlayer.mount_type = null;
         }
 
-        // [OPTIMIZED] Removed redundant playerCache.set() - currentPlayer is already a reference
-
         const direction = currentPlayer.location.position?.direction || "down";
         const walking = currentPlayer.moving || false;
         const mounted = currentPlayer.mounted;
@@ -4802,11 +4601,10 @@ export default async function packetReceiver(
           currentPlayer.casting || false
         );
 
-        // If player is currently moving, restart the movement with new speed
         if (gameLoop.isPlayerMoving(currentPlayer.id)) {
-          // Trigger a new MOVEXY to restart movement with the correct speed (will unregister and re-register)
+
           const moveDirection = currentPlayer.location.position?.direction || "down";
-          // Send MOVEXY packet internally to restart movement
+
           await packetReceiver(server, ws, JSON.stringify({ type: "MOVEXY", data: moveDirection }));
         }
         break;
@@ -4820,18 +4618,16 @@ export default async function packetReceiver(
         const foundEquipment = equipmentItems.find((invItem: any) => invItem.name.toLowerCase() === item.toLowerCase());
         const slot = foundEquipment?.equipment_slot;
 
-        // Check level requirement
         if (foundEquipment?.level_requirement) {
           const playerLevel = currentPlayer.stats.level || 1;
           if (playerLevel < foundEquipment.level_requirement) return;
         }
 
-        // Get the currently equipped item in this slot (if any) before replacing it
         const previouslyEquippedItem = currentPlayer.equipment[slot];
 
         const result = await equipment.equipItem(currentPlayer.username, slot, item);
         if (result) {
-          // If there was a previously equipped item, mark it as unequipped in cache
+
           if (previouslyEquippedItem) {
             const previousItem = currentPlayer.inventory.find((invItem: any) => invItem.name.toLowerCase() === previouslyEquippedItem.toLowerCase());
             if (previousItem) {
@@ -4839,34 +4635,26 @@ export default async function packetReceiver(
             }
           }
 
-          // Update the players equipment in cache
           currentPlayer.equipment[slot] = item;
 
-          // Update the equipped status in the inventory cache for the newly equipped item
           const inventoryItem = currentPlayer.inventory.find((invItem: any) => invItem.name.toLowerCase() === item.toLowerCase());
           if (inventoryItem) {
             inventoryItem.equipped = true;
           }
 
-          // Handle inventory slot updates if slotIndex was provided
           if (slotIndex !== undefined) {
-            // Reload config from database to ensure we have the latest saved configuration
+
             const freshConfig = await player.getConfig(currentPlayer.username);
             currentPlayer.config = freshConfig;
 
-            // Get current inventory configuration
             const config = currentPlayer.config && currentPlayer.config.length > 0 ? currentPlayer.config[0] : null;
-            // inventory_config is already an object from the database (MySQL JSON column)
+
             const inventoryConfig = config?.inventory_config || {};
 
-            // Simply modify the existing configuration instead of rebuilding
-            // If there was a previously equipped item, place it at the slot where the new item was
             if (previouslyEquippedItem) {
               inventoryConfig[slotIndex.toString()] = previouslyEquippedItem;
             }
 
-            // ALWAYS remove the newly equipped item from wherever it was in the configuration
-            // (since it's now equipped and shouldn't be in the inventory grid)
             for (const key in inventoryConfig) {
               if (inventoryConfig[key] && inventoryConfig[key].toLowerCase() === item.toLowerCase()) {
                 delete inventoryConfig[key];
@@ -4874,17 +4662,14 @@ export default async function packetReceiver(
               }
             }
 
-            // Remove null values from config to keep it sparse
             for (const key in inventoryConfig) {
               if (inventoryConfig[key] === null) {
                 delete inventoryConfig[key];
               }
             }
 
-            // Save the updated configuration
             await player.saveInventoryConfig(currentPlayer.username, inventoryConfig);
 
-            // Reload the config from database and update player cache
             const updatedConfig = await player.getConfig(currentPlayer.username);
             currentPlayer.config = updatedConfig;
             playerCache.set(currentPlayer.id, currentPlayer);
@@ -4899,7 +4684,6 @@ export default async function packetReceiver(
 
             currentPlayer.stats = stats;
 
-            // Preserve current health and stamina values, but clamp to new max values
             currentPlayer.stats.health = Math.min(currentHealth, stats.total_max_health);
             currentPlayer.stats.stamina = Math.min(currentStamina, stats.total_max_stamina);
 
@@ -4913,7 +4697,6 @@ export default async function packetReceiver(
               })
             );
 
-            // Send updated stats to party members
             await sendStatsToPartyMembers(
               currentPlayer.username,
               currentPlayer.id,
@@ -4921,7 +4704,7 @@ export default async function packetReceiver(
             );
 
             const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-            // Update equipment for all players in the same map
+
             playersInMap.forEach((player) => {
               sendPacket(
                 player.ws,
@@ -4932,7 +4715,6 @@ export default async function packetReceiver(
               );
             });
 
-            // Send updated client config if inventory config was changed
             if (slotIndex !== undefined) {
               sendPacket(
                 ws,
@@ -4940,12 +4722,10 @@ export default async function packetReceiver(
               );
             }
 
-            // Reload inventory from database to get updated equipped flags
             const freshInventory = await inventory.get(currentPlayer.username);
             currentPlayer.inventory = freshInventory;
             playerCache.set(currentPlayer.id, currentPlayer);
 
-            // Send updated inventory and equipment to player
             sendPacket(
               ws,
               packetManager.inventory(currentPlayer.inventory)
@@ -4955,7 +4735,6 @@ export default async function packetReceiver(
               packetManager.equipment(currentPlayer.equipment)
             );
 
-            // Update sprite sheet animation to reflect new armor layers
             const currentAnimationName = getAnimationNameForDirection(
               currentPlayer.location.position?.direction || "down",
               !!currentPlayer.moving,
@@ -4974,46 +4753,38 @@ export default async function packetReceiver(
         const targetSlotIndex = (data as any).targetSlotIndex;
         if (!slot) return;
 
-        // Get the currently equipped item in this slot
         const equippedItemName = currentPlayer.equipment[slot];
-        if (!equippedItemName) return; // Nothing equipped in this slot
+        if (!equippedItemName) return;
 
         const result = await equipment.unEquipItem(currentPlayer.username, slot, equippedItemName);
         if (result) {
-          // Mark the item as unequipped in cache
+
           const inventoryItem = currentPlayer.inventory.find((invItem: any) => invItem.name.toLowerCase() === equippedItemName.toLowerCase());
           if (inventoryItem) {
             inventoryItem.equipped = false;
           }
 
-          // Update the players equipment in cache (remove from slot)
           currentPlayer.equipment[slot] = null;
 
-          // Handle inventory slot placement if targetSlotIndex was provided
           if (targetSlotIndex !== undefined) {
-            // Reload config from database to ensure we have the latest saved configuration
+
             const freshConfig = await player.getConfig(currentPlayer.username);
             currentPlayer.config = freshConfig;
 
-            // Get current inventory configuration
             const config = currentPlayer.config && currentPlayer.config.length > 0 ? currentPlayer.config[0] : null;
-            // inventory_config is already an object from the database (MySQL JSON column)
+
             const inventoryConfig = config?.inventory_config || {};
 
-            // Simply place the unequipped item at the target slot index
             inventoryConfig[targetSlotIndex.toString()] = equippedItemName;
 
-            // Remove null values from config to keep it sparse
             for (const key in inventoryConfig) {
               if (inventoryConfig[key] === null) {
                 delete inventoryConfig[key];
               }
             }
 
-            // Save the updated configuration
             await player.saveInventoryConfig(currentPlayer.username, inventoryConfig);
 
-            // Reload the config from database and update player cache
             const updatedConfig = await player.getConfig(currentPlayer.username);
             currentPlayer.config = updatedConfig;
           }
@@ -5027,7 +4798,6 @@ export default async function packetReceiver(
 
             currentPlayer.stats = stats;
 
-            // Preserve current health and stamina values, but clamp to new max values
             currentPlayer.stats.health = Math.min(currentHealth, stats.total_max_health);
             currentPlayer.stats.stamina = Math.min(currentStamina, stats.total_max_stamina);
 
@@ -5041,7 +4811,6 @@ export default async function packetReceiver(
               })
             );
 
-            // Send updated stats to party members
             await sendStatsToPartyMembers(
               currentPlayer.username,
               currentPlayer.id,
@@ -5049,7 +4818,7 @@ export default async function packetReceiver(
             );
 
             const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-            // Update equipment for all players in the same map
+
             playersInMap.forEach((player) => {
               sendPacket(
                 player.ws,
@@ -5060,7 +4829,6 @@ export default async function packetReceiver(
               );
             });
 
-            // Send updated client config if inventory config was changed
             if (targetSlotIndex !== undefined) {
               sendPacket(
                 ws,
@@ -5068,12 +4836,10 @@ export default async function packetReceiver(
               );
             }
 
-            // Reload inventory from database to get updated equipped flags
             const freshInventory = await inventory.get(currentPlayer.username);
             currentPlayer.inventory = freshInventory;
             playerCache.set(currentPlayer.id, currentPlayer);
 
-            // Send updated inventory and equipment to player
             sendPacket(
               ws,
               packetManager.inventory(currentPlayer.inventory)
@@ -5083,7 +4849,6 @@ export default async function packetReceiver(
               packetManager.equipment(currentPlayer.equipment)
             );
 
-            // Update sprite sheet animation to reflect removed armor layers
             const currentAnimationName = getAnimationNameForDirection(
               currentPlayer.location.position?.direction || "down",
               !!currentPlayer.moving,
@@ -5099,7 +4864,6 @@ export default async function packetReceiver(
       case "GET_ONLINE_PLAYERS": {
         if (!currentPlayer?.isAdmin) return;
 
-        // Get all online players from cache
         const allPlayers = Object.values(playerCache.list());
         const playerList = allPlayers.map((p: any) => ({
           username: p.username,
@@ -5107,11 +4871,10 @@ export default async function packetReceiver(
           isAdmin: p.isAdmin || false
         }));
 
-        // Send the list back to the requesting admin
         sendPacket(ws, packetManager.onlinePlayersList(playerList));
         break;
       }
-      // Unknown packet type
+
       default: {
         log.error(`Unknown packet type: ${type}`);
         break;
@@ -5122,9 +4885,8 @@ export default async function packetReceiver(
   }
 }
 
-// Function to filter players by map
 function filterPlayersByMap(map: string) {
-  // Use optimized map index for O(1) lookup instead of O(n) linear search
+
   const playerIds = mapIndex.getPlayersOnMap(map);
   const players: any[] = [];
   for (const playerId of playerIds) {
@@ -5136,7 +4898,6 @@ function filterPlayersByMap(map: string) {
   return players;
 }
 
-// Function to filter players by distance and map
 function filterPlayersByDistance(ws: any, distance: number, map: string) {
   const players = filterPlayersByMap(map);
   const currentPlayer = playerCache.get(ws.data.id);
@@ -5147,7 +4908,6 @@ function filterPlayersByDistance(ws: any, distance: number, map: string) {
   });
 }
 
-// Try to parse the packet data
 function tryParsePacket(data: any) {
   try {
     return JSON.parse(data.toString());
@@ -5159,7 +4919,7 @@ function tryParsePacket(data: any) {
 
 function sendPacket(ws: any, packets: any[]) {
   if (!ws || !ws.send || ws.readyState !== 1) {
-    // Silently skip - websocket not ready or closed
+
     return;
   }
   try {
@@ -5172,15 +4932,13 @@ function sendPacket(ws: any, packets: any[]) {
 }
 
 async function sendStatsToPartyMembers(playerUsername: string, playerId: string, stats: any) {
-  // Get the player's party ID first
+
   const partyId = await parties.getPartyId(playerUsername);
   if (!partyId) return;
 
-  // Get the player's party members
   const partyMembers = await parties.getPartyMembers(partyId);
   if (!partyMembers || partyMembers.length === 0) return;
 
-  // Send stats update to all party members (excluding self, they already get it)
   for (const memberName of partyMembers) {
     if (memberName.toLowerCase() === playerUsername.toLowerCase()) continue;
 
@@ -5192,7 +4950,7 @@ async function sendStatsToPartyMembers(playerUsername: string, playerId: string,
         partyMember.ws,
         packetManager.updateStats({
           target: playerId,
-          username: playerUsername, // Include username so client can identify party member
+          username: playerUsername,
           stats: stats,
         })
       );
@@ -5204,28 +4962,22 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
   const currentPlayer = playerCache.get(playerId || ws.data.id);
   if (!currentPlayer) return;
 
-  // Get player equipment for armor layers
   const playerEquipment = currentPlayer.equipment || null;
 
-  // Get sprite sheet data for this animation
   const spriteSheetData = await getPlayerSpriteSheetData(name, playerEquipment);
 
-  // Check if at least one layer is available to render
   if (!spriteSheetData.bodySprite && !spriteSheetData.headSprite) {
     log.warn(`No sprite sheet layers available for animation "${name}", player ${currentPlayer.id}`);
     return;
   }
 
-  // Import getSpriteSheetImage and getSpriteSheetTemplate
   const { getSpriteSheetImage, getSpriteSheetTemplate } = await import("../modules/spriteSheetManager");
 
-  // Helper to extract equipment name from prefixed name (e.g., "helmet_iron_helmet" -> "iron_helmet")
   const extractEquipmentName = (prefixedName: string) => {
     const firstUnderscore = prefixedName.indexOf('_');
     return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
   };
 
-  // Get base64 image data for each sprite sheet (only if sprite exists)
   const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
   const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
   const armorHelmetImageData = spriteSheetData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHelmetSprite.name)) : null;
@@ -5237,20 +4989,17 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
   const armorLegsImageData = spriteSheetData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorLegsSprite.name)) : null;
   const armorWeaponImageData = spriteSheetData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorWeaponSprite.name)) : null;
 
-  // Get mount sprite sheet if player is mounted (based on cache mount_type)
-  // Always use player_mount_base template with custom mount image
   let mountSprite = null;
   let mountImageData = null;
   if (currentPlayer.mounted && currentPlayer.mount_type) {
-    // Get the base template (animation data)
+
     mountSprite = await getSpriteSheetTemplate('player_mount_base');
     if (mountSprite) {
-      // Keep the name as the mount type for database lookup
-      // The imageSource is just metadata for file organization reference
+
       const mountImageName = currentPlayer.mount_type;
       mountSprite.name = mountImageName;
       mountSprite.imageSource = `mounts/${mountImageName}.png`;
-      // Get the image data for this specific mount type
+
       mountImageData = await getSpriteSheetImage(mountImageName);
     }
   }
@@ -5260,7 +5009,7 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
     mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
     bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
     headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
-    // Only include armor sprites if their image data exists
+
     armorHelmetSprite: (spriteSheetData.armorHelmetSprite && armorHelmetImageData) ? { ...spriteSheetData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
     armorShoulderguardsSprite: (spriteSheetData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...spriteSheetData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
     armorNeckSprite: (spriteSheetData.armorNeckSprite && armorNeckImageData) ? { ...spriteSheetData.armorNeckSprite, imageData: armorNeckImageData } : null,
@@ -5273,15 +5022,12 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
     revision: revision,
   };
 
-  // Use AOI-based broadcasting instead of map-wide
   broadcastToAOI(currentPlayer, packetManager.spriteSheetAnimation(spriteSheetPacketData), true);
 }
 
 async function sendAnimation(ws: any, name: string, playerId?: string, revision?: number) {
   const currentPlayer = playerCache.get(playerId || ws.data.id);
   if (!currentPlayer) return;
-
-  // Use sprite sheet system only
 
   if (!useSpriteSheets) {
     log.warn(`Sprite sheet system disabled in config for player ${currentPlayer.id}`);
@@ -5305,7 +5051,6 @@ function getAnimationNameForDirection(
 ): string {
   const normalized = normalizeDirection(direction);
 
-  // If casting, use cast_idle (stationary) or cast_walk (moving)
   if (casting) {
     const castAction = walking ? "cast_walk" : "cast_idle";
     return `player_${castAction}_${normalized}.png`;
@@ -5334,20 +5079,18 @@ async function sendPositionAnimation(
 }
 
 function normalizeDirection(direction: string): string {
-  // Return all 8 directions as-is for proper directional animations
+
   const validDirections = ["down", "up", "left", "right", "downleft", "downright", "upleft", "upright"];
   if (validDirections.includes(direction)) {
     return direction;
   }
-  return "down"; // safe fallback for invalid directions
+  return "down";
 }
 
-// Get animation data without sending (for batching)
 async function getAnimationData(name: string, playerId: string, revision?: number): Promise<any | null> {
   const targetPlayer = playerCache.get(playerId);
   if (!targetPlayer) return null;
 
-  // Use sprite sheet system only
   if (!useSpriteSheets || !(await isSpriteSheetSystemAvailable())) {
     return null;
   }
@@ -5355,7 +5098,6 @@ async function getAnimationData(name: string, playerId: string, revision?: numbe
   const playerEquipment = targetPlayer.equipment || null;
   const spriteSheetData = await getPlayerSpriteSheetData(name, playerEquipment);
 
-  // Check if at least one layer is available to render
   if (!spriteSheetData.bodySprite && !spriteSheetData.headSprite) {
     return null;
   }
@@ -5367,7 +5109,6 @@ async function getAnimationData(name: string, playerId: string, revision?: numbe
     return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
   };
 
-  // Get base64 image data for each sprite sheet (only if sprite exists)
   const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
   const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
   const armorHelmetImageData = spriteSheetData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHelmetSprite.name)) : null;
@@ -5379,7 +5120,6 @@ async function getAnimationData(name: string, playerId: string, revision?: numbe
   const armorLegsImageData = spriteSheetData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorLegsSprite.name)) : null;
   const armorWeaponImageData = spriteSheetData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorWeaponSprite.name)) : null;
 
-  // Get mount sprite sheet if player is mounted
   let mountSprite = null;
   let mountImageData = null;
   if (targetPlayer.mounted && targetPlayer.mount_type) {
@@ -5414,7 +5154,6 @@ export async function sendAnimationTo(targetWs: any, name: string, playerId?: st
   const targetPlayer = playerCache.get(playerId || targetWs.data.id);
   if (!targetPlayer) return;
 
-  // Use sprite sheet system only
   if (!useSpriteSheets || !(await isSpriteSheetSystemAvailable())) {
     log.warn(`Sprite sheet system not available for player ${targetPlayer.id}`);
     return;
@@ -5424,22 +5163,18 @@ export async function sendAnimationTo(targetWs: any, name: string, playerId?: st
 
   const spriteSheetData = await getPlayerSpriteSheetData(name, playerEquipment);
 
-  // Check if at least one layer is available to render
   if (!spriteSheetData.bodySprite && !spriteSheetData.headSprite) {
-    log.warn(`No sprite sheet layers available for animation "${name}", player ${targetPlayer.id}`);
-    return;
+    log.debug(`No sprite sheet layers available for animation "${name}", player ${targetPlayer.id} - will send empty sprite data`);
+
   }
 
-  // Import getSpriteSheetImage and getSpriteSheetTemplate
   const { getSpriteSheetImage, getSpriteSheetTemplate } = await import("../modules/spriteSheetManager");
 
-  // Helper to extract equipment name from prefixed name (e.g., "helmet_iron_helmet" -> "iron_helmet")
   const extractEquipmentName = (prefixedName: string) => {
     const firstUnderscore = prefixedName.indexOf('_');
     return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
   };
 
-  // Get base64 image data for each sprite sheet (only if sprite exists)
   const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
   const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
   const armorHelmetImageData = spriteSheetData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHelmetSprite.name)) : null;
@@ -5451,20 +5186,17 @@ export async function sendAnimationTo(targetWs: any, name: string, playerId?: st
   const armorLegsImageData = spriteSheetData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorLegsSprite.name)) : null;
   const armorWeaponImageData = spriteSheetData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorWeaponSprite.name)) : null;
 
-  // Get mount sprite sheet if player is mounted (based on cache mount_type)
-  // Always use player_mount_base template with custom mount image
   let mountSprite = null;
   let mountImageData = null;
   if (targetPlayer.mounted && targetPlayer.mount_type) {
-    // Get the base template (animation data)
+
     mountSprite = await getSpriteSheetTemplate('player_mount_base');
     if (mountSprite) {
-      // Keep the name as the mount type for database lookup
-      // The imageSource is just metadata for file organization reference
+
       const mountImageName = targetPlayer.mount_type;
       mountSprite.name = mountImageName;
       mountSprite.imageSource = `mounts/${mountImageName}.png`;
-      // Get the image data for this specific mount type
+
       mountImageData = await getSpriteSheetImage(mountImageName);
     }
   }
@@ -5474,7 +5206,7 @@ export async function sendAnimationTo(targetWs: any, name: string, playerId?: st
     mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
     bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
     headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
-    // Only include armor sprites if their image data exists
+
     armorHelmetSprite: (spriteSheetData.armorHelmetSprite && armorHelmetImageData) ? { ...spriteSheetData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
     armorShoulderguardsSprite: (spriteSheetData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...spriteSheetData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
     armorNeckSprite: (spriteSheetData.armorNeckSprite && armorNeckImageData) ? { ...spriteSheetData.armorNeckSprite, imageData: armorNeckImageData } : null,

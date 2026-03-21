@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { mockAssetCache } from "./setup";
 
-// Mock database
 const spellsDatabase: Record<string, any> = {
   fireball: { name: "fireball", damage: 50, mana: 30, type: "offensive", range: 200, cast_time: 1, description: "A fireball spell" },
   heal: { name: "heal", damage: 0, mana: 20, type: "healing", range: 100, cast_time: 2, description: "A healing spell" },

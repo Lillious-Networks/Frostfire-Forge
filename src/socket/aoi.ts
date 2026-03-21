@@ -7,48 +7,36 @@ import { packetManager } from "./packet_manager";
 import log from "../modules/logger";
 import spatialGrid from "../services/spatialgrid";
 
-// Player AOI state interface
 export interface PlayerAOIState {
-  // Set of player IDs currently in this player's AOI
+
   playersInAOI: Set<string>;
 
-  // Grid cell coordinates for spatial indexing (optional optimization)
   gridX: number;
   gridY: number;
 
-  // AOI radius in pixels
   aoiRadius: number;
 
-  // Last position where AOI was updated (for change detection)
   lastAOIUpdatePosition: { x: number; y: number };
 
-  // Threshold distance to trigger AOI recalculation
   updateThreshold: number;
 
-  // Map change sequence number to handle rapid map changes
   mapChangeSequence: number;
 
-  // Layer ID for this player (e.g., "main:layer_1")
   layerId: string | null;
 }
 
-/**
- * Initialize AOI state for a player
- */
 export async function initializePlayerAOI(player: any): Promise<void> {
   const pos = player.location.position;
   const mapName = player.location.map.replaceAll(".json", "");
 
   let layerId: string;
 
-  // Check if player is in a party - if so, try to join party's existing layer
   if (player.party_id) {
     const partyId = player.party_id;
     const partyLeader = await parties.getPartyLeader(partyId);
     const partyMembers = await parties.getPartyMembers(partyId);
     const isLeader = partyLeader?.toLowerCase() === player.username?.toLowerCase();
 
-    // Find online party members and their layers
     const allPlayers = playerCache.list();
     const onlinePartyPlayers = Object.values(allPlayers).filter((p: any) =>
       p.username && partyMembers.some((m: string) => m.toLowerCase() === p.username.toLowerCase()) &&
@@ -58,8 +46,7 @@ export async function initializePlayerAOI(player: any): Promise<void> {
 
     if (onlinePartyPlayers.length > 0) {
       if (isLeader) {
-        // Leader joins the layer where party members are
-        // Find the most common layer among party members
+
         const layerCounts = new Map<string, number>();
         onlinePartyPlayers.forEach((p: any) => {
           if (p.aoi?.layerId) {
@@ -67,7 +54,6 @@ export async function initializePlayerAOI(player: any): Promise<void> {
           }
         });
 
-        // Get layer with most members
         let maxCount = 0;
         let targetLayer = null;
         for (const [layer, count] of layerCounts.entries()) {
@@ -78,23 +64,23 @@ export async function initializePlayerAOI(player: any): Promise<void> {
         }
 
         if (targetLayer) {
-          // Manually assign to the party's layer
+
           const targetLayerInfo = layerManager.getLayerInfo(targetLayer);
           if (targetLayerInfo && targetLayerInfo.playerCount < AOI_CONFIG.MAX_PLAYERS_PER_LAYER) {
             layerId = targetLayer;
-            layerManager.removePlayerFromLayer(player.id); // Remove from any existing layer
+            layerManager.removePlayerFromLayer(player.id);
             const layer = layerManager.getLayerInfo(targetLayer)!;
             layer.players.add(player.id);
             layer.playerCount++;
           } else {
-            // Party layer is full, assign normally
+
             layerId = layerManager.assignPlayerToLayer(player.id, mapName);
           }
         } else {
           layerId = layerManager.assignPlayerToLayer(player.id, mapName);
         }
       } else {
-        // Member joins leader's layer
+
         const leaderPlayer = onlinePartyPlayers.find((p: any) =>
           p.username?.toLowerCase() === partyLeader?.toLowerCase()
         );
@@ -105,25 +91,25 @@ export async function initializePlayerAOI(player: any): Promise<void> {
 
           if (leaderLayerInfo && leaderLayerInfo.playerCount < AOI_CONFIG.MAX_PLAYERS_PER_LAYER) {
             layerId = leaderLayerId;
-            layerManager.removePlayerFromLayer(player.id); // Remove from any existing layer
+            layerManager.removePlayerFromLayer(player.id);
             const layer = layerManager.getLayerInfo(leaderLayerId)!;
             layer.players.add(player.id);
             layer.playerCount++;
           } else {
-            // Leader's layer is full, assign normally
+
             layerId = layerManager.assignPlayerToLayer(player.id, mapName);
           }
         } else {
-          // Leader not online, assign normally
+
           layerId = layerManager.assignPlayerToLayer(player.id, mapName);
         }
       }
     } else {
-      // No party members online on this map, assign normally
+
       layerId = layerManager.assignPlayerToLayer(player.id, mapName);
     }
   } else {
-    // Not in a party, assign normally
+
     layerId = layerManager.assignPlayerToLayer(player.id, mapName);
   }
 
@@ -138,7 +124,6 @@ export async function initializePlayerAOI(player: any): Promise<void> {
     layerId: layerId,
   };
 
-  // Add player to spatial grid if enabled
   if (AOI_CONFIG.USE_SPATIAL_GRID) {
     spatialGrid.addPlayer(player.id, pos.x, pos.y, mapName);
     if (AOI_CONFIG.DEBUG) {
@@ -147,11 +132,6 @@ export async function initializePlayerAOI(player: any): Promise<void> {
   }
 }
 
-/**
- * Filter players by distance - optimized version with spatial grid indexing
- * Performance: O(k) where k is players in nearby cells (~20-100) instead of O(n) for all players (~1000+)
- * Now includes layer filtering: only players on same map AND same layer
- */
 function filterPlayersByDistance(
   sourcePlayer: any,
   radius: number,
@@ -163,9 +143,8 @@ function filterPlayersByDistance(
   const sourceMap = map.replaceAll(".json", "");
   const result: any[] = [];
 
-  // Use spatial grid if enabled (100-200x faster for 1000+ players)
   if (AOI_CONFIG.USE_SPATIAL_GRID) {
-    // Get candidate players from nearby grid cells only (O(k) instead of O(n))
+
     const candidateIds = spatialGrid.getPlayersInRadius(
       sourcePos.x,
       sourcePos.y,
@@ -173,19 +152,15 @@ function filterPlayersByDistance(
       sourceMap
     );
 
-    // Filter candidates by exact distance and layer
     for (const playerId of candidateIds) {
       const player = playerCache.get(playerId);
       if (!player) continue;
 
-      // Skip self
       if (player.id === sourcePlayer.id) continue;
 
-      // Must be on same layer
       const playerLayerId = player.aoi?.layerId;
       if (playerLayerId !== sourceLayerId) continue;
 
-      // Check exact distance (squared to avoid sqrt)
       const dx = player.location.position.x - sourcePos.x;
       const dy = player.location.position.y - sourcePos.y;
       const distSquared = dx * dx + dy * dy;
@@ -199,24 +174,20 @@ function filterPlayersByDistance(
       log.debug(`[AOI] Spatial grid: checked ${candidateIds.length} candidates, found ${result.length} in range`);
     }
   } else {
-    // Fallback: Linear search through all players (original implementation)
+
     const players = playerCache.list();
 
     for (const playerId in players) {
       const player = players[playerId];
 
-      // Skip self
       if (player.id === sourcePlayer.id) continue;
 
-      // Must be on same map
       const playerMap = player.location.map.replaceAll(".json", "");
       if (playerMap !== sourceMap) continue;
 
-      // Must be on same layer
       const playerLayerId = player.aoi?.layerId;
       if (playerLayerId !== sourceLayerId) continue;
 
-      // Check distance (squared to avoid sqrt)
       const dx = player.location.position.x - sourcePos.x;
       const dy = player.location.position.y - sourcePos.y;
       const distSquared = dx * dx + dy * dy;
@@ -230,9 +201,6 @@ function filterPlayersByDistance(
   return result;
 }
 
-/**
- * Send packet helper
- */
 function sendPacket(ws: any, packets: any[]) {
   if (!ws || !ws.send || ws.readyState !== 1) return;
   try {
@@ -240,21 +208,17 @@ function sendPacket(ws: any, packets: any[]) {
       ws.send(packet);
     });
   } catch (error) {
-    // Silently ignore errors when sending to closed websockets
+    log.error(`[AOI] Error sending packet: ${error}`);
   }
 }
 
-/**
- * Queue SPAWN_PLAYER data for batching
- * Returns spawn data to be added to batch queue
- */
 export function queueSpawnPlayerPacket(
   spawnedPlayer: any
 ): any {
   if (!spawnedPlayer) return null;
 
   try {
-    // Build spawn data structure
+
     const spawnData = {
       id: spawnedPlayer.id,
       userid: spawnedPlayer.userid,
@@ -273,6 +237,7 @@ export function queueSpawnPlayerPacket(
       stats: spawnedPlayer.stats,
       mounted: spawnedPlayer.mounted,
       animation: null,
+      spriteData: null,
     };
 
     if (AOI_CONFIG.DEBUG) {
@@ -286,10 +251,6 @@ export function queueSpawnPlayerPacket(
   }
 }
 
-/**
- * Calculate and update a player's Area of Interest
- * Queues SPAWN_PLAYER and DESPAWN_PLAYER packets for batching
- */
 export async function updatePlayerAOI(
   player: any,
   sendAnimationToFn: (targetWs: any, name: string, playerId: string) => Promise<void>,
@@ -308,15 +269,18 @@ export async function updatePlayerAOI(
   const aoiRadius = player.aoi.aoiRadius;
   const currentSequence = player.aoi.mapChangeSequence;
 
+  log.info(`[AOI] updatePlayerAOI called for player ${player.id} at (${currentPos.x}, ${currentPos.y}) on map ${currentMap}`);
+
   try {
-    // Step 1: Find all players currently in range on same map
+
     const playersInRange = filterPlayersByDistance(
       player,
       aoiRadius,
       currentMap
     );
 
-    // Check if map changed during async operation
+    log.info(`[AOI] Player ${player.id}: filterPlayersByDistance found ${playersInRange.length} players in range`);
+
     if (player.aoi.mapChangeSequence !== currentSequence) {
       if (AOI_CONFIG.DEBUG) {
         log.debug(`[AOI] Map changed during AOI update for ${player.id}, aborting`);
@@ -327,7 +291,8 @@ export async function updatePlayerAOI(
     const newAOISet = new Set(playersInRange.map((p) => p.id));
     const oldAOISet = player.aoi.playersInAOI;
 
-    // Step 2: Determine who entered AOI (in new but not in old)
+    log.info(`[AOI] Player ${player.id}: oldAOI has ${oldAOISet.size} players, newAOI has ${newAOISet.size} players`);
+
     const enteredAOI: string[] = [];
     newAOISet.forEach((playerId) => {
       if (!oldAOISet.has(playerId)) {
@@ -335,7 +300,6 @@ export async function updatePlayerAOI(
       }
     });
 
-    // Step 3: Determine who exited AOI (in old but not in new)
     const exitedAOI: string[] = [];
     oldAOISet.forEach((playerId: string) => {
       if (!newAOISet.has(playerId)) {
@@ -343,24 +307,32 @@ export async function updatePlayerAOI(
       }
     });
 
-    if (AOI_CONFIG.DEBUG && (enteredAOI.length > 0 || exitedAOI.length > 0)) {
-      log.debug(
-        `[AOI] Player ${player.id}: ${enteredAOI.length} entered, ${exitedAOI.length} exited`
-      );
+    log.info(`[AOI] Player ${player.id}: ${enteredAOI.length} entered, ${exitedAOI.length} exited`);
+    if (enteredAOI.length > 0) {
+      log.info(`[AOI] Player ${player.id}: Entered players: ${enteredAOI.join(', ')}`);
+    }
+    if (exitedAOI.length > 0) {
+      log.info(`[AOI] Player ${player.id}: Exited players: ${exitedAOI.join(', ')}`);
     }
 
-    // Step 4: Queue SPAWN_PLAYER for entries (bidirectional)
-    for (const enteredPlayerId of enteredAOI) {
-      const enteredPlayer = playerCache.get(enteredPlayerId);
-      if (!enteredPlayer) continue;
+    log.warn(`[AOI] BEFORE STEP 4`);
 
-      // Check visibility based on stealth and force visibility flag
+    log.warn(`[AOI] STARTING FOR LOOP: enteredAOI.length=${enteredAOI.length}`);
+    for (const enteredPlayerId of enteredAOI) {
+      log.warn(`[AOI] LOOP ITERATION: processing enteredPlayerId=${enteredPlayerId}`);
+      const enteredPlayer = playerCache.get(enteredPlayerId);
+      if (!enteredPlayer) {
+        log.warn(`[AOI] Player ${player.id}: Entered player ${enteredPlayerId} not in cache`);
+        continue;
+      }
+
+      log.warn(`[AOI] Got enteredPlayer: ${enteredPlayer.id}`);
+
       const playerForceSeeEntered = player.forceVisibleTo?.has(enteredPlayer.id);
       const enteredPlayerForceSeePlayer = enteredPlayer.forceVisibleTo?.has(player.id);
       const canSeeEntered = !enteredPlayer.isStealth || player.isAdmin || playerForceSeeEntered;
       const canSeePlayer = !player.isStealth || enteredPlayer.isAdmin || enteredPlayerForceSeePlayer;
 
-      // Queue entered player's spawn data to current player
       if (canSeeEntered && spawnBatchQueue) {
         const spawnData = queueSpawnPlayerPacket(enteredPlayer);
         if (spawnData) {
@@ -371,7 +343,6 @@ export async function updatePlayerAOI(
         }
       }
 
-      // Queue current player's spawn data to entered player (reciprocal)
       if (canSeePlayer && spawnBatchQueue) {
         const spawnData = queueSpawnPlayerPacket(player);
         if (spawnData) {
@@ -382,19 +353,17 @@ export async function updatePlayerAOI(
         }
       }
 
-      // Update entered player's AOI tracking (bidirectional)
       if (!enteredPlayer.aoi) {
         await initializePlayerAOI(enteredPlayer);
       }
       enteredPlayer.aoi.playersInAOI.add(player.id);
       playerCache.set(enteredPlayer.id, enteredPlayer);
+
     }
 
-    // Step 5: Queue DESPAWN_PLAYER for exits (bidirectional)
     for (const exitedPlayerId of exitedAOI) {
       const exitedPlayer = playerCache.get(exitedPlayerId);
 
-      // Queue despawn to current player
       if (despawnBatchQueue) {
         if (!despawnBatchQueue.has(player.id)) {
           despawnBatchQueue.set(player.id, new Set());
@@ -404,21 +373,24 @@ export async function updatePlayerAOI(
         sendPacket(player.ws, packetManager.despawnPlayer(exitedPlayerId, "distance"));
       }
 
-      // Queue despawn to exited player (reciprocal)
       if (exitedPlayer && exitedPlayer.ws) {
-        if (despawnBatchQueue) {
-          if (!despawnBatchQueue.has(exitedPlayer.id)) {
-            despawnBatchQueue.set(exitedPlayer.id, new Set());
-          }
-          despawnBatchQueue.get(exitedPlayer.id)!.add(player.id);
-        } else {
+
+        if (exitedPlayer.ws && exitedPlayer.ws.readyState === 1) {
           sendPacket(
             exitedPlayer.ws,
             packetManager.despawnPlayer(player.id, "distance")
           );
+          if (AOI_CONFIG.DEBUG) {
+            log.debug(`[AOI] IMMEDIATE SEND reciprocal despawn: ${player.id} -> ${exitedPlayer.id}`);
+          }
+        } else if (despawnBatchQueue) {
+
+          if (!despawnBatchQueue.has(exitedPlayer.id)) {
+            despawnBatchQueue.set(exitedPlayer.id, new Set());
+          }
+          despawnBatchQueue.get(exitedPlayer.id)!.add(player.id);
         }
 
-        // Update exited player's AOI tracking
         if (exitedPlayer.aoi) {
           exitedPlayer.aoi.playersInAOI.delete(player.id);
           playerCache.set(exitedPlayer.id, exitedPlayer);
@@ -426,13 +398,11 @@ export async function updatePlayerAOI(
       }
     }
 
-    // Step 6: Update current player's AOI state
     player.aoi.playersInAOI = newAOISet;
     player.aoi.lastAOIUpdatePosition = { x: currentPos.x, y: currentPos.y };
     player.aoi.gridX = Math.floor(currentPos.x / AOI_CONFIG.GRID_CELL_SIZE);
     player.aoi.gridY = Math.floor(currentPos.y / AOI_CONFIG.GRID_CELL_SIZE);
 
-    // Update spatial grid position if enabled
     if (AOI_CONFIG.USE_SPATIAL_GRID) {
       const mapName = currentMap.replaceAll(".json", "");
       const cellChanged = spatialGrid.updatePlayer(player.id, currentPos.x, currentPos.y, mapName);
@@ -441,15 +411,15 @@ export async function updatePlayerAOI(
       }
     }
 
+    log.warn(`[AOI] BEFORE FINAL CACHE UPDATE for player ${player.id}`);
     playerCache.set(player.id, player);
+    log.warn(`[AOI] AFTER FINAL CACHE UPDATE for player ${player.id}`);
   } catch (error) {
     log.error(`[AOI] Error updating AOI for player ${player.id}: ${error}`);
+    log.error(`[AOI] ERROR STACK: ${error instanceof Error ? error.stack : 'unknown'}`);
   }
 }
 
-/**
- * Check if player should update AOI based on distance moved
- */
 export function shouldUpdateAOI(player: any): boolean {
   if (!player || !player.aoi) return false;
 
@@ -460,13 +430,14 @@ export function shouldUpdateAOI(player: any): boolean {
   const dy = currentPos.y - lastPos.y;
   const distanceMoved = Math.sqrt(dx * dx + dy * dy);
 
-  return distanceMoved > player.aoi.updateThreshold;
+  const shouldUpdate = distanceMoved > player.aoi.updateThreshold;
+  if (!shouldUpdate) {
+    log.debug(`[AOI] shouldUpdateAOI for ${player.id}: distance=${distanceMoved.toFixed(2)}, threshold=${player.aoi.updateThreshold} - returning false`);
+  }
+
+  return shouldUpdate;
 }
 
-/**
- * Broadcast animation/sprite sheet to players in AOI
- * Always includes self for client-side prediction validation
- */
 export function broadcastToAOI(
   sourcePlayer: any,
   packetData: any[],
@@ -480,25 +451,23 @@ export function broadcastToAOI(
   }
 
   try {
-    // Always send to self if requested (required for client feedback)
+
     if (includeSelf && sourcePlayer.ws) {
       sendPacket(sourcePlayer.ws, packetData);
     }
 
-    // Get players in AOI
     const playersInAOI = Array.from(sourcePlayer.aoi.playersInAOI)
       .map((id) => playerCache.get(id as string))
       .filter((p) => p && p.ws);
 
-    // Handle stealth mode
     if (sourcePlayer.isStealth) {
-      // Only admins can see stealth players
+
       const visibleTo = playersInAOI.filter((p) => p.isAdmin);
       visibleTo.forEach((player) => {
         sendPacket(player.ws, packetData);
       });
     } else {
-      // Normal broadcast to all players in AOI
+
       playersInAOI.forEach((player) => {
         sendPacket(player.ws, packetData);
       });
@@ -508,9 +477,6 @@ export function broadcastToAOI(
   }
 }
 
-/**
- * Find all players who have targetId in their AOI
- */
 export function findPlayersWithTargetInAOI(targetId: string): any[] {
   const allPlayers = Object.values(playerCache.list());
   return allPlayers.filter(
@@ -518,10 +484,6 @@ export function findPlayersWithTargetInAOI(targetId: string): any[] {
   );
 }
 
-/**
- * Remove a player from everyone's AOI (used on disconnect/map change)
- * Queues despawn packets for batching
- */
 export function despawnPlayerFromAllAOI(
   departingPlayer: any,
   reason: "map_change" | "disconnect" = "map_change",
@@ -530,38 +492,34 @@ export function despawnPlayerFromAllAOI(
   if (!departingPlayer || !departingPlayer.aoi) return;
 
   try {
-    // Find all players who have this player in their AOI
+
     const affectedPlayers = findPlayersWithTargetInAOI(departingPlayer.id);
 
     affectedPlayers.forEach((player) => {
       if (despawnBatchQueue) {
-        // Queue despawn for batching
+
         if (!despawnBatchQueue.has(player.id)) {
           despawnBatchQueue.set(player.id, new Set());
         }
         despawnBatchQueue.get(player.id)!.add(departingPlayer.id);
       } else {
-        // Send despawn packet immediately (no batch queue provided)
+
         sendPacket(
           player.ws,
           packetManager.despawnPlayer(departingPlayer.id, reason)
         );
       }
 
-      // Update AOI tracking
       if (player.aoi) {
         player.aoi.playersInAOI.delete(departingPlayer.id);
         playerCache.set(player.id, player);
       }
     });
 
-    // Clear departing player's AOI only on disconnect
-    // For map_change/layer_change, keep the AOI so updatePlayerAOI can calculate the diff
     if (reason === "disconnect") {
       departingPlayer.aoi.playersInAOI.clear();
       layerManager.removePlayerFromLayer(departingPlayer.id);
 
-      // Remove from spatial grid if enabled
       if (AOI_CONFIG.USE_SPATIAL_GRID) {
         spatialGrid.removePlayer(departingPlayer.id);
         if (AOI_CONFIG.DEBUG) {
@@ -580,9 +538,6 @@ export function despawnPlayerFromAllAOI(
   }
 }
 
-/**
- * Handle map change for player AOI
- */
 export async function handleMapChangeAOI(
   player: any,
   newMapName: string,
@@ -594,29 +549,25 @@ export async function handleMapChangeAOI(
   if (!player) return;
 
   try {
-    // Initialize AOI if not present
+
     if (!player.aoi) {
       await initializePlayerAOI(player);
     }
 
     const oldMapName = player.location.map;
 
-    // Only process if actually changing maps
     const oldMap = oldMapName.replaceAll(".json", "");
     const newMap = newMapName.replaceAll(".json", "");
 
     if (oldMap !== newMap) {
-      // Increment sequence to invalidate any in-flight AOI updates
+
       player.aoi.mapChangeSequence++;
 
-      // Despawn from all players on old map (map changes send immediately, no batching)
       despawnPlayerFromAllAOI(player, "map_change", undefined);
 
-      // Reassign player to a new layer on the new map
       const newLayerId = layerManager.assignPlayerToLayer(player.id, newMap);
       player.aoi.layerId = newLayerId;
 
-      // Update spatial grid - remove from old map, add to new map
       if (AOI_CONFIG.USE_SPATIAL_GRID) {
         spatialGrid.removePlayer(player.id);
         spatialGrid.addPlayer(player.id, newPosition.x, newPosition.y, newMap);
@@ -630,13 +581,11 @@ export async function handleMapChangeAOI(
       }
     }
 
-    // Update position and grid cell
     const oldMapForIndex = player.location.map;
     player.location.map = newMapName;
     player.location.position.x = newPosition.x;
     player.location.position.y = newPosition.y;
 
-    // Update map index when player changes maps
     if (oldMap !== newMap) {
       mapIndex.movePlayer(player.id, oldMapForIndex, newMapName);
     }
@@ -645,16 +594,12 @@ export async function handleMapChangeAOI(
     player.aoi.lastAOIUpdatePosition = { x: newPosition.x, y: newPosition.y };
     playerCache.set(player.id, player);
 
-    // Discover new AOI on new map
     await updatePlayerAOI(player, sendAnimationToFn, spawnBatchQueue, despawnBatchQueue);
   } catch (error) {
     log.error(`[AOI] Error handling map change: ${error}`);
   }
 }
 
-/**
- * Get layer information for a player
- */
 export function getPlayerLayerInfo(playerId: string): { layerId: string | null; layerName: string | null } {
   const player = playerCache.get(playerId);
   if (!player || !player.aoi) {
@@ -667,15 +612,8 @@ export function getPlayerLayerInfo(playerId: string): { layerId: string | null; 
   return { layerId, layerName };
 }
 
-/**
- * Export layer manager for direct access if needed
- */
 export { layerManager };
 
-/**
- * Synchronize party members to the same layer and update their AOIs
- * Called when party composition changes
- */
 interface AOIPlayer {
   id: string;
   username: string;
@@ -702,7 +640,7 @@ export async function syncPartyLayers(
   sendAnimationToFn: (targetWs: any, name: string, playerId: string) => Promise<void>
 ): Promise<void> {
   try {
-    // Get player objects for leader and members
+
     const allPlayers: { [id: string]: AOIPlayer } = playerCache.list();
 
     const leaderPlayer = Object.values(allPlayers).find((p: AOIPlayer) =>
@@ -714,13 +652,12 @@ export async function syncPartyLayers(
       return;
     }
 
-    // Get online party members
     const onlineMembers: any[] = [];
     const memberPlayerIds: string[] = [];
 
     for (const memberUsername of partyMemberUsernames) {
       if (memberUsername.toLowerCase() === partyLeaderUsername.toLowerCase()) {
-        continue; // Skip leader, already have them
+        continue;
       }
 
       const memberPlayer = Object.values(allPlayers).find((p: any) =>
@@ -740,7 +677,6 @@ export async function syncPartyLayers(
 
     const mapName = leaderPlayer.location.map.replaceAll(".json", "");
 
-    // Filter members to only those on the same map as leader
     const membersOnSameMap = onlineMembers.filter(m =>
       m.location.map.replaceAll(".json", "") === mapName
     );
@@ -752,7 +688,6 @@ export async function syncPartyLayers(
 
     const memberIdsOnSameMap = membersOnSameMap.map(m => m.id);
 
-    // Sync party to leader's layer
     const targetLayerId = layerManager.syncPartyToLeaderLayer(
       leaderPlayer.id,
       memberIdsOnSameMap,
@@ -764,15 +699,11 @@ export async function syncPartyLayers(
       return;
     }
 
-    // Create batch queues for spawning/despawning players efficiently
     const spawnBatchQueue = new Map<string, Map<string, any>>();
     const despawnBatchQueue = new Map<string, Set<string>>();
 
-    // Track which players need AOI updates
     const playersNeedingUpdate: any[] = [];
 
-    // STEP 1: Update all layer IDs FIRST (before any AOI operations)
-    // This ensures all players are on their target layer before we calculate who can see whom
     const leaderOldLayerId = leaderPlayer.aoi?.layerId;
 
     if (leaderPlayer.aoi) {
@@ -803,27 +734,18 @@ export async function syncPartyLayers(
       }
     }
 
-    // STEP 2: Despawn players from old layers
-    // This tells old layer players to remove these players from their screens
     for (const { player, oldLayerId } of playersNeedingUpdate) {
       if (oldLayerId !== targetLayerId) {
-        // Player changed layers - despawn them from old layer players' AOIs
+
         despawnPlayerFromAllAOI(player, "map_change", despawnBatchQueue);
       }
     }
 
-    // STEP 3: Update AOI for all affected players
-    // Now that all layer IDs are updated, calculate new AOIs based on new layers
     for (const { player } of playersNeedingUpdate) {
-      // updatePlayerAOI will:
-      // - Find players in range on NEW layer (already updated)
-      // - Compare with old playersInAOI
-      // - Despawn old layer players from this player's view
-      // - Spawn new layer players to this player's view
+
       await updatePlayerAOI(player, sendAnimationToFn, spawnBatchQueue, despawnBatchQueue);
     }
 
-    // Flush batched spawn packets
     let totalSpawns = 0;
     let totalDespawns = 0;
 
@@ -835,11 +757,10 @@ export async function syncPartyLayers(
           totalSpawns += spawnsArray.length;
           sendPacket(player.ws, packetManager.loadPlayers({ players: spawnsArray, snapshotRevision: null }));
 
-          // Send animations for each spawned player
           for (const spawnData of spawnsArray) {
             const spawnedPlayer = playerCache.get(spawnData.id);
             if (spawnedPlayer && spawnedPlayer.location?.position?.direction) {
-              // Determine animation name based on player state
+
               const direction = spawnedPlayer.location.position.direction;
               const walking = spawnedPlayer.moving || false;
               const mounted = spawnedPlayer.mounted || false;
@@ -866,7 +787,6 @@ export async function syncPartyLayers(
       }
     }
 
-    // Flush batched despawn packets
     for (const [playerId, despawnSet] of despawnBatchQueue.entries()) {
       const player = playerCache.get(playerId);
       if (player && player.ws) {
@@ -879,7 +799,6 @@ export async function syncPartyLayers(
       }
     }
 
-    // Log positions for debugging visibility issues
     const positionInfo = playersNeedingUpdate.map(({ player }) => {
       const pos = player.location?.position;
       return `${player.username}(${pos?.x},${pos?.y})`;
@@ -893,16 +812,12 @@ export async function syncPartyLayers(
   }
 }
 
-/**
- * Periodically check all parties and sync layers if they're out of sync
- * Runs every 15 seconds
- */
 export function startAutoPartyLayerSync(
   sendAnimationToFn: (targetWs: any, name: string, playerId: string) => Promise<void>
 ): void {
   setInterval(async () => {
     try {
-      // Get all active parties
+
       const allParties = await parties.getAllParties();
 
       if (!allParties || allParties.length === 0) {
@@ -916,7 +831,6 @@ export function startAutoPartyLayerSync(
           continue;
         }
 
-        // Find online leader
         const leaderPlayer = Object.values(allPlayers).find((p: any) =>
           p.username && p.username.toLowerCase() === party.leader.toLowerCase()
         );
@@ -928,13 +842,12 @@ export function startAutoPartyLayerSync(
         const leaderLayerId = leaderPlayer.aoi.layerId;
         const leaderMapName = leaderPlayer.location.map.replaceAll(".json", "");
 
-        // Find online members on the same map
         const onlineMembers: any[] = [];
         let needsSync = false;
 
         for (const memberUsername of party.members) {
           if (memberUsername.toLowerCase() === party.leader.toLowerCase()) {
-            continue; // Skip leader
+            continue;
           }
 
           const memberPlayer = Object.values(allPlayers).find((p: any) =>
@@ -944,11 +857,9 @@ export function startAutoPartyLayerSync(
           if (memberPlayer && memberPlayer.aoi?.layerId) {
             const memberMapName = memberPlayer.location.map.replaceAll(".json", "");
 
-            // Only check members on the same map as leader
             if (memberMapName === leaderMapName) {
               onlineMembers.push(memberPlayer);
 
-              // Check if member is on a different layer than leader
               if (memberPlayer.aoi.layerId !== leaderLayerId) {
                 needsSync = true;
               }
@@ -956,7 +867,6 @@ export function startAutoPartyLayerSync(
           }
         }
 
-        // If any members are out of sync, sync the entire party
         if (needsSync && onlineMembers.length > 0) {
           await syncPartyLayers(
             party.leader,
@@ -969,13 +879,9 @@ export function startAutoPartyLayerSync(
     } catch (error) {
       log.error(`[LAYER] Error in auto party layer sync: ${error}`);
     }
-  }, 15000); // Run every 15 seconds
+  }, 15000);
 }
 
-/**
- * Condense layers by merging players from less populated layers into fuller layers
- * Runs every 5 minutes to optimize layer usage
- */
 export function startAutoLayerCondensation(
   sendAnimationToFn: (targetWs: any, name: string, playerId: string) => Promise<void>
 ): void {
@@ -984,13 +890,11 @@ export function startAutoLayerCondensation(
       const stats = layerManager.getStats();
 
       if (stats.totalLayers <= 1) {
-        return; // Nothing to condense
+        return;
       }
 
-      // Get layers grouped by map
       const layersByMap = new Map<string, Array<{ layerId: string; playerCount: number; players: string[] }>>();
 
-      // Group all layers by their map
       for (const [layerId, layerInfo] of layerManager.getAllLayers().entries()) {
         const mapName = layerInfo.mapName;
         if (!layersByMap.has(mapName)) {
@@ -1003,73 +907,63 @@ export function startAutoLayerCondensation(
         });
       }
 
-      // Process each map
       for (const [mapName, layers] of layersByMap.entries()) {
         if (layers.length <= 1) {
-          continue; // Only one layer, nothing to condense
+          continue;
         }
 
-        // Sort layers by player count (ascending) - we'll try to empty smaller layers first
         layers.sort((a, b) => a.playerCount - b.playerCount);
 
         let condensed = false;
         const spawnBatchQueue = new Map<string, Map<string, any>>();
         const despawnBatchQueue = new Map<string, Set<string>>();
 
-        // Try to move players from smaller layers to larger ones
         for (let i = 0; i < layers.length - 1; i++) {
           const sourceLayer = layers[i];
 
           if (sourceLayer.playerCount === 0) continue;
 
-          // Try to find a target layer that can accommodate these players
           for (let j = i + 1; j < layers.length; j++) {
             const targetLayer = layers[j];
             const availableSpace = AOI_CONFIG.MAX_PLAYERS_PER_LAYER - targetLayer.playerCount;
 
             if (availableSpace >= sourceLayer.playerCount) {
-              // We can move all players from source to target
+
               log.debug(`[LAYER] Condensing ${sourceLayer.playerCount} players from ${layerManager.getLayerName(sourceLayer.layerId)} to ${layerManager.getLayerName(targetLayer.layerId)} on map ${mapName}`);
 
-              // Move each player
               for (const playerId of sourceLayer.players) {
                 const player = playerCache.get(playerId);
                 if (!player || !player.aoi) continue;
 
-                // Update layer assignment in layer manager
                 layerManager.removePlayerFromLayer(playerId);
                 const targetLayerInfo = layerManager.getLayerInfo(targetLayer.layerId);
                 if (targetLayerInfo) {
                   targetLayerInfo.players.add(playerId);
                   targetLayerInfo.playerCount++;
-                  // Also update the playerToLayer map
+
                   (layerManager as any).playerToLayer.set(playerId, targetLayer.layerId);
                 }
 
-                // Update player's layer ID
                 player.aoi.layerId = targetLayer.layerId;
                 playerCache.set(playerId, player);
 
-                // Despawn from old layer players
                 despawnPlayerFromAllAOI(player, "map_change", despawnBatchQueue);
 
-                // Update AOI to spawn on new layer
                 await updatePlayerAOI(player, sendAnimationToFn, spawnBatchQueue, despawnBatchQueue);
               }
 
-              // Update our tracking
               targetLayer.playerCount += sourceLayer.playerCount;
               targetLayer.players.push(...sourceLayer.players);
               sourceLayer.playerCount = 0;
               sourceLayer.players = [];
               condensed = true;
-              break; // Found a home for this layer's players
+              break;
             }
           }
         }
 
         if (condensed) {
-          // Flush batched packets
+
           for (const [playerId, spawnsMap] of spawnBatchQueue.entries()) {
             const player = playerCache.get(playerId);
             if (player && player.ws) {
@@ -1077,7 +971,6 @@ export function startAutoLayerCondensation(
               if (spawnsArray.length > 0) {
                 sendPacket(player.ws, packetManager.loadPlayers({ players: spawnsArray, snapshotRevision: null }));
 
-                // Send animations for spawned players
                 for (const spawnData of spawnsArray) {
                   const spawnedPlayer = playerCache.get(spawnData.id);
                   if (spawnedPlayer && spawnedPlayer.location?.position?.direction) {
@@ -1106,7 +999,6 @@ export function startAutoLayerCondensation(
             }
           }
 
-          // Flush despawn packets
           for (const [playerId, despawnSet] of despawnBatchQueue.entries()) {
             const player = playerCache.get(playerId);
             if (player && player.ws && despawnSet.size > 0) {
@@ -1122,5 +1014,5 @@ export function startAutoLayerCondensation(
     } catch (error) {
       log.error(`[LAYER] Error in auto layer condensation: ${error}`);
     }
-  }, 300000); // Run every 5 minutes (300000ms)
+  }, 300000);
 }

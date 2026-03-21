@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 
-// Mock IP service
 const whitelistedIPs: Set<string> = new Set();
 const blacklistedIPs: Set<string> = new Set();
 
@@ -13,7 +12,6 @@ const service = {
   blacklistRemove: (ip: string) => blacklistedIPs.delete(ip),
 };
 
-// Mock database
 const mockQuery = async (sql: string, params: any[]) => {
   if (sql.includes("SELECT * FROM blocked_ips")) {
     return Array.from(blacklistedIPs).map((ip) => ({ ip }));

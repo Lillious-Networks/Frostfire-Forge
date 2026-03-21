@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { mockAssetCache } from "./setup";
 
-// Mock database
 const inventoryDatabase: Record<string, any[]> = {
   user1: [
     { item: "iron_sword", quantity: 1, equipped: 1 },

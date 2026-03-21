@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 
-// Mock database
 const friendsDatabase: Record<string, any> = {
   user1: { friends: "user2, user3" },
   user2: { friends: "user1" },

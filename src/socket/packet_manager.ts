@@ -208,6 +208,7 @@ export const packetManager = {
             stats: data.stats,
             sprite: data.sprite,
             mounted: data.mounted,
+            spriteData: data.spriteData || null,
             ...(data.friends ? { friends: data.friends } : {}),
             ...(data.party ? { party: data.party } : {}),
             ...(data.currency ? { currency: data.currency } : { copper: 0, silver: 0, gold: 0 }),
@@ -435,7 +436,7 @@ export const packetManager = {
     ] as any[];
   },
   projectile: (data: any) => {
-    // Don't send projectile packet if no icon is set because it won't render
+
     if (!data?.icon) return [];
     return [
       packet.encode(JSON.stringify({ type: "PROJECTILE", data })),

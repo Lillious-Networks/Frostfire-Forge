@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { mockAssetCache } from "./setup";
 
-// Mock database
 const mountsDatabase: Record<string, any> = {
   test_mount: { name: "test_mount", description: "A test mount" },
   horse: { name: "horse", description: "A fast horse" },

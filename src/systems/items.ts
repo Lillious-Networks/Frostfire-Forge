@@ -8,7 +8,7 @@ const items = {
       "INSERT IGNORE INTO items (name, quality, description, icon, type, stat_armor, stat_damage, stat_critical_chance, stat_critical_damage, stat_health, stat_stamina, stat_avoidance, level_requirement, equipable, equipment_slot) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [item.name, item.quality, item.description, item.icon || null, item.type, item.stat_armor || null, item.stat_damage || null, item.stat_critical_chance || null, item.stat_critical_damage || null, item.stat_health || null, item.stat_stamina || null, item.stat_avoidance || null, item.level_requirement || null, item.equipable, item.equipment_slot || null]
     ) as any;
-    // Update cache if insert was successful
+
     if (result.affectedRows > 0) {
       const items = await assetCache.get("items") as Item[];
       items.push(item);
@@ -18,7 +18,7 @@ const items = {
   async remove(item: Item) {
     if (!item?.name) return;
     const result = await query("DELETE FROM items WHERE name = ?", [item.name]) as any;
-    // Update cache if delete was successful
+
     if (result.affectedRows > 0) {
       const items = await assetCache.get("items") as Item[];
       const index = items.findIndex((i) => i.name === item.name);

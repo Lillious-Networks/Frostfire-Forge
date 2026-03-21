@@ -6,7 +6,7 @@ const guilds = {
         if (!username) return false;
         try {
             const result = await query("SELECT guild_id FROM accounts WHERE username = ?", [username]) as any[];
-            if (result.length === 0) return false; // User not found
+            if (result.length === 0) return false;
             return result.length > 0;
         } catch (error) {
             log.error(`Error checking if user is in guild: ${error}`);
@@ -38,7 +38,7 @@ const guilds = {
         if (!guildId) return null;
         try {
             const result = await query("SELECT name FROM guilds WHERE id = ?", [guildId]) as any[];
-            if (result.length === 0 || !result[0].name) return null; // Guild not found or no name
+            if (result.length === 0 || !result[0].name) return null;
             return result[0].name;
         } catch (error) {
             log.error(`Error getting guild name: ${error}`);
@@ -49,7 +49,7 @@ const guilds = {
         if (!guildId) return [];
         try {
             const result = await query("SELECT members FROM guilds WHERE id = ?", [guildId]) as any[];
-            if (result.length === 0 || !result[0].members) return []; // Guild not found or no members
+            if (result.length === 0 || !result[0].members) return [];
             const members = result[0].members.split(",").map((member: any) => member.trim());
             return members.filter((member: any) => member);
         } catch (error) {
@@ -61,7 +61,7 @@ const guilds = {
         if (!guildId) return null;
         try {
             const result = await query("SELECT leader FROM guilds WHERE id = ?", [guildId]) as any[];
-            if (result.length === 0 || !result[0].leader) return null; // Guild not found or no leader
+            if (result.length === 0 || !result[0].leader) return null;
             return result[0].leader;
         } catch (error) {
             log.error(`Error getting guild leader: ${error}`);
@@ -81,21 +81,17 @@ const guilds = {
     async add(username: string, guildId: number): Promise<string[]> {
         if (!username) return [];
         try {
-            // Check if the user is already in a guild
+
             const existingGuild = await this.exists(username);
             if (existingGuild) return [];
 
-            // Get guild members
             const members = await this.getGuildMembers(guildId) as string[];
             if (!members || members?.length === 0) return [];
 
-            // Check if guild members exceed the limit of 500
             if (members.length >= 500) return [];
 
-            // Prevent adding the same user multiple times
             if (members.includes(username)) return [];
 
-            // Add the user to the guild
             await query("UPDATE accounts SET guild_id = ? WHERE username = ?", [guildId, username]);
             const updatedMembers = [...members, username].join(", ");
             await query("UPDATE guilds SET members = ? WHERE id = ?", [updatedMembers, guildId]);
@@ -109,13 +105,12 @@ const guilds = {
         if (!username) return [];
         try {
             const guildId = await this.getGuildId(username);
-            if (!guildId) return []; // User is not in a guild
+            if (!guildId) return [];
 
             await query("UPDATE accounts SET guild_id = NULL WHERE username = ?", [username]);
 
             const members = await this.getGuildMembers(guildId);
 
-            // Remove the user from the members list
             const updatedMembers = members.filter((member: string) => member !== username).join(", ");
             await query("UPDATE guilds SET members = ? WHERE id = ?", [updatedMembers, guildId]);
             const memberArray = updatedMembers.split(",").map((member: string) => member.trim());
@@ -129,7 +124,7 @@ const guilds = {
         if (!guildId) return false;
         try {
             await query("DELETE FROM guilds WHERE id = ?", [guildId]);
-            // Remove guild_id from all members in the accounts table
+
             await query("UPDATE accounts SET guild_id = NULL WHERE guild_id = ?", [guildId]);
             log.info(`Guild with ID ${guildId} deleted successfully.`);
             return true;
@@ -142,11 +137,11 @@ const guilds = {
         if (!username) return false;
         try {
             const guildId = await this.getGuildId(username);
-            if (!guildId) return false; // User is not in a guild
+            if (!guildId) return false;
 
             const isLeader = await this.isGuildLeader(username);
             if (isLeader) {
-                return false; // Guild leaders cannot leave the guild
+                return false;
             }
             return await this.remove(username);
         } catch (error) {
@@ -158,17 +153,16 @@ const guilds = {
         if (!username) return false;
         try {
             const guildId = await this.getGuildId(username);
-            if (!guildId) return false; // User is not in a guild
+            if (!guildId) return false;
 
             const isLeader = await this.isGuildLeader(username);
-            if (!isLeader) return false; // User is not the leader and cannot disband
+            if (!isLeader) return false;
 
             const members = await this.getGuildMembers(guildId);
-            if (members.length === 0) return false; // No members to disband
+            if (members.length === 0) return false;
 
-            // Remove all members from the guild
             await query("UPDATE accounts SET guild_id = NULL WHERE guild_id = ?", [guildId]);
-            // Delete the guild
+
             return await this.delete(guildId);
         } catch (error) {
             log.error(`Error disbanding guild: ${error}`);
@@ -179,16 +173,15 @@ const guilds = {
         if (!username || !name) return false;
         try {
             const existingGuild = await this.exists(name);
-            if (existingGuild) return false; // Guild name already exists
+            if (existingGuild) return false;
 
-            // Check if the user is already in a guild
             const inGuild = await this.isInGuild(username);
             if (inGuild) return false;
 
             const members = username;;
             const result = await query("INSERT INTO guilds (leader, name, members) VALUES (?, ?, ?)", [username, name, members]) as any;
             const guildId = result.lastInsertRowid;
-            // Update the accounts table to set the guild_id for the user
+
             await query("UPDATE accounts SET guild_id = ? WHERE username = ?", [guildId, username]);
             return members.split(", ").map((member: string) => member.trim());
         } catch (error) {

@@ -6,7 +6,7 @@ const parties = {
         if (!username) return false;
         try {
             const result = await query("SELECT party_id FROM accounts WHERE username = ?", [username]) as any[];
-            if (result.length === 0) return false; // User not found
+            if (result.length === 0) return false;
             return result.length > 0;
         } catch (error) {
             log.error(`Error checking if user is in party: ${error}`);
@@ -38,7 +38,7 @@ const parties = {
         if (!partyId) return [];
         try {
             const result = await query("SELECT members FROM parties WHERE id = ?", [partyId]) as any[];
-            if (result.length === 0 || !result[0].members) return []; // Party not found or no members
+            if (result.length === 0 || !result[0].members) return [];
             const members = result[0].members.split(",").map((member: any) => member.trim());
             return members.filter((member: any) => member);
         } catch (error) {
@@ -50,7 +50,7 @@ const parties = {
         if (!partyId) return null;
         try {
             const result = await query("SELECT leader FROM parties WHERE id = ?", [partyId]) as any[];
-            if (result.length === 0 || !result[0].leader) return null; // Party not found or no leader
+            if (result.length === 0 || !result[0].leader) return null;
             return result[0].leader;
         } catch (error) {
             log.error(`Error getting party leader: ${error}`);
@@ -65,21 +65,17 @@ const parties = {
     async add(username: string, partyId: number): Promise<string[]> {
         if (!username) return [];
         try {
-            // Check if the user is already in a party
+
             const existingParty = await this.exists(username);
             if (existingParty) return [];
 
-            // Get party members
             const members = await this.getPartyMembers(partyId) as string[];
             if (!members || members?.length === 0) return [];
 
-            // Check if party members exceed the limit of 5
             if (members.length >= 5) return [];
 
-            // Prevent adding the same user multiple times
             if (members.includes(username)) return [];
 
-            // Add the user to the party
             await query("UPDATE accounts SET party_id = ? WHERE username = ?", [partyId, username]);
             const updatedMembers = [...members, username].join(", ");
             await query("UPDATE parties SET members = ? WHERE id = ?", [updatedMembers, partyId]);
@@ -93,21 +89,19 @@ const parties = {
         if (!username) return [];
         try {
             const partyId = await this.getPartyId(username);
-            if (!partyId) return []; // User is not in a party
+            if (!partyId) return [];
 
             await query("UPDATE accounts SET party_id = NULL WHERE username = ?", [username]);
 
             const members = await this.getPartyMembers(partyId);
 
-            // Remove the user from the members list
             const updatedMembers = members.filter((member: string) => member !== username).join(", ");
             await query("UPDATE parties SET members = ? WHERE id = ?", [updatedMembers, partyId]);
 
-            // If the party has no members left, delete the party
             const memberArray = Array.isArray(updatedMembers) ? updatedMembers.split(", ") : [updatedMembers];
             if (memberArray.length <= 1) {
                 await this.delete(partyId);
-                return true; // Party deleted
+                return true;
             }
 
             return memberArray.map((member: string) => member.trim());
@@ -120,7 +114,7 @@ const parties = {
         if (!partyId) return false;
         try {
             await query("DELETE FROM parties WHERE id = ?", [partyId]);
-            // Remove party_id from all members in the accounts table
+
             await query("UPDATE accounts SET party_id = NULL WHERE party_id = ?", [partyId]);
             log.info(`Party with ID ${partyId} deleted successfully.`);
             return true;
@@ -133,13 +127,12 @@ const parties = {
         if (!leader || !username) return false;
         try {
             const existingParty = await this.exists(leader);
-            if (existingParty) return false; // Leader is already in a party
+            if (existingParty) return false;
 
             const members = [leader, username].join(", ");
             const result = await query("INSERT INTO parties (leader, members) VALUES (?, ?)", [leader, members]) as any;
             const partyId = result.lastInsertRowid;
 
-            // Update the accounts table to set the party_id for both users
             await query("UPDATE accounts SET party_id = ? WHERE username IN (?, ?)", [partyId, leader, username]);
             return members.split(", ").map((member: string) => member.trim());
         } catch (error) {
@@ -151,7 +144,7 @@ const parties = {
         if (!username) return false;
         try {
             const partyId = await this.getPartyId(username);
-            if (!partyId) return false; // User is not in a party
+            if (!partyId) return false;
 
             const isLeader = await this.isPartyLeader(username);
             if (isLeader) return await this.delete(partyId);
@@ -166,17 +159,16 @@ const parties = {
         if (!username) return false;
         try {
             const partyId = await this.getPartyId(username);
-            if (!partyId) return false; // User is not in a party
+            if (!partyId) return false;
 
             const isLeader = await this.isPartyLeader(username);
-            if (!isLeader) return false; // User is not the leader and cannot disband
+            if (!isLeader) return false;
 
             const members = await this.getPartyMembers(partyId);
-            if (members.length === 0) return false; // No members to disband
+            if (members.length === 0) return false;
 
-            // Remove all members from the party
             await query("UPDATE accounts SET party_id = NULL WHERE party_id = ?", [partyId]);
-            // Delete the party
+
             return await this.delete(partyId);
         } catch (error) {
             log.error(`Error disbanding party: ${error}`);

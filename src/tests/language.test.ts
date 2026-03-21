@@ -1,22 +1,21 @@
 import { expect, test } from "bun:test";
 
-// Mock language system
 const language = {
   translate: async (text: string, lang: string) => {
     if (!text || text.trim() === "") return text;
-    // Mock translation - just return the text as-is for testing
+
     return text;
   },
 
   translate_google: async (data: any) => {
     if (!data?.text) return "";
-    // Mock Google Translate
+
     return data.text;
   },
 
   translate_openai: async (data: any) => {
     if (!data?.text) return "";
-    // Mock OpenAI translation
+
     return data.text;
   },
 };

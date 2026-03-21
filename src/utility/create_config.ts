@@ -3,6 +3,7 @@ import fs from "fs";
 const pwd = process.cwd();
 const args = process.argv.slice(2);
 const environment_index = args.indexOf("--environment");
+
 const environment = environment_index !== -1 ? args[environment_index + 1]?.toLowerCase() : 'local';
 
 const configPath = path.join(pwd, "src", "config");
@@ -37,7 +38,6 @@ DATABASE_PASSWORD=""
 DATABASE_PORT=""
 DATABASE_USER=""
 SQL_SSL_MODE=""
-
 
 GOOGLE_TRANSLATE_API_KEY=""
 OPENAI_API_KEY=""

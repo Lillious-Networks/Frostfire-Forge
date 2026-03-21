@@ -2,7 +2,6 @@ import { Worker } from "worker_threads";
 import assetCache from "../services/assetCache";
 import log from "../modules/logger";
 
-// Prepare serializable asset data for worker threads
 const prepareAssets = async () => {
     const items = await assetCache.get("items");
     const maps = await assetCache.get("maps");
@@ -17,17 +16,12 @@ const prepareAssets = async () => {
     };
 };
 
-// DO NOT cache assets at module scope - fetch fresh each time worker is created
-// This prevents stale data issues in development/hot-reload environments
 let serializedAssets: Awaited<ReturnType<typeof prepareAssets>> | null = null;
 
-// Single persistent worker that gets reused
-// This prevents creating multiple connection pools
 let persistentWorker: Worker | null = null;
 
 async function createPersistentWorker(): Promise<Worker> {
-    // Fetch fresh assets from cache each time worker is created
-    // This ensures we always have the latest data, especially after hot reloads
+
     serializedAssets = await prepareAssets();
 
     const worker = new Worker(new URL("authentication.ts", import.meta.url).href, {
@@ -36,7 +30,7 @@ async function createPersistentWorker(): Promise<Worker> {
 
     worker.on("error", (error) => {
         log.error(`[AUTH POOL] Worker error: ${error.message}`);
-        // Recreate worker on error
+
         persistentWorker = null;
         serializedAssets = null;
     });
@@ -59,7 +53,6 @@ export async function getAuthWorker(): Promise<Worker> {
     return persistentWorker;
 }
 
-// Force recreation of worker (useful for hot reloads in development)
 export function resetAuthWorker(): void {
     if (persistentWorker) {
         persistentWorker.terminate();

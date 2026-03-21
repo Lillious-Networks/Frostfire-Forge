@@ -37,7 +37,7 @@ const friends = {
       console.log("Current Friends:", currentFriends);
 
       if (currentFriends.includes(user.toString())) {
-        return currentFriends; // Already a friend
+        return currentFriends;
       }
 
       currentFriends.push(user.toString());
@@ -66,7 +66,7 @@ const friends = {
     if (!username || !friend_username) return [];
 
     try {
-      // Check if the friend exists
+
       const queryResult = (await query(
         "SELECT username FROM accounts WHERE username = ?",
         [friend_username]
@@ -75,19 +75,16 @@ const friends = {
       const user = queryResult[0]?.username;
       if (!user) return [];
 
-      // Get current friends list
       const currentFriends = await this.list(username);
 
-      // Find and remove the friend
       const friendIndex = currentFriends.indexOf(friend_username.toString());
       if (friendIndex === -1) {
-        return currentFriends; // Friend not found, return current list
+        return currentFriends;
       }
 
-      currentFriends.splice(friendIndex, 1); // Remove friend
+      currentFriends.splice(friendIndex, 1);
       const friendsString = currentFriends.join(",");
 
-      // Update the database
       const result = (await query(
         "UPDATE friendslist SET friends = ? WHERE username = ?",
         [friendsString, username]
@@ -96,7 +93,7 @@ const friends = {
       console.log("Update result:", result);
 
       if (result.affectedRows > 0) {
-        return currentFriends; // Return updated friends list
+        return currentFriends;
       } else {
         log.error(`Failed to remove friend for ${username}`);
         return currentFriends;

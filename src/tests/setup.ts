@@ -1,14 +1,9 @@
-/**
- * Mock setup utilities for system testing
- * Provides mock implementations of common dependencies for Bun test framework
- */
 
-// Mock query function for database operations
+
 export const mockQuery = async (sql: string, params?: any[]) => {
   return [];
 };
 
-// Mock assetCache
 export const mockAssetCache = {
   get: async (key: string) => {
     const mockData: Record<string, any> = {
@@ -29,12 +24,11 @@ export const mockAssetCache = {
   },
   set: async (key: string, value: any) => {},
   getNested: async (key: string, nestedKey: string) => {
-    return [512, 512, 0, 262144]; // Mock RLE collision data
+    return [512, 512, 0, 262144];
   },
   add: async (key: string, value: any) => {},
 };
 
-// Mock logger
 export const mockLog = {
   error: (msg: string) => console.error(msg),
   warn: (msg: string) => console.warn(msg),
@@ -43,7 +37,6 @@ export const mockLog = {
   success: (msg: string) => console.log(msg),
 };
 
-// Mock player cache
 export const mockPlayerCache = {
   get: (playerId: string) => ({
     id: playerId,
@@ -56,9 +49,6 @@ export const mockPlayerCache = {
   delete: (playerId: string) => {},
 };
 
-/**
- * Helper to create a mock query result
- */
 export function createMockQueryResult(data: any[] = [], affectedRows = 1, lastInsertRowid = 1) {
   return {
     ...data,
@@ -71,16 +61,10 @@ export function createMockQueryResult(data: any[] = [], affectedRows = 1, lastIn
   };
 }
 
-/**
- * Helper to create mock currency data
- */
 export function createMockCurrency(copper = 0, silver = 0, gold = 0) {
   return { copper, silver, gold };
 }
 
-/**
- * Helper to create mock item
- */
 export function createMockItem(overrides: any = {}) {
   return {
     name: "test_item",
@@ -102,9 +86,6 @@ export function createMockItem(overrides: any = {}) {
   };
 }
 
-/**
- * Helper to create mock collectable
- */
 export function createMockCollectable(overrides: any = {}) {
   return {
     username: "test_user",

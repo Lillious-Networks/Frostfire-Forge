@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { mockAssetCache } from "./setup";
 
-// Mock database
 const worldsDatabase: Record<string, any> = {
   main: { name: "main", weather: "clear", max_players: 100, default_map: "main" },
   dungeon: { name: "dungeon", weather: "dark", max_players: 50, default_map: "dungeon_1" },

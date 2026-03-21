@@ -1,10 +1,10 @@
 const PROCESS_STARTED_AT = Date.now() - performance.now();
-const MAX_BUFFER_SIZE = 1024 * 1024 * 1024; // 1GB
+const MAX_BUFFER_SIZE = 1024 * 1024 * 1024;
 const packetQueue = new Map<string, (() => void)[]>();
 import "../utility/validate_config.ts";
 import crypto from "crypto";
 import { packetManager } from "./packet_manager.ts";
-import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, sendAnimationTo } from "./receiver.ts";
+import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, sendAnimationTo, spriteDataCacheReady } from "./receiver.ts";
 import eventEmitter from "node:events";
 export const listener = new eventEmitter();
 const event = new eventEmitter();
@@ -19,7 +19,6 @@ import fs from "node:fs";
 import { generateKeyPair } from "../modules/cipher.ts";
 import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondensation, findPlayersWithTargetInAOI } from "./aoi.ts";
 
-// Load settings
 import * as settings from "../config/settings.json";
 import assetCache from "../services/assetCache.ts";
 import { GatewayClient } from "../modules/gateway-client.ts";
@@ -38,7 +37,7 @@ if (useSSL) {
     throw new Error("SSL certificate or key is missing");
   }
   try {
-    // Read certificate and CA bundle, concatenate them for full chain
+
     const cert = fs.readFileSync(_cert, 'utf-8');
     const key = fs.readFileSync(_key, 'utf-8');
     const ca = fs.existsSync(_ca) ? fs.readFileSync(_ca, 'utf-8') : '';
@@ -55,11 +54,11 @@ if (useSSL) {
   }
 }
 const RateLimitOptions: RateLimitOptions = {
-  // Maximum amount of requests
+
   maxRequests: settings?.websocketRatelimit?.maxRequests || 2000,
-  // Time in milliseconds to remove rate limiting
+
   time: settings?.websocketRatelimit?.time || 2000,
-  // Maximum window time in milliseconds
+
   maxWindowTime: settings?.websocketRatelimit?.maxWindowTime || 1000,
 };
 
@@ -69,22 +68,21 @@ if (settings?.websocketRatelimit?.enabled) {
   log.warn(`Rate limiting is disabled for websocket connections`);
 }
 
-// Set to store all connected clients
 const connections = new Set<Identity>();
 
-// Map to track the amount of requests (changed from Array for O(1) lookups)
 const ClientRateLimit = new Map<string, ClientRateLimit>();
 
 const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
+
+await spriteDataCacheReady;
 
 const Server = Bun.serve<Packet, any>({
   port: process.env.WEB_SOCKET_PORT || 3000,
   reusePort: false,
   fetch(req, Server) {
-    // Handle /ping endpoint for client latency measurement (no auth required)
+
     const url = new URL(req.url, `http://${req.headers.get("host")}`);
 
-    // Handle CORS preflight for all requests
     if (req.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -118,7 +116,6 @@ const Server = Bun.serve<Packet, any>({
       return new Response("User-Agent header is missing", { status: 400 });
     }
 
-    // Validate connection token from gateway
     const token = url.searchParams.get("token");
     const timestamp = url.searchParams.get("timestamp");
     const expiresAt = url.searchParams.get("expiresAt");
@@ -128,7 +125,6 @@ const Server = Bun.serve<Packet, any>({
       return new Response("Unauthorized: Missing connection token", { status: 401 });
     }
 
-    // Verify token signature
     const sharedSecret = process.env.GATEWAY_GAME_SERVER_SECRET || "default-secret-change-me";
     const expectedSignature = crypto
       .createHmac("sha256", sharedSecret)
@@ -140,7 +136,6 @@ const Server = Bun.serve<Packet, any>({
       return new Response("Unauthorized: Invalid token", { status: 401 });
     }
 
-    // Check if token is expired
     const now = Date.now();
     if (now > parseInt(expiresAt)) {
       log.warn(`Connection attempt with expired token from: ${req.headers.get("x-forwarded-for") || "unknown"}`);
@@ -234,11 +229,9 @@ const Server = Bun.serve<Packet, any>({
           ws.unsubscribe("BROADCAST" as Subscription["event"]);
           ws.unsubscribe("DISCONNECT_PLAYER" as Subscription["event"]);
 
-          // Remove from rate limit map (O(1) operation)
           ClientRateLimit.delete(ws.data.id);
         }
-        // Disconnect notifications are now handled by AOI system with batching
-        // ws.publish("DISCONNECT_PLAYER") removed to avoid duplicate packets
+
       }
     },
     async message(ws: any, message: any) {
@@ -282,17 +275,14 @@ const Server = Bun.serve<Packet, any>({
   },
 });
 
-// Awake event
 listener.on("onAwake", async () => {
-  await player.clear(); // Clear player sessions on startup
+  await player.clear();
 });
 
-// Start event
 listener.on("onStart", async () => {});
 
 event.emit("online");
 
-// Initialize gateway client if enabled
 let gatewayClient: GatewayClient | null = null;
 const serverId = process.env.SERVER_ID || `server-${crypto.randomBytes(8).toString("hex")}`;
 const serverHost = process.env.SERVER_HOST || "localhost";
@@ -310,19 +300,15 @@ gatewayClient = new GatewayClient({
   heartbeatInterval: settings?.gateway?.heartbeatInterval || 5000,
 });
 
-// Block until connected to gateway (keeps retrying forever with reduced logging)
 await gatewayClient.registerWithRetry();
 
 listener.emit("onAwake");
 listener.emit("onStart");
 
-// Start centralized game loop for movement processing
 gameLoop.start();
 
-// Start auto party layer sync every 15 seconds
 startAutoPartyLayerSync(sendAnimationTo);
 
-// Start auto layer condensation every 5 minutes
 startAutoLayerCondensation(sendAnimationTo);
 
 setInterval(() => {
@@ -341,7 +327,6 @@ setInterval(() => {
   listener.emit("onServerTick");
 }, 1000);
 
-// Backpressure monitoring - logs every second
 setInterval(() => {
   const allPlayers = Object.values(playerCache.list());
   const connectedPlayers = allPlayers.filter((p: any) => p?.ws && p.ws.readyState === 1);
@@ -352,7 +337,7 @@ setInterval(() => {
   let maxBuffered = 0;
   let playersWithBackpressure = 0;
   let maxBufferedPlayer: any = null;
-  const BACKPRESSURE_THRESHOLD = 32 * 1024; // 32KB
+  const BACKPRESSURE_THRESHOLD = 32 * 1024;
 
   for (const player of connectedPlayers) {
     const buffered = player.ws.bufferedAmount || 0;
@@ -371,7 +356,6 @@ setInterval(() => {
   const avgBufferedBytes = totalBuffered / connectedPlayers.length;
   const movingPlayers = gameLoop.getStats().movingPlayers;
 
-  // Format buffer size intelligently
   const formatBuffer = (bytes: number): string => {
     if (bytes >= 1024) {
       return `${(bytes / 1024).toFixed(1)}KB`;
@@ -382,7 +366,6 @@ setInterval(() => {
   const avgBufferStr = formatBuffer(avgBufferedBytes);
   const maxBufferStr = formatBuffer(maxBuffered);
 
-  // Always log if there's significant backpressure, otherwise log less frequently
   if (playersWithBackpressure > 0 || avgBufferedBytes > 16 * 1024) {
     log.warn(
       `[BACKPRESSURE] Players: ${connectedPlayers.length} (${movingPlayers} moving) | ` +
@@ -391,7 +374,7 @@ setInterval(() => {
       (maxBufferedPlayer ? ` | Worst: ${maxBufferedPlayer.username || maxBufferedPlayer.id}` : '')
     );
   } else if (connectedPlayers.length > 50) {
-    // Light logging every 10 seconds for high player counts with no issues
+
     const tick = Math.floor(Date.now() / 1000);
     if (tick % 10 === 0) {
       log.info(
@@ -402,8 +385,6 @@ setInterval(() => {
   }
 }, 1000);
 
-// Global rate limit window time management (replaces per-client intervals)
-// This single interval handles all clients instead of creating 1000+ separate intervals
 if (settings?.websocketRatelimit?.enabled) {
   setInterval(() => {
     for (const client of ClientRateLimit.values()) {
@@ -421,7 +402,6 @@ if (settings?.websocketRatelimit?.enabled) {
   }, 1000);
 }
 
-// Fixed update loop
 listener.on("onUpdate", async () => {});
 
 listener.on("onFixedUpdate", async () => {
@@ -513,8 +493,6 @@ listener.on("onServerTick", async () => {
       playerData.ws.send(packetManager.updateStats(updateStatsData)[0])
     );
 
-    // Use AOI system instead of O(n²) map-wide loop
-    // Only send updates to players who can actually see this player
     const observers = findPlayersWithTargetInAOI(playerData.id);
     for (const other of observers) {
       if (
@@ -531,12 +509,10 @@ listener.on("onServerTick", async () => {
   }
   if (inactiveSet.size > 0) {
     for (const id of inactiveSet) {
-      // Check if player still exists in cache AND connections - they might have been removed by websocket close handler
+
       const stillInCache = playerCache.get(id);
       if (!stillInCache) continue;
 
-      // CRITICAL: Also check if they're still in the connections Set
-      // If not, the websocket close handler already handled their disconnect
       let stillConnected = false;
       for (const client of connections) {
         if (client.id === id) {
@@ -546,9 +522,6 @@ listener.on("onServerTick", async () => {
       }
       if (!stillConnected) continue;
 
-      // Disconnect notifications are now handled by AOI system with batching
-      // Server.publish("DISCONNECT_PLAYER") removed to avoid duplicate packets
-
       listener.emit("onDisconnect", { id, reason: "inactive" });
 
       packetQueue.delete(id);
@@ -556,7 +529,6 @@ listener.on("onServerTick", async () => {
     }
   }
 
-  // Update gateway with current connection count
   if (gatewayClient) {
     gatewayClient.setActiveConnections(connections.size);
   }
@@ -573,22 +545,16 @@ listener.on("onDisconnect", async (data) => {
     const playerData = playerCache.get(data.id);
     if (!playerData) return;
 
-    // CRITICAL: Unregister from game loop FIRST to stop processing movement
     gameLoop.unregisterMovingPlayer(playerData.id);
 
-    // CRITICAL: Remove from cache IMMEDIATELY to prevent batch timers from processing this player
     playerCache.remove(playerData.id);
 
-    // Remove player from map index
     mapIndex.removePlayer(playerData.id);
 
-    // Clear all batch queue entries for this player
     clearBatchQueuesForPlayer(playerData.id, playerData.location.map);
 
-    // Despawn player from all other players' AOI with batching
     despawnPlayerFromAllAOI(playerData, "disconnect", despawnBatchQueue);
 
-    // Now do async cleanup operations (player already removed from cache, so no batch packets sent)
     let _worlds: WorldData[] = [];
     try {
       const cachedWorlds = await assetCache.get("worlds");
@@ -607,7 +573,7 @@ listener.on("onDisconnect", async (data) => {
     ) || null;
 
     if (thisWorld) {
-      // Decrement player count, ensuring it never goes below 0
+
       thisWorld.players = Math.max(0, (thisWorld.players || 0) - 1);
       await assetCache.set("worlds", JSON.stringify(_worlds));
       log.info(
@@ -644,7 +610,6 @@ listener.on("onSave", async () => {
   log.info("Saving player data...");
   const startTime = Date.now();
 
-  // Build array of save promises for parallel execution
   const savePromises = Object.entries(cache).map(async ([playerId, row]) => {
     if (!row) return { success: false, playerId, reason: "no_row" };
     if (row.isGuest) return { success: true, playerId, reason: "guest_skipped" };
@@ -655,7 +620,7 @@ listener.on("onSave", async () => {
     }
 
     try {
-      // Execute both save operations in parallel for each player
+
       await Promise.all([
         player.setStats(row.username, row.stats),
         player.setLocation(playerId, row.location.map, row.location.position)
@@ -668,10 +633,8 @@ listener.on("onSave", async () => {
     }
   });
 
-  // Execute all saves in parallel
   const results = await Promise.allSettled(savePromises);
 
-  // Count successes and failures
   const successful = results.filter(r => r.status === "fulfilled" && r.value.success).length;
   const failed = results.filter(r => r.status === "rejected" || (r.status === "fulfilled" && !r.value.success)).length;
 
@@ -700,7 +663,6 @@ export const events = {
     return Array.from(ClientRateLimit.values()).filter((client) => client.rateLimited);
   },
 };
-
 
 function handleBackpressure(ws: any, action: () => void, retryCount = 0) {
   if (retryCount > 20) {
@@ -737,14 +699,11 @@ function handleBackpressure(ws: any, action: () => void, retryCount = 0) {
   }
 }
 
-// Graceful shutdown handler
 async function gracefulShutdown(signal: string) {
   log.info(`Received ${signal}, shutting down gracefully...`);
 
-  // Stop game loop
   gameLoop.stop();
 
-  // Unregister from gateway if enabled
   if (gatewayClient) {
     await gatewayClient.unregister();
   }
@@ -753,9 +712,7 @@ async function gracefulShutdown(signal: string) {
   process.exit(0);
 }
 
-// Register shutdown handlers
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
-// Export gateway client for use in receiver
 export { gatewayClient };
