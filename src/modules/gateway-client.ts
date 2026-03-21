@@ -28,26 +28,7 @@ class GatewayClient {
   }
 
   private async getGatewayUrl(): Promise<string> {
-    let url = this.config.gatewayUrl;
-
-    if (url.startsWith("http://")) {
-      const httpsUrl = url.replace("http://", "https://").replace(":9999", ":9998");
-      try {
-
-        const testResponse = await fetch(httpsUrl, {
-          method: "HEAD",
-          signal: AbortSignal.timeout(2000)
-        });
-        if (testResponse.ok || testResponse.status === 404) {
-
-          url = httpsUrl;
-        }
-      } catch {
-        console.warn(`HTTPS gateway not available at ${httpsUrl}, falling back to HTTP`);
-      }
-    }
-
-    return url;
+    return this.config.gatewayUrl;
   }
 
   async register(quiet: boolean = false): Promise<boolean> {

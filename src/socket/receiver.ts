@@ -3576,15 +3576,52 @@ export default async function packetReceiver(
               break;
             }
 
+            // SECURITY: Permission checks FIRST before any other logic
+            let hasPermissionToModify = false;
+            let requiredPermission = "";
+
+            if (mode === "ADD" || mode === "SET") {
+              requiredPermission = "permission.add";
+            } else if (mode === "REMOVE" || mode === "CLEAR") {
+              requiredPermission = "permission.remove";
+            } else if (mode === "LIST") {
+              requiredPermission = "permission.list";
+            }
+
+            // Check if user has required permission
+            hasPermissionToModify = currentPlayer.permissions.some(
+              (p: string) =>
+                p === requiredPermission || p === "permission.*"
+            );
+
+            if (!hasPermissionToModify) {
+              const notifyData = {
+                message: "Insufficient permissions for this operation",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            // SECURITY: Always prevent self-modification regardless of permission level
+            if (targetPlayer?.id === currentPlayer.id && mode !== "LIST") {
+              const notifyData = {
+                message: "You cannot modify your own permissions",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
             let access;
-            let permissionsArray;
+            let permissionsArray: string[] = [];
             if (mode !== "CLEAR" && mode !== "LIST") {
               access = args.slice(2).join(" ");
 
               const validPermissions = await permissions.list();
 
-              permissionsArray = access.split(",");
-              permissionsArray.forEach((permission: string) => {
+              permissionsArray = access.split(",").map((p: string) => p.trim());
+
+              // Validate all permissions exist
+              for (const permission of permissionsArray) {
                 if (!validPermissions.includes(permission)) {
                   const notifyData = {
                     message: `Invalid permission: ${permission}`,
@@ -3592,176 +3629,136 @@ export default async function packetReceiver(
                   sendPacket(ws, packetManager.notify(notifyData));
                   return;
                 }
-              });
-            }
+              }
 
-            switch (mode) {
-              case "ADD": {
-                if (
-                  !currentPlayer.permissions.some(
-                    (p: string) =>
-                      p === "permission.add" || p === "permission.*"
-                  )
-                ) {
+              // SECURITY: Validate user can only grant permissions they have
+              for (const permission of permissionsArray) {
+                const userHasPermission = currentPlayer.permissions.some(
+                  (p: string) =>
+                    p === permission ||
+                    p === "permission.*" ||
+                    p === "server.*"
+                );
 
-                  if (targetPlayer?.id === currentPlayer.id) {
-                    const notifyData = {
-                      message: "You cannot set permissions for yourself",
-                    };
-                    sendPacket(ws, packetManager.notify(notifyData));
-                    break;
-                  }
+                if (!userHasPermission) {
                   const notifyData = {
-                    message: "Invalid command",
+                    message: `You cannot grant the ${permission} permission`,
                   };
                   sendPacket(ws, packetManager.notify(notifyData));
-                  break;
+                  return;
                 }
-                await permissions.add(targetPlayer.username, permissionsArray);
+              }
+            }
+
+            // Perform the permission modification
+            switch (mode) {
+              case "ADD": {
+                await permissions.add(targetPlayer.username, permissionsArray.join(","));
 
                 if (targetPlayer.ws) {
-                  targetPlayer.permissions = permissionsArray;
+                  const existingPerms = targetPlayer.permissions || [];
+                  targetPlayer.permissions = [
+                    ...new Set([...existingPerms, ...permissionsArray])
+                  ];
                   playerCache.set(targetPlayer.id, targetPlayer);
                 }
+
+                // Audit log
+                log.info(
+                  `[PERMISSION_AUDIT] ${currentPlayer.username} (${currentPlayer.id}) added permissions [${permissionsArray.join(
+                    ", "
+                  )}] to ${targetPlayer.username}`
+                );
+
                 const notifyData = {
                   message: `Permissions \`${permissionsArray.join(
                     ", "
                   )}\` added to ${targetPlayer.username.charAt(0).toUpperCase() +
-                  targetPlayer.username.slice(1)
-                    }`,
+                    targetPlayer.username.slice(1)}`,
                 };
                 sendPacket(ws, packetManager.notify(notifyData));
                 break;
               }
               case "REMOVE": {
-                if (
-                  !currentPlayer.permissions.some(
-                    (p: string) =>
-                      p === "permission.remove" || p === "permission.*"
-                  )
-                ) {
-
-                  if (targetPlayer?.id === currentPlayer.id) {
-                    const notifyData = {
-                      message: "You cannot set permissions for yourself",
-                    };
-                    sendPacket(ws, packetManager.notify(notifyData));
-                    break;
-                  }
-                  const notifyData = {
-                    message: "Invalid command",
-                  };
-                  sendPacket(ws, packetManager.notify(notifyData));
-                  break;
-                }
                 await permissions.remove(
                   targetPlayer.username,
-                  permissionsArray
+                  permissionsArray.join(",")
                 );
 
                 if (targetPlayer.ws) {
-                  targetPlayer.permissions = permissionsArray;
+                  targetPlayer.permissions = (targetPlayer.permissions || []).filter(
+                    (p: string) => !permissionsArray.includes(p)
+                  );
                   playerCache.set(targetPlayer.id, targetPlayer);
                 }
+
+                // Audit log
+                log.info(
+                  `[PERMISSION_AUDIT] ${currentPlayer.username} (${currentPlayer.id}) removed permissions [${permissionsArray.join(
+                    ", "
+                  )}] from ${targetPlayer.username}`
+                );
+
                 const notifyData = {
                   message: `Permissions removed from ${targetPlayer.username.charAt(0).toUpperCase() +
-                    targetPlayer.username.slice(1)
-                    }`,
+                    targetPlayer.username.slice(1)}`,
                 };
                 sendPacket(ws, packetManager.notify(notifyData));
                 break;
               }
               case "SET": {
-                if (
-                  !currentPlayer.permissions.some(
-                    (p: string) =>
-                      p === "permission.add" || p === "permission.*"
-                  )
-                ) {
-
-                  if (targetPlayer?.id === currentPlayer.id) {
-                    const notifyData = {
-                      message: "You cannot set permissions for yourself",
-                    };
-                    sendPacket(ws, packetManager.notify(notifyData));
-                    break;
-                  }
-                  const notifyData = {
-                    message: "Invalid command",
-                  };
-                  sendPacket(ws, packetManager.notify(notifyData));
-                  break;
-                }
                 await permissions.set(targetPlayer.username, permissionsArray);
 
                 if (targetPlayer.ws) {
                   targetPlayer.permissions = permissionsArray;
                   playerCache.set(targetPlayer.id, targetPlayer);
                 }
+
+                // Audit log
+                log.info(
+                  `[PERMISSION_AUDIT] ${currentPlayer.username} (${currentPlayer.id}) set permissions to [${permissionsArray.join(
+                    ", "
+                  )}] for ${targetPlayer.username}`
+                );
+
                 const notifyData = {
                   message: `Permissions set for ${targetPlayer.username.charAt(0).toUpperCase() +
-                    targetPlayer.username.slice(1)
-                    }`,
+                    targetPlayer.username.slice(1)}`,
                 };
                 sendPacket(ws, packetManager.notify(notifyData));
                 break;
               }
               case "CLEAR": {
-                if (
-                  !currentPlayer.permissions.some(
-                    (p: string) =>
-                      p === "permission.remove" || p === "permission.*"
-                  )
-                ) {
-
-                  if (targetPlayer?.id === currentPlayer.id) {
-                    const notifyData = {
-                      message: "You cannot set permissions for yourself",
-                    };
-                    sendPacket(ws, packetManager.notify(notifyData));
-                    break;
-                  }
-                  const notifyData = {
-                    message: "Invalid command",
-                  };
-                  sendPacket(ws, packetManager.notify(notifyData));
-                  break;
-                }
                 await permissions.clear(targetPlayer.username);
 
                 targetPlayer.permissions = [];
                 const p = playerCache.get(targetPlayer.id);
-                if (p.ws) {
+                if (p && p.ws) {
                   playerCache.set(targetPlayer.id, targetPlayer);
                 }
+
+                // Audit log
+                log.info(
+                  `[PERMISSION_AUDIT] ${currentPlayer.username} (${currentPlayer.id}) cleared all permissions for ${targetPlayer.username}`
+                );
+
                 const notifyData = {
                   message: `Permissions cleared for ${targetPlayer.username.charAt(0).toUpperCase() +
-                    targetPlayer.username.slice(1)
-                    }`,
+                    targetPlayer.username.slice(1)}`,
                 };
                 sendPacket(ws, packetManager.notify(notifyData));
                 break;
               }
               case "LIST": {
-                if (
-                  !currentPlayer.permissions.some(
-                    (p: string) =>
-                      p === "permission.list" || p === "permission.*"
-                  )
-                ) {
-                  const notifyData = {
-                    message: "Invalid command",
-                  };
-                  sendPacket(ws, packetManager.notify(notifyData));
-                  break;
-                }
                 const response =
                   ((await permissions.get(targetPlayer.username)) as string) ||
                   "No permissions found";
                 const notifyData = {
                   message: `Permissions for ${targetPlayer.username.charAt(0).toUpperCase() +
-                    targetPlayer.username.slice(1)
-                    }: ${response.replaceAll(",", ", ")}`,
+                    targetPlayer.username.slice(1)}: ${response.replaceAll(
+                    ",",
+                    ", "
+                  )}`,
                 };
                 sendPacket(ws, packetManager.notify(notifyData));
                 break;

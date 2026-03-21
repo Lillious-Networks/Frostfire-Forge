@@ -104,6 +104,9 @@ WEB_SOCKET_USE_SSL="true" | "false"       # Enable SSL/TLS for WebSocket
 GAME_NAME="Your Game Name"
 LOG_LEVEL="info"                          # Logging level: trace, debug, info, warn, error
 
+# CORS Configuration (Security)
+CORS_ALLOWED_ORIGINS="https://game.example.com,https://client.example.com" # Comma-separated list of allowed origins
+
 # Gateway (Required)
 GATEWAY_URL="http://gateway:9999"               # Gateway registration endpoint
 GATEWAY_AUTH_KEY="your_secret_key"              # Shared secret for server registration

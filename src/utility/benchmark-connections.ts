@@ -19,11 +19,17 @@ function parseArgs(): BenchmarkConfig {
     const port = process.env.WEB_SOCKET_PORT || '3000';
     const protocol = useSSL ? 'wss' : 'ws';
 
+    const serverSecret = process.env.GATEWAY_GAME_SERVER_SECRET;
+    if (!serverSecret) {
+        console.error(chalk.red('Error: GATEWAY_GAME_SERVER_SECRET environment variable is not set'));
+        process.exit(1);
+    }
+
     const config: BenchmarkConfig = {
         connections: 100,
         duration: 60,
         websocketUrl: `${protocol}://${host}:${port}`,
-        serverSecret: process.env.GATEWAY_GAME_SERVER_SECRET || 'default-secret-change-me',
+        serverSecret: serverSecret,
         help: false
     };
 

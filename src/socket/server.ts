@@ -76,33 +76,73 @@ const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
 
 await spriteDataCacheReady;
 
+// Parse allowed CORS origins from environment variable
+const ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS || "").split(",").filter(o => o.trim());
+const ALLOWED_METHODS = "GET,POST";
+const ALLOWED_HEADERS = "Content-Type,Authorization";
+
+// Warn if CORS origins are not configured
+if (ALLOWED_ORIGINS.length === 0) {
+  log.warn("CORS_ALLOWED_ORIGINS environment variable is not set - cross-origin requests will be blocked");
+} else {
+  log.info(`CORS allowed origins: ${ALLOWED_ORIGINS.join(", ")}`);
+}
+
+// Helper function to get CORS headers
+function getCORSHeaders(requestOrigin: string | null): Record<string, string> {
+  if (!requestOrigin) {
+    return {};
+  }
+
+  // Check if the request origin is in the allowed list
+  const isAllowed = ALLOWED_ORIGINS.some(origin => {
+    const cleanOrigin = origin.trim();
+    if (cleanOrigin === "*") return true;
+    return cleanOrigin === requestOrigin;
+  });
+
+  if (!isAllowed) {
+    return {};
+  }
+
+  return {
+    "Access-Control-Allow-Origin": requestOrigin,
+    "Access-Control-Allow-Methods": ALLOWED_METHODS,
+    "Access-Control-Allow-Headers": ALLOWED_HEADERS,
+    "Access-Control-Max-Age": "3600"
+  };
+}
+
 const Server = Bun.serve<Packet, any>({
   port: process.env.WEB_SOCKET_PORT || 3000,
   reusePort: false,
   fetch(req, Server) {
 
     const url = new URL(req.url, `http://${req.headers.get("host")}`);
+    const requestOrigin = req.headers.get("origin");
 
     if (req.method === "OPTIONS") {
+      const corsHeaders = getCORSHeaders(requestOrigin);
+
+      if (Object.keys(corsHeaders).length === 0) {
+        // Origin not allowed
+        return new Response(null, { status: 403 });
+      }
+
       return new Response(null, {
         status: 204,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "*",
-          "Access-Control-Allow-Headers": "*",
-          "Access-Control-Max-Age": "86400"
-        }
+        headers: corsHeaders
       });
     }
 
     if (url.pathname === "/ping" && req.method === "GET") {
+      const corsHeaders = getCORSHeaders(requestOrigin);
+
       return new Response(JSON.stringify({ pong: Date.now() }), {
         status: 200,
         headers: {
           "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "*",
-          "Access-Control-Allow-Headers": "*"
+          ...corsHeaders
         }
       });
     }
@@ -125,7 +165,11 @@ const Server = Bun.serve<Packet, any>({
       return new Response("Unauthorized: Missing connection token", { status: 401 });
     }
 
-    const sharedSecret = process.env.GATEWAY_GAME_SERVER_SECRET || "default-secret-change-me";
+    const sharedSecret = process.env.GATEWAY_GAME_SERVER_SECRET;
+    if (!sharedSecret) {
+      log.error("GATEWAY_GAME_SERVER_SECRET environment variable is not set");
+      return new Response("Server misconfiguration", { status: 500 });
+    }
     const expectedSignature = crypto
       .createHmac("sha256", sharedSecret)
       .update(`${token}:${timestamp}:${expiresAt}`)

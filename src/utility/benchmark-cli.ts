@@ -449,7 +449,11 @@ async function createClients(amount: number, host: string, websocketUrl: string,
                 const timestamp = Date.now().toString();
                 const expiresAt = (Date.now() + 60000).toString();
 
-                const sharedSecret = process.env.GATEWAY_GAME_SERVER_SECRET || 'default-secret-change-me';
+                const sharedSecret = process.env.GATEWAY_GAME_SERVER_SECRET;
+                if (!sharedSecret) {
+                    log('GATEWAY_GAME_SERVER_SECRET environment variable is not set', 'error');
+                    return;
+                }
                 const signature = crypto
                     .createHmac('sha256', sharedSecret)
                     .update(`${connectionToken}:${timestamp}:${expiresAt}`)
