@@ -88,6 +88,42 @@ declare interface QuestLogData {
   incomplete: number[];
 }
 
+declare interface Particle {
+  name: string | null;
+  size: number;
+  color: string | null;
+  velocity: {
+      x: number;
+      y: number;
+  };
+  lifetime: number;
+  scale: number;
+  opacity: number;
+  visible: boolean;
+  gravity: {
+      x: number;
+      y: number;
+  };
+  localposition: {
+    x: number | 0;
+    y: number | 0;
+  } | null;
+  interval: number;
+  amount: number;
+  staggertime: number;
+  currentLife: number | null;
+  initialVelocity: {
+    x: number;
+    y: number;
+  } | null;
+  spread: {
+    x: number;
+    y: number;
+  };
+  weather: WeatherData | 'none';
+  affected_by_weather?: boolean;
+}
+
 type NullablePlayer = Player | null;
 
 declare interface InventoryItem {

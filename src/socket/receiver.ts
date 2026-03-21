@@ -1063,14 +1063,16 @@ export default async function packetReceiver(
             return;
           }
 
-          tempPosition.x = Math.round(tempPosition.x + offset.dx);
-          tempPosition.y = Math.round(tempPosition.y + offset.dy);
+          // Store fractional position internally for smooth movement
+          tempPosition.x = tempPosition.x + offset.dx;
+          tempPosition.y = tempPosition.y + offset.dy;
 
+          // Round for collision detection only
           const collision = await player.checkIfWouldCollide(
             currentPlayer.location.map,
             {
-              x: tempPosition.x,
-              y: tempPosition.y,
+              x: Math.round(tempPosition.x),
+              y: Math.round(tempPosition.y),
               direction,
             },
             {
