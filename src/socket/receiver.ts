@@ -56,11 +56,11 @@ let globalStateRevision: number = 0;
 
 export const movementBatchQueue = new Map<string, Map<string, any>>();
 
-let currentBatchInterval = 40;
-const BATCH_INTERVAL_NORMAL = 40;
-const BATCH_INTERVAL_MEDIUM = 50;
-const BATCH_INTERVAL_HIGH = 75;
-const BATCH_INTERVAL_EXTREME = 125;
+let currentBatchInterval = 8;
+const BATCH_INTERVAL_NORMAL = 8;      // ~125 Hz - smooth movement
+const BATCH_INTERVAL_MEDIUM = 12;     // ~83 Hz
+const BATCH_INTERVAL_HIGH = 16;       // ~60 Hz
+const BATCH_INTERVAL_EXTREME = 25;    // ~40 Hz
 
 const MAX_BUFFER_BACKPRESSURE = 1024 * 32;
 
@@ -972,6 +972,10 @@ export default async function packetReceiver(
 
           gameLoop.unregisterMovingPlayer(currentPlayer.id);
           currentPlayer.moving = false;
+          // Clean up movement state
+          if (currentPlayer._movementState) {
+            currentPlayer._movementState = undefined;
+          }
 
           globalStateRevision++;
           await sendPositionAnimation(
@@ -1017,6 +1021,18 @@ export default async function packetReceiver(
         currentPlayer.location.position.direction = direction || "down";
         currentPlayer.moving = true;
 
+        // Track direction changes for smooth transitions
+        if (!currentPlayer._movementState) {
+          currentPlayer._movementState = {
+            currentDirection: direction,
+            targetDirection: direction,
+            directionChangeTime: 0,
+          };
+        } else {
+          currentPlayer._movementState.targetDirection = direction;
+          currentPlayer._movementState.directionChangeTime = Date.now();
+        }
+
         globalStateRevision++;
         await sendPositionAnimation(
           ws,
@@ -1055,17 +1071,47 @@ export default async function packetReceiver(
             downright: { dx: speed, dy: speed },
           };
 
-          const offset = directionOffsets[direction];
-          if (!offset) {
-            currentPlayer.moving = false;
-            gameLoop.unregisterMovingPlayer(currentPlayer.id);
+          // Handle direction transitions smoothly
+          let activeDirection = direction;
+          if (currentPlayer._movementState) {
+            const timeSinceDirectionChange = Date.now() - currentPlayer._movementState.directionChangeTime;
+            const DIRECTION_TRANSITION_TIME = 50; // ms to blend direction changes
 
-            return;
+            if (timeSinceDirectionChange < DIRECTION_TRANSITION_TIME &&
+                currentPlayer._movementState.currentDirection !== currentPlayer._movementState.targetDirection) {
+              // During transition: blend between old and new direction
+              const transitionProgress = Math.min(1, timeSinceDirectionChange / DIRECTION_TRANSITION_TIME);
+
+              const oldOffset = directionOffsets[currentPlayer._movementState.currentDirection] || directionOffsets.down;
+              const newOffset = directionOffsets[currentPlayer._movementState.targetDirection] || directionOffsets.down;
+
+              // Smoothly interpolate between old and new direction offsets
+              const blendedOffset = {
+                dx: oldOffset.dx + (newOffset.dx - oldOffset.dx) * transitionProgress,
+                dy: oldOffset.dy + (newOffset.dy - oldOffset.dy) * transitionProgress,
+              };
+
+              tempPosition.x = tempPosition.x + blendedOffset.dx;
+              tempPosition.y = tempPosition.y + blendedOffset.dy;
+            } else {
+              // Direction transition complete, use target direction
+              if (currentPlayer._movementState.currentDirection !== currentPlayer._movementState.targetDirection) {
+                currentPlayer._movementState.currentDirection = currentPlayer._movementState.targetDirection;
+              }
+              activeDirection = currentPlayer._movementState.currentDirection;
+              const offset = directionOffsets[activeDirection];
+              if (offset) {
+                tempPosition.x = tempPosition.x + offset.dx;
+                tempPosition.y = tempPosition.y + offset.dy;
+              }
+            }
+          } else {
+            const offset = directionOffsets[direction];
+            if (offset) {
+              tempPosition.x = tempPosition.x + offset.dx;
+              tempPosition.y = tempPosition.y + offset.dy;
+            }
           }
-
-          // Store fractional position internally for smooth movement
-          tempPosition.x = tempPosition.x + offset.dx;
-          tempPosition.y = tempPosition.y + offset.dy;
 
           // Round for collision detection only
           const collision = await player.checkIfWouldCollide(
@@ -1091,6 +1137,10 @@ export default async function packetReceiver(
           if (isColliding && !currentPlayer.isNoclip) {
             gameLoop.unregisterMovingPlayer(currentPlayer.id);
             currentPlayer.moving = false;
+            // Clean up movement state on collision
+            if (currentPlayer._movementState) {
+              currentPlayer._movementState = undefined;
+            }
 
             globalStateRevision++;
             await sendPositionAnimation(
