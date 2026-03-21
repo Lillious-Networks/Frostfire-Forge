@@ -573,8 +573,8 @@ export async function handleMapChangeAOI(
 
     const oldMapForIndex = player.location.map;
     player.location.map = newMapName;
-    player.location.position.x = newPosition.x;
-    player.location.position.y = newPosition.y;
+    player.location.position.x = Math.round(newPosition.x);
+    player.location.position.y = Math.round(newPosition.y);
 
     if (oldMap !== newMap) {
       mapIndex.movePlayer(player.id, oldMapForIndex, newMapName);

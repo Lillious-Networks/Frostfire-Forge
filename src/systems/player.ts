@@ -260,8 +260,8 @@ const player = {
     )) as LocationData[];
     const map = response[0]?.map as string;
     const position: PositionData = {
-      x: Number(response[0]?.position?.split(",")[0]),
-      y: Number(response[0]?.position?.split(",")[1]),
+      x: Math.round(Number(response[0]?.position?.split(",")[0])),
+      y: Math.round(Number(response[0]?.position?.split(",")[1])),
       direction: response[0]?.direction || "down",
     };
 
@@ -283,7 +283,7 @@ const player = {
     if (!session_id || !map || !position) return;
     const response = await query(
       "UPDATE accounts SET map = ?, position = ?, direction = ? WHERE session_id = ?",
-      [map, `${position.x},${position.y}`, position.direction, session_id]
+      [map, `${Math.round(position.x)},${Math.round(position.y)}`, position.direction, session_id]
     );
     return response;
   },

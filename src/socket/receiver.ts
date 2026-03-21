@@ -39,6 +39,17 @@ const defaultMap = (settings as any).default_map?.replace(".json", "") || "main"
 
 const useSpriteSheets = (settings as any).animation_system?.use_sprite_sheets ?? true;
 
+const DIRECTION_OFFSETS: Record<string, { dx: number; dy: number }> = {
+  up: { dx: 0, dy: -1 },
+  down: { dx: 0, dy: 1 },
+  left: { dx: -1, dy: 0 },
+  right: { dx: 1, dy: 0 },
+  upleft: { dx: -1, dy: -1 },
+  upright: { dx: 1, dy: -1 },
+  downleft: { dx: -1, dy: 1 },
+  downright: { dx: 1, dy: 1 },
+};
+
 async function waitForSpritesReady() {
   if (!useSpriteSheets || !(await isSpriteSheetSystemAvailable())) {
     log.warn("Sprite sheet system not available");
@@ -1131,7 +1142,8 @@ export default async function packetReceiver(
           const isColliding = collision?.value === true;
 
           if (!isColliding || currentPlayer.isNoclip) {
-            currentPlayer.location.position = tempPosition;
+            currentPlayer.location.position.x = Math.round(tempPosition.x);
+            currentPlayer.location.position.y = Math.round(tempPosition.y);
           }
 
           if (isColliding && !currentPlayer.isNoclip) {
@@ -1257,11 +1269,11 @@ export default async function packetReceiver(
         currentPlayer.location.position.direction = "down";
 
         currentPlayer.location.position.x = Math.round(
-          Number(currentPlayer.location.position.x) * 10
-        ) / 10;
+          Number(currentPlayer.location.position.x)
+        );
         currentPlayer.location.position.y = Math.round(
-          Number(currentPlayer.location.position.y) * 10
-        ) / 10;
+          Number(currentPlayer.location.position.y)
+        );
         globalStateRevision++;
 
         if (shouldUpdateAOI(currentPlayer)) {
@@ -1942,7 +1954,7 @@ export default async function packetReceiver(
               : 0;
           }
 
-          target.location.position = { x: respawnX, y: respawnY, direction: "down" };
+          target.location.position = { x: Math.round(respawnX), y: Math.round(respawnY), direction: "down" };
 
           const xp = 10;
           const xpResult = await player.increaseXp(currentPlayer.username, xp);
@@ -2538,8 +2550,8 @@ export default async function packetReceiver(
 
                 targetPlayer.location.map = currentPlayer.location.map;
                 targetPlayer.location.position = {
-                  x: currentPlayer.location.position.x,
-                  y: currentPlayer.location.position.y,
+                  x: Math.round(currentPlayer.location.position.x),
+                  y: Math.round(currentPlayer.location.position.y),
                   direction: targetPlayer.location.position?.direction || "down",
                 };
 
@@ -2582,8 +2594,8 @@ export default async function packetReceiver(
             } else {
 
               targetPlayer.location.position = {
-                x: currentPlayer.location.position.x,
-                y: currentPlayer.location.position.y,
+                x: Math.round(currentPlayer.location.position.x),
+                y: Math.round(currentPlayer.location.position.y),
                 direction: targetPlayer.location.position?.direction || "down",
               };
 
@@ -2761,8 +2773,8 @@ export default async function packetReceiver(
 
                 currentPlayer.location.map = targetPlayer.location.map;
                 currentPlayer.location.position = {
-                  x: targetPlayer.location.position.x,
-                  y: targetPlayer.location.position.y,
+                  x: Math.round(targetPlayer.location.position.x),
+                  y: Math.round(targetPlayer.location.position.y),
                   direction: currentPlayer.location.position?.direction || "down",
                 };
 
@@ -2799,8 +2811,8 @@ export default async function packetReceiver(
             } else {
 
               currentPlayer.location.position = {
-                x: targetPlayer.location.position.x,
-                y: targetPlayer.location.position.y,
+                x: Math.round(targetPlayer.location.position.x),
+                y: Math.round(targetPlayer.location.position.y),
                 direction: currentPlayer.location.position?.direction || "down",
               };
 
@@ -3471,8 +3483,8 @@ export default async function packetReceiver(
 
             if (playerCache.get(targetPlayer.id)) {
               targetPlayer.location.position = {
-                x: centerX,
-                y: centerY,
+                x: Math.round(centerX),
+                y: Math.round(centerY),
                 direction: "down",
               };
               playerCache.set(targetPlayer.id, targetPlayer);
