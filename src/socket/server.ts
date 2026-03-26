@@ -148,13 +148,8 @@ const Server = Bun.serve<Packet, any>({
     }
 
     const id = crypto.randomBytes(32).toString("hex");
-    const useragent = req.headers.get("user-agent");
+    const useragent = req.headers.get("user-agent") || "unknown";
     const chatDecryptionKey = keyPair.publicKey;
-
-    if (!useragent) {
-      log.error(`User-Agent header is missing for client with id: ${id}`);
-      return new Response("User-Agent header is missing", { status: 400 });
-    }
 
     const token = url.searchParams.get("token");
     const timestamp = url.searchParams.get("timestamp");

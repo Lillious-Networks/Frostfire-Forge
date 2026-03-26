@@ -67,34 +67,12 @@ let globalStateRevision: number = 0;
 
 export const movementBatchQueue = new Map<string, Map<string, any>>();
 
-let currentBatchInterval = 8;
-const BATCH_INTERVAL_NORMAL = 8;      // ~125 Hz - smooth movement
-const BATCH_INTERVAL_MEDIUM = 12;     // ~83 Hz
-const BATCH_INTERVAL_HIGH = 16;       // ~60 Hz
-const BATCH_INTERVAL_EXTREME = 25;    // ~40 Hz
+const BATCH_INTERVAL = 8; // 125 Hz - smooth movement
 
 const MAX_BUFFER_BACKPRESSURE = 1024 * 32;
 
 let lastFlushTime = Date.now();
 let flushCount = 0;
-
-function adjustBatchInterval(): void {
-  const playerCount = Object.keys(playerCache.list()).length;
-
-  let newInterval = BATCH_INTERVAL_NORMAL;
-  if (playerCount >= 800) {
-    newInterval = BATCH_INTERVAL_EXTREME;
-  } else if (playerCount >= 600) {
-    newInterval = BATCH_INTERVAL_HIGH;
-  } else if (playerCount >= 300) {
-    newInterval = BATCH_INTERVAL_MEDIUM;
-  }
-
-  if (newInterval !== currentBatchInterval) {
-    currentBatchInterval = newInterval;
-    log.info(`[MOVEMENT] ⚡ Adjusted batch interval to ${newInterval}ms for ${playerCount} players (${Math.round(1000/newInterval)} Hz)`);
-  }
-}
 
 function flushMovementBatches() {
   const startTime = Date.now();
@@ -197,7 +175,7 @@ function flushMovementBatches() {
       : 0;
 
     if (skippedDueToLoad > 0 || avgBuffered > 24) {
-      log.warn(`[MOVEMENT] ${playerCount} players | Skipped ${skippedDueToLoad} updates | Avg buffer: ${avgBuffered}KB | Flush: ${Date.now() - startTime}ms | Rate: ${Math.round(1000/currentBatchInterval)}Hz`);
+      log.warn(`[MOVEMENT] ${playerCount} players | Skipped ${skippedDueToLoad} updates | Avg buffer: ${avgBuffered}KB | Flush: ${Date.now() - startTime}ms | Rate: ${Math.round(1000/BATCH_INTERVAL)}Hz`);
     }
   }
 }
@@ -359,22 +337,11 @@ async function scheduleBatchFlush() {
   } catch (error) {
     log.error(`[BATCH] Error during batch flush: ${error}`);
   } finally {
-
-    batchTimer = setTimeout(scheduleBatchFlush, currentBatchInterval);
+    batchTimer = setTimeout(scheduleBatchFlush, BATCH_INTERVAL);
   }
 }
 
-batchTimer = setTimeout(scheduleBatchFlush, currentBatchInterval);
-
-setInterval(() => {
-  const oldInterval = currentBatchInterval;
-  adjustBatchInterval();
-
-  if (currentBatchInterval !== oldInterval) {
-    if (batchTimer) clearTimeout(batchTimer);
-    batchTimer = setTimeout(scheduleBatchFlush, currentBatchInterval);
-  }
-}, 5000);
+batchTimer = setTimeout(scheduleBatchFlush, BATCH_INTERVAL);
 
 export function clearBatchQueuesForPlayer(playerId: string, mapName: string) {
 

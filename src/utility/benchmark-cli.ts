@@ -499,7 +499,7 @@ async function createClients(amount: number, host: string, websocketUrl: string,
                             startKeepAlive(websocket);
 
                             const randomDelay = Math.floor(Math.random() * 10000);
-                            startMovementSimulation(websocket, randomDelay);
+                            //startMovementSimulation(websocket, randomDelay);
 
                             if (loggedInCount === amount) {
                                 clearTimeout(loginTimeout);
