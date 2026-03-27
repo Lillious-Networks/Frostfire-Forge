@@ -108,6 +108,7 @@ const createItemsTable = async () => {
         stat_stamina INT DEFAULT NULL,
         stat_avoidance INT DEFAULT NULL,
         level_requirement INT DEFAULT NULL,
+        equipment_slot VARCHAR(255) DEFAULT NULL,
         equipable INT NOT NULL DEFAULT 0
     )
   `;
