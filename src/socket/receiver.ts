@@ -227,14 +227,35 @@ async function flushSpawnBatches() {
           );
           const playerSpriteData = await getPlayerSpriteSheetData(animationName, fullPlayer.equipment || null);
 
+          const extractEquipmentName = (prefixedName: string) => {
+            const firstUnderscore = prefixedName.indexOf('_');
+            return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
+          };
+
           let spriteData = null;
           if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite) {
             const bodyImageData = playerSpriteData.bodySprite ? await getSpriteSheetImage(playerSpriteData.bodySprite.name) : null;
             const headImageData = playerSpriteData.headSprite ? await getSpriteSheetImage(playerSpriteData.headSprite.name) : null;
+            const armorHelmetImageData = playerSpriteData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorHelmetSprite.name)) : null;
+            const armorShoulderguardsImageData = playerSpriteData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorShoulderguardsSprite.name)) : null;
+            const armorNeckImageData = playerSpriteData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorNeckSprite.name)) : null;
+            const armorHandsImageData = playerSpriteData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorHandsSprite.name)) : null;
+            const armorChestImageData = playerSpriteData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorChestSprite.name)) : null;
+            const armorFeetImageData = playerSpriteData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorFeetSprite.name)) : null;
+            const armorLegsImageData = playerSpriteData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorLegsSprite.name)) : null;
+            const armorWeaponImageData = playerSpriteData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorWeaponSprite.name)) : null;
 
             spriteData = {
               bodySprite: playerSpriteData.bodySprite ? { ...playerSpriteData.bodySprite, imageData: bodyImageData } : null,
               headSprite: playerSpriteData.headSprite ? { ...playerSpriteData.headSprite, imageData: headImageData } : null,
+              armorHelmetSprite: (playerSpriteData.armorHelmetSprite && armorHelmetImageData) ? { ...playerSpriteData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
+              armorShoulderguardsSprite: (playerSpriteData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...playerSpriteData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
+              armorNeckSprite: (playerSpriteData.armorNeckSprite && armorNeckImageData) ? { ...playerSpriteData.armorNeckSprite, imageData: armorNeckImageData } : null,
+              armorHandsSprite: (playerSpriteData.armorHandsSprite && armorHandsImageData) ? { ...playerSpriteData.armorHandsSprite, imageData: armorHandsImageData } : null,
+              armorChestSprite: (playerSpriteData.armorChestSprite && armorChestImageData) ? { ...playerSpriteData.armorChestSprite, imageData: armorChestImageData } : null,
+              armorFeetSprite: (playerSpriteData.armorFeetSprite && armorFeetImageData) ? { ...playerSpriteData.armorFeetSprite, imageData: armorFeetImageData } : null,
+              armorLegsSprite: (playerSpriteData.armorLegsSprite && armorLegsImageData) ? { ...playerSpriteData.armorLegsSprite, imageData: armorLegsImageData } : null,
+              armorWeaponSprite: (playerSpriteData.armorWeaponSprite && armorWeaponImageData) ? { ...playerSpriteData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
               animationState: playerSpriteData.animationState,
             };
           }
@@ -617,14 +638,35 @@ authWorker.on("message", async (result: any) => {
         const animationName = getAnimationNameForDirection(p.location.position?.direction || "down", !!p.moving, false, undefined, !!p.casting);
         const playerSpriteData = await getPlayerSpriteSheetData(animationName, p.equipment || null);
 
+        const extractEquipmentName = (prefixedName: string) => {
+          const firstUnderscore = prefixedName.indexOf('_');
+          return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
+        };
+
         let spriteData = null;
         if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite) {
           const bodyImageData = playerSpriteData.bodySprite ? await getSpriteSheetImage(playerSpriteData.bodySprite.name) : null;
           const headImageData = playerSpriteData.headSprite ? await getSpriteSheetImage(playerSpriteData.headSprite.name) : null;
+          const armorHelmetImageData = playerSpriteData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorHelmetSprite.name)) : null;
+          const armorShoulderguardsImageData = playerSpriteData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorShoulderguardsSprite.name)) : null;
+          const armorNeckImageData = playerSpriteData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorNeckSprite.name)) : null;
+          const armorHandsImageData = playerSpriteData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorHandsSprite.name)) : null;
+          const armorChestImageData = playerSpriteData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorChestSprite.name)) : null;
+          const armorFeetImageData = playerSpriteData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorFeetSprite.name)) : null;
+          const armorLegsImageData = playerSpriteData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorLegsSprite.name)) : null;
+          const armorWeaponImageData = playerSpriteData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorWeaponSprite.name)) : null;
 
           spriteData = {
             bodySprite: playerSpriteData.bodySprite ? { ...playerSpriteData.bodySprite, imageData: bodyImageData } : null,
             headSprite: playerSpriteData.headSprite ? { ...playerSpriteData.headSprite, imageData: headImageData } : null,
+            armorHelmetSprite: (playerSpriteData.armorHelmetSprite && armorHelmetImageData) ? { ...playerSpriteData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
+            armorShoulderguardsSprite: (playerSpriteData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...playerSpriteData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
+            armorNeckSprite: (playerSpriteData.armorNeckSprite && armorNeckImageData) ? { ...playerSpriteData.armorNeckSprite, imageData: armorNeckImageData } : null,
+            armorHandsSprite: (playerSpriteData.armorHandsSprite && armorHandsImageData) ? { ...playerSpriteData.armorHandsSprite, imageData: armorHandsImageData } : null,
+            armorChestSprite: (playerSpriteData.armorChestSprite && armorChestImageData) ? { ...playerSpriteData.armorChestSprite, imageData: armorChestImageData } : null,
+            armorFeetSprite: (playerSpriteData.armorFeetSprite && armorFeetImageData) ? { ...playerSpriteData.armorFeetSprite, imageData: armorFeetImageData } : null,
+            armorLegsSprite: (playerSpriteData.armorLegsSprite && armorLegsImageData) ? { ...playerSpriteData.armorLegsSprite, imageData: armorLegsImageData } : null,
+            armorWeaponSprite: (playerSpriteData.armorWeaponSprite && armorWeaponImageData) ? { ...playerSpriteData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
             animationState: playerSpriteData.animationState,
           };
         }
