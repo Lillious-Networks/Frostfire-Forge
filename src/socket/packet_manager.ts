@@ -228,24 +228,77 @@ export const packetManager = {
     ] as any[];
   },
   moveXY: (data: any) => {
-    return [
-      packet.encode(
-        JSON.stringify({
-          type: "MOVEXY",
-          data,
-        })
-      )
-    ] as any[];
+    const HEADER_BYTE = 0x02;
+    const DIRECTION_MAP: Record<string, number> = {
+      up: 0, down: 1, left: 2, right: 3,
+      upleft: 4, upright: 5, downleft: 6, downright: 7
+    };
+
+    const playerId = typeof data.i === "number" ? data.i : parseInt(data.i, 10) || 0;
+    const x = typeof data.d?.x === "number" ? Math.round(data.d.x) : 0;
+    const y = typeof data.d?.y === "number" ? Math.round(data.d.y) : 0;
+    const direction = DIRECTION_MAP[data.d?.dr as string] ?? 1;
+    const stealth = data.s === 1 ? 1 : 0;
+
+    const packetData = new Uint8Array(9);
+    const view = new DataView(packetData.buffer);
+
+    packetData[0] = HEADER_BYTE;
+    view.setUint16(1, playerId, true);
+    view.setInt16(3, x, true);
+    view.setInt16(5, y, true);
+    packetData[7] = direction | (stealth << 4);
+
+    return [packetData];
   },
   batchMoveXY: (movements: any[]) => {
-    return [
-      packet.encode(
-        JSON.stringify({
-          type: "BATCH_MOVEXY",
-          data: movements,
-        })
-      )
-    ] as any[];
+    const HEADER_BYTE = 0x01;
+    const DIRECTION_MAP: Record<string, number> = {
+      up: 0, down: 1, left: 2, right: 3,
+      upleft: 4, upright: 5, downleft: 6, downright: 7
+    };
+
+    const chunks: number[][] = [];
+
+    chunks.push([HEADER_BYTE]);
+
+    const countBytes = new Uint8Array(2);
+    const dataView = new DataView(countBytes.buffer);
+    dataView.setUint16(0, movements.length, true);
+    chunks.push(Array.from(countBytes));
+
+    for (const m of movements) {
+      const playerId = typeof m.i === "number" ? m.i : parseInt(m.i, 10) || 0;
+
+      const idBytes = new Uint8Array(2);
+      const idView = new DataView(idBytes.buffer);
+      idView.setUint16(0, playerId, true);
+      chunks.push(Array.from(idBytes));
+
+      const x = typeof m.d?.x === "number" ? Math.round(m.d.x) : 0;
+      const y = typeof m.d?.y === "number" ? Math.round(m.d.y) : 0;
+      const direction = DIRECTION_MAP[m.d?.dr as string] ?? 1;
+      const stealth = m.s === 1 ? 1 : 0;
+
+      const moveData = new Uint8Array(5);
+      const moveView = new DataView(moveData.buffer);
+
+      moveView.setInt16(0, x, true);
+      moveView.setInt16(2, y, true);
+      moveData[4] = direction | (stealth << 4);
+
+      chunks.push(Array.from(moveData));
+    }
+
+    const flatLength = chunks.reduce((sum, c) => sum + c.length, 0);
+    const result = new Uint8Array(flatLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    return [result];
   },
   chat: (data: any) => {
     return [

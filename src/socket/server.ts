@@ -147,7 +147,7 @@ const Server = Bun.serve<Packet, any>({
       });
     }
 
-    const id = crypto.randomBytes(32).toString("hex");
+    const id = parseInt(crypto.randomBytes(2).toString("hex"), 16);
     const useragent = req.headers.get("user-agent") || "unknown";
     const chatDecryptionKey = keyPair.publicKey;
 

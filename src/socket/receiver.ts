@@ -39,17 +39,6 @@ const defaultMap = (settings as any).default_map?.replace(".json", "") || "main"
 
 const useSpriteSheets = (settings as any).animation_system?.use_sprite_sheets ?? true;
 
-const DIRECTION_OFFSETS: Record<string, { dx: number; dy: number }> = {
-  up: { dx: 0, dy: -1 },
-  down: { dx: 0, dy: 1 },
-  left: { dx: -1, dy: 0 },
-  right: { dx: 1, dy: 0 },
-  upleft: { dx: -1, dy: -1 },
-  upright: { dx: 1, dy: -1 },
-  downleft: { dx: -1, dy: 1 },
-  downright: { dx: 1, dy: 1 },
-};
-
 async function waitForSpritesReady() {
   if (!useSpriteSheets || !(await isSpriteSheetSystemAvailable())) {
     log.warn("Sprite sheet system not available");
@@ -67,7 +56,7 @@ let globalStateRevision: number = 0;
 
 export const movementBatchQueue = new Map<string, Map<string, any>>();
 
-const BATCH_INTERVAL = 8; // 125 Hz - smooth movement
+const BATCH_INTERVAL = 8;
 
 const MAX_BUFFER_BACKPRESSURE = 1024 * 32;
 
@@ -337,6 +326,7 @@ async function scheduleBatchFlush() {
   } catch (error) {
     log.error(`[BATCH] Error during batch flush: ${error}`);
   } finally {
+    if (batchTimer) clearTimeout(batchTimer);
     batchTimer = setTimeout(scheduleBatchFlush, BATCH_INTERVAL);
   }
 }
@@ -1171,7 +1161,7 @@ export default async function packetReceiver(
                   y: warp.position.y || 0
                 };
 
-                await handleMapChangeAOI(currentPlayer, newMap, newPosition, sendAnimationTo, spawnBatchQueue);
+                await handleMapChangeAOI(currentPlayer, newMap, newPosition, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
 
                 currentPlayer.location.position.direction = currentPlayer.location.position?.direction || "down";
 
@@ -1216,6 +1206,8 @@ export default async function packetReceiver(
             s: currentPlayer.isStealth ? 1 : 0
           };
 
+          sendPacket(ws, packetManager.moveXY(movementData));
+
           if (ws.readyState === 1) {
             const mapName = currentPlayer.location.map;
             if (!movementBatchQueue.has(mapName)) {
@@ -1248,13 +1240,14 @@ export default async function packetReceiver(
         }
 
         const movementData = {
-          id: ws.data.id,
-          _data: {
+          i: ws.data.id,
+          d: {
             x: Number(currentPlayer.location.position.x),
             y: Number(currentPlayer.location.position.y),
-            direction: currentPlayer.location.position.direction
+            dr: currentPlayer.location.position.direction
           },
-          revision: globalStateRevision
+          r: globalStateRevision,
+          s: currentPlayer.isStealth ? 1 : 0
         };
         broadcastToAOI(currentPlayer, packetManager.moveXY(movementData), true);
         break;
@@ -1476,13 +1469,14 @@ export default async function packetReceiver(
           globalStateRevision++;
           playersInMap.forEach(async (player) => {
             const moveXYData = {
-              id: ws.data.id,
-              _data: {
+              i: ws.data.id,
+              d: {
                 x: Number(currentPlayer.location.position.x),
                 y: Number(currentPlayer.location.position.y),
-                direction: currentPlayer.location.position.direction
+                dr: currentPlayer.location.position.direction
               },
-              revision: globalStateRevision
+              r: globalStateRevision,
+              s: currentPlayer.isStealth ? 1 : 0
             };
 
             if (currentPlayer.location.position?.direction) {
@@ -1975,13 +1969,14 @@ export default async function packetReceiver(
             sendPacket(
               player.ws,
               packetManager.moveXY({
-                id: target.id,
-                _data: {
+                i: target.id,
+                d: {
                   x: Number(target.location.position.x),
                   y: Number(target.location.position.y),
-                  direction: target.location.position.direction
+                  dr: target.location.position.direction
                 },
-                revision: globalStateRevision
+                r: globalStateRevision,
+                s: target.isStealth ? 1 : 0
               })
             );
 
@@ -2625,13 +2620,14 @@ export default async function packetReceiver(
               globalStateRevision++;
 
               const targetMovementData = {
-                id: targetPlayer.id,
-                _data: {
+                i: targetPlayer.id,
+                d: {
                   x: Number(targetPlayer.location.position.x),
                   y: Number(targetPlayer.location.position.y),
-                  direction: targetPlayer.location.position.direction
+                  dr: targetPlayer.location.position.direction
                 },
-                revision: globalStateRevision
+                r: globalStateRevision,
+                s: targetPlayer.isStealth ? 1 : 0
               };
               sendPacket(targetPlayer.ws, packetManager.moveXY(targetMovementData));
 
@@ -2842,35 +2838,31 @@ export default async function packetReceiver(
               globalStateRevision++;
 
               const adminMovementData = {
-                id: currentPlayer.id,
-                _data: {
+                i: currentPlayer.id,
+                d: {
                   x: Number(currentPlayer.location.position.x),
                   y: Number(currentPlayer.location.position.y),
-                  direction: currentPlayer.location.position.direction
+                  dr: currentPlayer.location.position.direction
                 },
-                revision: globalStateRevision
+                r: globalStateRevision,
+                s: currentPlayer.isStealth ? 1 : 0
               };
               sendPacket(ws, packetManager.moveXY(adminMovementData));
 
-              if (currentPlayer.isStealth) {
-                const allPlayers = playerCache.list();
-                for (const playerId of targetPlayer.aoi.playersInAOI) {
-                  const otherPlayer = allPlayers[playerId as string];
-                  if (!otherPlayer || !otherPlayer.ws || otherPlayer.id === currentPlayer.id) continue;
+              const targetMovementData = {
+                i: targetPlayer.id,
+                d: {
+                  x: Number(targetPlayer.location.position.x),
+                  y: Number(targetPlayer.location.position.y),
+                  dr: targetPlayer.location.position.direction
+                },
+                r: globalStateRevision,
+                s: targetPlayer.isStealth ? 1 : 0
+              };
+              sendPacket(targetPlayer.ws, packetManager.moveXY(targetMovementData));
 
-                  if (otherPlayer.isAdmin) {
-                    sendPacket(otherPlayer.ws, packetManager.moveXY(adminMovementData));
-                  }
-                }
-              } else {
-
-                const allPlayers = playerCache.list();
-                for (const playerId of targetPlayer.aoi.playersInAOI) {
-                  const otherPlayer = allPlayers[playerId as string];
-                  if (!otherPlayer || !otherPlayer.ws || otherPlayer.id === currentPlayer.id) continue;
-                  sendPacket(otherPlayer.ws, packetManager.moveXY(adminMovementData));
-                }
-              }
+              broadcastToAOI(currentPlayer, packetManager.moveXY(adminMovementData), true);
+              broadcastToAOI(targetPlayer, packetManager.moveXY(targetMovementData), true);
 
               sendPacket(
                 ws,
@@ -3461,13 +3453,14 @@ export default async function packetReceiver(
               globalStateRevision++;
               playersInMap.forEach((player) => {
                 const moveData = {
-                  id: targetPlayer.id,
-                  _data: {
+                  i: targetPlayer.id,
+                  d: {
                     x: Number(targetPlayer.location.position.x),
                     y: Number(targetPlayer.location.position.y),
-                    direction: targetPlayer.location.position.direction
+                    dr: targetPlayer.location.position.direction
                   },
-                  revision: globalStateRevision
+                  r: globalStateRevision,
+                  s: targetPlayer.isStealth ? 1 : 0
                 };
                 sendPacket(player.ws, packetManager.moveXY(moveData));
               });
