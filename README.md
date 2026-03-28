@@ -41,6 +41,7 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
 - [Requirements](#-requirements)
 - [Architecture](#-architecture)
   - [Gateway (Authentication & Reverse Proxy)](#gateway-authentication--reverse-proxy)
+  - [Asset Server (Media & Resources)](#asset-server-media--resources)
 - [Quick Start](#-quick-start)
   - [Development Setup](#development-setup)
   - [Production Setup](#production-setup)
@@ -65,6 +66,7 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
 > - [Bun](https://bun.sh/) - JavaScript runtime & package manager
 > - [MySQL](https://www.mysql.com/downloads/) - Database
 > - [Frostfire Forge Gateway](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) - Authentication and reverse proxy gateway (required for all deployments)
+> - [Frostfire Forge Assets](https://github.com/Lillious-Networks/Frostfire-Forge-Assets) - Asset server for map data, sprites, and resources (required for all deployments)
 > - [Docker](https://www.docker.com/) (Optional) - For containerized deployment
 
 ---
@@ -78,6 +80,23 @@ Frostfire Forge requires the [Frostfire Forge Gateway](https://github.com/Lillio
 #### Setup
 
 Game servers automatically register with the gateway on startup using the `GATEWAY_URL`, `GATEWAY_AUTH_KEY`, and `GATEWAY_GAME_SERVER_SECRET` environment variables. The server will continuously poll until the gateway is available.
+
+---
+
+### Asset Server (Media & Resources)
+
+Frostfire Forge requires the [Frostfire Forge Assets](https://github.com/Lillious-Networks/Frostfire-Forge-Assets) server for all deployments. The asset server manages and distributes critical game data including:
+
+- **Map Data** - Tile maps, collision layers, spawn points, and warps
+- **Sprites & Animations** - Character sprites, item graphics, and animation frames
+- **Game Resources** - Particle effects, NPC data, quest data, items, spells, and mounts
+- **Dynamic Updates** - Real-time map updates from the tile editor for collaborative world building
+
+The asset server provides a centralized repository for all game assets, enabling the game engine to fetch required data on-demand and persist editor changes back to permanent storage.
+
+#### Setup
+
+The game server connects to the asset server using the `ASSET_SERVER_URL` and `ASSET_SERVER_AUTH_KEY` environment variables.
 
 ---
 
@@ -114,6 +133,10 @@ GATEWAY_GAME_SERVER_SECRET="another_secret_key" # Game server authentication tok
 SERVER_HOST="game-server-hostname"              # Internal server hostname
 PUBLIC_HOST="yourdomain.com"                    # External hostname for clients
 SERVER_ID="server-1"                            # Game server identification
+
+# Asset Server (Required)
+ASSET_SERVER_URL="http://assets:8000"           # Asset server endpoint
+ASSET_SERVER_AUTH_KEY="your_secret_key"         # Asset server authentication token
 ```
 
 ---

@@ -15,8 +15,8 @@ services:
     env_file:
       - ../../.env.development
     networks:
-      - gateway-network-dev
+      - frostfire-network-dev
 
 networks:
-  gateway-network-dev:
+  frostfire-network-dev:
     driver: bridge

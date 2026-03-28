@@ -56,7 +56,6 @@ function loadAnimations() {
   assetCache.add("animations", animations);
   log.success(`Loaded ${animations.length} animation(s) in ${(performance.now() - now).toFixed(2)}ms`);
 }
-loadAnimations();
 
 function loadSprites() {
   const now = performance.now();
@@ -96,7 +95,6 @@ function loadSprites() {
   assetCache.add("sprites", sprites);
   log.success(`Loaded ${sprites.length} sprite(s) in ${(performance.now() - now).toFixed(2)}ms`);
 }
-loadSprites();
 
 async function loadSpriteSheetTemplates() {
   const now = performance.now();
@@ -215,7 +213,6 @@ async function loadSpriteSheetTemplates() {
   await assetCache.add('spriteSheetTemplates', templates);
   log.success(`Loaded ${templates.length} sprite sheet(s) (${templateFiles.length} with templates, ${templates.length - templateFiles.length} images only) in ${(performance.now() - now).toFixed(2)}ms`);
 }
-await loadSpriteSheetTemplates();
 
 function loadIcons() {
   const now = performance.now();
@@ -255,6 +252,10 @@ function loadIcons() {
   assetCache.add("icons", icons);
   log.success(`Loaded ${icons.length} icon(s) in ${(performance.now() - now).toFixed(2)}ms`);
 }
+
+loadAnimations();
+loadSprites();
+await loadSpriteSheetTemplates();
 loadIcons();
 
 const worldNow = performance.now();
@@ -411,6 +412,8 @@ function extractAndCompressLayers(map: MapData) {
   const warps: any[] = [];
   const graveyards: any[] = [];
 
+  log.info(`[EXTRACT] Processing ${map.data.layers.length} layers from ${map.name}`);
+
   map.data.layers.forEach((layer: any) => {
 
     if (layer.type === "objectgroup") {
@@ -418,9 +421,11 @@ function extractAndCompressLayers(map: MapData) {
     }
 
     const layerName = layer.name ? layer.name.toLowerCase() : "";
+    log.debug(`[EXTRACT] Checking layer: ${layer.name} (type: ${layer.type})`);
 
     if ((layer.properties?.[0]?.name.toLowerCase() === "collision" && layer.properties[0].value === true) ||
         layerName.includes("collision")) {
+      log.info(`[EXTRACT] Found collision layer: ${layer.name}`);
       collisions.push(layer.data);
     }
 
@@ -725,6 +730,7 @@ export async function saveMapChunks(mapName: string, chunks: any[]): Promise<voi
 
 export async function reloadMap(mapName: string): Promise<MapData> {
   try {
+    log.info(`[RELOAD] Starting reloadMap for ${mapName}`);
     const mapDir = path.join(assetPath, assetData.maps.path);
     const file = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
     const fullPath = path.join(mapDir, file);
@@ -733,14 +739,17 @@ export async function reloadMap(mapName: string): Promise<MapData> {
       throw new Error(`Map ${file} not found`);
     }
 
+    log.info(`[RELOAD] Loading map from disk: ${fullPath}`);
     const newMap = processMapFile(file);
     if (!newMap) {
       throw new Error(`Failed to load map ${file}`);
     }
 
+    log.info(`[RELOAD] Removing old collision/nopvp caches for ${mapName}`);
     assetCache.removeNested(mapName, "collision");
     assetCache.removeNested(mapName, "nopvp");
 
+    log.info(`[RELOAD] Extracting and compressing layers for ${mapName}`);
     extractAndCompressLayers(newMap);
 
     const maps = await assetCache.get("maps") as MapData[];
@@ -787,6 +796,10 @@ function tryParse(data: string): any {
   }
 }
 
+const assetLoadingEndTime = performance.now();
+const totalAssetLoadingTime = (assetLoadingEndTime - assetLoadingStartTime).toFixed(2);
+log.success(`✔ All assets loaded successfully in ${totalAssetLoadingTime}ms`);
+
 function parseAnimations() {
   const animationFiles = fs
     .readdirSync(path.join(assetPath, assetData.animations.path))
@@ -809,7 +822,3 @@ function validateAnimationFile(file: string) {
   }
   return true;
 }
-
-const assetLoadingEndTime = performance.now();
-const totalAssetLoadingTime = (assetLoadingEndTime - assetLoadingStartTime).toFixed(2);
-log.success(`✔ All assets loaded successfully in ${totalAssetLoadingTime}ms`);

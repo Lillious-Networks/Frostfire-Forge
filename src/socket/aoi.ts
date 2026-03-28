@@ -127,9 +127,6 @@ export async function initializePlayerAOI(player: any): Promise<void> {
 
   if (AOI_CONFIG.USE_SPATIAL_GRID) {
     spatialGrid.addPlayer(player.id, pos.x, pos.y, mapName);
-    if (AOI_CONFIG.DEBUG) {
-      log.debug(`[AOI] Added player ${player.id} to spatial grid at (${pos.x}, ${pos.y}) on ${mapName}`);
-    }
   }
 }
 
@@ -170,10 +167,6 @@ function filterPlayersByDistance(
         result.push(player);
       }
     }
-
-    if (AOI_CONFIG.DEBUG) {
-      log.debug(`[AOI] Spatial grid: checked ${candidateIds.length} candidates, found ${result.length} in range`);
-    }
   } else {
 
     const players = playerCache.list();
@@ -209,7 +202,7 @@ function sendPacket(ws: any, packets: any[]) {
       ws.send(packet);
     });
   } catch (error) {
-    log.error(`[AOI] Error sending packet: ${error}`);
+    // Silently ignore packet send errors
   }
 }
 
@@ -241,13 +234,8 @@ export function queueSpawnPlayerPacket(
       spriteData: null,
     };
 
-    if (AOI_CONFIG.DEBUG) {
-      log.debug(`[AOI] Queued SPAWN_PLAYER for ${spawnedPlayer.id}`);
-    }
-
     return spawnData;
   } catch (error) {
-    log.error(`[AOI] Error queueing spawn player packet: ${error}`);
     return null;
   }
 }
@@ -259,9 +247,6 @@ export async function updatePlayerAOI(
   despawnBatchQueue?: Map<string, Set<string>>
 ): Promise<void> {
   if (!player || !player.aoi) {
-    if (AOI_CONFIG.DEBUG) {
-      log.warn(`[AOI] Cannot update AOI for player without AOI state`);
-    }
     return;
   }
 
@@ -269,8 +254,6 @@ export async function updatePlayerAOI(
   const currentPos = player.location.position;
   const aoiRadius = player.aoi.aoiRadius;
   const currentSequence = player.aoi.mapChangeSequence;
-
-  log.info(`[AOI] updatePlayerAOI called for player ${player.id} at (${currentPos.x}, ${currentPos.y}) on map ${currentMap}`);
 
   try {
 
@@ -280,43 +263,21 @@ export async function updatePlayerAOI(
       currentMap
     );
 
-    log.info(`[AOI] Player ${player.id}: filterPlayersByDistance found ${playersInRange.length} players in range`);
-
     if (player.aoi.mapChangeSequence !== currentSequence) {
-      if (AOI_CONFIG.DEBUG) {
-        log.debug(`[AOI] Map changed during AOI update for ${player.id}, aborting`);
-      }
       return;
     }
 
     const newAOISet = new Set(playersInRange.map((p) => p.id));
     const oldAOISet = player.aoi.playersInAOI;
 
-    log.info(`[AOI] Player ${player.id}: oldAOI has ${oldAOISet.size} players, newAOI has ${newAOISet.size} players`);
-
     const enteredAOI: string[] = [...newAOISet].filter(id => !oldAOISet.has(id));
     const exitedAOI: string[] = [...oldAOISet].filter(id => !newAOISet.has(id));
 
-    log.info(`[AOI] Player ${player.id}: ${enteredAOI.length} entered, ${exitedAOI.length} exited`);
-    if (enteredAOI.length > 0) {
-      log.info(`[AOI] Player ${player.id}: Entered players: ${enteredAOI.join(', ')}`);
-    }
-    if (exitedAOI.length > 0) {
-      log.info(`[AOI] Player ${player.id}: Exited players: ${exitedAOI.join(', ')}`);
-    }
-
-    log.warn(`[AOI] BEFORE STEP 4`);
-
-    log.warn(`[AOI] STARTING FOR LOOP: enteredAOI.length=${enteredAOI.length}`);
     for (const enteredPlayerId of enteredAOI) {
-      log.warn(`[AOI] LOOP ITERATION: processing enteredPlayerId=${enteredPlayerId}`);
       const enteredPlayer = playerCache.get(enteredPlayerId);
       if (!enteredPlayer) {
-        log.warn(`[AOI] Player ${player.id}: Entered player ${enteredPlayerId} not in cache`);
         continue;
       }
-
-      log.warn(`[AOI] Got enteredPlayer: ${enteredPlayer.id}`);
 
       const playerForceSeeEntered = player.forceVisibleTo?.has(enteredPlayer.id);
       const enteredPlayerForceSeePlayer = enteredPlayer.forceVisibleTo?.has(player.id);
@@ -370,9 +331,6 @@ export async function updatePlayerAOI(
             exitedPlayer.ws,
             packetManager.despawnPlayer(player.id, "distance")
           );
-          if (AOI_CONFIG.DEBUG) {
-            log.debug(`[AOI] IMMEDIATE SEND reciprocal despawn: ${player.id} -> ${exitedPlayer.id}`);
-          }
         } else if (despawnBatchQueue) {
 
           if (!despawnBatchQueue.has(exitedPlayer.id)) {
@@ -396,17 +354,11 @@ export async function updatePlayerAOI(
     if (AOI_CONFIG.USE_SPATIAL_GRID) {
       const mapName = currentMap.replaceAll(".json", "");
       const cellChanged = spatialGrid.updatePlayer(player.id, currentPos.x, currentPos.y, mapName);
-      if (AOI_CONFIG.DEBUG && cellChanged) {
-        log.debug(`[AOI] Player ${player.id} moved to new grid cell at (${currentPos.x}, ${currentPos.y})`);
-      }
     }
 
-    log.warn(`[AOI] BEFORE FINAL CACHE UPDATE for player ${player.id}`);
     playerCache.set(player.id, player);
-    log.warn(`[AOI] AFTER FINAL CACHE UPDATE for player ${player.id}`);
   } catch (error) {
-    log.error(`[AOI] Error updating AOI for player ${player.id}: ${error}`);
-    log.error(`[AOI] ERROR STACK: ${error instanceof Error ? error.stack : 'unknown'}`);
+    // Silently ignore AOI update errors
   }
 }
 
@@ -421,10 +373,6 @@ export function shouldUpdateAOI(player: any): boolean {
   const distanceMoved = Math.sqrt(dx * dx + dy * dy);
 
   const shouldUpdate = distanceMoved > player.aoi.updateThreshold;
-  if (!shouldUpdate) {
-    log.debug(`[AOI] shouldUpdateAOI for ${player.id}: distance=${distanceMoved.toFixed(2)}, threshold=${player.aoi.updateThreshold} - returning false`);
-  }
-
   return shouldUpdate;
 }
 
@@ -434,9 +382,6 @@ export function broadcastToAOI(
   includeSelf: boolean = true
 ): void {
   if (!sourcePlayer || !sourcePlayer.aoi) {
-    if (AOI_CONFIG.DEBUG) {
-      log.warn(`[AOI] Cannot broadcast for player without AOI state`);
-    }
     return;
   }
 
@@ -463,7 +408,7 @@ export function broadcastToAOI(
       });
     }
   } catch (error) {
-    log.error(`[AOI] Error broadcasting to AOI: ${error}`);
+    // Silently ignore broadcast errors
   }
 }
 
@@ -512,19 +457,10 @@ export function despawnPlayerFromAllAOI(
 
       if (AOI_CONFIG.USE_SPATIAL_GRID) {
         spatialGrid.removePlayer(departingPlayer.id);
-        if (AOI_CONFIG.DEBUG) {
-          log.debug(`[AOI] Removed player ${departingPlayer.id} from spatial grid (disconnect)`);
-        }
       }
     }
-
-    if (AOI_CONFIG.DEBUG) {
-      log.debug(
-        `[AOI] Despawned player ${departingPlayer.id} from ${affectedPlayers.length} players (${reason})`
-      );
-    }
   } catch (error) {
-    log.error(`[AOI] Error despawning player from all AOI: ${error}`);
+    // Silently ignore despawn errors
   }
 }
 
@@ -561,13 +497,6 @@ export async function handleMapChangeAOI(
       if (AOI_CONFIG.USE_SPATIAL_GRID) {
         spatialGrid.removePlayer(player.id);
         spatialGrid.addPlayer(player.id, newPosition.x, newPosition.y, newMap);
-        if (AOI_CONFIG.DEBUG) {
-          log.debug(`[AOI] Player ${player.id} moved in spatial grid from ${oldMap} to ${newMap}`);
-        }
-      }
-
-      if (AOI_CONFIG.DEBUG) {
-        log.debug(`[AOI] Player ${player.id} changing map from ${oldMap} to ${newMap}, assigned to ${newLayerId}`);
       }
     }
 
@@ -586,7 +515,7 @@ export async function handleMapChangeAOI(
 
     await updatePlayerAOI(player, sendAnimationToFn, spawnBatchQueue, despawnBatchQueue);
   } catch (error) {
-    log.error(`[AOI] Error handling map change: ${error}`);
+    // Silently ignore map change errors
   }
 }
 
@@ -638,7 +567,6 @@ export async function syncPartyLayers(
     );
 
     if (!leaderPlayer || !leaderPlayer.aoi) {
-      log.debug(`[LAYER] Party leader ${partyLeaderUsername} not online or no AOI`);
       return;
     }
 
@@ -667,7 +595,6 @@ export async function syncPartyLayers(
     }
 
     if (onlineMembers.length === 0) {
-      log.debug(`[LAYER] No online party members to sync for ${partyLeaderUsername}`);
       return;
     }
 
@@ -678,7 +605,6 @@ export async function syncPartyLayers(
     );
 
     if (membersOnSameMap.length === 0) {
-      log.debug(`[LAYER] No party members on same map as leader (${mapName})`);
       return;
     }
 
@@ -691,7 +617,6 @@ export async function syncPartyLayers(
     );
 
     if (!targetLayerId) {
-      log.error(`[LAYER] Failed to sync party to leader layer`);
       return;
     }
 
@@ -705,12 +630,6 @@ export async function syncPartyLayers(
     if (leaderPlayer.aoi) {
       playersNeedingUpdate.push({ player: leaderPlayer, oldLayerId: leaderOldLayerId });
 
-      if (leaderOldLayerId !== targetLayerId) {
-        log.debug(`[LAYER] Leader ${leaderPlayer.username} changing from ${leaderOldLayerId} to ${targetLayerId}`);
-      } else {
-        log.debug(`[LAYER] Leader ${leaderPlayer.username} staying on ${targetLayerId}, refreshing AOI for new members`);
-      }
-
       leaderPlayer.aoi.layerId = targetLayerId;
       playerCache.set(leaderPlayer.id, leaderPlayer);
     }
@@ -720,10 +639,6 @@ export async function syncPartyLayers(
 
       if (member.aoi) {
         playersNeedingUpdate.push({ player: member, oldLayerId: oldLayerId });
-
-        if (oldLayerId !== targetLayerId) {
-          log.debug(`[LAYER] Member ${member.username} changing from ${oldLayerId} to ${targetLayerId}`);
-        }
 
         member.aoi.layerId = targetLayerId;
         playerCache.set(member.id, member);
@@ -795,16 +710,8 @@ export async function syncPartyLayers(
       }
     }
 
-    const positionInfo = playersNeedingUpdate.map(({ player }) => {
-      const pos = player.location?.position;
-      return `${player.username}(${pos?.x},${pos?.y})`;
-    }).join(", ");
-
-    log.debug(`[LAYER] Synced party of ${partyLeaderUsername} to layer ${layerManager.getLayerName(targetLayerId)}`);
-    log.debug(`[LAYER] Positions: ${positionInfo}`);
-    log.debug(`[LAYER] Sent ${totalSpawns} spawns, ${totalDespawns} despawns to ${playersNeedingUpdate.length} players`);
   } catch (error) {
-    log.error(`[LAYER] Error syncing party layers: ${error}`);
+    // Silently ignore party layer sync errors
   }
 }
 
@@ -877,7 +784,7 @@ export function startAutoPartyLayerSync(
         }
       }
     } catch (error) {
-      log.error(`[LAYER] Error in auto party layer sync: ${error}`);
+      // Silently ignore auto party sync errors
     }
   }, 15000);
 }
@@ -928,8 +835,6 @@ export function startAutoLayerCondensation(
             const availableSpace = AOI_CONFIG.MAX_PLAYERS_PER_LAYER - targetLayer.playerCount;
 
             if (availableSpace >= sourceLayer.playerCount) {
-
-              log.debug(`[LAYER] Condensing ${sourceLayer.playerCount} players from ${layerManager.getLayerName(sourceLayer.layerId)} to ${layerManager.getLayerName(targetLayer.layerId)} on map ${mapName}`);
 
               for (const playerId of sourceLayer.players) {
                 const player = playerCache.get(playerId);
@@ -1008,11 +913,10 @@ export function startAutoLayerCondensation(
             }
           }
 
-          log.debug(`[LAYER] Condensation complete for map ${mapName}`);
         }
       }
     } catch (error) {
-      log.error(`[LAYER] Error in auto layer condensation: ${error}`);
+      // Silently ignore auto layer condensation errors
     }
   }, 300000);
 }

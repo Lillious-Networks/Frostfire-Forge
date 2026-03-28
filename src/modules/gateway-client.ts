@@ -5,6 +5,7 @@ import os from "os";
 
 interface ServerRegistrationConfig {
   gatewayUrl: string;
+  assetServerUrl?: string;
   serverId: string;
   host: string;
   publicHost?: string;
@@ -22,6 +23,8 @@ class GatewayClient {
   private reconnectTimer?: Timer;
   private reconnectAttempts: number = 0;
   private maxReconnectDelay: number = 30000;
+  private mapSyncPromise: Promise<void> | null = null;
+  private mapSyncResolver: (() => void) | null = null;
 
   constructor(config: ServerRegistrationConfig) {
     this.config = config;
@@ -74,8 +77,20 @@ class GatewayClient {
         log.success(`Successfully registered with gateway as ${this.config.serverId}`);
         this.startHeartbeat();
 
-        this.syncMapChecksums().catch(error => {
+        // Create a promise that resolves when map sync completes
+        this.mapSyncPromise = new Promise((resolve) => {
+          this.mapSyncResolver = resolve;
+        });
+
+        this.syncMapChecksums().then(() => {
+          if (this.mapSyncResolver) {
+            this.mapSyncResolver();
+          }
+        }).catch(error => {
           log.warn(`Map sync failed on registration: ${error}`);
+          if (this.mapSyncResolver) {
+            this.mapSyncResolver(); // Resolve anyway after all retries exhausted
+          }
         });
 
         return true;
@@ -229,49 +244,64 @@ class GatewayClient {
     this.activeConnections = count;
   }
 
-  private async syncMapChecksums(): Promise<void> {
+  private async syncMapChecksums(attempt: number = 1, maxAttempts: number = 30): Promise<void> {
     try {
       const { calculateAllMapChecksums, writeMapContent } = await import("./checksums.ts");
 
       const localChecksums = calculateAllMapChecksums();
 
-      const gatewayUrl = await this.getGatewayUrl();
-      const response = await fetch(`${gatewayUrl}/map-checksums`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          checksums: localChecksums,
-          serverId: this.config.serverId,
-          authKey: process.env.GATEWAY_AUTH_KEY
-        })
-      });
-
-      if (!response.ok) {
-        log.error(`Map checksum sync failed with status ${response.status}`);
+      const assetServerUrl = this.config.assetServerUrl || process.env.ASSET_SERVER_URL;
+      if (!assetServerUrl) {
+        log.warn("Asset server URL not configured, skipping map sync");
         return;
       }
 
-      const result = await response.json();
+      try {
+        const response = await fetch(`${assetServerUrl}/map-checksums`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            checksums: localChecksums,
+            serverId: this.config.serverId,
+            authKey: process.env.ASSET_SERVER_AUTH_KEY || process.env.GATEWAY_AUTH_KEY
+          })
+        });
 
-      if (!result.success) {
-        log.error(`Map checksum sync failed: ${result.error}`);
-        return;
-      }
-
-      if (result.outdatedMaps && result.outdatedMaps.length > 0) {
-        log.info(`Syncing ${result.outdatedMaps.length} map(s) from gateway...`);
-
-        for (const mapUpdate of result.outdatedMaps) {
-          const success = writeMapContent(mapUpdate.name, mapUpdate.data);
-          if (success) {
-            log.success(`Updated map: ${mapUpdate.name}`);
-          } else {
-            log.error(`Failed to update map: ${mapUpdate.name}`);
-          }
+        if (!response.ok) {
+          throw new Error(`Map checksum sync failed with status ${response.status}`);
         }
 
-      } else {
-        log.success("All maps are up to date");
+        const result = await response.json();
+
+        if (!result.success) {
+          throw new Error(result.error || "Unknown error");
+        }
+
+        if (result.outdatedMaps && result.outdatedMaps.length > 0) {
+          log.info(`Syncing ${result.outdatedMaps.length} map(s) from asset server...`);
+
+          for (const mapUpdate of result.outdatedMaps) {
+            const success = writeMapContent(mapUpdate.name, mapUpdate.data);
+            if (success) {
+              log.success(`Updated map: ${mapUpdate.name}`);
+            } else {
+              log.error(`Failed to update map: ${mapUpdate.name}`);
+            }
+          }
+
+        } else {
+          log.success("All maps are up to date");
+        }
+      } catch (syncError) {
+        if (attempt < maxAttempts) {
+          const delayMs = Math.min(1000 * Math.pow(2, attempt - 1), 30000); // Exponential backoff, max 30s
+          log.warn(`Map checksum sync failed (attempt ${attempt}/${maxAttempts}): ${syncError}. Retrying in ${delayMs}ms...`);
+
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          return this.syncMapChecksums(attempt + 1, maxAttempts);
+        } else {
+          throw new Error(`Map checksum sync failed after ${maxAttempts} attempts: ${syncError}`);
+        }
       }
     } catch (error) {
       log.error(`Map checksum sync error: ${error}`);
@@ -279,39 +309,38 @@ class GatewayClient {
   }
 
   async sendMapUpdateToGateway(mapName: string, mapData: any): Promise<boolean> {
-    if (!this.registered) {
-      log.warn("Not registered with gateway, cannot send map update");
-      return false;
-    }
-
     try {
-      const gatewayUrl = await this.getGatewayUrl();
-      const response = await fetch(`${gatewayUrl}/update-map`, {
+      const assetServerUrl = this.config.assetServerUrl || process.env.ASSET_SERVER_URL;
+      if (!assetServerUrl) {
+        log.error("Asset server URL not configured, cannot send map update");
+        return false;
+      }
+      const response = await fetch(`${assetServerUrl}/update-map`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           mapName,
           mapData,
           serverId: this.config.serverId,
-          authKey: process.env.GATEWAY_AUTH_KEY
+          authKey: process.env.ASSET_SERVER_AUTH_KEY || process.env.GATEWAY_AUTH_KEY
         })
       });
 
       if (!response.ok) {
-        log.error(`Failed to send map update to gateway: ${response.status}`);
+        log.error(`Failed to send map update to asset server: ${response.status}`);
         return false;
       }
 
       const result = await response.json();
       if (result.success) {
-        log.success(`Map update sent to gateway: ${mapName}`);
+        log.success(`Map update sent to asset server: ${mapName}`);
         return true;
       } else {
-        log.error(`Gateway rejected map update: ${result.error}`);
+        log.error(`Asset server rejected map update: ${result.error}`);
         return false;
       }
     } catch (error) {
-      log.error(`Error sending map update to gateway: ${error}`);
+      log.error(`Error sending map update to asset server: ${error}`);
       return false;
     }
   }
@@ -343,6 +372,23 @@ class GatewayClient {
       log.success("Unregistered from gateway");
     } catch (error) {
       log.error(`Failed to unregister from gateway: ${error}`);
+    }
+  }
+
+  async waitForMapSync(timeoutMs: number = 300000): Promise<void> {
+    if (!this.mapSyncPromise) {
+      throw new Error("Map sync not started - gateway registration failed");
+    }
+
+    try {
+      const timeoutPromise = new Promise<void>((_, reject) =>
+        setTimeout(() => reject(new Error("Map sync timeout")), timeoutMs)
+      );
+      await Promise.race([this.mapSyncPromise, timeoutPromise]);
+      log.success("Map sync completed successfully");
+    } catch (error) {
+      log.error(`CRITICAL: Map sync failed - cannot start engine without synced maps: ${error}`);
+      throw error; // Re-throw to prevent engine startup
     }
   }
 }

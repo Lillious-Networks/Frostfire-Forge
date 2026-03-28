@@ -1,10 +1,9 @@
 import { packetTypes } from "./types";
 import { packetManager } from "./packet_manager";
 import log from "../modules/logger";
-import player from "../systems/player.ts";
+import player, { clearMapCache } from "../systems/player.ts";
 import permissions from "../systems/permissions";
 import { getAuthWorker } from "./authentication_pool.ts";
-import { gatewayClient } from "./server.ts";
 import fs from "fs";
 import path from "path";
 const authentication_queue = new Set<string>();
@@ -17,7 +16,6 @@ import mapIndex from "../services/mapindex";
 import gameLoop from "../services/gameloop";
 import assetCache from "../services/assetCache";
 import { reloadMap } from "../modules/assetloader";
-import { clearMapCache } from "../systems/player.ts";
 import language from "../systems/language";
 import quests from "../systems/quests";
 import friends from "../systems/friends";
@@ -48,6 +46,9 @@ async function waitForSpritesReady() {
 }
 
 export const spriteDataCacheReady = waitForSpritesReady();
+
+const npcs = await assetCache.get("npcs");
+const particles = await assetCache.get("particles");
 
 let restartScheduled: boolean;
 let restartTimers: ReturnType<typeof setTimeout>[];
@@ -388,9 +389,6 @@ export function clearBatchQueuesForPlayer(playerId: string, mapName: string) {
 
 }
 
-const npcs = await assetCache.get("npcs");
-const particles = await assetCache.get("particles");
-
 const authWorker = await getAuthWorker();
 authWorker.on("message", async (result: any) => {
   const status = result as Authentication;
@@ -408,14 +406,12 @@ authWorker.on("message", async (result: any) => {
   if (status.error && !status.authenticated) {
     sendPacket(ws, packetManager.loginFailed());
     ws.close(1008, status.error);
-    log.error(`Authentication error for token ${token}: ${status.error}`);
     return;
   }
 
   if (status.authenticated && status.completed && status.error) {
     sendPacket(ws, packetManager.loginFailed());
     ws.close(1008, status.error);
-    log.error(`Authentication error for token ${token}: ${status.error}`);
     return;
   }
 
@@ -571,15 +567,23 @@ authWorker.on("message", async (result: any) => {
       mapIndex.addPlayer(_pcache.id, _pcache.location.map);
     }
 
-    const mapData = [
-      map?.compressed,
-      spawnLocation?.map,
-      position?.x || 0,
-      position?.y || 0,
-      position?.direction || "down",
-    ];
+    // Send map chunk metadata instead of full map
+    const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
+    const mapMetadata = {
+      name: spawnLocation?.map,
+      assetServerUrl,
+      width: map?.data?.width || 0,
+      height: map?.data?.height || 0,
+      tilewidth: map?.data?.tilewidth || 32,
+      tileheight: map?.data?.tileheight || 32,
+      tilesets: map?.data?.tilesets || [], // Tileset metadata (not images, just definitions)
+      spawnX: position?.x || 0,
+      spawnY: position?.y || 0,
+      direction: position?.direction || "down",
+      chunks: null, // Client will fetch from asset server
+    };
 
-    sendPacket(ws, packetManager.loadMap(mapData));
+    sendPacket(ws, packetManager.loadMap(mapMetadata));
 
     setImmediate(async () => {
 
@@ -2111,50 +2115,77 @@ export default async function packetReceiver(
         try {
           log.info(`Map save requested by ${currentPlayer.username} for map: ${saveData.mapName}, ${saveData.chunks.length} chunks modified`);
 
+          // Forward chunks to asset server via HTTP
+          const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
+          const authKey = process.env.ASSET_SERVER_AUTH_KEY || process.env.GATEWAY_AUTH_KEY;
+
+          const response = await fetch(`${assetServerUrl}/save-map-chunks`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              mapName: saveData.mapName,
+              chunks: saveData.chunks,
+              authKey: authKey
+            })
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ error: response.statusText }));
+            throw new Error(errorData.error || `Failed to save chunks to asset server: ${response.status}`);
+          }
+
+          log.info(`Map chunks saved to asset server: ${saveData.mapName}`);
+
+          // Update local cache with the changes AND save to disk
           const cachedMaps = (await assetCache.get("maps")) as MapData[];
           const mapIndex = cachedMaps.findIndex((m: any) => m.name === saveData.mapName);
 
-          if (mapIndex === -1) {
-            throw new Error(`Map ${saveData.mapName} not found`);
-          }
+          if (mapIndex !== -1) {
+            // Update actual map layers with chunk data
+            const mapData = cachedMaps[mapIndex].data;
+            saveData.chunks.forEach((chunkData: any) => {
+              const startX = chunkData.chunkX * chunkData.width;
+              const startY = chunkData.chunkY * chunkData.height;
 
-          saveData.chunks.forEach((chunkData: any) => {
-            const chunkKey = `${chunkData.chunkX}-${chunkData.chunkY}`;
-
-            if (!cachedMaps[mapIndex].chunks) {
-              cachedMaps[mapIndex].chunks = {};
-            }
-
-            cachedMaps[mapIndex].chunks[chunkKey] = {
-              width: chunkData.width,
-              height: chunkData.height,
-              layers: chunkData.layers
-            };
-          });
-
-          assetCache.add("maps", cachedMaps);
-
-          await saveMapChunks(saveData.mapName, saveData.chunks);
-
-          clearMapCache(saveData.mapName);
-
-          const reloadedMap = await reloadMap(saveData.mapName);
-          if (reloadedMap) {
-
-            const updatedMaps = (await assetCache.get("maps")) as MapData[];
-            const index = updatedMaps.findIndex((m: any) => m.name === saveData.mapName);
-            if (index >= 0) {
-              updatedMaps[index].compressed = reloadedMap.compressed;
-              updatedMaps[index].data = reloadedMap.data;
-              await assetCache.add("maps", updatedMaps);
-            }
-            log.info(`Reloaded collision data for map: ${saveData.mapName}`);
-          }
-
-          if (gatewayClient && gatewayClient.isRegistered() && reloadedMap) {
-            gatewayClient.sendMapUpdateToGateway(saveData.mapName, reloadedMap.data).catch((error) => {
-              log.warn(`Failed to sync map update to gateway: ${error}`);
+              for (const chunkLayer of chunkData.layers) {
+                const mapLayer = mapData.layers.find((l: any) => l.name === chunkLayer.name);
+                if (mapLayer && mapLayer.data) {
+                  for (let y = 0; y < chunkData.height; y++) {
+                    for (let x = 0; x < chunkData.width; x++) {
+                      const chunkIndex = y * chunkData.width + x;
+                      const mapX = startX + x;
+                      const mapY = startY + y;
+                      const mapIndex = mapY * mapLayer.width + mapX;
+                      if (mapIndex < mapLayer.data.length && chunkIndex < chunkLayer.data.length) {
+                        mapLayer.data[mapIndex] = chunkLayer.data[chunkIndex];
+                      }
+                    }
+                  }
+                }
+              }
             });
+
+            assetCache.add("maps", cachedMaps);
+
+            // Also save chunks to disk locally for persistence
+            try {
+              await saveMapChunks(saveData.mapName, saveData.chunks);
+            } catch (diskError) {
+              log.warn(`Failed to save chunks to disk locally: ${diskError}`);
+              // Don't fail the request if local disk save fails, asset server has the data
+            }
+
+            // Refresh collision cache since collision layer may have been updated
+            try {
+              const { reloadMap } = await import("../modules/assetloader");
+              await reloadMap(saveData.mapName);
+              // Clear the player.ts local map cache so collision checks fetch fresh data
+              clearMapCache(saveData.mapName);
+            } catch (reloadError) {
+              log.warn(`Failed to reload map collision cache: ${reloadError}`);
+            }
           }
 
           sendPacket(ws, packetManager.notify({
@@ -3824,16 +3855,22 @@ export default async function packetReceiver(
               map.data = result.data;
 
               const playersInMap = filterPlayersByMap(mapName);
+              const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
               playersInMap.forEach((player) => {
-                const mapData = [
-                  result?.compressed,
-                  player.location.map,
-                  player.location.position?.x || 0,
-                  player.location.position?.y || 0,
-                  player.location.position?.direction || "down",
-                  player.location.position?.moving || false,
-                ];
-                sendPacket(player.ws, packetManager.loadMap(mapData));
+                const mapMetadata = {
+                  name: mapName,
+                  assetServerUrl,
+                  width: result?.data?.width || 0,
+                  height: result?.data?.height || 0,
+                  tilewidth: result?.data?.tilewidth || 32,
+                  tileheight: result?.data?.tileheight || 32,
+                  tilesets: result?.data?.tilesets || [], // Tileset metadata (not images, just definitions)
+                  spawnX: player.location.position?.x || 0,
+                  spawnY: player.location.position?.y || 0,
+                  direction: player.location.position?.direction || "down",
+                  chunks: null,
+                };
+                sendPacket(player.ws, packetManager.loadMap(mapMetadata));
               });
             } else {
               log.error(`Failed to reload map ${mapName}`);

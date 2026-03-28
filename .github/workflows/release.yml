@@ -147,7 +147,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:latest
 
   test-integration:
-    name: Test Gateway and Game Server Integration
+    name: Test Asset Server, Gateway and Game Server Integration
     runs-on: ubuntu-latest
     needs: [build-development]
     steps:
@@ -159,6 +159,12 @@ jobs:
         with:
           repository: Lillious-Networks/Frostfire-Forge-Gateway
           path: gateway
+
+      - name: Checkout Asset Server Repository
+        uses: actions/checkout@v6
+        with:
+          repository: Lillious-Networks/Frostfire-Forge-Assets
+          path: assets
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -172,6 +178,9 @@ jobs:
         run: |
           IMAGE_NAME=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Start Asset Server with Docker Compose
+        run: docker compose -p gateway -f assets/src/docker/docker-compose.dev.yml up -d && sleep 10
 
       - name: Start Gateway with Docker Compose
         run: docker compose -p gateway -f gateway/src/docker/docker-compose.dev.yml up -d && sleep 10
@@ -195,6 +204,8 @@ jobs:
             echo "$GATEWAY_LOGS"
             echo "Game server logs:"
             docker compose -p gateway -f src/docker/docker-compose.dev.yml logs
+            echo "Asset server logs:"
+            docker compose -p gateway -f assets/src/docker/docker-compose.dev.yml logs
             exit 1
           fi
 
@@ -205,6 +216,7 @@ jobs:
         run: |
           docker compose -p gateway -f src/docker/docker-compose.dev.yml down
           docker compose -p gateway -f gateway/src/docker/docker-compose.dev.yml down
+          docker compose -p gateway -f assets/src/docker/docker-compose.dev.yml down
 
   publish:
     name: Publish Docker Image to GitHub Packages

@@ -63,7 +63,9 @@ export function writeMapContent(mapName: string, mapData: any): boolean {
     const mapDir = path.join(assetPath, assetData.maps.path);
     const filePath = path.join(mapDir, mapName.endsWith(".json") ? mapName : `${mapName}.json`);
 
-    fs.writeFileSync(filePath, JSON.stringify(mapData, null, 2), "utf-8");
+    // Write with normalized JSON format to ensure checksums match after writing
+    const normalizedContent = JSON.stringify(mapData);
+    fs.writeFileSync(filePath, normalizedContent, "utf-8");
     return true;
   } catch (error) {
     console.error(`Failed to write map ${mapName}:`, error);
