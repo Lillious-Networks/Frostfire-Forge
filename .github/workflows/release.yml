@@ -190,6 +190,23 @@ jobs:
           GAME_SERVER_IMAGE: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:latest
         run: docker compose -p gateway -f src/docker/docker-compose.dev.yml up -d && sleep 10
 
+      - name: Verify Asset Server Connectivity
+        run: |
+          echo "Checking if game server synced with asset server..."
+          sleep 5
+          ASSET_LOGS=$(docker compose -p gateway -f assets/src/docker/docker-compose.dev.yml logs)
+          if echo "$ASSET_LOGS" | grep -q "Map sync for server-1"; then
+            echo "✅ Game server successfully synced with asset server"
+            echo "$ASSET_LOGS" | grep "Map sync for server-1"
+          else
+            echo "❌ Game server failed to sync with asset server"
+            echo "Asset server logs:"
+            echo "$ASSET_LOGS"
+            echo "Game server logs:"
+            docker compose -p gateway -f src/docker/docker-compose.dev.yml logs
+            exit 1
+          fi
+
       - name: Verify Game Server Registration with Gateway
         run: |
           echo "Checking if game server registered with gateway..."
