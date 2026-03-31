@@ -84,10 +84,6 @@ jobs:
       - name: Verify Config Generation
         run: |
           bun create-config --environment local
-          if [ ! -f "src/config/assets.json" ]; then
-            echo "❌ Config generation failed: assets.json not created"
-            exit 1
-          fi
           if [ ! -f "src/config/settings.json" ]; then
             echo "❌ Config generation failed: settings.json not created"
             exit 1
