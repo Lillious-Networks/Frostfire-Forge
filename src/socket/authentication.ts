@@ -95,7 +95,7 @@ const authentication = {
                 spellsByName[sp.name] = sp;
             }
 
-            const learnedSpells: Record<string, { sprite: SpellData["sprite"] | null }> = Object.create(null);
+            const learnedSpells: Record<string, { icon: string | null }> = Object.create(null);
 
             for (const row of learnedSpellsData) {
                 const name = row.spell;
@@ -104,7 +104,7 @@ const authentication = {
                 if (!spellDetails) continue;
 
                 learnedSpells[name] = {
-                    sprite: spellDetails.sprite ?? null,
+                    icon: spellDetails.icon ?? null,
                 };
             }
 

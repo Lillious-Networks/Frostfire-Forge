@@ -60,24 +60,6 @@ CACHE=""
 REDIS_URL=""
 `;
 
-const assetConfig = {
-  maps: {
-    path: "/maps/",
-  },
-  sfx: {
-    path: "/sfx/",
-  },
-  sprites: {
-    path: "/sprites/",
-  },
-  animations: {
-    path: "/animations/",
-  },
-  icons: {
-    path: "/icons/",
-  }
-};
-
 const settings = {
   "webserverRatelimit": {
     "enabled": true,
@@ -111,16 +93,6 @@ if (!fs.existsSync(path.join(".env.development")) && environment === "developmen
 if (!fs.existsSync(path.join(".env.production")) && environment === "production") {
   console.info("Creating .env.production file for production environment...");
   fs.writeFileSync(path.join(".env.production"), production_environment_variables);
-}
-
-if (!fs.existsSync(path.join(configPath, "assets.json"))) {
-  fs.writeFileSync(
-    path.join(configPath, "assets.json"),
-    JSON.stringify(assetConfig, null, 2)
-  );
-  console.log(`Created assets config file at ${path.join(configPath, "assets.json")}`);
-} else {
-  console.log(`Assets config file loaded from ${path.join(configPath, "assets.json")}`);
 }
 
 if (!fs.existsSync(path.join(configPath, "settings.json"))) {

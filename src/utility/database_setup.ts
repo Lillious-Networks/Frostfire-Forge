@@ -96,7 +96,7 @@ const createItemsTable = async () => {
     CREATE TABLE IF NOT EXISTS items (
         id INT AUTO_INCREMENT PRIMARY KEY UNIQUE NOT NULL,
         name VARCHAR(255) NOT NULL UNIQUE,
-        type VARCHAR(255) NOT NULL UNIQUE,
+        type VARCHAR(255) NOT NULL,
         quality VARCHAR(255) NOT NULL,
         description VARCHAR(255) DEFAULT NULL,
         icon VARCHAR(1000) DEFAULT NULL,
@@ -237,7 +237,7 @@ const createNpcTable = async () => {
       map VARCHAR(255) NOT NULL,
       position VARCHAR(255) NOT NULL,
       direction VARCHAR(10) NOT NULL,
-      dialog VARCHAR(500) NOT NULL,
+      dialog VARCHAR(500) NOT NULL DEFAULT '',
       hidden INT NOT NULL DEFAULT 0,
       script VARCHAR(5000) NOT NULL,
       particles VARCHAR(500) NOT NULL,

@@ -12,251 +12,10 @@ import assetCache from "../services/assetCache";
 import zlib from "zlib";
 import * as settings from "../config/settings.json";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
-
-import assetConfig from "../services/assetConfig";
+const mapDir = path.join('.', 'src', 'assets', 'maps');
 import mounts from "../systems/mounts";
-const assetPath = assetConfig.getAssetConfig() as string;
-const assetData = assetConfig.getAssetData() as any;
-
-if (!assetConfig.getAssetConfig()) {
-  throw new Error("Asset path not found");
-}
 
 const assetLoadingStartTime = performance.now();
-
-function loadAnimations() {
-  const now = performance.now();
-
-  const animationPath = path.join(assetPath, assetData.animations.path);
-  if (!fs.existsSync(animationPath)) return;
-
-  const animationFiles = parseAnimations();
-  const animations = [] as any[];
-
-  for (const file of animationFiles) {
-    if (validateAnimationFile(file)) {
-      const buffer = fs.readFileSync(path.join(animationPath, file));
-      const compressed = zlib.deflateSync(buffer);
-
-      const originalSize = buffer.length;
-      const compressedSize = compressed.length;
-      const ratio = (originalSize / compressedSize).toFixed(2);
-      const savings = (((originalSize - compressedSize) / originalSize) * 100).toFixed(2);
-
-      log.debug(`Compressed animation: ${file}
-  - Original: ${originalSize} bytes
-  - Compressed: ${compressedSize} bytes
-  - Compression Ratio: ${ratio}x
-  - Compression Savings: ${savings}%`);
-
-      animations.push({ name: file, data: compressed });
-    }
-  }
-
-  assetCache.add("animations", animations);
-  log.success(`Loaded ${animations.length} animation(s) in ${(performance.now() - now).toFixed(2)}ms`);
-}
-
-function loadSprites() {
-  const now = performance.now();
-  const sprites = [] as any[];
-
-  const spriteDir = path.join(assetPath, assetData.sprites.path);
-
-  if (!fs.existsSync(spriteDir)) {
-    throw new Error(`Sprites directory not found at ${spriteDir}`);
-  }
-
-  const spriteFiles = fs.readdirSync(spriteDir).filter((file) => file.endsWith(".png"));
-
-  spriteFiles.forEach((file) => {
-    const name = file.replace(".png", "");
-    const rawData = fs.readFileSync(path.join(spriteDir, file));
-    const base64Data = rawData.toString("base64");
-
-    log.debug(`Loaded sprite: ${name}`);
-
-    const compressedData = zlib.deflateSync(base64Data);
-
-    sprites.push({ name, data: compressedData });
-    assetCache.add(`sprite_${name}`, compressedData);
-
-    const originalSize = base64Data.length;
-    const compressedSize = compressedData.length;
-    const ratio = (originalSize / compressedSize).toFixed(2);
-    const savings = (((originalSize - compressedSize) / originalSize) * 100).toFixed(2);
-
-    log.debug(`Compressed sprite: ${name}
-  - Original: ${originalSize} bytes
-  - Compressed: ${compressedSize} bytes
-  - Compression Ratio: ${ratio}x
-  - Compression Savings: ${savings}%`);
-  });
-  assetCache.add("sprites", sprites);
-  log.success(`Loaded ${sprites.length} sprite(s) in ${(performance.now() - now).toFixed(2)}ms`);
-}
-
-async function loadSpriteSheetTemplates() {
-  const now = performance.now();
-  const templates = [] as any[];
-
-  const animationsDir = path.join(assetPath, 'animations');
-
-  const spriteSheetDir = path.join(assetPath, 'spritesheets');
-
-  if (!fs.existsSync(animationsDir)) {
-    log.warn('Animations directory not found at ' + animationsDir + ', skipping animation template loading');
-    await assetCache.add('spriteSheetTemplates', []);
-    return;
-  }
-
-  if (!fs.existsSync(spriteSheetDir)) {
-    log.warn('Sprite sheets directory not found at ' + spriteSheetDir + ', skipping sprite sheet image loading');
-    await assetCache.add('spriteSheetTemplates', []);
-    return;
-  }
-
-  const templateFiles = fs.readdirSync(animationsDir)
-    .filter(file => file.endsWith('.json'));
-
-  if (templateFiles.length === 0) {
-    log.warn('No animation templates found in ' + animationsDir);
-    await assetCache.add('spriteSheetTemplates', []);
-    return;
-  }
-
-  templateFiles.forEach(file => {
-    const templatePath = path.join(animationsDir, file);
-    const templateData = JSON.parse(fs.readFileSync(templatePath, 'utf-8'));
-
-    const templateJson = JSON.stringify(templateData);
-    const compressedTemplate = zlib.deflateSync(templateJson);
-
-    const pngFile = templateData.imageSource;
-    const pngPath = path.join(spriteSheetDir, pngFile);
-    let compressedImage = null;
-
-    if (fs.existsSync(pngPath)) {
-
-      const imageBuffer = fs.readFileSync(pngPath);
-      const base64Image = imageBuffer.toString('base64');
-      compressedImage = zlib.deflateSync(base64Image);
-
-      const originalTemplateSize = templateJson.length;
-      const compressedTemplateSize = compressedTemplate.length;
-      const originalImageSize = base64Image.length;
-      const compressedImageSize = compressedImage.length;
-
-      log.debug(`Loaded animation template: ${file} with image ${pngFile}
-  - Template Original: ${originalTemplateSize} bytes, Compressed: ${compressedTemplateSize} bytes
-  - Image Original: ${originalImageSize} bytes, Compressed: ${compressedImageSize} bytes
-  - Total Compression Ratio: ${((originalTemplateSize + originalImageSize) / (compressedTemplateSize + compressedImageSize)).toFixed(2)}x`);
-    } else {
-      log.debug(`Loaded animation template: ${file} (no image - template only, imageSource "${pngFile}" not found)`);
-    }
-
-    templates.push({
-      name: file.replace('.json', ''),
-      template: compressedTemplate,
-      image: compressedImage
-    });
-  });
-
-  function getAllPngFilesRecursive(dir: string, baseDir: string = dir): string[] {
-    let results: string[] = [];
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-
-        results = results.concat(getAllPngFilesRecursive(fullPath, baseDir));
-      } else if (entry.name.endsWith('.png')) {
-
-        const relativePath = path.relative(baseDir, fullPath);
-        results.push(relativePath);
-      }
-    }
-    return results;
-  }
-
-  const allPngFiles = getAllPngFilesRecursive(spriteSheetDir);
-
-  const templatePngFiles = new Set(templateFiles.map(f => {
-    const templatePath = path.join(animationsDir, f);
-    const templateData = JSON.parse(fs.readFileSync(templatePath, 'utf-8'));
-    return templateData.imageSource;
-  }));
-
-  allPngFiles.forEach(pngFile => {
-
-    if (templatePngFiles.has(pngFile)) {
-      return;
-    }
-
-    const pngPath = path.join(spriteSheetDir, pngFile);
-    const imageBuffer = fs.readFileSync(pngPath);
-    const base64Image = imageBuffer.toString('base64');
-    const compressedImage = zlib.deflateSync(base64Image);
-
-    const filename = path.basename(pngFile, '.png');
-
-    templates.push({
-      name: filename,
-      template: null,
-      image: compressedImage
-    });
-
-    log.debug(`Loaded sprite sheet image only: ${pngFile} (name: ${filename})`);
-  });
-
-  await assetCache.add('spriteSheetTemplates', templates);
-  log.success(`Loaded ${templates.length} sprite sheet(s) (${templateFiles.length} with templates, ${templates.length - templateFiles.length} images only) in ${(performance.now() - now).toFixed(2)}ms`);
-}
-
-function loadIcons() {
-  const now = performance.now();
-  const icons = [] as any[];
-  const iconDir = path.join(assetPath, assetData.icons.path);
-
-  if (!fs.existsSync(iconDir)) {
-    throw new Error(`Icons directory not found at ${iconDir}`);
-  }
-
-  const iconFiles = fs.readdirSync(iconDir).filter((file) => file.endsWith(".png"));
-
-  iconFiles.forEach((file) => {
-    const name = file.replace(".png", "");
-    const rawData = fs.readFileSync(path.join(iconDir, file));
-    const base64Data = rawData.toString("base64");
-
-    log.debug(`Loaded icon: ${name}`);
-
-    const compressedData = zlib.deflateSync(base64Data);
-
-    icons.push({ name, data: compressedData });
-    assetCache.add(name, compressedData);
-
-    const originalSize = base64Data.length;
-    const compressedSize = compressedData.length;
-    const ratio = (originalSize / compressedSize).toFixed(2);
-    const savings = (((originalSize - compressedSize) / originalSize) * 100).toFixed(2);
-
-    log.debug(`Compressed icon: ${name}
-  - Original: ${originalSize} bytes
-  - Compressed: ${compressedSize} bytes
-  - Compression Ratio: ${ratio}x
-  - Compression Savings: ${savings}%`);
-  });
-
-  assetCache.add("icons", icons);
-  log.success(`Loaded ${icons.length} icon(s) in ${(performance.now() - now).toFixed(2)}ms`);
-}
-
-loadAnimations();
-loadSprites();
-await loadSpriteSheetTemplates();
-loadIcons();
 
 const worldNow = performance.now();
 await assetCache.add("worlds", await worlds.list());
@@ -272,41 +31,15 @@ if (!world.find((w) => w.name === worldName)) {
 
 const itemnow = performance.now();
 const itemList = await item.list();
-const missingIcon = await assetCache.get("missing_icon");
 
-await Promise.all(itemList.map(async (item: any) => {
-  if (item.icon) {
-    const iconData = await assetCache.get(item.icon);
-    item.icon = iconData || missingIcon || null;
-  }
-}));
 await assetCache.add("items", itemList);
 const items = await assetCache.get("items") as Item[];
 
 log.success(`Loaded ${items.length} item(s) from the database in ${(performance.now() - itemnow).toFixed(2)}ms`);
 
 const mountNow = performance.now();
-const unfilteredMounts = await mounts.list();
 
-const filteredMounts = unfilteredMounts.filter((m) => {
-  const spriteSheetDir = path.join(assetPath, 'spritesheets');
-  const mountImageName = `${m.name.toLowerCase()}.png`;
-  const mountImagePath = path.join(spriteSheetDir, 'mounts', mountImageName);
-  const result = fs.existsSync(mountImagePath);
-  if (!result) {
-    log.warn(`Mount ${m.name} has no corresponding sprite sheet image (mounts/${mountImageName}) and will be skipped`);
-  }
-  return result;
-});
-
-await Promise.all(filteredMounts.map(async (mount: any) => {
-  if (mount.icon) {
-    const iconData = await assetCache.get(mount.icon);
-    mount.icon = iconData || missingIcon || null;
-  }
-}));
-
-await assetCache.add("mounts", filteredMounts);
+await assetCache.add("mounts", await mounts.list());
 const mountList = await assetCache.get("mounts") as Mount[];
 
 log.success(`Loaded ${mountList.length} mount(s) from the database in ${(performance.now() - mountNow).toFixed(2)}ms`);
@@ -314,14 +47,8 @@ log.info(`Mounts loaded: ${mountList.map((m) => m.name).join(", ")}`);
 
 const spellnow = performance.now();
 const spellList = await spell.list();
-await Promise.all(spellList.map(async (spell: any) => {
-  if (spell.icon) {
-    const iconData = await assetCache.get(spell.icon);
-    const spriteData = await assetCache.get(`sprite_${spell.icon}`);
-    spell.icon = iconData || null;
-    spell.sprite = spriteData || missingIcon || null;
-  }
-}));
+// Icons and sprites are now served from asset server, not stored in cache
+
 await assetCache.add("spells", spellList);
 const spells = await assetCache.get("spells") as SpellData[];
 
@@ -346,7 +73,6 @@ log.success(`Loaded ${quests.length} quest(s) from the database in ${(performanc
 const mapProperties: MapProperties[] = [];
 function loadAllMaps() {
   const now = performance.now();
-  const mapDir = path.join(assetPath, assetData.maps.path);
   const maps: MapData[] = [];
 
   if (!fs.existsSync(mapDir)) throw new Error(`Maps directory not found at ${mapDir}`);
@@ -380,7 +106,6 @@ function loadAllMaps() {
 }
 
 function processMapFile(file: string): MapData | null {
-  const mapDir = path.join(assetPath, assetData.maps.path);
   const fullPath = path.join(mapDir, file);
   const parsed = tryParse(fs.readFileSync(fullPath, "utf-8"));
 
@@ -593,7 +318,6 @@ function extractAndCompressLayers(map: MapData) {
 
 export async function saveMapChunks(mapName: string, chunks: any[]): Promise<void> {
   try {
-    const mapDir = path.join(assetPath, assetData.maps.path);
     const file = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
     const fullPath = path.join(mapDir, file);
 
@@ -731,7 +455,6 @@ export async function saveMapChunks(mapName: string, chunks: any[]): Promise<voi
 export async function reloadMap(mapName: string): Promise<MapData> {
   try {
     log.info(`[RELOAD] Starting reloadMap for ${mapName}`);
-    const mapDir = path.join(assetPath, assetData.maps.path);
     const file = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
     const fullPath = path.join(mapDir, file);
 
@@ -799,26 +522,3 @@ function tryParse(data: string): any {
 const assetLoadingEndTime = performance.now();
 const totalAssetLoadingTime = (assetLoadingEndTime - assetLoadingStartTime).toFixed(2);
 log.success(`✔ All assets loaded successfully in ${totalAssetLoadingTime}ms`);
-
-function parseAnimations() {
-  const animationFiles = fs
-    .readdirSync(path.join(assetPath, assetData.animations.path))
-    .filter((file) => file.toLowerCase().endsWith(".png"));
-  return animationFiles;
-}
-
-function validateAnimationFile(file: string) {
-
-  const buffer = fs.readFileSync(
-    path.join(assetPath, assetData.animations.path, file)
-  );
-  if (
-    buffer[0] !== 0x89 ||
-    buffer[1] !== 0x50 ||
-    buffer[2] !== 0x4e ||
-    buffer[3] !== 0x47
-  ) {
-    return false;
-  }
-  return true;
-}

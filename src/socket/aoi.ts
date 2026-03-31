@@ -821,6 +821,12 @@ export function startAutoLayerCondensation(
 
         layers.sort((a, b) => a.playerCount - b.playerCount);
 
+        // Only condense if we have layers that are significantly underfilled
+        const underfilled = layers.filter(l => l.playerCount < 25).length;
+        if (underfilled === 0) {
+          continue; // No need to condense if all layers are reasonably filled
+        }
+
         let condensed = false;
         const spawnBatchQueue = new Map<string, Map<string, any>>();
         const despawnBatchQueue = new Map<string, Set<string>>();
@@ -828,43 +834,66 @@ export function startAutoLayerCondensation(
         for (let i = 0; i < layers.length - 1; i++) {
           const sourceLayer = layers[i];
 
-          if (sourceLayer.playerCount === 0) continue;
+          // Skip empty layers and layers with reasonable population
+          if (sourceLayer.playerCount === 0 || sourceLayer.playerCount >= 25) {
+            continue;
+          }
 
+          // Find a suitable target: must have space and not be over-full after merge
+          let targetLayerIndex = -1;
           for (let j = i + 1; j < layers.length; j++) {
             const targetLayer = layers[j];
-            const availableSpace = AOI_CONFIG.MAX_PLAYERS_PER_LAYER - targetLayer.playerCount;
+            // Check actual layerManager to get current state, not the temporary array
+            const actualLayerInfo = layerManager.getLayerInfo(targetLayer.layerId);
+            if (!actualLayerInfo) continue;
 
-            if (availableSpace >= sourceLayer.playerCount) {
+            const actualAvailableSpace = AOI_CONFIG.MAX_PLAYERS_PER_LAYER - actualLayerInfo.playerCount;
+            const resultingSize = actualLayerInfo.playerCount + sourceLayer.playerCount;
 
-              for (const playerId of sourceLayer.players) {
-                const player = playerCache.get(playerId);
-                if (!player || !player.aoi) continue;
-
-                layerManager.removePlayerFromLayer(playerId);
-                const targetLayerInfo = layerManager.getLayerInfo(targetLayer.layerId);
-                if (targetLayerInfo) {
-                  targetLayerInfo.players.add(playerId);
-                  targetLayerInfo.playerCount++;
-
-                  (layerManager as any).playerToLayer.set(playerId, targetLayer.layerId);
-                }
-
-                player.aoi.layerId = targetLayer.layerId;
-                playerCache.set(playerId, player);
-
-                despawnPlayerFromAllAOI(player, "map_change", despawnBatchQueue);
-
-                await updatePlayerAOI(player, sendAnimationToFn, spawnBatchQueue, despawnBatchQueue);
-              }
-
-              targetLayer.playerCount += sourceLayer.playerCount;
-              targetLayer.players.push(...sourceLayer.players);
-              sourceLayer.playerCount = 0;
-              sourceLayer.players = [];
-              condensed = true;
-              break;
+            // Only merge if: 1) source fits, and 2) result won't be over-full
+            if (actualAvailableSpace >= sourceLayer.playerCount && resultingSize <= AOI_CONFIG.MAX_PLAYERS_PER_LAYER) {
+              targetLayerIndex = j;
+              break; // Take the first suitable target
             }
           }
+
+          if (targetLayerIndex === -1) {
+            continue; // No suitable target found
+          }
+
+          const targetLayer = layers[targetLayerIndex];
+
+          for (const playerId of sourceLayer.players) {
+            const player = playerCache.get(playerId);
+            if (!player || !player.aoi) continue;
+
+            layerManager.removePlayerFromLayer(playerId);
+            const targetLayerInfo = layerManager.getLayerInfo(targetLayer.layerId);
+            if (targetLayerInfo) {
+              targetLayerInfo.players.add(playerId);
+              targetLayerInfo.playerCount++;
+
+              (layerManager as any).playerToLayer.set(playerId, targetLayer.layerId);
+            }
+
+            player.aoi.layerId = targetLayer.layerId;
+            playerCache.set(playerId, player);
+
+            despawnPlayerFromAllAOI(player, "map_change", despawnBatchQueue);
+
+            await updatePlayerAOI(player, sendAnimationToFn, spawnBatchQueue, despawnBatchQueue);
+          }
+
+          // Update actual layerManager state instead of temporary array
+          const actualTargetInfo = layerManager.getLayerInfo(targetLayer.layerId);
+          if (actualTargetInfo) {
+            targetLayer.playerCount = actualTargetInfo.playerCount;
+            targetLayer.players = Array.from(actualTargetInfo.players);
+          }
+
+          sourceLayer.playerCount = 0;
+          sourceLayer.players = [];
+          condensed = true;
         }
 
         if (condensed) {

@@ -31,7 +31,7 @@ import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks } from "../modules/assetloader";
-import { getPlayerSpriteSheetData, getSpriteSheetImage, isSpriteSheetSystemAvailable } from "../modules/spriteSheetManager";
+import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl } from "../modules/spriteSheetManager";
 import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers } from "./aoi";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
@@ -57,12 +57,53 @@ let globalStateRevision: number = 0;
 
 export const movementBatchQueue = new Map<string, Map<string, any>>();
 
-const BATCH_INTERVAL = 8;
+let BATCH_INTERVAL = 8; // Will be set dynamically based on flush latency
 
-const MAX_BUFFER_BACKPRESSURE = 1024 * 32;
+const MAX_BUFFER_BACKPRESSURE = 1024 * 32; // 32KB - aggressive at high loads
 
 let lastFlushTime = Date.now();
 let flushCount = 0;
+
+// Track recent flush latencies for adaptive batch scheduling
+const LATENCY_HISTORY_SIZE = 20; // Keep last 20 flushes
+const recentFlushLatencies: number[] = [];
+
+/**
+ * Calculate average flush latency from recent history
+ */
+function getAverageFlushLatency(): number {
+  if (recentFlushLatencies.length === 0) return 0;
+  const sum = recentFlushLatencies.reduce((a, b) => a + b, 0);
+  return sum / recentFlushLatencies.length;
+}
+
+/**
+ * Calculate adaptive batch interval based on actual flush latency
+ * Higher latency = more aggressive throttling
+ * This dynamically adapts to real server load instead of player count
+ */
+function getAdaptiveBatchInterval(): number {
+  const avgLatency = getAverageFlushLatency();
+
+  // Thresholds based on flush latency (in milliseconds)
+  if (avgLatency < 5) {
+    return 25; // <5ms: 40 Hz - very responsive
+  } else if (avgLatency < 10) {
+    return 30; // 5-10ms: 33 Hz - responsive
+  } else if (avgLatency < 15) {
+    return 35; // 10-15ms: 28 Hz - good balance
+  } else if (avgLatency < 20) {
+    return 45; // 15-20ms: 22 Hz - starting to reduce
+  } else if (avgLatency < 30) {
+    return 70; // 20-30ms: 14 Hz - moderate throttling
+  } else if (avgLatency < 40) {
+    return 100; // 30-40ms: 10 Hz - aggressive throttling
+  } else if (avgLatency < 50) {
+    return 130; // 40-50ms: 7 Hz - very aggressive
+  } else {
+    return 170; // 50+ms: 5 Hz - maximum stability
+  }
+}
 
 function flushMovementBatches() {
   const startTime = Date.now();
@@ -70,17 +111,24 @@ function flushMovementBatches() {
   const timeSinceLastFlush = startTime - lastFlushTime;
   lastFlushTime = startTime;
 
-  const isOverloaded = timeSinceLastFlush > 30;
+  const avgLatency = getAverageFlushLatency();
+
+  // Overloaded if current cycle is taking longer than average or latency is building
+  const isOverloaded = timeSinceLastFlush > 30 || avgLatency > 25;
+
   let skippedDueToLoad = 0;
 
-  const MAX_BATCH_QUEUE_SIZE = 1000;
+  // Queue management based on latency
+  const MAX_BATCH_QUEUE_SIZE = avgLatency > 40 ? 800 : (avgLatency > 25 ? 1200 : 2000);
+
   if (movementBatchQueue.size > MAX_BATCH_QUEUE_SIZE) {
-    const toDrop = Math.floor(MAX_BATCH_QUEUE_SIZE * 0.1);
+    const dropRate = avgLatency > 40 ? 0.15 : (avgLatency > 25 ? 0.08 : 0.05);
+    const toDrop = Math.floor(MAX_BATCH_QUEUE_SIZE * dropRate);
     const keys = Array.from(movementBatchQueue.keys());
     for (let i = 0; i < toDrop; i++) {
       movementBatchQueue.delete(keys[i]);
     }
-    log.debug(`[MOVEMENT] Dropped ${toDrop} movement batches due to queue overflow`);
+    log.debug(`[MOVEMENT] Dropped ${toDrop} movement batches due to queue overflow (latency: ${Math.round(avgLatency)}ms)`);
   }
 
   for (const [_mapName, playerMovements] of movementBatchQueue.entries()) {
@@ -135,7 +183,10 @@ function flushMovementBatches() {
 
       const bufferedAmount = receiver.ws.bufferedAmount;
 
-      if (bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
+      // Dynamic backpressure threshold based on latency
+      const backpressureThreshold = avgLatency > 35 ? 1024 * 16 : (avgLatency > 20 ? 1024 * 24 : MAX_BUFFER_BACKPRESSURE);
+
+      if (bufferedAmount > backpressureThreshold) {
         skippedDueToLoad++;
         continue;
       }
@@ -144,7 +195,19 @@ function flushMovementBatches() {
       sendPacket(receiver.ws, batchPacket);
       sentCount++;
 
-      if (isOverloaded && sentCount > 100 && Date.now() - startTime > 25) {
+      // Early-exit thresholds based on latency
+      let sentThreshold = 200;
+      let timeThreshold = 40;
+
+      if (avgLatency > 40) {
+        sentThreshold = 50;
+        timeThreshold = 20;
+      } else if (avgLatency > 25) {
+        sentThreshold = 100;
+        timeThreshold = 30;
+      }
+
+      if (isOverloaded && sentCount > sentThreshold && Date.now() - startTime > timeThreshold) {
         skippedDueToLoad += receiverArray.length - sentCount;
         break;
       }
@@ -152,6 +215,13 @@ function flushMovementBatches() {
   }
 
   movementBatchQueue.clear();
+
+  // Track this flush's latency
+  const flushLatency = Date.now() - startTime;
+  recentFlushLatencies.push(flushLatency);
+  if (recentFlushLatencies.length > LATENCY_HISTORY_SIZE) {
+    recentFlushLatencies.shift();
+  }
 
   flushCount++;
   if (flushCount % 100 === 0) {
@@ -165,7 +235,7 @@ function flushMovementBatches() {
       : 0;
 
     if (skippedDueToLoad > 0 || avgBuffered > 24) {
-      log.warn(`[MOVEMENT] ${playerCount} players | Skipped ${skippedDueToLoad} updates | Avg buffer: ${avgBuffered}KB | Flush: ${Date.now() - startTime}ms | Rate: ${Math.round(1000/BATCH_INTERVAL)}Hz`);
+      log.warn(`[MOVEMENT] ${playerCount} players | Skipped ${skippedDueToLoad} updates | Avg buffer: ${avgBuffered}KB | Flush latency: ${Math.round(avgLatency)}ms | Rate: ${Math.round(1000/BATCH_INTERVAL)}Hz`);
     }
   }
 }
@@ -175,35 +245,26 @@ export const spawnBatchQueue = new Map<string, Map<string, any>>();
 async function flushSpawnBatches() {
   if (spawnBatchQueue.size === 0) return;
 
-  log.info(`[BATCH] flushSpawnBatches: queue has ${spawnBatchQueue.size} entries`);
-
   const allPlayers = playerCache.list();
 
   for (const [receivingPlayerId, spawnedPlayers] of spawnBatchQueue.entries()) {
     if (spawnedPlayers.size === 0) {
-      log.info(`[BATCH] Skipping ${receivingPlayerId}: empty spawn set`);
       continue;
     }
 
     const receivingPlayer = allPlayers[receivingPlayerId];
-    log.warn(`[BATCH] Processing spawns for ${receivingPlayerId} - player in cache: ${!!receivingPlayer}`);
 
     if (!receivingPlayer) {
-      log.warn(`[BATCH] Skipping ${receivingPlayerId}: player not in cache`);
       continue;
     }
     if (!receivingPlayer.ws) {
-      log.warn(`[BATCH] Skipping ${receivingPlayerId}: no websocket`);
       continue;
     }
-    log.warn(`[BATCH] Websocket readyState: ${receivingPlayer.ws.readyState}`);
     if (receivingPlayer.ws.readyState !== 1) {
-      log.warn(`[BATCH] Skipping ${receivingPlayerId}: websocket not open (state=${receivingPlayer.ws.readyState})`);
       continue;
     }
 
     if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
-      log.warn(`[BATCH] Skipping ${receivingPlayerId}: backpressure too high (${receivingPlayer.ws.bufferedAmount} > ${MAX_BUFFER_BACKPRESSURE})`);
       continue;
     }
 
@@ -222,41 +283,29 @@ async function flushSpawnBatches() {
           const animationName = getAnimationNameForDirection(
             fullPlayer.location.position?.direction || "down",
             !!fullPlayer.moving,
-            false,
-            undefined,
+            !!fullPlayer.mounted,
+            fullPlayer.mount_type,
             !!fullPlayer.casting
           );
           const playerSpriteData = await getPlayerSpriteSheetData(animationName, fullPlayer.equipment || null);
 
-          const extractEquipmentName = (prefixedName: string) => {
-            const firstUnderscore = prefixedName.indexOf('_');
-            return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
-          };
+          const mountSpriteForBatch = fullPlayer.mount_type ? getMountSpriteUrl(fullPlayer.mount_type) : null;
 
           let spriteData = null;
-          if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite) {
-            const bodyImageData = playerSpriteData.bodySprite ? await getSpriteSheetImage(playerSpriteData.bodySprite.name) : null;
-            const headImageData = playerSpriteData.headSprite ? await getSpriteSheetImage(playerSpriteData.headSprite.name) : null;
-            const armorHelmetImageData = playerSpriteData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorHelmetSprite.name)) : null;
-            const armorShoulderguardsImageData = playerSpriteData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorShoulderguardsSprite.name)) : null;
-            const armorNeckImageData = playerSpriteData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorNeckSprite.name)) : null;
-            const armorHandsImageData = playerSpriteData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorHandsSprite.name)) : null;
-            const armorChestImageData = playerSpriteData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorChestSprite.name)) : null;
-            const armorFeetImageData = playerSpriteData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorFeetSprite.name)) : null;
-            const armorLegsImageData = playerSpriteData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorLegsSprite.name)) : null;
-            const armorWeaponImageData = playerSpriteData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorWeaponSprite.name)) : null;
-
+          if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite || mountSpriteForBatch) {
+            // Sprite URLs are now sent to the client, which fetches them from the asset server
             spriteData = {
-              bodySprite: playerSpriteData.bodySprite ? { ...playerSpriteData.bodySprite, imageData: bodyImageData } : null,
-              headSprite: playerSpriteData.headSprite ? { ...playerSpriteData.headSprite, imageData: headImageData } : null,
-              armorHelmetSprite: (playerSpriteData.armorHelmetSprite && armorHelmetImageData) ? { ...playerSpriteData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
-              armorShoulderguardsSprite: (playerSpriteData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...playerSpriteData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
-              armorNeckSprite: (playerSpriteData.armorNeckSprite && armorNeckImageData) ? { ...playerSpriteData.armorNeckSprite, imageData: armorNeckImageData } : null,
-              armorHandsSprite: (playerSpriteData.armorHandsSprite && armorHandsImageData) ? { ...playerSpriteData.armorHandsSprite, imageData: armorHandsImageData } : null,
-              armorChestSprite: (playerSpriteData.armorChestSprite && armorChestImageData) ? { ...playerSpriteData.armorChestSprite, imageData: armorChestImageData } : null,
-              armorFeetSprite: (playerSpriteData.armorFeetSprite && armorFeetImageData) ? { ...playerSpriteData.armorFeetSprite, imageData: armorFeetImageData } : null,
-              armorLegsSprite: (playerSpriteData.armorLegsSprite && armorLegsImageData) ? { ...playerSpriteData.armorLegsSprite, imageData: armorLegsImageData } : null,
-              armorWeaponSprite: (playerSpriteData.armorWeaponSprite && armorWeaponImageData) ? { ...playerSpriteData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
+              mountSprite: mountSpriteForBatch,
+              bodySprite: playerSpriteData.bodySprite || null,
+              headSprite: playerSpriteData.headSprite || null,
+              armorHelmetSprite: playerSpriteData.armorHelmetSprite || null,
+              armorShoulderguardsSprite: playerSpriteData.armorShoulderguardsSprite || null,
+              armorNeckSprite: playerSpriteData.armorNeckSprite || null,
+              armorHandsSprite: playerSpriteData.armorHandsSprite || null,
+              armorChestSprite: playerSpriteData.armorChestSprite || null,
+              armorFeetSprite: playerSpriteData.armorFeetSprite || null,
+              armorLegsSprite: playerSpriteData.armorLegsSprite || null,
+              armorWeaponSprite: playerSpriteData.armorWeaponSprite || null,
               animationState: playerSpriteData.animationState,
             };
           }
@@ -279,7 +328,6 @@ async function flushSpawnBatches() {
       const animationPromises = playersWithSprites.map(async (spawnData) => {
         const spawnedPlayer = allPlayers[spawnData.id];
         if (!spawnedPlayer) {
-          log.warn(`[BATCH] spawnedPlayer null for ${spawnData.id}`);
           return null;
         }
 
@@ -346,14 +394,20 @@ async function scheduleBatchFlush() {
   try {
     await flushAllBatches();
   } catch (error) {
-    log.error(`[BATCH] Error during batch flush: ${error}`);
+    // Silently ignore batch flush errors
   } finally {
     if (batchTimer) clearTimeout(batchTimer);
-    batchTimer = setTimeout(scheduleBatchFlush, BATCH_INTERVAL);
+    // Use adaptive interval based on current player count
+    const adaptiveInterval = getAdaptiveBatchInterval();
+    BATCH_INTERVAL = adaptiveInterval;
+    batchTimer = setTimeout(scheduleBatchFlush, adaptiveInterval);
   }
 }
 
-batchTimer = setTimeout(scheduleBatchFlush, BATCH_INTERVAL);
+// Initialize with adaptive interval
+const initialInterval = getAdaptiveBatchInterval();
+BATCH_INTERVAL = initialInterval;
+batchTimer = setTimeout(scheduleBatchFlush, initialInterval);
 
 export function clearBatchQueuesForPlayer(playerId: string, mapName: string) {
 
@@ -417,6 +471,7 @@ authWorker.on("message", async (result: any) => {
 
   const playerData = status.data as PlayerData;
   if (status.authenticated && status.completed && playerData) {
+    const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
 
     if (!playerData.isAdmin && playerData.isNoclip) {
       player.toggleNoclip(playerData.username).catch(err =>
@@ -568,7 +623,6 @@ authWorker.on("message", async (result: any) => {
     }
 
     // Send map chunk metadata instead of full map
-    const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
     const mapMetadata = {
       name: spawnLocation?.map,
       assetServerUrl,
@@ -597,11 +651,10 @@ authWorker.on("message", async (result: any) => {
 
       let spriteDataForSelf = null;
       if (selfSpriteData.bodySprite || selfSpriteData.headSprite) {
-        const bodyImageData = selfSpriteData.bodySprite ? await getSpriteSheetImage(selfSpriteData.bodySprite.name) : null;
-        const headImageData = selfSpriteData.headSprite ? await getSpriteSheetImage(selfSpriteData.headSprite.name) : null;
+        // Sprite URLs are now sent to the client, which fetches them from the asset server
         spriteDataForSelf = {
-          bodySprite: selfSpriteData.bodySprite ? { ...selfSpriteData.bodySprite, imageData: bodyImageData } : null,
-          headSprite: selfSpriteData.headSprite ? { ...selfSpriteData.headSprite, imageData: headImageData } : null,
+          bodySprite: selfSpriteData.bodySprite || null,
+          headSprite: selfSpriteData.headSprite || null,
           animationState: selfSpriteData.animationState,
         };
       }
@@ -639,38 +692,26 @@ authWorker.on("message", async (result: any) => {
 
       for (const p of playersInAOI) {
 
-        const animationName = getAnimationNameForDirection(p.location.position?.direction || "down", !!p.moving, false, undefined, !!p.casting);
+        const animationName = getAnimationNameForDirection(p.location.position?.direction || "down", !!p.moving, !!p.mounted, p.mount_type, !!p.casting);
         const playerSpriteData = await getPlayerSpriteSheetData(animationName, p.equipment || null);
 
-        const extractEquipmentName = (prefixedName: string) => {
-          const firstUnderscore = prefixedName.indexOf('_');
-          return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
-        };
+        const mountSprite = p.mount_type ? getMountSpriteUrl(p.mount_type) : null;
 
         let spriteData = null;
-        if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite) {
-          const bodyImageData = playerSpriteData.bodySprite ? await getSpriteSheetImage(playerSpriteData.bodySprite.name) : null;
-          const headImageData = playerSpriteData.headSprite ? await getSpriteSheetImage(playerSpriteData.headSprite.name) : null;
-          const armorHelmetImageData = playerSpriteData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorHelmetSprite.name)) : null;
-          const armorShoulderguardsImageData = playerSpriteData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorShoulderguardsSprite.name)) : null;
-          const armorNeckImageData = playerSpriteData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorNeckSprite.name)) : null;
-          const armorHandsImageData = playerSpriteData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorHandsSprite.name)) : null;
-          const armorChestImageData = playerSpriteData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorChestSprite.name)) : null;
-          const armorFeetImageData = playerSpriteData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorFeetSprite.name)) : null;
-          const armorLegsImageData = playerSpriteData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorLegsSprite.name)) : null;
-          const armorWeaponImageData = playerSpriteData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorWeaponSprite.name)) : null;
-
+        if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite || mountSprite) {
+          // Sprite URLs are now sent to the client, which fetches them from the asset server
           spriteData = {
-            bodySprite: playerSpriteData.bodySprite ? { ...playerSpriteData.bodySprite, imageData: bodyImageData } : null,
-            headSprite: playerSpriteData.headSprite ? { ...playerSpriteData.headSprite, imageData: headImageData } : null,
-            armorHelmetSprite: (playerSpriteData.armorHelmetSprite && armorHelmetImageData) ? { ...playerSpriteData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
-            armorShoulderguardsSprite: (playerSpriteData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...playerSpriteData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
-            armorNeckSprite: (playerSpriteData.armorNeckSprite && armorNeckImageData) ? { ...playerSpriteData.armorNeckSprite, imageData: armorNeckImageData } : null,
-            armorHandsSprite: (playerSpriteData.armorHandsSprite && armorHandsImageData) ? { ...playerSpriteData.armorHandsSprite, imageData: armorHandsImageData } : null,
-            armorChestSprite: (playerSpriteData.armorChestSprite && armorChestImageData) ? { ...playerSpriteData.armorChestSprite, imageData: armorChestImageData } : null,
-            armorFeetSprite: (playerSpriteData.armorFeetSprite && armorFeetImageData) ? { ...playerSpriteData.armorFeetSprite, imageData: armorFeetImageData } : null,
-            armorLegsSprite: (playerSpriteData.armorLegsSprite && armorLegsImageData) ? { ...playerSpriteData.armorLegsSprite, imageData: armorLegsImageData } : null,
-            armorWeaponSprite: (playerSpriteData.armorWeaponSprite && armorWeaponImageData) ? { ...playerSpriteData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
+            mountSprite: mountSprite,
+            bodySprite: playerSpriteData.bodySprite || null,
+            headSprite: playerSpriteData.headSprite || null,
+            armorHelmetSprite: playerSpriteData.armorHelmetSprite || null,
+            armorShoulderguardsSprite: playerSpriteData.armorShoulderguardsSprite || null,
+            armorNeckSprite: playerSpriteData.armorNeckSprite || null,
+            armorHandsSprite: playerSpriteData.armorHandsSprite || null,
+            armorChestSprite: playerSpriteData.armorChestSprite || null,
+            armorFeetSprite: playerSpriteData.armorFeetSprite || null,
+            armorLegsSprite: playerSpriteData.armorLegsSprite || null,
+            armorWeaponSprite: playerSpriteData.armorWeaponSprite || null,
             animationState: playerSpriteData.animationState,
           };
         }
@@ -712,7 +753,7 @@ authWorker.on("message", async (result: any) => {
             const pcache = playerCache.get(pl.id);
             await sendAnimationTo(
               ws,
-              getAnimationNameForDirection(pl.location.direction, !!pcache?.moving, false, undefined, !!pcache?.casting),
+              getAnimationNameForDirection(pl.location.direction, !!pcache?.moving, !!pcache?.mounted, pcache?.mount_type, !!pcache?.casting),
               pl.id
             );
           }
@@ -840,10 +881,35 @@ authWorker.on("message", async (result: any) => {
     });
 
     sendPacket(ws, packetManager.clientConfig(playerData.config || []));
-    sendPacket(ws, packetManager.inventory(playerData.inventory));
+
+    // Convert icon names to Asset Server URLs for inventory items
+    const inventoryWithIconUrls = playerData.inventory?.map((item: any) => ({
+      ...item,
+      iconUrl: getIconUrl(item.icon),
+      icon: undefined // Remove the old icon field
+    })) || [];
+
+    // Convert icon names to Asset Server sprite URLs for spells (icons and sprites share the same name)
+    const spellsWithSpriteUrls: Record<string, any> = {};
+    if (playerData.learnedSpells && typeof playerData.learnedSpells === 'object') {
+      for (const [spellName, spellData] of Object.entries(playerData.learnedSpells)) {
+        spellsWithSpriteUrls[spellName] = {
+          spriteUrl: (spellData as any).icon ? `${assetServerUrl}/sprite?name=${encodeURIComponent((spellData as any).icon)}` : null
+        };
+      }
+    }
+
+    // Convert icon names to Asset Server URLs for collectables (mounts)
+    const collectablesWithIconUrls = playerData.collectables?.map((collectable: any) => ({
+      ...collectable,
+      iconUrl: getIconUrl(collectable.icon),
+      icon: undefined // Remove the old icon field
+    })) || [];
+
+    sendPacket(ws, packetManager.inventory(inventoryWithIconUrls));
     sendPacket(ws, packetManager.equipment(playerData.equipment || {}));
-    sendPacket(ws, packetManager.collectables(playerData.collectables || []));
-    sendPacket(ws, packetManager.spells(playerData.learnedSpells));
+    sendPacket(ws, packetManager.collectables(collectablesWithIconUrls));
+    sendPacket(ws, packetManager.spells(spellsWithSpriteUrls));
     sendPacket(ws, packetManager.questlog(completedQuest, incompleteQuest));
   }
 });
@@ -1846,7 +1912,7 @@ export default async function packetReceiver(
           playersInMap.forEach((player) => {
             sendPacket(
               player.ws,
-              packetManager.projectile({ id: currentPlayer.id, time: delay / 1000, target_id: target.id, spell: spell.name, icon: spell.icon || null })
+              packetManager.projectile({ id: currentPlayer.id, time: delay / 1000, target_id: target.id, spell: spell.name, icon: getIconUrl(spell.icon) })
             );
           });
         }
@@ -2656,6 +2722,33 @@ export default async function packetReceiver(
               await updatePlayerAOI(targetPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
               await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
 
+              const targetAnimationNameForSprite = getAnimationNameForDirection(
+                targetPlayer.location.position?.direction || "down",
+                !!targetPlayer.moving,
+                !!targetPlayer.mounted,
+                targetPlayer.mount_type,
+                !!targetPlayer.casting
+              );
+              const targetSpriteData = await getPlayerSpriteSheetData(targetAnimationNameForSprite, targetPlayer.equipment || null);
+
+              let targetSpritesData = null;
+              if (targetSpriteData?.bodySprite || targetSpriteData?.headSprite) {
+                targetSpritesData = {
+                  mountSprite: targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
+                  bodySprite: targetSpriteData.bodySprite || null,
+                  headSprite: targetSpriteData.headSprite || null,
+                  armorHelmetSprite: targetSpriteData.armorHelmetSprite || null,
+                  armorShoulderguardsSprite: targetSpriteData.armorShoulderguardsSprite || null,
+                  armorNeckSprite: targetSpriteData.armorNeckSprite || null,
+                  armorHandsSprite: targetSpriteData.armorHandsSprite || null,
+                  armorChestSprite: targetSpriteData.armorChestSprite || null,
+                  armorFeetSprite: targetSpriteData.armorFeetSprite || null,
+                  armorLegsSprite: targetSpriteData.armorLegsSprite || null,
+                  armorWeaponSprite: targetSpriteData.armorWeaponSprite || null,
+                  animationState: targetSpriteData.animationState,
+                };
+              }
+
               const targetSpawnData = {
                 id: targetPlayer.id,
                 userid: targetPlayer.userid,
@@ -2673,6 +2766,7 @@ export default async function packetReceiver(
                 isNoclip: targetPlayer.isNoclip,
                 stats: targetPlayer.stats,
                 animation: null,
+                spriteData: targetSpritesData,
                 mounted: targetPlayer.mounted,
               };
 
@@ -2874,6 +2968,33 @@ export default async function packetReceiver(
               await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
               await updatePlayerAOI(targetPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
 
+              const targetAnimationNameForSpriteTeleport = getAnimationNameForDirection(
+                targetPlayer.location.position?.direction || "down",
+                !!targetPlayer.moving,
+                !!targetPlayer.mounted,
+                targetPlayer.mount_type,
+                !!targetPlayer.casting
+              );
+              const targetSpriteDataTeleport = await getPlayerSpriteSheetData(targetAnimationNameForSpriteTeleport, targetPlayer.equipment || null);
+
+              let targetSpritesDataTeleport = null;
+              if (targetSpriteDataTeleport?.bodySprite || targetSpriteDataTeleport?.headSprite) {
+                targetSpritesDataTeleport = {
+                  mountSprite: targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
+                  bodySprite: targetSpriteDataTeleport.bodySprite || null,
+                  headSprite: targetSpriteDataTeleport.headSprite || null,
+                  armorHelmetSprite: targetSpriteDataTeleport.armorHelmetSprite || null,
+                  armorShoulderguardsSprite: targetSpriteDataTeleport.armorShoulderguardsSprite || null,
+                  armorNeckSprite: targetSpriteDataTeleport.armorNeckSprite || null,
+                  armorHandsSprite: targetSpriteDataTeleport.armorHandsSprite || null,
+                  armorChestSprite: targetSpriteDataTeleport.armorChestSprite || null,
+                  armorFeetSprite: targetSpriteDataTeleport.armorFeetSprite || null,
+                  armorLegsSprite: targetSpriteDataTeleport.armorLegsSprite || null,
+                  armorWeaponSprite: targetSpriteDataTeleport.armorWeaponSprite || null,
+                  animationState: targetSpriteDataTeleport.animationState,
+                };
+              }
+
               const targetSpawnDataTeleport = {
                 id: targetPlayer.id,
                 userid: targetPlayer.userid,
@@ -2891,6 +3012,7 @@ export default async function packetReceiver(
                 isNoclip: targetPlayer.isNoclip,
                 stats: targetPlayer.stats,
                 animation: null,
+                spriteData: targetSpritesDataTeleport,
                 mounted: targetPlayer.mounted,
               };
 
@@ -5067,53 +5189,20 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
     return;
   }
 
-  const { getSpriteSheetImage, getSpriteSheetTemplate } = await import("../modules/spriteSheetManager");
-
-  const extractEquipmentName = (prefixedName: string) => {
-    const firstUnderscore = prefixedName.indexOf('_');
-    return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
-  };
-
-  const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
-  const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
-  const armorHelmetImageData = spriteSheetData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHelmetSprite.name)) : null;
-  const armorShoulderguardsImageData = spriteSheetData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorShoulderguardsSprite.name)) : null;
-  const armorNeckImageData = spriteSheetData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorNeckSprite.name)) : null;
-  const armorHandsImageData = spriteSheetData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHandsSprite.name)) : null;
-  const armorChestImageData = spriteSheetData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorChestSprite.name)) : null;
-  const armorFeetImageData = spriteSheetData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorFeetSprite.name)) : null;
-  const armorLegsImageData = spriteSheetData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorLegsSprite.name)) : null;
-  const armorWeaponImageData = spriteSheetData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorWeaponSprite.name)) : null;
-
-  let mountSprite = null;
-  let mountImageData = null;
-  if (currentPlayer.mounted && currentPlayer.mount_type) {
-
-    mountSprite = await getSpriteSheetTemplate('player_mount_base');
-    if (mountSprite) {
-
-      const mountImageName = currentPlayer.mount_type;
-      mountSprite.name = mountImageName;
-      mountSprite.imageSource = `mounts/${mountImageName}.png`;
-
-      mountImageData = await getSpriteSheetImage(mountImageName);
-    }
-  }
-
+  // Sprite URLs are now sent directly to the client
   const spriteSheetPacketData = {
     id: currentPlayer.id,
-    mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
-    bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
-    headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
-
-    armorHelmetSprite: (spriteSheetData.armorHelmetSprite && armorHelmetImageData) ? { ...spriteSheetData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
-    armorShoulderguardsSprite: (spriteSheetData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...spriteSheetData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
-    armorNeckSprite: (spriteSheetData.armorNeckSprite && armorNeckImageData) ? { ...spriteSheetData.armorNeckSprite, imageData: armorNeckImageData } : null,
-    armorHandsSprite: (spriteSheetData.armorHandsSprite && armorHandsImageData) ? { ...spriteSheetData.armorHandsSprite, imageData: armorHandsImageData } : null,
-    armorChestSprite: (spriteSheetData.armorChestSprite && armorChestImageData) ? { ...spriteSheetData.armorChestSprite, imageData: armorChestImageData } : null,
-    armorFeetSprite: (spriteSheetData.armorFeetSprite && armorFeetImageData) ? { ...spriteSheetData.armorFeetSprite, imageData: armorFeetImageData } : null,
-    armorLegsSprite: (spriteSheetData.armorLegsSprite && armorLegsImageData) ? { ...spriteSheetData.armorLegsSprite, imageData: armorLegsImageData } : null,
-    armorWeaponSprite: (spriteSheetData.armorWeaponSprite && armorWeaponImageData) ? { ...spriteSheetData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
+    mountSprite: currentPlayer.mount_type ? getMountSpriteUrl(currentPlayer.mount_type) : null,
+    bodySprite: spriteSheetData.bodySprite || null,
+    headSprite: spriteSheetData.headSprite || null,
+    armorHelmetSprite: spriteSheetData.armorHelmetSprite || null,
+    armorShoulderguardsSprite: spriteSheetData.armorShoulderguardsSprite || null,
+    armorNeckSprite: spriteSheetData.armorNeckSprite || null,
+    armorHandsSprite: spriteSheetData.armorHandsSprite || null,
+    armorChestSprite: spriteSheetData.armorChestSprite || null,
+    armorFeetSprite: spriteSheetData.armorFeetSprite || null,
+    armorLegsSprite: spriteSheetData.armorLegsSprite || null,
+    armorWeaponSprite: spriteSheetData.armorWeaponSprite || null,
     animationState: spriteSheetData.animationState,
     revision: revision,
   };
@@ -5198,49 +5287,20 @@ async function getAnimationData(name: string, playerId: string, revision?: numbe
     return null;
   }
 
-  const { getSpriteSheetImage, getSpriteSheetTemplate } = await import("../modules/spriteSheetManager");
-
-  const extractEquipmentName = (prefixedName: string) => {
-    const firstUnderscore = prefixedName.indexOf('_');
-    return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
-  };
-
-  const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
-  const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
-  const armorHelmetImageData = spriteSheetData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHelmetSprite.name)) : null;
-  const armorShoulderguardsImageData = spriteSheetData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorShoulderguardsSprite.name)) : null;
-  const armorNeckImageData = spriteSheetData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorNeckSprite.name)) : null;
-  const armorHandsImageData = spriteSheetData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHandsSprite.name)) : null;
-  const armorChestImageData = spriteSheetData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorChestSprite.name)) : null;
-  const armorFeetImageData = spriteSheetData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorFeetSprite.name)) : null;
-  const armorLegsImageData = spriteSheetData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorLegsSprite.name)) : null;
-  const armorWeaponImageData = spriteSheetData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorWeaponSprite.name)) : null;
-
-  let mountSprite = null;
-  let mountImageData = null;
-  if (targetPlayer.mounted && targetPlayer.mount_type) {
-    mountSprite = await getSpriteSheetTemplate('player_mount_base');
-    if (mountSprite) {
-      const mountImageName = targetPlayer.mount_type;
-      mountSprite.name = mountImageName;
-      mountSprite.imageSource = `mounts/${mountImageName}.png`;
-      mountImageData = await getSpriteSheetImage(mountImageName);
-    }
-  }
-
+  // Sprite URLs are now sent directly to the client
   return {
     id: targetPlayer.id,
-    mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
-    bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
-    headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
-    armorHelmetSprite: (spriteSheetData.armorHelmetSprite && armorHelmetImageData) ? { ...spriteSheetData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
-    armorShoulderguardsSprite: (spriteSheetData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...spriteSheetData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
-    armorNeckSprite: (spriteSheetData.armorNeckSprite && armorNeckImageData) ? { ...spriteSheetData.armorNeckSprite, imageData: armorNeckImageData } : null,
-    armorHandsSprite: (spriteSheetData.armorHandsSprite && armorHandsImageData) ? { ...spriteSheetData.armorHandsSprite, imageData: armorHandsImageData } : null,
-    armorChestSprite: (spriteSheetData.armorChestSprite && armorChestImageData) ? { ...spriteSheetData.armorChestSprite, imageData: armorChestImageData } : null,
-    armorFeetSprite: (spriteSheetData.armorFeetSprite && armorFeetImageData) ? { ...spriteSheetData.armorFeetSprite, imageData: armorFeetImageData } : null,
-    armorLegsSprite: (spriteSheetData.armorLegsSprite && armorLegsImageData) ? { ...spriteSheetData.armorLegsSprite, imageData: armorLegsImageData } : null,
-    armorWeaponSprite: (spriteSheetData.armorWeaponSprite && armorWeaponImageData) ? { ...spriteSheetData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
+    mountSprite: targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
+    bodySprite: spriteSheetData.bodySprite || null,
+    headSprite: spriteSheetData.headSprite || null,
+    armorHelmetSprite: spriteSheetData.armorHelmetSprite || null,
+    armorShoulderguardsSprite: spriteSheetData.armorShoulderguardsSprite || null,
+    armorNeckSprite: spriteSheetData.armorNeckSprite || null,
+    armorHandsSprite: spriteSheetData.armorHandsSprite || null,
+    armorChestSprite: spriteSheetData.armorChestSprite || null,
+    armorFeetSprite: spriteSheetData.armorFeetSprite || null,
+    armorLegsSprite: spriteSheetData.armorLegsSprite || null,
+    armorWeaponSprite: spriteSheetData.armorWeaponSprite || null,
     animationState: spriteSheetData.animationState,
     revision: revision,
   };
@@ -5264,53 +5324,20 @@ export async function sendAnimationTo(targetWs: any, name: string, playerId?: st
 
   }
 
-  const { getSpriteSheetImage, getSpriteSheetTemplate } = await import("../modules/spriteSheetManager");
-
-  const extractEquipmentName = (prefixedName: string) => {
-    const firstUnderscore = prefixedName.indexOf('_');
-    return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
-  };
-
-  const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
-  const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
-  const armorHelmetImageData = spriteSheetData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHelmetSprite.name)) : null;
-  const armorShoulderguardsImageData = spriteSheetData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorShoulderguardsSprite.name)) : null;
-  const armorNeckImageData = spriteSheetData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorNeckSprite.name)) : null;
-  const armorHandsImageData = spriteSheetData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHandsSprite.name)) : null;
-  const armorChestImageData = spriteSheetData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorChestSprite.name)) : null;
-  const armorFeetImageData = spriteSheetData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorFeetSprite.name)) : null;
-  const armorLegsImageData = spriteSheetData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorLegsSprite.name)) : null;
-  const armorWeaponImageData = spriteSheetData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorWeaponSprite.name)) : null;
-
-  let mountSprite = null;
-  let mountImageData = null;
-  if (targetPlayer.mounted && targetPlayer.mount_type) {
-
-    mountSprite = await getSpriteSheetTemplate('player_mount_base');
-    if (mountSprite) {
-
-      const mountImageName = targetPlayer.mount_type;
-      mountSprite.name = mountImageName;
-      mountSprite.imageSource = `mounts/${mountImageName}.png`;
-
-      mountImageData = await getSpriteSheetImage(mountImageName);
-    }
-  }
-
+  // Sprite URLs are now sent directly to the client
   const spriteSheetPacketData = {
     id: targetPlayer.id,
-    mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
-    bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
-    headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
-
-    armorHelmetSprite: (spriteSheetData.armorHelmetSprite && armorHelmetImageData) ? { ...spriteSheetData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
-    armorShoulderguardsSprite: (spriteSheetData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...spriteSheetData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
-    armorNeckSprite: (spriteSheetData.armorNeckSprite && armorNeckImageData) ? { ...spriteSheetData.armorNeckSprite, imageData: armorNeckImageData } : null,
-    armorHandsSprite: (spriteSheetData.armorHandsSprite && armorHandsImageData) ? { ...spriteSheetData.armorHandsSprite, imageData: armorHandsImageData } : null,
-    armorChestSprite: (spriteSheetData.armorChestSprite && armorChestImageData) ? { ...spriteSheetData.armorChestSprite, imageData: armorChestImageData } : null,
-    armorFeetSprite: (spriteSheetData.armorFeetSprite && armorFeetImageData) ? { ...spriteSheetData.armorFeetSprite, imageData: armorFeetImageData } : null,
-    armorLegsSprite: (spriteSheetData.armorLegsSprite && armorLegsImageData) ? { ...spriteSheetData.armorLegsSprite, imageData: armorLegsImageData } : null,
-    armorWeaponSprite: (spriteSheetData.armorWeaponSprite && armorWeaponImageData) ? { ...spriteSheetData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
+    mountSprite: targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
+    bodySprite: spriteSheetData.bodySprite || null,
+    headSprite: spriteSheetData.headSprite || null,
+    armorHelmetSprite: spriteSheetData.armorHelmetSprite || null,
+    armorShoulderguardsSprite: spriteSheetData.armorShoulderguardsSprite || null,
+    armorNeckSprite: spriteSheetData.armorNeckSprite || null,
+    armorHandsSprite: spriteSheetData.armorHandsSprite || null,
+    armorChestSprite: spriteSheetData.armorChestSprite || null,
+    armorFeetSprite: spriteSheetData.armorFeetSprite || null,
+    armorLegsSprite: spriteSheetData.armorLegsSprite || null,
+    armorWeaponSprite: spriteSheetData.armorWeaponSprite || null,
     animationState: spriteSheetData.animationState,
     revision: revision,
   };
