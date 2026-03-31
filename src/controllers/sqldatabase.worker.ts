@@ -1,5 +1,8 @@
 import { SQL } from 'bun';
 import { getSqlCert } from "./utils";
+import os from 'os';
+import path from 'path';
+import fs from 'fs';
 
 let sqlController: any = null;
 
@@ -85,6 +88,35 @@ async function createSQLController(): Promise<any> {
       maxLifetime: 0,
       max: 20,
     });
+
+    return db;
+  }
+  else if (_databaseEngine === "sqlite") {
+    const dbDir = path.join(os.tmpdir(), "frostfire_forge");
+    const dbPath = path.join(dbDir, `${process.env.DATABASE_NAME}.sqlite`);
+    if (!fs.existsSync(dbDir)) {
+        fs.mkdirSync(dbDir, { recursive: true });
+    }
+
+    const db = new SQL({
+      adapter: "sqlite",
+      filename: process.env.DATABASE_NAME ? dbPath : "./database.sqlite",
+
+      // SQLite-specific options
+      readonly: false, // Open in read-only mode
+      create: true, // Create database if it doesn't exist
+      readwrite: true, // Open for reading and writing
+
+      // Additional Bun:sqlite options
+      strict: true, // Enable strict mode
+      safeIntegers: false, // Use JavaScript numbers for integers
+    });
+
+    await db`PRAGMA journal_mode = WAL`;  // Write-Ahead Logging (WAL)
+    await db`PRAGMA busy_timeout = 5000`; // Tells SQLite to wait up to 5000ms if it hits a lock
+    await db`PRAGMA synchronous = NORMAL`;
+    await db`PRAGMA foreign_keys = ON`;
+    await db`PRAGMA cache_size = 32000`;
 
     return db;
   }
