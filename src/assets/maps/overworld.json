@@ -331462,21 +331462,21 @@
             },
             {
               "name": "x",
-              "type": "int",
-              "value": 3760
+              "type": "number",
+              "value": 2409
             },
             {
               "name": "y",
-              "type": "int",
-              "value": 3760
+              "type": "number",
+              "value": 4104
             }
           ],
           "rotation": 0,
           "type": "warp",
           "visible": true,
-          "width": 40.5,
+          "width": 40,
           "x": 2409,
-          "y": 4104.5
+          "y": 4104
         }
       ],
       "opacity": 1,
@@ -331499,8 +331499,15 @@
           "type": "graveyard",
           "visible": true,
           "width": 0,
-          "x": 2703.33333333333,
-          "y": 4016.66666666667
+          "x": 2703,
+          "y": 4016,
+          "properties": [
+            {
+              "name": "hi",
+              "type": "string",
+              "value": "hi"
+            }
+          ]
         }
       ],
       "opacity": 1,
@@ -331574,5 +331581,33 @@
   "tilewidth": 32,
   "type": "map",
   "version": "1.10",
-  "width": 235
+  "width": 235,
+  "graveyards": {
+    "Town": {
+      "position": {
+        "x": 2703,
+        "y": 4016
+      },
+      "layer": "Graveyards",
+      "x": 2703,
+      "y": 4016,
+      "hi": "hi"
+    }
+  },
+  "warps": {
+    "Main": {
+      "map": "main",
+      "position": {
+        "x": 2409,
+        "y": 4104
+      },
+      "x": 2409,
+      "y": 4104,
+      "size": {
+        "width": 40,
+        "height": 51
+      },
+      "layer": "Warps"
+    }
+  }
 }

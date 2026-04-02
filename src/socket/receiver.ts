@@ -4,8 +4,6 @@ import log from "../modules/logger";
 import player, { clearMapCache } from "../systems/player.ts";
 import permissions from "../systems/permissions";
 import { getAuthWorker } from "./authentication_pool.ts";
-import fs from "fs";
-import path from "path";
 const authentication_queue = new Set<string>();
 const authentication_session_queue = new Set<string>();
 
@@ -30,7 +28,7 @@ import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 
 import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
-import { saveMapChunks } from "../modules/assetloader";
+import { saveMapChunks, saveMapProperties } from "../modules/assetloader";
 import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl } from "../modules/spriteSheetManager";
 import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers } from "./aoi";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
@@ -622,6 +620,11 @@ authWorker.on("message", async (result: any) => {
       mapIndex.addPlayer(_pcache.id, _pcache.location.map);
     }
 
+    // Extract object layers from map data
+    const objectLayers = (map?.data?.layers || [])
+      .filter((layer: any) => layer.type === "objectgroup")
+      .map((layer: any) => ({ name: layer.name }));
+
     // Send map chunk metadata instead of full map
     const mapMetadata = {
       name: spawnLocation?.map,
@@ -635,6 +638,9 @@ authWorker.on("message", async (result: any) => {
       spawnY: position?.y || 0,
       direction: position?.direction || "down",
       chunks: null, // Client will fetch from asset server
+      warps: player_map_properties?.warps || null,
+      graveyards: player_map_properties?.graveyards || null,
+      objectLayers: objectLayers,
     };
 
     sendPacket(ws, packetManager.loadMap(mapMetadata));
@@ -2176,7 +2182,7 @@ export default async function packetReceiver(
           return;
         }
 
-        const saveData = data as unknown as { mapName: string, chunks: any[] };
+        const saveData = data as unknown as { mapName: string, chunks: any[], graveyards?: any, warps?: any };
 
         try {
           log.info(`Map save requested by ${currentPlayer.username} for map: ${saveData.mapName}, ${saveData.chunks.length} chunks modified`);
@@ -2203,6 +2209,27 @@ export default async function packetReceiver(
           }
 
           log.info(`Map chunks saved to asset server: ${saveData.mapName}`);
+
+          // Save graveyards and warps to mapProperties
+          if (saveData.graveyards !== undefined || saveData.warps !== undefined) {
+            const mapPropertiesCache = await assetCache.get("mapProperties");
+            const mapPropsIndex = mapPropertiesCache.findIndex((m: any) => m.name === `${saveData.mapName.replace('.json', '')}.json`);
+
+            if (mapPropsIndex !== -1) {
+              if (saveData.graveyards !== undefined) {
+                mapPropertiesCache[mapPropsIndex].graveyards = saveData.graveyards;
+              }
+              if (saveData.warps !== undefined) {
+                mapPropertiesCache[mapPropsIndex].warps = saveData.warps;
+              }
+
+              try {
+                await assetCache.add("mapProperties", mapPropertiesCache);
+              } catch (propError) {
+                log.warn(`Failed to update mapProperties for ${saveData.mapName}: ${propError}`);
+              }
+            }
+          }
 
           // Update local cache with the changes AND save to disk
           const cachedMaps = (await assetCache.get("maps")) as MapData[];
@@ -2233,6 +2260,14 @@ export default async function packetReceiver(
               }
             });
 
+            // Update graveyards and warps in the map data
+            if (saveData.graveyards !== undefined) {
+              cachedMaps[mapIndex].data.graveyards = saveData.graveyards;
+            }
+            if (saveData.warps !== undefined) {
+              cachedMaps[mapIndex].data.warps = saveData.warps;
+            }
+
             assetCache.add("maps", cachedMaps);
 
             // Also save chunks to disk locally for persistence
@@ -2241,6 +2276,27 @@ export default async function packetReceiver(
             } catch (diskError) {
               log.warn(`Failed to save chunks to disk locally: ${diskError}`);
               // Don't fail the request if local disk save fails, asset server has the data
+            }
+
+            // Save graveyards and warps properties and reload the map
+            if (saveData.graveyards !== undefined || saveData.warps !== undefined) {
+              try {
+                await saveMapProperties(saveData.mapName, saveData.graveyards, saveData.warps);
+
+                // Reload the map to refresh mapProperties cache
+                const { reloadMap: reloadMapFunc } = await import("../modules/assetloader");
+                const reloadedMap = await reloadMapFunc(saveData.mapName);
+
+                // Update the cached maps with the reloaded map
+                const updatedMaps = cachedMaps;
+                const mapIdx = updatedMaps.findIndex((m: any) => m.name === saveData.mapName);
+                if (mapIdx !== -1) {
+                  updatedMaps[mapIdx] = reloadedMap;
+                  assetCache.add("maps", updatedMaps);
+                }
+              } catch (propError) {
+                log.warn(`Failed to save/reload map properties: ${propError}`);
+              }
             }
 
             // Refresh collision cache since collision layer may have been updated
@@ -2273,70 +2329,6 @@ export default async function packetReceiver(
             message: 'Error saving map changes.'
           }));
         }
-        break;
-      }
-      case "LOAD_CHUNK": {
-        if (!currentPlayer) return;
-
-        const loadChunkData = data as unknown as { map: string, x: number, y: number };
-        const { map: mapName, x: chunkX, y: chunkY } = loadChunkData;
-
-        try {
-
-          const mapFileName = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
-          const assetData = (await assetCache.get("mapAssetConfig") as any) || {
-            path: path.join(import.meta.dir, "../assets/maps")
-          };
-
-          const mapFilePath = path.join(assetData.path, mapFileName);
-
-          if (!fs.existsSync(mapFilePath)) {
-            sendPacket(ws, packetManager.notify({
-              message: `Map ${mapName} not found`
-            }));
-            return;
-          }
-
-          const mapData = JSON.parse(fs.readFileSync(mapFilePath, "utf-8"));
-
-          const CHUNK_SIZE = mapData.tilewidth;
-          const startX = chunkX * CHUNK_SIZE;
-          const startY = chunkY * CHUNK_SIZE;
-          const chunkWidth = Math.min(CHUNK_SIZE, mapData.width - startX);
-          const chunkHeight = Math.min(CHUNK_SIZE, mapData.height - startY);
-
-          const chunkLayers = mapData.layers.map((layer: any, layerIndex: number) => {
-            const chunkData = new Array(chunkWidth * chunkHeight).fill(0);
-
-            for (let y = 0; y < chunkHeight; y++) {
-              for (let x = 0; x < chunkWidth; x++) {
-                const sourceIndex = (startY + y) * mapData.width + (startX + x);
-                const destIndex = y * chunkWidth + x;
-                if (layer.data && layer.data[sourceIndex] !== undefined) {
-                  chunkData[destIndex] = layer.data[sourceIndex];
-                }
-              }
-            }
-
-            const zIndex = typeof layer.zIndex === 'number' ? layer.zIndex : layerIndex;
-
-            return {
-              name: layer.name,
-              zIndex: zIndex,
-              data: chunkData,
-              width: chunkWidth,
-              height: chunkHeight
-            };
-          });
-
-          sendPacket(ws, packetManager.chunkData(chunkX, chunkY, chunkWidth, chunkHeight, chunkLayers, mapData.tilewidth, mapData.tileheight, startX, startY));
-        } catch (error) {
-          log.error(`Error loading chunk ${chunkX},${chunkY} from map ${mapName}: ${error}`);
-          sendPacket(ws, packetManager.notify({
-            message: "Error loading chunk data"
-          }));
-        }
-
         break;
       }
       case "COMMAND": {
@@ -3978,6 +3970,13 @@ export default async function packetReceiver(
 
               const playersInMap = filterPlayersByMap(mapName);
               const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
+              const reloadedMapProps = mapPropertiesCache.find((m: any) => m.name === `${mapName}.json`);
+
+              // Extract object layers from reloaded map data
+              const reloadedObjectLayers = (result?.data?.layers || [])
+                .filter((layer: any) => layer.type === "objectgroup")
+                .map((layer: any) => ({ name: layer.name }));
+
               playersInMap.forEach((player) => {
                 const mapMetadata = {
                   name: mapName,
@@ -3991,6 +3990,9 @@ export default async function packetReceiver(
                   spawnY: player.location.position?.y || 0,
                   direction: player.location.position?.direction || "down",
                   chunks: null,
+                  warps: reloadedMapProps?.warps || null,
+                  graveyards: reloadedMapProps?.graveyards || null,
+                  objectLayers: reloadedObjectLayers,
                 };
                 sendPacket(player.ws, packetManager.loadMap(mapMetadata));
               });

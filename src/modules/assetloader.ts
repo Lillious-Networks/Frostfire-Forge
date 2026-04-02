@@ -162,6 +162,7 @@ function extractAndCompressLayers(map: MapData) {
 
   map.data.layers.forEach((layer: any) => {
     if (layer.type === "objectgroup") {
+      const layerName = layer.name;
       const objects = layer.objects;
       objects.forEach((obj: any) => {
 
@@ -170,7 +171,9 @@ function extractAndCompressLayers(map: MapData) {
           log.warn(`Object in map ${map.name} has no type or class: ${JSON.stringify(obj)}`);
           return;
         }
-        const propsMap = new Map(obj.properties?.map((p: any) => [p.name, p.value]));
+        // Ensure properties is an array (skip if not)
+        const propsArray = Array.isArray(obj.properties) ? obj.properties : [];
+        const propsMap = new Map(propsArray.map((p: any) => [p.name, p.value]));
         switch (type) {
 
           case "warp": {
@@ -192,6 +195,7 @@ function extractAndCompressLayers(map: MapData) {
                   width: Math.floor(obj.width),
                   height: Math.floor(obj.height),
                 },
+                layer: layerName,
               });
             } else {
               log.warn(`Invalid warp object in map ${map.name}: ${JSON.stringify(obj)}`);
@@ -205,7 +209,8 @@ function extractAndCompressLayers(map: MapData) {
               position: {
                 x: Math.floor(obj.x),
                 y: Math.floor(obj.y),
-              }
+              },
+              layer: layerName,
             });
             break;
           }
@@ -227,10 +232,11 @@ function extractAndCompressLayers(map: MapData) {
             position: warp.position,
             x: warp.x,
             y: warp.y,
-            size: warp.size
+            size: warp.size,
+            layer: warp.layer
           };
           return acc;
-        }, {} as { [key: string]: { map: string; position: any; x: number; y: number; size: { width: number; height: number; }; } });
+        }, {} as { [key: string]: { map: string; position: any; x: number; y: number; size: { width: number; height: number; }; layer: string; } });
         log.debug(`Extracted ${warps.length} warp(s) from map ${map.name}`);
       }
 
@@ -241,11 +247,59 @@ function extractAndCompressLayers(map: MapData) {
           log.error(`Map properties not found for ${map.name}`);
           return;
         }
-        _map.graveyards = graveyards;
+        _map.graveyards = graveyards.reduce((acc, graveyard) => {
+          acc[graveyard.name] = {
+            position: graveyard.position,
+            layer: graveyard.layer
+          };
+          return acc;
+        }, {} as { [key: string]: { position: any; layer: string; } });
         log.debug(`Extracted ${graveyards.length} graveyard(s) from map ${map.name}`);
       }
     }
   });
+
+  // Check if graveyards and warps are saved in the map JSON properties
+  // These take precedence over extracted object group data
+  const _map = mapProperties.find(m => m.name.replace(".json", "") === map.name.replace(".json", "")) as MapProperties | undefined;
+  if (_map) {
+    // Only update if not already extracted from object groups or if map file has explicit saved data
+    if (map.data.graveyards && (!_map.graveyards || Object.keys(_map.graveyards).length === 0)) {
+      _map.graveyards = map.data.graveyards;
+    } else if (map.data.graveyards) {
+      // If there's saved data in the map file AND extracted data, merge them
+      // Preserve layer info from extracted data
+      const extractedLayers = (_map.graveyards || {}) as { [key: string]: any };
+      const mergedGraveyards: any = { ...(_map.graveyards || {}), ...map.data.graveyards };
+
+      // Ensure all graveyards have layer property from extracted data
+      Object.keys(mergedGraveyards).forEach(name => {
+        if (extractedLayers[name] && extractedLayers[name].layer) {
+          mergedGraveyards[name].layer = extractedLayers[name].layer;
+        }
+      });
+
+      _map.graveyards = mergedGraveyards;
+    }
+
+    if (map.data.warps && (!_map.warps || Object.keys(_map.warps).length === 0)) {
+      _map.warps = map.data.warps;
+    } else if (map.data.warps) {
+      // If there's saved data in the map file AND extracted data, merge them
+      // Preserve layer info from extracted data
+      const extractedLayers = (_map.warps || {}) as { [key: string]: any };
+      const mergedWarps: any = { ...(_map.warps || {}), ...map.data.warps };
+
+      // Ensure all warps have layer property from extracted data
+      Object.keys(mergedWarps).forEach(name => {
+        if (extractedLayers[name] && extractedLayers[name].layer) {
+          mergedWarps[name].layer = extractedLayers[name].layer;
+        }
+      });
+
+      _map.warps = mergedWarps;
+    }
+  }
 
   let width: number | null = null;
   let height: number | null = null;
@@ -452,9 +506,8 @@ export async function saveMapChunks(mapName: string, chunks: any[]): Promise<voi
   }
 }
 
-export async function reloadMap(mapName: string): Promise<MapData> {
+export async function saveMapProperties(mapName: string, graveyards?: any, warps?: any): Promise<void> {
   try {
-    log.info(`[RELOAD] Starting reloadMap for ${mapName}`);
     const file = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
     const fullPath = path.join(mapDir, file);
 
@@ -462,31 +515,181 @@ export async function reloadMap(mapName: string): Promise<MapData> {
       throw new Error(`Map ${file} not found`);
     }
 
-    log.info(`[RELOAD] Loading map from disk: ${fullPath}`);
+    const mapData = JSON.parse(fs.readFileSync(fullPath, "utf-8"));
+
+    // Add graveyards and warps properties to the map file (for custom use)
+    if (graveyards !== undefined) {
+      mapData.graveyards = graveyards;
+    }
+    if (warps !== undefined) {
+      mapData.warps = warps;
+    }
+
+    // Update Tiled object layers with the objects
+    if (graveyards !== undefined) {
+      let graveyardLayer = mapData.layers.find((l: any) => l.name === "Graveyards" && l.type === "objectgroup");
+      // Create the layer if it doesn't exist
+      if (!graveyardLayer) {
+        graveyardLayer = {
+          draworder: "topdown",
+          id: Math.max(...mapData.layers.map((l: any) => l.id || 0), 0) + 1,
+          name: "Graveyards",
+          objects: [],
+          opacity: 1,
+          type: "objectgroup",
+          visible: true,
+          x: 0,
+          y: 0
+        };
+        mapData.layers.push(graveyardLayer);
+      }
+      if (graveyardLayer) {
+        // Create a map of existing objects by name for ID preservation
+        const existingObjMap = new Map(graveyardLayer.objects?.map((obj: any) => [obj.name, obj]) || []);
+        let nextId = Math.max(1, ...(graveyardLayer.objects?.map((o: any) => o.id || 0) || [1])) + 1;
+
+        // Convert graveyards object to Tiled objects array
+        graveyardLayer.objects = Object.entries(graveyards).map(([name, data]: [string, any]) => {
+          const existingObj = existingObjMap.get(name) as any;
+          const objId = existingObj?.id || nextId++;
+
+          // Convert custom properties to Tiled format (array of {name, value, type})
+          const tiledProperties: any[] = [];
+          if (data && typeof data === 'object') {
+            Object.entries(data).forEach(([propName, propValue]: [string, any]) => {
+              // Skip position, layer, and x/y as those are handled specially
+              if (propName !== 'position' && propName !== 'layer' && propName !== 'x' && propName !== 'y') {
+                tiledProperties.push({
+                  name: propName,
+                  type: typeof propValue,
+                  value: propValue
+                });
+              }
+            });
+          }
+
+          return {
+            ...existingObj,
+            id: objId,
+            name: name,
+            type: "graveyard",
+            x: data.position?.x || data.x || 0,
+            y: data.position?.y || data.y || 0,
+            width: 0,
+            height: 0,
+            rotation: 0,
+            visible: true,
+            point: true,
+            properties: tiledProperties.length > 0 ? tiledProperties : undefined
+          };
+        });
+      }
+    }
+
+    if (warps !== undefined) {
+      let warpLayer = mapData.layers.find((l: any) => l.name === "Warps" && l.type === "objectgroup");
+      // Create the layer if it doesn't exist
+      if (!warpLayer) {
+        warpLayer = {
+          draworder: "topdown",
+          id: Math.max(...mapData.layers.map((l: any) => l.id || 0), 0) + 1,
+          name: "Warps",
+          objects: [],
+          opacity: 1,
+          type: "objectgroup",
+          visible: true,
+          x: 0,
+          y: 0
+        };
+        mapData.layers.push(warpLayer);
+      }
+      if (warpLayer) {
+        // Create a map of existing objects by name for ID preservation
+        const existingObjMap = new Map(warpLayer.objects?.map((obj: any) => [obj.name, obj]) || []);
+        let nextId = Math.max(1, ...(warpLayer.objects?.map((o: any) => o.id || 0) || [1])) + 1;
+
+        // Convert warps object to Tiled objects array
+        warpLayer.objects = Object.entries(warps).map(([name, data]: [string, any]) => {
+          const existingObj = existingObjMap.get(name) as any;
+          const objId = existingObj?.id || nextId++;
+
+          // Convert custom properties to Tiled format (array of {name, value, type})
+          const tiledProperties: any[] = [];
+          if (data && typeof data === 'object') {
+            Object.entries(data).forEach(([propName, propValue]: [string, any]) => {
+              // Skip position and size as those are handled specially, but KEEP map, x, y
+              if (propName !== 'position' && propName !== 'size' && propName !== 'layer') {
+                tiledProperties.push({
+                  name: propName,
+                  type: typeof propValue,
+                  value: propValue
+                });
+              }
+            });
+          }
+
+          return {
+            ...existingObj,
+            id: objId,
+            name: name,
+            type: "warp",
+            x: data.position?.x || data.x || 0,
+            y: data.position?.y || data.y || 0,
+            width: data.size?.width || 32,
+            height: data.size?.height || 32,
+            rotation: 0,
+            visible: true,
+            properties: tiledProperties.length > 0 ? tiledProperties : undefined
+          };
+        });
+      }
+    }
+
+    fs.writeFileSync(fullPath, JSON.stringify(mapData, null, 2), "utf-8");
+    log.success(`Saved graveyards/warps properties for ${file}`);
+  } catch (error) {
+    log.error(`Failed to save map properties for ${mapName}: ${error}`);
+    throw error;
+  }
+}
+
+export async function reloadMap(mapName: string): Promise<MapData> {
+  try {
+    const file = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
+    const fullPath = path.join(mapDir, file);
+
+    if (!fs.existsSync(fullPath)) {
+      throw new Error(`Map ${file} not found`);
+    }
+
     const newMap = processMapFile(file);
     if (!newMap) {
       throw new Error(`Failed to load map ${file}`);
     }
 
-    log.info(`[RELOAD] Removing old collision/nopvp caches for ${mapName}`);
     assetCache.removeNested(mapName, "collision");
     assetCache.removeNested(mapName, "nopvp");
 
-    log.info(`[RELOAD] Extracting and compressing layers for ${mapName}`);
     extractAndCompressLayers(newMap);
 
     const maps = await assetCache.get("maps") as MapData[];
     const mapProps = await assetCache.get("mapProperties") as MapProperties[];
 
     const index = maps.findIndex(m => m.name === file);
+
+    // Get the updated mapProperties from the cache (extractAndCompressLayers updated it)
+    const existingProps = mapProps.find(m => m.name.replace(".json", "") === newMap.name.replace(".json", ""));
+    const existingGraveyards = existingProps?.graveyards;
+    const existingWarps = existingProps?.warps;
+
     const newProps: MapProperties = {
       name: newMap.name,
       width: newMap.data.layers[0].width,
       height: newMap.data.layers[0].height,
       tileWidth: newMap.data.tilewidth,
       tileHeight: newMap.data.tileheight,
-      warps: null,
-      graveyards: null,
+      warps: existingWarps || null,
+      graveyards: existingGraveyards || null,
     };
 
     if (index >= 0) {
@@ -500,7 +703,6 @@ export async function reloadMap(mapName: string): Promise<MapData> {
     assetCache.add("maps", maps);
     assetCache.add("mapProperties", mapProps);
 
-    log.success(`Reloaded map: ${file}`);
     return newMap;
   } catch (error) {
     log.error(`Failed to reload map: ${mapName}: ${error}`);
