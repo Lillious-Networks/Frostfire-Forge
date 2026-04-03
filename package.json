@@ -3,7 +3,6 @@
   "module": "./src/socket/server.ts",
   "dependencies": {
     "openai": "^4.104.0",
-    "sharp": "^0.33.5",
     "typescript": "^5.9.3"
   },
   "devDependencies": {
