@@ -233,14 +233,14 @@ const createNpcTable = async () => {
   const sql = `
     CREATE TABLE IF NOT EXISTS npcs (
       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
-      last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
       map VARCHAR(255) NOT NULL,
       position VARCHAR(255) NOT NULL,
       direction VARCHAR(10) NOT NULL,
-      dialog VARCHAR(500) NOT NULL DEFAULT '',
+      dialog VARCHAR(500) DEFAULT NULL,
       hidden INT NOT NULL DEFAULT 0,
-      script VARCHAR(5000) NOT NULL,
-      particles VARCHAR(500) NOT NULL,
+      script VARCHAR(5000) DEFAULT NULL,
+      particles VARCHAR(500) DEFAULT NULL,
       quest INT DEFAULT NULL
     )
   `;
