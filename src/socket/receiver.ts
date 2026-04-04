@@ -22,6 +22,7 @@ import spells from "../systems/spells";
 import equipment from "../systems/equipment.ts";
 import inventory from "../systems/inventory";
 import particles from "../systems/particles";
+import npcSystem from "../systems/npcs";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const mapPropertiesCache = await assetCache.get("mapProperties");
@@ -45,8 +46,6 @@ async function waitForSpritesReady() {
 }
 
 export const spriteDataCacheReady = waitForSpritesReady();
-
-const npcs = await assetCache.get("npcs");
 
 let restartScheduled: boolean;
 let restartTimers: ReturnType<typeof setTimeout>[];
@@ -840,7 +839,7 @@ authWorker.on("message", async (result: any) => {
     });
 
     setImmediate(async () => {
-      const npcsData = await npcs;
+      const npcsData = await assetCache.get("npcs") as Npc[];
       const npcsInMap = npcsData.filter(
         (npc: Npc) => npc.map === spawnLocation.map.replace(".json", "")
       );
@@ -951,6 +950,17 @@ export default async function packetReceiver(
     }
 
     const currentPlayer = playerCache.get(ws.data.id) || null;
+
+    // Resolve a DB NPC's comma-separated particle names to full particle objects
+    async function resolveNpcParticles(npc: Npc): Promise<Npc> {
+      const particlesCache = await assetCache.get("particles") as any[] | null;
+      const resolved = typeof npc.particles === "string" && npc.particles && particlesCache
+        ? (npc.particles as string).split(",")
+            .map((name: string) => particlesCache.find((p: any) => p.name === name.trim()))
+            .filter(Boolean)
+        : (Array.isArray(npc.particles) ? npc.particles : []);
+      return { ...npc, particles: resolved as Particle[] };
+    }
 
     switch (type) {
       case "BENCHMARK": {
@@ -2431,6 +2441,225 @@ export default async function packetReceiver(
         }
         break;
       }
+      case "LIST_NPCS": {
+        if (!currentPlayer) return;
+
+        try {
+          const allNpcs = await assetCache.get("npcs") as Npc[];
+          const mapName = currentPlayer.location.map;
+          const npcsInMap = (allNpcs || []).filter((npc: Npc) => npc.map === mapName);
+          sendPacket(ws, packetManager.npcList(npcsInMap));
+        } catch (error: any) {
+          log.error(`Error listing NPCs: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error loading NPCs." }));
+        }
+        break;
+      }
+      case "ADD_NPC": {
+        if (!currentPlayer) return;
+
+        if (
+          !currentPlayer.permissions.some(
+            (p: string) => p === "server.admin" || p === "server.*"
+          )
+        ) {
+          sendPacket(ws, packetManager.notify({ message: "You do not have permission to add NPCs." }));
+          return;
+        }
+
+        try {
+          const mapName = currentPlayer.location.map;
+          const clientData = data as any;
+          const newNpc: Npc = {
+            id: null,
+            last_updated: null,
+            map: mapName,
+            position: {
+              x: clientData?.position?.x ?? currentPlayer.location.position.x,
+              y: clientData?.position?.y ?? currentPlayer.location.position.y,
+              direction: clientData?.position?.direction ?? "down",
+            },
+            hidden: clientData?.hidden ?? false,
+            script: clientData?.script ?? null,
+            dialog: clientData?.dialog ?? null,
+            particles: clientData?.particles ?? [],
+            quest: clientData?.quest ?? null,
+          };
+
+          await npcSystem.add(newNpc);
+          const updatedNpcs = await npcSystem.list();
+          await assetCache.set("npcs", updatedNpcs);
+
+          const createdNpc = updatedNpcs
+            .filter((n: Npc) => n.map === mapName)
+            .sort((a: Npc, b: Npc) => (b.id ?? 0) - (a.id ?? 0))[0];
+
+          if (createdNpc) {
+            const resolvedNpc = await resolveNpcParticles(createdNpc);
+            const updatePacket = packetManager.npcUpdated(resolvedNpc);
+            const playersInMap = filterPlayersByMap(mapName);
+            for (const p of playersInMap) {
+              if (p.ws && p.ws.readyState === 1) {
+                sendPacket(p.ws, updatePacket);
+              }
+            }
+          }
+
+          log.info(`NPC added by ${currentPlayer.username} on map ${mapName}`);
+        } catch (error: any) {
+          log.error(`Error adding NPC: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error adding NPC." }));
+        }
+        break;
+      }
+      case "SAVE_NPC": {
+        if (!currentPlayer) return;
+
+        if (
+          !currentPlayer.permissions.some(
+            (p: string) => p === "server.admin" || p === "server.*"
+          )
+        ) {
+          sendPacket(ws, packetManager.notify({ message: "You do not have permission to save NPCs." }));
+          return;
+        }
+
+        try {
+          const npcData = data as unknown as Npc;
+          if (!npcData?.id) {
+            sendPacket(ws, packetManager.notify({ message: "Invalid NPC data." }));
+            return;
+          }
+
+          await npcSystem.update(npcData);
+          const updatedNpcs = await npcSystem.list();
+          await assetCache.set("npcs", updatedNpcs);
+
+          const updatedNpc = updatedNpcs.find((n: Npc) => n.id === npcData.id);
+          if (updatedNpc) {
+            const resolvedNpc = await resolveNpcParticles(updatedNpc);
+            const updatePacket = packetManager.npcUpdated(resolvedNpc);
+            const playersInMap = filterPlayersByMap(resolvedNpc.map);
+            for (const p of playersInMap) {
+              if (p.ws && p.ws.readyState === 1) {
+                sendPacket(p.ws, updatePacket);
+              }
+            }
+          }
+
+          sendPacket(ws, packetManager.notify({ message: "NPC saved successfully." }));
+          log.info(`NPC ${npcData.id} saved by ${currentPlayer.username}`);
+        } catch (error: any) {
+          log.error(`Error saving NPC: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error saving NPC." }));
+        }
+        break;
+      }
+      case "MOVE_NPC": {
+        if (!currentPlayer) return;
+
+        if (
+          !currentPlayer.permissions.some(
+            (p: string) => p === "server.admin" || p === "server.*"
+          )
+        ) {
+          sendPacket(ws, packetManager.notify({ message: "You do not have permission to move NPCs." }));
+          return;
+        }
+
+        try {
+          const { id, position } = data as unknown as { id: number; position: { x: number; y: number } };
+          if (!id || !position) {
+            sendPacket(ws, packetManager.notify({ message: "Invalid NPC move data." }));
+            return;
+          }
+
+          const allNpcs = await assetCache.get("npcs") as Npc[];
+          const existingNpc = (allNpcs || []).find((n: Npc) => n.id === id);
+          if (!existingNpc) {
+            sendPacket(ws, packetManager.notify({ message: "NPC not found." }));
+            return;
+          }
+
+          const updatedNpcData: Npc = {
+            ...existingNpc,
+            position: {
+              x: position.x,
+              y: position.y,
+              direction: existingNpc.position.direction || "down",
+            },
+          };
+
+          await npcSystem.update(updatedNpcData);
+          const updatedNpcs = await npcSystem.list();
+          await assetCache.set("npcs", updatedNpcs);
+
+          const updatedNpc = updatedNpcs.find((n: Npc) => n.id === id);
+          if (updatedNpc) {
+            const resolvedNpc = await resolveNpcParticles(updatedNpc);
+            const updatePacket = packetManager.npcUpdated(resolvedNpc);
+            const playersInMap = filterPlayersByMap(resolvedNpc.map);
+            for (const p of playersInMap) {
+              if (p.ws && p.ws.readyState === 1) {
+                sendPacket(p.ws, updatePacket);
+              }
+            }
+          }
+
+          log.info(`NPC ${id} moved by ${currentPlayer.username}`);
+        } catch (error: any) {
+          log.error(`Error moving NPC: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error moving NPC." }));
+        }
+        break;
+      }
+      case "DELETE_NPC": {
+        if (!currentPlayer) return;
+
+        if (
+          !currentPlayer.permissions.some(
+            (p: string) => p === "server.admin" || p === "server.*"
+          )
+        ) {
+          sendPacket(ws, packetManager.notify({ message: "You do not have permission to delete NPCs." }));
+          return;
+        }
+
+        try {
+          const { id } = data as unknown as { id: number };
+          if (!id) {
+            sendPacket(ws, packetManager.notify({ message: "Invalid NPC ID." }));
+            return;
+          }
+
+          const allNpcs = await assetCache.get("npcs") as Npc[];
+          const existingNpc = (allNpcs || []).find((n: Npc) => n.id === id);
+          if (!existingNpc) {
+            sendPacket(ws, packetManager.notify({ message: "NPC not found." }));
+            return;
+          }
+
+          const mapName = existingNpc.map;
+          await npcSystem.remove({ id } as Npc);
+          const updatedNpcs = await npcSystem.list();
+          await assetCache.set("npcs", updatedNpcs);
+
+          const removePacket = packetManager.npcRemoved(id);
+          const playersInMap = filterPlayersByMap(mapName);
+          for (const p of playersInMap) {
+            if (p.ws && p.ws.readyState === 1) {
+              sendPacket(p.ws, removePacket);
+            }
+          }
+
+          sendPacket(ws, packetManager.notify({ message: "NPC deleted successfully." }));
+          log.info(`NPC ${id} deleted by ${currentPlayer.username}`);
+        } catch (error: any) {
+          log.error(`Error deleting NPC: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error deleting NPC." }));
+        }
+        break;
+      }
       case "TEST_PARTICLE": {
         if (!currentPlayer) return;
 
@@ -3613,6 +3842,25 @@ export default async function packetReceiver(
             }
 
             sendPacket(ws, packetManager.toggleParticleEditor());
+            break;
+          }
+
+          case "NE":
+          case "NPCEDITOR": {
+
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "server.admin" || p === "server.*"
+              )
+            ) {
+              const notifyData = {
+                message: "You don't have permission to use this command",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            sendPacket(ws, packetManager.toggleNpcEditor());
             break;
           }
 

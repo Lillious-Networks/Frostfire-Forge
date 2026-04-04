@@ -1,15 +1,21 @@
 import query from "../controllers/sqldatabase";
 import assetCache from "../services/assetCache";
 
+function toMysqlDatetime(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 19).replace("T", " ");
+}
+
 const npcs = {
   async add(npc: Npc) {
     if (!npc || !npc?.map || !npc?.position) return;
-    const last_updated = Date.now();
+    const last_updated = toMysqlDatetime(Date.now());
     const hidden = npc.hidden ? 1 : 0;
     const x = npc.position.x || 0;
     const y = npc.position.y || 0;
     const direction = npc.position.direction || "down";
-    const particles = npc.particles || [];
+    const particles = Array.isArray(npc.particles)
+      ? npc.particles.join(",")
+      : (npc.particles || "");
     const quest = npc.quest || null;
 
     const response = await query(
@@ -22,7 +28,7 @@ const npcs = {
         hidden,
         npc.script || null,
         npc.dialog || null,
-        JSON.stringify(particles),
+        particles,
         quest,
       ]
     );
@@ -80,12 +86,14 @@ const npcs = {
 
   async update(npc: Npc) {
     if (!npc?.id || !npc?.map || !npc?.position) return;
-    const last_updated = Date.now();
+    const last_updated = toMysqlDatetime(Date.now());
     const hidden = npc.hidden ? 1 : 0;
     const x = npc.position.x || 0;
     const y = npc.position.y || 0;
     const direction = npc.position.direction;
-    const particles = npc.particles || [];
+    const particles = Array.isArray(npc.particles)
+      ? npc.particles.join(",")
+      : (npc.particles || "");
     const quest = npc.quest || null;
 
     const response = await query(
@@ -98,7 +106,7 @@ const npcs = {
         hidden,
         npc.script,
         npc.dialog,
-        JSON.stringify(particles),
+        particles,
         quest,
         npc.id,
       ]
@@ -111,7 +119,7 @@ const npcs = {
 
   async move(npc: Npc) {
     if (!npc?.id || !npc?.position) return;
-    const last_updated = Date.now();
+    const last_updated = toMysqlDatetime(Date.now());
 
     const response = await query(
       "UPDATE npcs SET last_updated = ?, position = ? WHERE id = ?",

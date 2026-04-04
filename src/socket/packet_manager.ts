@@ -460,6 +460,26 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "TOGGLE_PARTICLE_EDITOR", data: null })),
     ] as any[];
   },
+  toggleNpcEditor: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "TOGGLE_NPC_EDITOR", data: null })),
+    ] as any[];
+  },
+  npcList: (npcs: any[]) => {
+    return [
+      packet.encode(JSON.stringify({ type: "NPC_LIST", data: npcs })),
+    ] as any[];
+  },
+  npcUpdated: (npc: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "NPC_UPDATED", data: npc })),
+    ] as any[];
+  },
+  npcRemoved: (id: number) => {
+    return [
+      packet.encode(JSON.stringify({ type: "NPC_REMOVED", data: { id } })),
+    ] as any[];
+  },
   saveParticle: (particle: any) => {
     return [
       packet.encode(JSON.stringify({ type: "SAVE_PARTICLE", data: particle })),
