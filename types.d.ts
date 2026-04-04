@@ -97,7 +97,6 @@ declare interface Particle {
       y: number;
   };
   lifetime: number;
-  scale: number;
   opacity: number;
   visible: boolean;
   gravity: {

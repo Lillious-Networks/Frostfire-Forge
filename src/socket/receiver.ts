@@ -21,6 +21,7 @@ import parties from "../systems/parties.ts";
 import spells from "../systems/spells";
 import equipment from "../systems/equipment.ts";
 import inventory from "../systems/inventory";
+import particles from "../systems/particles";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const mapPropertiesCache = await assetCache.get("mapProperties");
@@ -46,7 +47,6 @@ async function waitForSpritesReady() {
 export const spriteDataCacheReady = waitForSpritesReady();
 
 const npcs = await assetCache.get("npcs");
-const particles = await assetCache.get("particles");
 
 let restartScheduled: boolean;
 let restartTimers: ReturnType<typeof setTimeout>[];
@@ -844,21 +844,18 @@ authWorker.on("message", async (result: any) => {
       const npcsInMap = npcsData.filter(
         (npc: Npc) => npc.map === spawnLocation.map.replace(".json", "")
       );
+      const particlesCache = await assetCache.get("particles") as Particle[] | null;
       const npcPackets = await npcsInMap.reduce(
         async (packetsPromise: Promise<any[]>, npc: Npc) => {
           const packets = await packetsPromise;
           const particleArray =
-            typeof npc.particles === "string"
+            typeof npc.particles === "string" && particlesCache
               ? (
-                await Promise.all(
-                  (npc.particles as string)
-                    .split(",")
-                    .map(async (name) =>
-                      (
-                        await particles
-                      ).find((p: Particle) => p.name === name.trim())
-                    )
-                )
+                (npc.particles as string)
+                  .split(",")
+                  .map((name) =>
+                    particlesCache.find((p: Particle) => p.name === name.trim())
+                  )
               ).filter(Boolean)
               : [];
           const npcData = {
@@ -2331,6 +2328,142 @@ export default async function packetReceiver(
         }
         break;
       }
+      case "SAVE_PARTICLE": {
+        if (!currentPlayer) return;
+
+        const userPermissions = await permissions.get(currentPlayer.username) as string;
+        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
+        const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
+
+        if (!hasPermission) {
+          sendPacket(ws, packetManager.notify({
+            message: 'You do not have permission to save particles.'
+          }));
+          return;
+        }
+
+        try {
+          const particleData = data as unknown as Particle;
+
+          // Check if particle already exists
+          const existingParticles = await particles.list();
+          const particleExists = existingParticles.some(p => p.name === particleData.name);
+
+          if (particleExists) {
+            await particles.update(particleData);
+            log.info(`Particle updated by ${currentPlayer.username}: ${particleData.name}`);
+          } else {
+            await particles.add(particleData);
+            log.info(`Particle added by ${currentPlayer.username}: ${particleData.name}`);
+          }
+
+          // Reload particles cache from database to ensure consistency
+          const updatedParticles = await particles.list();
+          const updatedParticleData = updatedParticles.find(p => p.name === particleData.name);
+
+          // Broadcast particle update to all connected players
+          if (updatedParticleData) {
+            const updatePacket = packetManager.particleUpdated(updatedParticleData);
+            const allPlayers = playerCache.list();
+            for (const playerId in allPlayers) {
+              const player = allPlayers[playerId];
+              if (player.ws && player.ws.readyState === 1) { // readyState 1 = OPEN
+                sendPacket(player.ws, updatePacket);
+              }
+            }
+          }
+
+          sendPacket(ws, packetManager.notify({
+            message: 'Particle saved successfully'
+          }));
+        } catch (error: any) {
+          log.error(`Error saving particle: ${error.message}`);
+          sendPacket(ws, packetManager.notify({
+            message: 'Error saving particle.'
+          }));
+        }
+        break;
+      }
+      case "DELETE_PARTICLE": {
+        if (!currentPlayer) return;
+
+        const userPermissions = await permissions.get(currentPlayer.username) as string;
+        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
+        const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
+
+        if (!hasPermission) {
+          sendPacket(ws, packetManager.notify({
+            message: 'You do not have permission to delete particles.'
+          }));
+          return;
+        }
+
+        try {
+          const { name } = data as unknown as { name: string };
+          await particles.remove({ name } as any);
+          log.info(`Particle deleted by ${currentPlayer.username}: ${name}`);
+
+          sendPacket(ws, packetManager.notify({
+            message: 'Particle deleted successfully'
+          }));
+        } catch (error: any) {
+          log.error(`Error deleting particle: ${error.message}`);
+          sendPacket(ws, packetManager.notify({
+            message: 'Error deleting particle.'
+          }));
+        }
+        break;
+      }
+      case "LIST_PARTICLES": {
+        if (!currentPlayer) return;
+
+        try {
+          const particleList = await particles.list();
+          sendPacket(ws, packetManager.custom({
+            type: "PARTICLE_LIST",
+            data: particleList
+          }));
+        } catch (error: any) {
+          log.error(`Error listing particles: ${error.message}`);
+          sendPacket(ws, packetManager.notify({
+            message: 'Error loading particles.'
+          }));
+        }
+        break;
+      }
+      case "TEST_PARTICLE": {
+        if (!currentPlayer) return;
+
+        const userPermissions = await permissions.get(currentPlayer.username) as string;
+        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
+        const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
+
+        if (!hasPermission) {
+          return;
+        }
+
+        try {
+          const { testType, data: testData } = data as { testType: string; data: any };
+          log.info(`Particle test by ${currentPlayer.username}: type=${testType}`);
+
+          // Broadcast test particle event to all players in the map
+          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+          playersInMap.forEach((player) => {
+            sendPacket(player.ws, packetManager.custom({
+              type: "TEST_PARTICLE_EVENT",
+              data: {
+                testType,
+                particle: testData.particle,
+                position: testData.position || currentPlayer.location,
+                npcId: testData.npcId
+              }
+            }));
+          });
+        } catch (error: any) {
+          log.error(`Error testing particle: ${error.message}`);
+        }
+        break;
+      }
       case "COMMAND": {
         if (!currentPlayer) return;
         if (currentPlayer.isGuest) {
@@ -3461,6 +3594,25 @@ export default async function packetReceiver(
             }
 
             sendPacket(ws, packetManager.toggleTileEditor());
+            break;
+          }
+
+          case "PE":
+          case "PARTICLEEDITOR": {
+
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "server.admin" || p === "server.*"
+              )
+            ) {
+              const notifyData = {
+                message: "You don't have permission to use this command",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            sendPacket(ws, packetManager.toggleParticleEditor());
             break;
           }
 

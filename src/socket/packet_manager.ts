@@ -455,6 +455,36 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "TOGGLE_TILE_EDITOR", data: null })),
     ] as any[];
   },
+  toggleParticleEditor: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "TOGGLE_PARTICLE_EDITOR", data: null })),
+    ] as any[];
+  },
+  saveParticle: (particle: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "SAVE_PARTICLE", data: particle })),
+    ] as any[];
+  },
+  deleteParticle: (particleName: string) => {
+    return [
+      packet.encode(JSON.stringify({ type: "DELETE_PARTICLE", data: { name: particleName } })),
+    ] as any[];
+  },
+  listParticles: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "LIST_PARTICLES", data: null })),
+    ] as any[];
+  },
+  testParticle: (particle: any, testType: string, data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "TEST_PARTICLE", data: { particle, testType, data } })),
+    ] as any[];
+  },
+  particleUpdated: (particle: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "PARTICLE_UPDATED", data: particle })),
+    ] as any[];
+  },
   reloadChunks: () => {
     return [
       packet.encode(JSON.stringify({ type: "RELOAD_CHUNKS", data: null })),
