@@ -234,6 +234,7 @@ const createNpcTable = async () => {
     CREATE TABLE IF NOT EXISTS npcs (
       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
       last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+      name VARCHAR(255) DEFAULT NULL,
       map VARCHAR(255) NOT NULL,
       position VARCHAR(255) NOT NULL,
       direction VARCHAR(10) NOT NULL,
@@ -241,7 +242,18 @@ const createNpcTable = async () => {
       hidden INT NOT NULL DEFAULT 0,
       script VARCHAR(5000) DEFAULT NULL,
       particles VARCHAR(500) DEFAULT NULL,
-      quest INT DEFAULT NULL
+      quest INT DEFAULT NULL,
+      sprite_type VARCHAR(10) NOT NULL DEFAULT 'none',
+      sprite_body VARCHAR(255) DEFAULT NULL,
+      sprite_head VARCHAR(255) DEFAULT NULL,
+      sprite_helmet VARCHAR(255) DEFAULT NULL,
+      sprite_shoulderguards VARCHAR(255) DEFAULT NULL,
+      sprite_neck VARCHAR(255) DEFAULT NULL,
+      sprite_hands VARCHAR(255) DEFAULT NULL,
+      sprite_chest VARCHAR(255) DEFAULT NULL,
+      sprite_feet VARCHAR(255) DEFAULT NULL,
+      sprite_legs VARCHAR(255) DEFAULT NULL,
+      sprite_weapon VARCHAR(255) DEFAULT NULL
     )
   `;
   await query(sql);

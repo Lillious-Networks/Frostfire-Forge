@@ -17,12 +17,17 @@ const npcs = {
       ? npc.particles.join(",")
       : (npc.particles || "");
     const quest = npc.quest || null;
+    const sprite_type = npc.sprite_type || "none";
 
     const response = await query(
-      "INSERT INTO npcs (last_updated, map, position, direction, hidden, script, dialog, particles, quest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      `INSERT INTO npcs (last_updated, map, name, position, direction, hidden, script, dialog, particles, quest,
+        sprite_type, sprite_body, sprite_head, sprite_helmet, sprite_shoulderguards, sprite_neck,
+        sprite_hands, sprite_chest, sprite_feet, sprite_legs, sprite_weapon)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         last_updated,
         npc.map,
+        npc.name || null,
         `${x},${y}`,
         direction,
         hidden,
@@ -30,6 +35,17 @@ const npcs = {
         npc.dialog || null,
         particles,
         quest,
+        sprite_type,
+        npc.sprite_body || null,
+        npc.sprite_head || null,
+        npc.sprite_helmet || null,
+        npc.sprite_shoulderguards || null,
+        npc.sprite_neck || null,
+        npc.sprite_hands || null,
+        npc.sprite_chest || null,
+        npc.sprite_feet || null,
+        npc.sprite_legs || null,
+        npc.sprite_weapon || null,
       ]
     );
 
@@ -63,12 +79,24 @@ const npcs = {
         id: npc?.id as number,
         last_updated: (npc?.last_updated as number) || null,
         map,
+        name: npc?.name || null,
         position,
         hidden: npc?.hidden === 1,
         script: npc?.script as string,
         dialog: npc?.dialog as string,
         particles: npc?.particles as Particle[],
         quest: npc?.quest as number,
+        sprite_type: (npc?.sprite_type as 'none' | 'static' | 'animated') || 'none',
+        sprite_body: npc?.sprite_body || null,
+        sprite_head: npc?.sprite_head || null,
+        sprite_helmet: npc?.sprite_helmet || null,
+        sprite_shoulderguards: npc?.sprite_shoulderguards || null,
+        sprite_neck: npc?.sprite_neck || null,
+        sprite_hands: npc?.sprite_hands || null,
+        sprite_chest: npc?.sprite_chest || null,
+        sprite_feet: npc?.sprite_feet || null,
+        sprite_legs: npc?.sprite_legs || null,
+        sprite_weapon: npc?.sprite_weapon || null,
       });
     }
 
@@ -95,12 +123,17 @@ const npcs = {
       ? npc.particles.join(",")
       : (npc.particles || "");
     const quest = npc.quest || null;
+    const sprite_type = npc.sprite_type || "none";
 
     const response = await query(
-      "UPDATE npcs SET last_updated = ?, map = ?, position = ?, direction = ?, hidden = ?, script = ?, dialog = ?, particles = ?, quest = ? WHERE id = ?",
+      `UPDATE npcs SET last_updated = ?, map = ?, name = ?, position = ?, direction = ?, hidden = ?, script = ?,
+        dialog = ?, particles = ?, quest = ?, sprite_type = ?, sprite_body = ?, sprite_head = ?,
+        sprite_helmet = ?, sprite_shoulderguards = ?, sprite_neck = ?, sprite_hands = ?,
+        sprite_chest = ?, sprite_feet = ?, sprite_legs = ?, sprite_weapon = ? WHERE id = ?`,
       [
         last_updated,
         npc.map,
+        npc.name || null,
         `${x},${y}`,
         direction,
         hidden,
@@ -108,6 +141,17 @@ const npcs = {
         npc.dialog,
         particles,
         quest,
+        sprite_type,
+        npc.sprite_body || null,
+        npc.sprite_head || null,
+        npc.sprite_helmet || null,
+        npc.sprite_shoulderguards || null,
+        npc.sprite_neck || null,
+        npc.sprite_hands || null,
+        npc.sprite_chest || null,
+        npc.sprite_feet || null,
+        npc.sprite_legs || null,
+        npc.sprite_weapon || null,
         npc.id,
       ]
     );

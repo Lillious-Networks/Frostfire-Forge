@@ -186,12 +186,24 @@ declare interface Npc {
   id: Nullable<number>;
   last_updated: Nullable<number>;
   map: string;
+  name: Nullable<string>;
   position: PositionData;
   hidden: boolean;
   script: Nullable<string>;
   dialog: Nullable<string>;
   particles: Nullable<Particle[]>;
   quest: Nullable<number>;
+  sprite_type: 'none' | 'static' | 'animated';
+  sprite_body: Nullable<string>;
+  sprite_head: Nullable<string>;
+  sprite_helmet: Nullable<string>;
+  sprite_shoulderguards: Nullable<string>;
+  sprite_neck: Nullable<string>;
+  sprite_hands: Nullable<string>;
+  sprite_chest: Nullable<string>;
+  sprite_feet: Nullable<string>;
+  sprite_legs: Nullable<string>;
+  sprite_weapon: Nullable<string>;
 }
 
 declare interface LocationData {

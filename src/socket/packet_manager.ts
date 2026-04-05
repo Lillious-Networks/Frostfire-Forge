@@ -159,10 +159,11 @@ export const packetManager = {
           data: {
             id: data.id,
             last_updated: data.last_updated,
+            name: data.name || null,
             location: {
               x: data.position.x,
               y: data.position.y,
-              direction: "down",
+              direction: data.location?.direction || data.position?.direction || "down",
             },
             script: data.script,
             hidden: data.hidden,
@@ -171,6 +172,8 @@ export const packetManager = {
             quest: data.quest,
             map: data.map,
             position: data.position,
+            sprite_type: data.sprite_type || 'none',
+            spriteLayers: data.spriteLayers || null,
           },
         })
       )

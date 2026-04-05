@@ -31,7 +31,7 @@ import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks, saveMapProperties } from "../modules/assetloader";
-import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl } from "../modules/spriteSheetManager";
+import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers } from "../modules/spriteSheetManager";
 import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers } from "./aoi";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
@@ -860,10 +860,11 @@ authWorker.on("message", async (result: any) => {
           const npcData = {
             id: npc.id,
             last_updated: npc.last_updated,
+            name: npc.name || null,
             location: {
               x: npc.position.x,
               y: npc.position.y,
-              direction: "down",
+              direction: npc.position.direction || "down",
             },
             script: npc.script,
             hidden: npc.hidden,
@@ -872,6 +873,8 @@ authWorker.on("message", async (result: any) => {
             quest: npc.quest,
             map: npc.map,
             position: npc.position,
+            sprite_type: npc.sprite_type,
+            spriteLayers: getNpcSpriteLayers(npc),
           };
           return [...packets, ...packetManager.createNpc(npcData)];
         },
@@ -960,6 +963,11 @@ export default async function packetReceiver(
             .filter(Boolean)
         : (Array.isArray(npc.particles) ? npc.particles : []);
       return { ...npc, particles: resolved as Particle[] };
+    }
+
+    async function resolveNpcForClient(npc: Npc): Promise<any> {
+      const withParticles = await resolveNpcParticles(npc);
+      return { ...withParticles, spriteLayers: getNpcSpriteLayers(npc) };
     }
 
     switch (type) {
@@ -2474,6 +2482,7 @@ export default async function packetReceiver(
             id: null,
             last_updated: null,
             map: mapName,
+            name: clientData?.name ?? null,
             position: {
               x: clientData?.position?.x ?? currentPlayer.location.position.x,
               y: clientData?.position?.y ?? currentPlayer.location.position.y,
@@ -2484,6 +2493,17 @@ export default async function packetReceiver(
             dialog: clientData?.dialog ?? null,
             particles: clientData?.particles ?? [],
             quest: clientData?.quest ?? null,
+            sprite_type: clientData?.sprite_type ?? 'none',
+            sprite_body: clientData?.sprite_body ?? null,
+            sprite_head: clientData?.sprite_head ?? null,
+            sprite_helmet: clientData?.sprite_helmet ?? null,
+            sprite_shoulderguards: clientData?.sprite_shoulderguards ?? null,
+            sprite_neck: clientData?.sprite_neck ?? null,
+            sprite_hands: clientData?.sprite_hands ?? null,
+            sprite_chest: clientData?.sprite_chest ?? null,
+            sprite_feet: clientData?.sprite_feet ?? null,
+            sprite_legs: clientData?.sprite_legs ?? null,
+            sprite_weapon: clientData?.sprite_weapon ?? null,
           };
 
           await npcSystem.add(newNpc);
@@ -2495,7 +2515,7 @@ export default async function packetReceiver(
             .sort((a: Npc, b: Npc) => (b.id ?? 0) - (a.id ?? 0))[0];
 
           if (createdNpc) {
-            const resolvedNpc = await resolveNpcParticles(createdNpc);
+            const resolvedNpc = await resolveNpcForClient(createdNpc);
             const updatePacket = packetManager.npcUpdated(resolvedNpc);
             const playersInMap = filterPlayersByMap(mapName);
             for (const p of playersInMap) {
@@ -2537,7 +2557,7 @@ export default async function packetReceiver(
 
           const updatedNpc = updatedNpcs.find((n: Npc) => n.id === npcData.id);
           if (updatedNpc) {
-            const resolvedNpc = await resolveNpcParticles(updatedNpc);
+            const resolvedNpc = await resolveNpcForClient(updatedNpc);
             const updatePacket = packetManager.npcUpdated(resolvedNpc);
             const playersInMap = filterPlayersByMap(resolvedNpc.map);
             for (const p of playersInMap) {
@@ -2596,7 +2616,7 @@ export default async function packetReceiver(
 
           const updatedNpc = updatedNpcs.find((n: Npc) => n.id === id);
           if (updatedNpc) {
-            const resolvedNpc = await resolveNpcParticles(updatedNpc);
+            const resolvedNpc = await resolveNpcForClient(updatedNpc);
             const updatePacket = packetManager.npcUpdated(resolvedNpc);
             const playersInMap = filterPlayersByMap(resolvedNpc.map);
             for (const p of playersInMap) {
