@@ -331,6 +331,7 @@ const wsPort = parseInt(process.env.WEB_SOCKET_PORT || "3000");
 gatewayClient = new GatewayClient({
   gatewayUrl: process.env.GATEWAY_URL || "http://localhost:9999",
   serverId,
+  description: process.env.SERVER_DESCRIPTION || "",
   host: serverHost,
   publicHost: publicHost,
   port: wsPort,

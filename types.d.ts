@@ -485,3 +485,16 @@ declare interface SpriteSheetCache {
     };
   };
 }
+
+declare interface ServerRegistrationConfig {
+  gatewayUrl: string;
+  assetServerUrl?: string;
+  serverId: string;
+  description?: string;
+  host: string;
+  publicHost?: string;
+  port: number;
+  wsPort: number;
+  maxConnections: number;
+  heartbeatInterval: number;
+}
