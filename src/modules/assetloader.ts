@@ -4,6 +4,7 @@ import log from "./logger";
 import item from "../systems/items";
 import spell from "../systems/spells";
 import npc from "../systems/npcs";
+import entities from "../systems/entities";
 import particle from "../systems/particles";
 import worlds from "../systems/worlds";
 import quest from "../systems/quests";
@@ -59,6 +60,11 @@ const npcnow = performance.now();
 await assetCache.add("npcs", await npc.list());
 const npcs = await assetCache.get("npcs") as Npc[];
 log.success(`Loaded ${npcs.length} npc(s) from the database in ${(performance.now() - npcnow).toFixed(2)}ms`);
+
+const entityNow = performance.now();
+await assetCache.add("entities", await entities.list());
+const entityList = await assetCache.get("entities") as Entity[];
+log.success(`Loaded ${entityList.length} entit(ies) from the database in ${(performance.now() - entityNow).toFixed(2)}ms`);
 
 const particleNow = performance.now();
 await assetCache.add("particles", await particle.list());

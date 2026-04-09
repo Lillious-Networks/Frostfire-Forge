@@ -498,3 +498,31 @@ declare interface ServerRegistrationConfig {
   maxConnections: number;
   heartbeatInterval: number;
 }
+
+declare interface Entity {
+  id: Nullable<number>;
+  isMoving?: boolean;
+  hasMoved?: boolean;
+  tileSize?: number;
+  last_updated?: Nullable<number>;
+  map: string;
+  name?: string | null;
+  position: PositionData;
+  aggro_type?: string;
+  level?: number;
+  health?: number;
+  max_health?: number;
+  particles?: Particle[] | null;
+  sprite_type?: 'none' | 'static' | 'animated';
+  sprite_body?: string | null;
+  sprite_head?: string | null;
+  sprite_helmet?: string | null;
+  sprite_shoulderguards?: string | null;
+  sprite_neck?: string | null;
+  sprite_hands?: string | null;
+  sprite_chest?: string | null;
+  sprite_feet?: string | null;
+  sprite_legs?: string | null;
+  sprite_weapon?: string | null;
+  initialize?: () => Promise<void>;
+}

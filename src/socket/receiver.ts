@@ -13,6 +13,7 @@ import layerManager from "../services/layermanager";
 import mapIndex from "../services/mapindex";
 import gameLoop from "../services/gameloop";
 import assetCache from "../services/assetCache";
+import entityCache from "../services/entityCache.ts";
 import { reloadMap } from "../modules/assetloader";
 import language from "../systems/language";
 import quests from "../systems/quests";
@@ -23,6 +24,8 @@ import equipment from "../systems/equipment.ts";
 import inventory from "../systems/inventory";
 import particles from "../systems/particles";
 import npcSystem from "../systems/npcs";
+import entitySystem from "../systems/entities";
+import entityAI from "../systems/entityAI";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const mapPropertiesCache = await assetCache.get("mapProperties");
@@ -31,7 +34,7 @@ import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks, saveMapProperties } from "../modules/assetloader";
-import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers } from "../modules/spriteSheetManager";
+import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers, getEntitySpriteLayers } from "../modules/spriteSheetManager";
 import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers } from "./aoi";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
@@ -885,6 +888,56 @@ authWorker.on("message", async (result: any) => {
       }
     });
 
+    // Send entities on map spawn (from in-memory cache, no database calls)
+    setImmediate(async () => {
+      try {
+        const mapName = spawnLocation.map.replace(".json", "");
+        const entitiesInMap = entityCache.getByMap(mapName);
+        const particlesCache = await assetCache.get("particles") as Particle[] | null;
+        const entityPackets = await entitiesInMap.reduce(
+          async (packetsPromise: Promise<any[]>, entity: any) => {
+            const packets = await packetsPromise;
+            const particleArray =
+              typeof entity.particles === "string" && particlesCache
+                ? (
+                  (entity.particles as string)
+                    .split(",")
+                    .map((name) =>
+                      particlesCache.find((p: Particle) => p.name === name.trim())
+                    )
+                ).filter(Boolean)
+                : [];
+            const entityData = {
+              id: entity.id,
+              last_updated: entity.last_updated,
+              name: entity.name || null,
+              location: {
+                x: entity.position.x,
+                y: entity.position.y,
+                direction: entity.position.direction || "down",
+              },
+              health: entity.health,
+              max_health: entity.max_health,
+              level: entity.level,
+              aggro_type: entity.aggro_type,
+              particles: particleArray,
+              map: entity.map,
+              position: entity.position,
+              sprite_type: entity.sprite_type || 'animated',
+              spriteLayers: getEntitySpriteLayers(entity),
+            };
+            return [...packets, ...packetManager.createEntity(entityData as any)];
+          },
+          Promise.resolve([] as any[])
+        );
+        if (entityPackets.length) {
+          sendPacket(ws, entityPackets);
+        }
+      } catch (error: any) {
+        log.warn(`Error loading entities: ${error.message}`);
+      }
+    });
+
     sendPacket(ws, packetManager.clientConfig(playerData.config || []));
 
     // Convert icon names to Asset Server URLs for inventory items
@@ -1538,14 +1591,63 @@ export default async function packetReceiver(
           500
         );
 
-        if (closestPlayer) {
-          const selectPlayerData = {
-            id: closestPlayer.id || null,
-            username: closestPlayer.username || null,
-            stats: closestPlayer.stats || null,
-          };
+        // Also check for closest entity (from in-memory cache)
+        const entitiesInMap = entityCache.getByMap(currentPlayer.location.map);
+        let closestEntity: any = null;
+        let closestEntityDistance = 500;
 
-          sendPacket(ws, packetManager.selectPlayer(selectPlayerData));
+        for (const entity of entitiesInMap) {
+          // Skip dead entities - check both health and combatState
+          if ((entity.health ?? 0) <= 0 || (entity as any).combatState === 'dead') continue;
+
+          const distance = Math.sqrt(
+            Math.pow(currentPlayer.location.position.x - entity.position.x, 2) +
+            Math.pow(currentPlayer.location.position.y - entity.position.y, 2)
+          );
+
+          if (distance < closestEntityDistance) {
+            closestEntity = entity;
+            closestEntityDistance = distance;
+          }
+        }
+
+        // Determine which target is closer
+        let targetToSelect: any = null;
+        if (closestPlayer && closestEntity) {
+          const currPos = typeof currentPlayer.location.position === 'string'
+            ? { x: Number(currentPlayer.location.position.split(',')[0]), y: Number(currentPlayer.location.position.split(',')[1]) }
+            : currentPlayer.location.position;
+          const closestPos = typeof closestPlayer.location?.position === 'string'
+            ? { x: Number(closestPlayer.location.position.split(',')[0]), y: Number(closestPlayer.location.position.split(',')[1]) }
+            : closestPlayer.location?.position;
+          const playerDistance = Math.sqrt(
+            Math.pow((currPos?.x ?? 0) - (closestPos?.x ?? 0), 2) +
+            Math.pow((currPos?.y ?? 0) - (closestPos?.y ?? 0), 2)
+          );
+          targetToSelect = playerDistance < closestEntityDistance ? closestPlayer : closestEntity;
+        } else if (closestPlayer) {
+          targetToSelect = closestPlayer;
+        } else if (closestEntity) {
+          targetToSelect = closestEntity;
+        }
+
+        if (targetToSelect) {
+          if (targetToSelect.stats) {
+            // It's a player
+            const selectPlayerData = {
+              id: targetToSelect.id || null,
+              username: targetToSelect.username || null,
+              stats: targetToSelect.stats || null,
+            };
+            sendPacket(ws, packetManager.selectPlayer(selectPlayerData));
+          } else {
+            // It's an entity - set cache.targetId on client side
+            // Send entity selection as a special packet or use existing mechanism
+            const selectEntityData = {
+              id: targetToSelect.id || null,
+            };
+            sendPacket(ws, packetManager.selectPlayer(selectEntityData));
+          }
         }
         break;
       }
@@ -1672,6 +1774,10 @@ export default async function packetReceiver(
         }
 
         const spell_identifier = (data as any).spell;
+        const targetId = (data as any).target?.id;
+        const isEntityRequest = (data as any).entity === true;
+
+        log.debug(`[ATTACK] Spell cast request - spell=${spell_identifier}, targetId=${targetId}, isEntityRequest=${isEntityRequest}`);
 
         const spell = await spells.find(spell_identifier);
         const spell_id = spell?.id;
@@ -1696,16 +1802,44 @@ export default async function packetReceiver(
           return;
         }
 
-        const target = playerCache.get((data as any).target?.id) || currentPlayer;
+        log.debug(`[ATTACK] Looking for target ID: ${targetId}`);
+        let target = null;
+
+        if (isEntityRequest) {
+          // Looking for an entity target (from in-memory cache)
+          log.debug(`[ATTACK] Entity request detected, looking in entity cache...`);
+          target = entityCache.getById(targetId);
+          if (target) {
+            log.debug(`[ATTACK] Found target as entity ${target.id} with aggro_type=${target.aggro_type}`);
+          } else {
+            log.debug(`[ATTACK] Entity target not found in cache: ${targetId}`);
+          }
+        } else {
+          // Looking for a player target
+          target = playerCache.get(targetId);
+          if (target) {
+            log.debug(`[ATTACK] Found target as player: ${target.username}`);
+          } else if (targetId) {
+            log.debug(`[ATTACK] Player target not found in cache: ${targetId}`);
+          }
+        }
+
+        if (!target && !targetId) {
+          // Only default to self if no target was specified
+          target = currentPlayer;
+          log.debug(`[ATTACK] No target specified, defaulting to self`);
+        }
 
         if (!target?.id) {
+          log.debug(`[ATTACK] Player ${currentPlayer.username} attempted attack with invalid target: ${targetId}`);
           sendPacket(
             ws,
-            packetManager.notify({ message: "Target player not found." })
+            packetManager.notify({ message: "Target not found." })
           );
           return;
         }
 
+        // Only guests check applies to players, not entities
         if (target.isGuest) {
           sendPacket(
             ws,
@@ -1786,18 +1920,80 @@ export default async function packetReceiver(
           currentPlayer.location.map
         );
 
-        const canAttack = await player.canAttack(currentPlayer, target,
-          {
-            width: 24,
-            height: 40,
-          },
-          spell_range
+        // Determine if target is an entity or a player
+        const isEntityTarget = target.aggro_type !== undefined && target.health !== undefined && !target.stats;
+
+        if (isEntityTarget) {
+          log.debug(`[ATTACK] Identified target as entity. aggro_type=${target.aggro_type}, health=${target.health}, has_stats=${!!target.stats}`);
+        } else {
+          log.debug(`[ATTACK] Identified target as player. username=${target.username}`);
+        }
+
+        let canAttack: any = { value: true };
+
+        if (isEntityTarget) {
+          // For entity targets, check map first
+          if (target.map !== currentPlayer.location.map) {
+            canAttack = { value: false, reason: "different_map" };
+          } else {
+            // Check if entity is in returning state (invulnerable)
+            const entityState = entityAI.getEntityAIState(target.id);
+            if (entityState && entityState.combatState === 'returning') {
+              canAttack = { value: false, reason: "entity_returning" };
+            } else {
+              // Convert entity to player-like format for canAttack
+              const entityAsPlayer = {
+                ...target,
+                location: {
+                  map: target.map,
+                  position: target.position
+                },
+                stats: { health: target.health }
+              };
+              canAttack = await player.canAttack(currentPlayer, entityAsPlayer,
+                {
+                  width: 24,
+                  height: 40,
+                },
+                spell_range
+              );
+            }
+          }
+        } else {
+          // Perform canAttack check for player targets
+          canAttack = await player.canAttack(currentPlayer, target,
+            {
+              width: 24,
+              height: 40,
+            },
+            spell_range
+          );
+        }
+        log.debug(`[ATTACK] canAttack result: ${JSON.stringify(canAttack)}`);
+
+        // Handle both player targets (location.position) and entity targets (position)
+        const targetX = target.location?.position?.x || target.position?.x || 0;
+        const targetY = target.location?.position?.y || target.position?.y || 0;
+
+        const distance = Math.sqrt(
+          Math.pow(currentPlayer.location.position.x - targetX, 2) +
+          Math.pow(currentPlayer.location.position.y - targetY, 2)
         );
+
+        // Check range for entities and players
+        log.debug(`[ATTACK] Distance to target: ${distance}, spell_range: ${spell_range}`);
+        if (isEntityTarget && distance > spell_range) {
+          log.debug(`[ATTACK] Entity target out of range. distance=${distance} > spell_range=${spell_range}`);
+          sendPacket(
+            ws,
+            packetManager.notify({ message: "Target is out of range" })
+          );
+          return;
+        }
 
         if (target.id === currentPlayer.id && spell_damage < 0) {
           playersInAttackRange.push(target);
-        } else if (!playersInAttackRange.includes(target) || !canAttack?.value) {
-
+        } else if (!canAttack?.value) {
           if (canAttack?.reason == "nopvp") {
             sendPacket(
               ws,
@@ -1810,13 +2006,16 @@ export default async function packetReceiver(
               packetManager.notify({ message: "Target is not in line of sight" })
             );
           }
+          if (canAttack?.reason == "entity_returning") {
+            sendPacket(
+              ws,
+              packetManager.notify({ message: "The entity is returning to its home" })
+            );
+          }
+          return;
+        } else if (!isEntityTarget && !playersInAttackRange.includes(target)) {
           return;
         }
-
-        const distance = Math.sqrt(
-          Math.pow(currentPlayer.location.position.x - target.location.position.x, 2) +
-          Math.pow(currentPlayer.location.position.y - target.location.position.y, 2)
-        );
 
         let delay = 0;
         if (target.id !== currentPlayer.id) {
@@ -1873,13 +2072,39 @@ export default async function packetReceiver(
           false
         );
 
-        const canAttack2 = await player.canAttack(currentPlayer, target,
-          {
-            width: 24,
-            height: 40,
-          },
-          spell_range
-        );
+        let canAttack2: any = { value: true };
+
+        if (isEntityTarget) {
+          // Check if entity is still in returning state
+          const entityState = entityAI.getEntityAIState(target.id);
+          if (entityState && entityState.combatState === 'returning') {
+            canAttack2 = { value: false, reason: "entity_returning" };
+          } else {
+            const entityAsPlayer = {
+              ...target,
+              location: {
+                map: target.map,
+                position: target.position
+              },
+              stats: { health: target.health }
+            };
+            canAttack2 = await player.canAttack(currentPlayer, entityAsPlayer,
+              {
+                width: 24,
+                height: 40,
+              },
+              spell_range
+            );
+          }
+        } else {
+          canAttack2 = await player.canAttack(currentPlayer, target,
+            {
+              width: 24,
+              height: 40,
+            },
+            spell_range
+          );
+        }
 
         if (canAttack2?.reason == "nopvp") {
           playersInMap.forEach((player) => {
@@ -1929,11 +2154,37 @@ export default async function packetReceiver(
           return;
         }
 
+        if (canAttack2?.reason == "entity_returning") {
+          playersInMap.forEach((player) => {
+            sendPacket(
+              player.ws,
+              packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
+            );
+          });
+
+          const resetPlayer = playerCache.get(currentPlayer.id);
+          if (resetPlayer && resetPlayer.spellCooldowns) {
+            delete resetPlayer.spellCooldowns[spell_id];
+            playerCache.set(resetPlayer.id, resetPlayer);
+          }
+          return;
+        }
+
+        // If canAttack validation failed for any other reason, abort
+        if (!canAttack2?.value) {
+          const resetPlayer = playerCache.get(currentPlayer.id);
+          if (resetPlayer && resetPlayer.spellCooldowns) {
+            delete resetPlayer.spellCooldowns[spell_id];
+            playerCache.set(resetPlayer.id, resetPlayer);
+          }
+          return;
+        }
+
         if (target.id !== currentPlayer.id) {
           playersInMap.forEach((player) => {
             sendPacket(
               player.ws,
-              packetManager.projectile({ id: currentPlayer.id, time: delay / 1000, target_id: target.id, spell: spell.name, icon: getIconUrl(spell.icon) })
+              packetManager.projectile({ id: currentPlayer.id, time: delay / 1000, target_id: target.id, spell: spell.name, icon: getIconUrl(spell.icon), entity: isEntityTarget })
             );
           });
         }
@@ -1963,15 +2214,17 @@ export default async function packetReceiver(
           finalDamage = Math.floor(baseDamage * (1 + critDamage / 100));
         }
 
+        log.debug(`[ATTACK] Damage calculation: spell=${spell_damage}, bonus=${attackerDamageBonus}, base=${baseDamage}, crit=${isCrit}, final=${finalDamage}`);
+
         if (finalDamage > 0) {
-          const targetAvoidance = target.stats.stat_avoidance || 0;
+          const targetAvoidance = target.stats?.stat_avoidance || 0;
           const avoidanceRoll = Math.random() * 100;
           if (avoidanceRoll < targetAvoidance) {
             finalDamage = 0;
           }
 
           if (finalDamage > 0) {
-            const targetArmor = target.stats.stat_armor || 0;
+            const targetArmor = target.stats?.stat_armor || 0;
             const armorReduction = Math.min(targetArmor, 75) / 100;
             finalDamage = Math.floor(finalDamage * (1 - armorReduction));
           }
@@ -1988,21 +2241,68 @@ export default async function packetReceiver(
         }
 
         currentPlayer.stats.stamina = finalManaCheck.stats.stamina;
-
-        target.stats.health = Math.round(target.stats.health - finalDamage);
         currentPlayer.stats.stamina -= actualManaCost;
 
         if (currentPlayer.stats.stamina < 0) {
           currentPlayer.stats.stamina = 0;
         }
 
-        playerCache.set(currentPlayer.id, currentPlayer);
+        if (isEntityTarget) {
+          // Apply damage to entity using AI system with same calculation as players
+          log.debug(`[ATTACK] Applying ${finalDamage} damage to entity ${target.id}. Current health: ${target.health}`);
+          entityAI.applyDamageToEntity(target, finalDamage, currentPlayer);
 
-        if (target.stats.health > target.stats.total_max_health) {
-          target.stats.health = target.stats.total_max_health;
-        }
+          log.debug(`[ATTACK] Entity health after damage: ${target.health}`);
 
-        if (target.stats.health <= 0) {
+          // Clamp health to 0 if negative
+          if (target.health < 0) {
+            target.health = 0;
+          }
+
+          // Update entity health in cache only (not database - database is only updated on respawn/init)
+          entityCache.updateHealth(target.id, target.health);
+
+          // Broadcast entity damage to all players on the map
+          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+          log.debug(`[ATTACK] Broadcasting damage to ${playersInMap.length} players on map`);
+          playersInMap.forEach((player) => {
+            sendPacket(
+              player.ws,
+              packetManager.updateStats({
+                id: ws.data.id,
+                target: target.id,
+                stats: { health: target.health, total_max_health: target.max_health },
+                isCrit: isCrit,
+                damage: finalDamage,
+                entity: true,
+              })
+            );
+          });
+
+          // If entity died, broadcast despawn and remove from cache
+          if (target.health <= 0) {
+            log.debug(`[ATTACK] Entity ${target.id} died, broadcasting despawn`);
+            const respawnTime = 30; // 30 seconds respawn time
+            playersInMap.forEach((player) => {
+              sendPacket(
+                player.ws,
+                packetManager.despawnEntity(target.id, respawnTime)
+              );
+            });
+            // Remove entity from cache when despawned
+            entityCache.remove(target.id);
+          }
+        } else {
+          // Apply damage to player target
+          target.stats.health = Math.round(target.stats.health - finalDamage);
+
+          playerCache.set(currentPlayer.id, currentPlayer);
+
+          if (target.stats.health > target.stats.total_max_health) {
+            target.stats.health = target.stats.total_max_health;
+          }
+
+          if (target.stats.health <= 0) {
 
           const deathStats = { ...target.stats };
 
@@ -2152,14 +2452,20 @@ export default async function packetReceiver(
           sendStatsToPartyMembers(target.username, target.id, target.stats);
           sendStatsToPartyMembers(currentPlayer.username, currentPlayer.id, currentPlayer.stats);
         }
+        }
 
-        if (!isInParty) {
+        // Update attacker stats regardless of target type
+        playerCache.set(currentPlayer.id, currentPlayer);
+
+        if (!isInParty && !isEntityTarget) {
           currentPlayer.pvp = true;
           target.pvp = true;
         }
 
         currentPlayer.last_attack = performance.now();
-        target.last_attack = performance.now();
+        if (!isEntityTarget) {
+          target.last_attack = performance.now();
+        }
 
         break;
       }
@@ -2493,7 +2799,7 @@ export default async function packetReceiver(
             dialog: clientData?.dialog ?? null,
             particles: clientData?.particles ?? [],
             quest: clientData?.quest ?? null,
-            sprite_type: clientData?.sprite_type ?? 'none',
+            sprite_type: clientData?.sprite_type ?? 'animated',
             sprite_body: clientData?.sprite_body ?? null,
             sprite_head: clientData?.sprite_head ?? null,
             sprite_helmet: clientData?.sprite_helmet ?? null,
@@ -2677,6 +2983,218 @@ export default async function packetReceiver(
         } catch (error: any) {
           log.error(`Error deleting NPC: ${error.message}`);
           sendPacket(ws, packetManager.notify({ message: "Error deleting NPC." }));
+        }
+        break;
+      }
+      case "LIST_ENTITIES": {
+        if (!currentPlayer) return;
+
+        try {
+          let allEntities = await assetCache.get("entities") as any[];
+          if (!allEntities || allEntities.length === 0) {
+            allEntities = await entitySystem.list();
+          }
+          const mapName = currentPlayer.location.map.replace(".json", "");
+          const entitiesInMap = (allEntities || []).filter((e: any) => e.map === mapName);
+          sendPacket(ws, packetManager.entityList(entitiesInMap));
+        } catch (error: any) {
+          log.error(`Error listing entities: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error loading entities." }));
+        }
+        break;
+      }
+      case "ADD_ENTITY": {
+        if (!currentPlayer) return;
+
+        if (
+          !currentPlayer.permissions.some(
+            (p: string) => p === "server.admin" || p === "server.*"
+          )
+        ) {
+          sendPacket(ws, packetManager.notify({ message: "You do not have permission to add entities." }));
+          return;
+        }
+
+        try {
+          const mapName = currentPlayer.location.map.replace(".json", "");
+          const clientData = data as any;
+          const newEntity: any = {
+            id: null,
+            last_updated: null,
+            map: mapName,
+            name: clientData?.name ?? null,
+            position: {
+              x: clientData?.position?.x ?? currentPlayer.location.position.x,
+              y: clientData?.position?.y ?? currentPlayer.location.position.y,
+              direction: clientData?.position?.direction ?? "down",
+            },
+            max_health: clientData?.max_health ?? 100,
+            level: clientData?.level ?? 1,
+            aggro_type: clientData?.aggro_type ?? 'neutral',
+            aggro_range: clientData?.aggro_range ?? 300,
+            speed: clientData?.speed ?? 2.0,
+            aggro_leash: clientData?.aggro_leash ?? 600,
+            particles: clientData?.particles ?? [],
+            sprite_type: clientData?.sprite_type ?? 'animated',
+            sprite_body: clientData?.sprite_body ?? 'player_body_base',
+            sprite_head: clientData?.sprite_head ?? 'player_head_base',
+            sprite_helmet: clientData?.sprite_helmet ?? null,
+            sprite_shoulderguards: clientData?.sprite_shoulderguards ?? null,
+            sprite_neck: clientData?.sprite_neck ?? null,
+            sprite_hands: clientData?.sprite_hands ?? null,
+            sprite_chest: clientData?.sprite_chest ?? null,
+            sprite_feet: clientData?.sprite_feet ?? null,
+            sprite_legs: clientData?.sprite_legs ?? null,
+            sprite_weapon: clientData?.sprite_weapon ?? null,
+          };
+
+          await entitySystem.add(newEntity);
+          const updatedEntities = await entitySystem.list();
+          await assetCache.set("entities", updatedEntities);
+
+          const createdEntity = updatedEntities
+            .filter((e: any) => e.map === mapName)
+            .sort((a: any, b: any) => (b.id ?? 0) - (a.id ?? 0))[0];
+
+          if (createdEntity) {
+            // Add the new entity to the in-memory cache with health = max_health and isMoving = false
+            const entityWithHealth = { ...createdEntity, health: createdEntity.max_health, isMoving: false };
+            entityCache.add(entityWithHealth);
+
+            // Broadcast entity with a small delay to ensure sprite data is ready
+            setTimeout(() => {
+              const resolvedEntity = { ...createdEntity, sprite_type: (createdEntity as any).sprite_type || 'animated', spriteLayers: getEntitySpriteLayers(createdEntity as any) };
+              const updatePacket = packetManager.createEntity(resolvedEntity as any);
+              const playersInMap = filterPlayersByMap(mapName);
+              for (const p of playersInMap) {
+                if (p.ws && p.ws.readyState === 1) {
+                  sendPacket(p.ws, updatePacket);
+                }
+              }
+            }, 100);
+          }
+
+          log.info(`Entity added by ${currentPlayer.username} on map ${mapName}`);
+        } catch (error: any) {
+          log.error(`Error adding entity: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error adding entity." }));
+        }
+        break;
+      }
+      case "SAVE_ENTITY": {
+        if (!currentPlayer) return;
+
+        if (
+          !currentPlayer.permissions.some(
+            (p: string) => p === "server.admin" || p === "server.*"
+          )
+        ) {
+          sendPacket(ws, packetManager.notify({ message: "You do not have permission to save entities." }));
+          return;
+        }
+
+        try {
+          const entityData = data as unknown as any;
+          if (!entityData?.id) {
+            sendPacket(ws, packetManager.notify({ message: "Invalid entity ID." }));
+            return;
+          }
+
+          await entitySystem.update(entityData);
+          const updatedEntities = await entitySystem.list();
+          await assetCache.set("entities", updatedEntities);
+
+          const mapName = entityData.map;
+          const updatedEntity = updatedEntities.find((e: any) => e.id === entityData.id);
+          if (updatedEntity) {
+            // Update the entity in the in-memory cache (reset health to max_health)
+            const cachedEntity = entityCache.getById(entityData.id);
+            if (cachedEntity) {
+              // Update properties from database and reset health to max_health
+              Object.assign(cachedEntity, {
+                ...updatedEntity,
+                health: updatedEntity.max_health // Reset health to max_health when saving
+              });
+              // Reset hasMoved so the entity won't broadcast unless it actually moves
+              (cachedEntity as any).hasMoved = false;
+            } else {
+              // Entity not in cache yet, add it with health = max_health and isMoving = false
+              entityCache.add({ ...updatedEntity, health: updatedEntity.max_health, isMoving: false, hasMoved: false });
+            }
+
+            // Update the entity's spawn point so it doesn't walk back to the old position
+            entityAI.updateEntitySpawnPoint(entityData.id, updatedEntity.position);
+
+            // Include the in-memory health in the update packet to preserve health
+            const resolvedEntity = {
+              ...updatedEntity,
+              sprite_type: (updatedEntity as any).sprite_type || 'animated',
+              spriteLayers: getEntitySpriteLayers(updatedEntity as any),
+              health: cachedEntity ? cachedEntity.health : updatedEntity.max_health
+            };
+            const updatePacket = packetManager.updateEntity(resolvedEntity as any);
+            const playersInMap = filterPlayersByMap(mapName);
+            for (const p of playersInMap) {
+              if (p.ws && p.ws.readyState === 1) {
+                sendPacket(p.ws, updatePacket);
+              }
+            }
+          }
+
+          log.info(`Entity ${entityData.id} saved by ${currentPlayer.username}`);
+        } catch (error: any) {
+          log.error(`Error saving entity: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error saving entity." }));
+        }
+        break;
+      }
+      case "DELETE_ENTITY": {
+        if (!currentPlayer) return;
+
+        if (
+          !currentPlayer.permissions.some(
+            (p: string) => p === "server.admin" || p === "server.*"
+          )
+        ) {
+          sendPacket(ws, packetManager.notify({ message: "You do not have permission to delete entities." }));
+          return;
+        }
+
+        try {
+          const { id } = data as unknown as { id: number };
+          if (!id) {
+            sendPacket(ws, packetManager.notify({ message: "Invalid entity ID." }));
+            return;
+          }
+
+          const allEntities = await assetCache.get("entities") as any[];
+          const existingEntity = (allEntities || []).find((e: any) => e.id === id);
+          if (!existingEntity) {
+            sendPacket(ws, packetManager.notify({ message: "Entity not found." }));
+            return;
+          }
+
+          const mapName = existingEntity.map;
+          await entitySystem.remove({ id } as any);
+          const updatedEntities = await entitySystem.list();
+          await assetCache.set("entities", updatedEntities);
+
+          // Remove entity from in-memory cache
+          entityCache.remove(id);
+
+          const removePacket = packetManager.entityDied(id.toString());
+          const playersInMap = filterPlayersByMap(mapName);
+          for (const p of playersInMap) {
+            if (p.ws && p.ws.readyState === 1) {
+              sendPacket(p.ws, removePacket);
+            }
+          }
+
+          sendPacket(ws, packetManager.notify({ message: "Entity deleted successfully." }));
+          log.info(`Entity ${id} deleted by ${currentPlayer.username}`);
+        } catch (error: any) {
+          log.error(`Error deleting entity: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error deleting entity." }));
         }
         break;
       }
@@ -3881,6 +4399,25 @@ export default async function packetReceiver(
             }
 
             sendPacket(ws, packetManager.toggleNpcEditor());
+            break;
+          }
+
+          case "EM":
+          case "ENTITYEDITOR": {
+
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "server.admin" || p === "server.*"
+              )
+            ) {
+              const notifyData = {
+                message: "You don't have permission to use this command",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            sendPacket(ws, packetManager.toggleEntityEditor());
             break;
           }
 
@@ -5501,6 +6038,17 @@ export default async function packetReceiver(
         }
         break;
       }
+      case "RESPAWN_ENTITY": {
+        // This is a client-side notification that entity respawn timer has expired
+        // The actual respawn is handled server-side by the entityAI system
+        // This handler just validates the request
+        if (!data || !(data as any).id) return;
+
+        log.debug(`Client requested respawn for entity ${(data as any).id}`);
+        // Server-side respawn is already handled by entityAI setTimeout in handleEntityDeath
+        break;
+      }
+
       case "GET_ONLINE_PLAYERS": {
         if (!currentPlayer?.isAdmin) return;
 
@@ -5514,6 +6062,7 @@ export default async function packetReceiver(
         sendPacket(ws, packetManager.onlinePlayersList(playerList));
         break;
       }
+
 
       default: {
         log.error(`Unknown packet type: ${type}`);
@@ -5542,8 +6091,14 @@ function filterPlayersByDistance(ws: any, distance: number, map: string) {
   const players = filterPlayersByMap(map);
   const currentPlayer = playerCache.get(ws.data.id);
   return players.filter((p) => {
-    const dx = p.location.position.x - currentPlayer.location.position.x;
-    const dy = p.location.position.y - currentPlayer.location.position.y;
+    const pPos = typeof p.location.position === 'string'
+      ? { x: Number(p.location.position.split(',')[0]), y: Number(p.location.position.split(',')[1]) }
+      : p.location.position;
+    const currPos = typeof currentPlayer.location.position === 'string'
+      ? { x: Number(currentPlayer.location.position.split(',')[0]), y: Number(currentPlayer.location.position.split(',')[1]) }
+      : currentPlayer.location.position;
+    const dx = (pPos?.x ?? 0) - (currPos?.x ?? 0);
+    const dy = (pPos?.y ?? 0) - (currPos?.y ?? 0);
     return Math.sqrt(dx * dx + dy * dy) <= distance;
   });
 }

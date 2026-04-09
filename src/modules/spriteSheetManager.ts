@@ -173,9 +173,8 @@ export function getNpcSpriteLayers(npc: {
   sprite_legs?: string | null;
   sprite_weapon?: string | null;
 }): NpcSpriteLayers | null {
-  if (!npc.sprite_type || npc.sprite_type === 'none') return null;
-
-  if (npc.sprite_type === 'static') {
+  const spriteType = npc.sprite_type || 'animated';
+  if (spriteType === 'static') {
     // Static: body is a plain icon, no template needed
     return {
       body: npc.sprite_body ? { name: npc.sprite_body, templateUrl: null, imageUrl: `${assetServerUrl}/icon?name=${encodeURIComponent(npc.sprite_body)}` } : null,
@@ -213,6 +212,60 @@ export function getNpcSpriteLayers(npc: {
     feet: npc.sprite_feet ? equipUrl(npc.sprite_feet) : null,
     legs: npc.sprite_legs ? equipUrl(npc.sprite_legs) : null,
     weapon: npc.sprite_weapon ? equipUrl(npc.sprite_weapon) : null,
+  };
+}
+
+// Entity sprite layers - uses player sprite templates like players, not NPC templates
+export function getEntitySpriteLayers(entity: {
+  sprite_type: string;
+  sprite_body?: string | null;
+  sprite_head?: string | null;
+  sprite_helmet?: string | null;
+  sprite_shoulderguards?: string | null;
+  sprite_neck?: string | null;
+  sprite_hands?: string | null;
+  sprite_chest?: string | null;
+  sprite_feet?: string | null;
+  sprite_legs?: string | null;
+  sprite_weapon?: string | null;
+}): NpcSpriteLayers | null {
+  const spriteType = entity.sprite_type || 'animated';
+  if (spriteType === 'static') {
+    return {
+      body: entity.sprite_body ? { name: entity.sprite_body, templateUrl: null, imageUrl: `${assetServerUrl}/icon?name=${encodeURIComponent(entity.sprite_body)}` } : null,
+      head: null, helmet: null, shoulderguards: null, neck: null,
+      hands: null, chest: null, feet: null, legs: null, weapon: null,
+    };
+  }
+
+  // Animated: use player sprite templates (not NPC templates)
+  const bodyUrl = (name: string): SpriteUrl => ({
+    name,
+    templateUrl: `${assetServerUrl}/sprite-sheet-template?name=player_body_base`,
+    imageUrl: `${assetServerUrl}/sprite-sheet-image?name=${encodeURIComponent(name)}`,
+  });
+  const headUrl = (name: string): SpriteUrl => ({
+    name,
+    templateUrl: `${assetServerUrl}/sprite-sheet-template?name=player_head_base`,
+    imageUrl: `${assetServerUrl}/sprite-sheet-image?name=${encodeURIComponent(name)}`,
+  });
+  const equipUrl = (name: string): SpriteUrl => ({
+    name,
+    templateUrl: `${assetServerUrl}/sprite-sheet-template?name=${encodeURIComponent(name)}`,
+    imageUrl: `${assetServerUrl}/sprite-sheet-image?name=${encodeURIComponent(name)}`,
+  });
+
+  return {
+    body: entity.sprite_body ? bodyUrl(entity.sprite_body) : null,
+    head: entity.sprite_head ? headUrl(entity.sprite_head) : null,
+    helmet: entity.sprite_helmet ? equipUrl(entity.sprite_helmet) : null,
+    shoulderguards: entity.sprite_shoulderguards ? equipUrl(entity.sprite_shoulderguards) : null,
+    neck: entity.sprite_neck ? equipUrl(entity.sprite_neck) : null,
+    hands: entity.sprite_hands ? equipUrl(entity.sprite_hands) : null,
+    chest: entity.sprite_chest ? equipUrl(entity.sprite_chest) : null,
+    feet: entity.sprite_feet ? equipUrl(entity.sprite_feet) : null,
+    legs: entity.sprite_legs ? equipUrl(entity.sprite_legs) : null,
+    weapon: entity.sprite_weapon ? equipUrl(entity.sprite_weapon) : null,
   };
 }
 

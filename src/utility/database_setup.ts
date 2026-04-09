@@ -259,6 +259,55 @@ const createNpcTable = async () => {
   await query(sql);
 };
 
+const createEntitiesTable = async () => {
+  log.info("Creating entities table...");
+  const sql = `
+    CREATE TABLE IF NOT EXISTS entities (
+      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+      last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+      name VARCHAR(255) DEFAULT NULL,
+      map VARCHAR(255) NOT NULL,
+      position VARCHAR(255) NOT NULL,
+      direction VARCHAR(10) NOT NULL DEFAULT 'down',
+      particles VARCHAR(500) DEFAULT NULL,
+      sprite_body VARCHAR(255) DEFAULT NULL,
+      sprite_head VARCHAR(255) DEFAULT NULL,
+      sprite_helmet VARCHAR(255) DEFAULT NULL,
+      sprite_shoulderguards VARCHAR(255) DEFAULT NULL,
+      sprite_neck VARCHAR(255) DEFAULT NULL,
+      sprite_hands VARCHAR(255) DEFAULT NULL,
+      sprite_chest VARCHAR(255) DEFAULT NULL,
+      sprite_feet VARCHAR(255) DEFAULT NULL,
+      sprite_legs VARCHAR(255) DEFAULT NULL,
+      sprite_weapon VARCHAR(255) DEFAULT NULL,
+      aggro_type VARCHAR(255) DEFAULT 'neutral',
+      level INT DEFAULT 1,
+      max_health INT DEFAULT 100,
+      aggro_range INT DEFAULT 300,
+      speed DECIMAL(5,2) DEFAULT 2.0,
+      aggro_leash INT DEFAULT 600
+    )
+  `;
+  await query(sql);
+};
+
+const createEntitySpawnPointsTable = async () => {
+  log.info("Creating entity_spawn_points table...");
+  const sql = `
+    CREATE TABLE IF NOT EXISTS entity_spawn_points (
+      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+      entity_template_id INT NOT NULL,
+      map VARCHAR(255) NOT NULL,
+      position VARCHAR(255) NOT NULL,
+      respawn_time INT DEFAULT 30000,
+      max_spawns INT DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (entity_template_id) REFERENCES entities(id) ON DELETE CASCADE
+    )
+  `;
+  await query(sql);
+};
+
 const createParticleTable = async () => {
   log.info("Creating particles table...");
   const sql = `
@@ -626,6 +675,12 @@ const createIndexes = async () => {
     ,{ name: "idx_learned_spells_username", sql: "CREATE INDEX idx_learned_spells_username ON learned_spells(username)" }
 
     ,{ name: "idx_equipment_username", sql: "CREATE INDEX idx_equipment_username ON equipment(username)" }
+
+    ,{ name: "idx_entities_map", sql: "CREATE INDEX idx_entities_map ON entities(map)" }
+
+    ,{ name: "idx_entity_spawn_points_map", sql: "CREATE INDEX idx_entity_spawn_points_map ON entity_spawn_points(map)" }
+
+    ,{ name: "idx_entity_spawn_points_template", sql: "CREATE INDEX idx_entity_spawn_points_template ON entity_spawn_points(entity_template_id)" }
   ];
 
   for (const index of indexes) {
@@ -671,6 +726,8 @@ const setupDatabase = async () => {
   await createPermissionsTable();
   await createPermissionTypesTable();
   await createNpcTable();
+  await createEntitiesTable();
+  await createEntitySpawnPointsTable();
   await createParticleTable();
   await createWeatherTable();
   await createDefaultWeather();
