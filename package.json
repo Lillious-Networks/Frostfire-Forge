@@ -3,7 +3,6 @@
   "module": "./src/socket/server.ts",
   "dependencies": {
     "openai": "^4.104.0",
-    "sharp": "^0.33.5",
     "typescript": "^5.9.3"
   },
   "devDependencies": {
@@ -24,8 +23,6 @@
     "setup-development": "bun create-config --environment development",
     "setup-production": "bun create-config --environment production && bun setup",
     "setup-localdb": "bun --env-file=.env.development ./src/utility/database_setup_sqlite.ts",
-    "start-client": "cd ./Frostfire-Forge-Client && npm i && npm start",
-    "package-client": "cd ./Frostfire-Forge-Client && npm i && npm run package",
     "docker:dev": "docker compose -f src/docker/docker-compose.dev.yml up -d",
     "docker:dev:down": "docker compose -f src/docker/docker-compose.dev.yml down",
     "docker:dev:logs": "docker compose -f src/docker/docker-compose.dev.yml logs -f",

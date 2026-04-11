@@ -21,6 +21,7 @@ import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondens
 
 import * as settings from "../config/settings.json";
 import assetCache from "../services/assetCache.ts";
+import entityCache from "../services/entityCache.ts";
 import { GatewayClient } from "../modules/gateway-client.ts";
 
 const _cert = path.join(import.meta.dir, "../certs/cert.pem");
@@ -318,7 +319,15 @@ listener.on("onAwake", async () => {
   await player.clear();
 });
 
-listener.on("onStart", async () => {});
+listener.on("onStart", async () => {
+  // Load entities into in-memory cache with full health
+  try {
+    const entitySystem = (await import("../systems/entities")).default;
+    await entityCache.initialize(entitySystem);
+  } catch (error: any) {
+    log.error(`Error initializing entities on server start: ${error.message}`);
+  }
+});
 
 event.emit("online");
 
@@ -331,6 +340,7 @@ const wsPort = parseInt(process.env.WEB_SOCKET_PORT || "3000");
 gatewayClient = new GatewayClient({
   gatewayUrl: process.env.GATEWAY_URL || "http://localhost:9999",
   serverId,
+  description: process.env.SERVER_DESCRIPTION || "",
   host: serverHost,
   publicHost: publicHost,
   port: wsPort,

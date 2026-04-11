@@ -1,7 +1,5 @@
 import crypto from "crypto";
 import log from "../modules/logger";
-import path from "path";
-import fs from "fs";
 
 export default (async () => {
 
@@ -80,15 +78,6 @@ export default (async () => {
   }
 
   process.env.RSA_PASSPHRASE = crypto.randomBytes(32).toString("hex");
-
-  const assetPath = path.join(import.meta.dir, "..", "config", "assets.json");
-  if (!fs.existsSync(assetPath)) {
-    startUpErrors.push(
-      `Asset config not found at ${assetPath}, aborting... Please ensure the assets.json file exists to suppress this message.`
-    );
-  } else {
-    log.info(`Asset config found at ${assetPath}`);
-  }
 
   if (!process.env.GAME_NAME) {
     startUpErrors.push(

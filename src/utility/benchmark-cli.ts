@@ -498,8 +498,8 @@ async function createClients(amount: number, host: string, websocketUrl: string,
 
                             startKeepAlive(websocket);
 
-                            //const randomDelay = Math.floor(Math.random() * 10000);
-                            //startMovementSimulation(websocket, randomDelay);
+                            const randomDelay = Math.floor(Math.random() * 10000);
+                            startMovementSimulation(websocket, randomDelay);
 
                             if (loggedInCount === amount) {
                                 clearTimeout(loginTimeout);
@@ -628,7 +628,15 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
     websockets.forEach((websocket: any) => {
         websocket.addEventListener('message', (event: any) => {
             try {
-                const message = JSON.parse(packet.decode(event.data));
+                const decodedMessage = packet.decode(event.data);
+
+                // Skip empty messages
+                if (!decodedMessage || decodedMessage.trim().length === 0) {
+                    return;
+                }
+
+                const message = JSON.parse(decodedMessage);
+
                 if (message.type === 'TIME_SYNC') {
                     const sentTime = latencyStats.lastSyncTimes.get(websocket);
                     if (sentTime) {
@@ -640,7 +648,13 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
                         }
                     }
                 }
+                // Silently ignore other message types
             } catch (e: any) {
+                // Only log unexpected errors, not JSON parse failures on non-JSON data
+                if (e instanceof SyntaxError) {
+                    // Silently ignore JSON parse errors (expected for binary packets)
+                    return;
+                }
                 console.error(chalk.red(`Error processing message for latency: ${e.message}`));
             }
         });

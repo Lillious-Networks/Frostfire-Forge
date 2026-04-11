@@ -133,6 +133,7 @@ GATEWAY_GAME_SERVER_SECRET="another_secret_key" # Game server authentication tok
 SERVER_HOST="game-server-hostname"              # Internal server hostname
 PUBLIC_HOST="yourdomain.com"                    # External hostname for clients
 SERVER_ID="server-1"                            # Game server identification
+SERVER_DESCRIPTION="The server description"     # Game server description
 
 # Asset Server (Required)
 ASSET_SERVER_URL="http://assets:8000"           # Asset server endpoint

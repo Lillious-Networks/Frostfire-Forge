@@ -3,18 +3,6 @@
 import log from "./logger.ts";
 import os from "os";
 
-interface ServerRegistrationConfig {
-  gatewayUrl: string;
-  assetServerUrl?: string;
-  serverId: string;
-  host: string;
-  publicHost?: string;
-  port: number;
-  wsPort: number;
-  maxConnections: number;
-  heartbeatInterval: number;
-}
-
 class GatewayClient {
   private config: ServerRegistrationConfig;
   private heartbeatTimer?: Timer;
@@ -47,6 +35,7 @@ class GatewayClient {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: this.config.serverId,
+          description: this.config.description || "",
           host: this.config.host,
           publicHost: this.config.publicHost || this.config.host,
           port: this.config.port,
@@ -394,4 +383,3 @@ class GatewayClient {
 }
 
 export { GatewayClient };
-export type { ServerRegistrationConfig };

@@ -4,8 +4,6 @@ import log from "../modules/logger";
 import player, { clearMapCache } from "../systems/player.ts";
 import permissions from "../systems/permissions";
 import { getAuthWorker } from "./authentication_pool.ts";
-import fs from "fs";
-import path from "path";
 const authentication_queue = new Set<string>();
 const authentication_session_queue = new Set<string>();
 
@@ -15,6 +13,7 @@ import layerManager from "../services/layermanager";
 import mapIndex from "../services/mapindex";
 import gameLoop from "../services/gameloop";
 import assetCache from "../services/assetCache";
+import entityCache from "../services/entityCache.ts";
 import { reloadMap } from "../modules/assetloader";
 import language from "../systems/language";
 import quests from "../systems/quests";
@@ -23,6 +22,10 @@ import parties from "../systems/parties.ts";
 import spells from "../systems/spells";
 import equipment from "../systems/equipment.ts";
 import inventory from "../systems/inventory";
+import particles from "../systems/particles";
+import npcSystem from "../systems/npcs";
+import entitySystem from "../systems/entities";
+import entityAI from "../systems/entityAI";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const mapPropertiesCache = await assetCache.get("mapProperties");
@@ -30,8 +33,8 @@ import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 
 import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
-import { saveMapChunks } from "../modules/assetloader";
-import { getPlayerSpriteSheetData, getSpriteSheetImage, isSpriteSheetSystemAvailable } from "../modules/spriteSheetManager";
+import { saveMapChunks, saveMapProperties } from "../modules/assetloader";
+import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers, getEntitySpriteLayers } from "../modules/spriteSheetManager";
 import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers } from "./aoi";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
@@ -47,9 +50,6 @@ async function waitForSpritesReady() {
 
 export const spriteDataCacheReady = waitForSpritesReady();
 
-const npcs = await assetCache.get("npcs");
-const particles = await assetCache.get("particles");
-
 let restartScheduled: boolean;
 let restartTimers: ReturnType<typeof setTimeout>[];
 
@@ -57,12 +57,53 @@ let globalStateRevision: number = 0;
 
 export const movementBatchQueue = new Map<string, Map<string, any>>();
 
-const BATCH_INTERVAL = 8;
+let BATCH_INTERVAL = 8; // Will be set dynamically based on flush latency
 
-const MAX_BUFFER_BACKPRESSURE = 1024 * 32;
+const MAX_BUFFER_BACKPRESSURE = 1024 * 32; // 32KB - aggressive at high loads
 
 let lastFlushTime = Date.now();
 let flushCount = 0;
+
+// Track recent flush latencies for adaptive batch scheduling
+const LATENCY_HISTORY_SIZE = 20; // Keep last 20 flushes
+const recentFlushLatencies: number[] = [];
+
+/**
+ * Calculate average flush latency from recent history
+ */
+function getAverageFlushLatency(): number {
+  if (recentFlushLatencies.length === 0) return 0;
+  const sum = recentFlushLatencies.reduce((a, b) => a + b, 0);
+  return sum / recentFlushLatencies.length;
+}
+
+/**
+ * Calculate adaptive batch interval based on actual flush latency
+ * Higher latency = more aggressive throttling
+ * This dynamically adapts to real server load instead of player count
+ */
+function getAdaptiveBatchInterval(): number {
+  const avgLatency = getAverageFlushLatency();
+
+  // Thresholds based on flush latency (in milliseconds)
+  if (avgLatency < 5) {
+    return 25; // <5ms: 40 Hz - very responsive
+  } else if (avgLatency < 10) {
+    return 30; // 5-10ms: 33 Hz - responsive
+  } else if (avgLatency < 15) {
+    return 35; // 10-15ms: 28 Hz - good balance
+  } else if (avgLatency < 20) {
+    return 45; // 15-20ms: 22 Hz - starting to reduce
+  } else if (avgLatency < 30) {
+    return 70; // 20-30ms: 14 Hz - moderate throttling
+  } else if (avgLatency < 40) {
+    return 100; // 30-40ms: 10 Hz - aggressive throttling
+  } else if (avgLatency < 50) {
+    return 130; // 40-50ms: 7 Hz - very aggressive
+  } else {
+    return 170; // 50+ms: 5 Hz - maximum stability
+  }
+}
 
 function flushMovementBatches() {
   const startTime = Date.now();
@@ -70,17 +111,24 @@ function flushMovementBatches() {
   const timeSinceLastFlush = startTime - lastFlushTime;
   lastFlushTime = startTime;
 
-  const isOverloaded = timeSinceLastFlush > 30;
+  const avgLatency = getAverageFlushLatency();
+
+  // Overloaded if current cycle is taking longer than average or latency is building
+  const isOverloaded = timeSinceLastFlush > 30 || avgLatency > 25;
+
   let skippedDueToLoad = 0;
 
-  const MAX_BATCH_QUEUE_SIZE = 1000;
+  // Queue management based on latency
+  const MAX_BATCH_QUEUE_SIZE = avgLatency > 40 ? 800 : (avgLatency > 25 ? 1200 : 2000);
+
   if (movementBatchQueue.size > MAX_BATCH_QUEUE_SIZE) {
-    const toDrop = Math.floor(MAX_BATCH_QUEUE_SIZE * 0.1);
+    const dropRate = avgLatency > 40 ? 0.15 : (avgLatency > 25 ? 0.08 : 0.05);
+    const toDrop = Math.floor(MAX_BATCH_QUEUE_SIZE * dropRate);
     const keys = Array.from(movementBatchQueue.keys());
     for (let i = 0; i < toDrop; i++) {
       movementBatchQueue.delete(keys[i]);
     }
-    log.debug(`[MOVEMENT] Dropped ${toDrop} movement batches due to queue overflow`);
+    log.debug(`[MOVEMENT] Dropped ${toDrop} movement batches due to queue overflow (latency: ${Math.round(avgLatency)}ms)`);
   }
 
   for (const [_mapName, playerMovements] of movementBatchQueue.entries()) {
@@ -135,7 +183,10 @@ function flushMovementBatches() {
 
       const bufferedAmount = receiver.ws.bufferedAmount;
 
-      if (bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
+      // Dynamic backpressure threshold based on latency
+      const backpressureThreshold = avgLatency > 35 ? 1024 * 16 : (avgLatency > 20 ? 1024 * 24 : MAX_BUFFER_BACKPRESSURE);
+
+      if (bufferedAmount > backpressureThreshold) {
         skippedDueToLoad++;
         continue;
       }
@@ -144,7 +195,19 @@ function flushMovementBatches() {
       sendPacket(receiver.ws, batchPacket);
       sentCount++;
 
-      if (isOverloaded && sentCount > 100 && Date.now() - startTime > 25) {
+      // Early-exit thresholds based on latency
+      let sentThreshold = 200;
+      let timeThreshold = 40;
+
+      if (avgLatency > 40) {
+        sentThreshold = 50;
+        timeThreshold = 20;
+      } else if (avgLatency > 25) {
+        sentThreshold = 100;
+        timeThreshold = 30;
+      }
+
+      if (isOverloaded && sentCount > sentThreshold && Date.now() - startTime > timeThreshold) {
         skippedDueToLoad += receiverArray.length - sentCount;
         break;
       }
@@ -152,6 +215,13 @@ function flushMovementBatches() {
   }
 
   movementBatchQueue.clear();
+
+  // Track this flush's latency
+  const flushLatency = Date.now() - startTime;
+  recentFlushLatencies.push(flushLatency);
+  if (recentFlushLatencies.length > LATENCY_HISTORY_SIZE) {
+    recentFlushLatencies.shift();
+  }
 
   flushCount++;
   if (flushCount % 100 === 0) {
@@ -165,7 +235,7 @@ function flushMovementBatches() {
       : 0;
 
     if (skippedDueToLoad > 0 || avgBuffered > 24) {
-      log.warn(`[MOVEMENT] ${playerCount} players | Skipped ${skippedDueToLoad} updates | Avg buffer: ${avgBuffered}KB | Flush: ${Date.now() - startTime}ms | Rate: ${Math.round(1000/BATCH_INTERVAL)}Hz`);
+      log.warn(`[MOVEMENT] ${playerCount} players | Skipped ${skippedDueToLoad} updates | Avg buffer: ${avgBuffered}KB | Flush latency: ${Math.round(avgLatency)}ms | Rate: ${Math.round(1000/BATCH_INTERVAL)}Hz`);
     }
   }
 }
@@ -175,35 +245,26 @@ export const spawnBatchQueue = new Map<string, Map<string, any>>();
 async function flushSpawnBatches() {
   if (spawnBatchQueue.size === 0) return;
 
-  log.info(`[BATCH] flushSpawnBatches: queue has ${spawnBatchQueue.size} entries`);
-
   const allPlayers = playerCache.list();
 
   for (const [receivingPlayerId, spawnedPlayers] of spawnBatchQueue.entries()) {
     if (spawnedPlayers.size === 0) {
-      log.info(`[BATCH] Skipping ${receivingPlayerId}: empty spawn set`);
       continue;
     }
 
     const receivingPlayer = allPlayers[receivingPlayerId];
-    log.warn(`[BATCH] Processing spawns for ${receivingPlayerId} - player in cache: ${!!receivingPlayer}`);
 
     if (!receivingPlayer) {
-      log.warn(`[BATCH] Skipping ${receivingPlayerId}: player not in cache`);
       continue;
     }
     if (!receivingPlayer.ws) {
-      log.warn(`[BATCH] Skipping ${receivingPlayerId}: no websocket`);
       continue;
     }
-    log.warn(`[BATCH] Websocket readyState: ${receivingPlayer.ws.readyState}`);
     if (receivingPlayer.ws.readyState !== 1) {
-      log.warn(`[BATCH] Skipping ${receivingPlayerId}: websocket not open (state=${receivingPlayer.ws.readyState})`);
       continue;
     }
 
     if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
-      log.warn(`[BATCH] Skipping ${receivingPlayerId}: backpressure too high (${receivingPlayer.ws.bufferedAmount} > ${MAX_BUFFER_BACKPRESSURE})`);
       continue;
     }
 
@@ -222,41 +283,29 @@ async function flushSpawnBatches() {
           const animationName = getAnimationNameForDirection(
             fullPlayer.location.position?.direction || "down",
             !!fullPlayer.moving,
-            false,
-            undefined,
+            !!fullPlayer.mounted,
+            fullPlayer.mount_type,
             !!fullPlayer.casting
           );
           const playerSpriteData = await getPlayerSpriteSheetData(animationName, fullPlayer.equipment || null);
 
-          const extractEquipmentName = (prefixedName: string) => {
-            const firstUnderscore = prefixedName.indexOf('_');
-            return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
-          };
+          const mountSpriteForBatch = fullPlayer.mount_type ? getMountSpriteUrl(fullPlayer.mount_type) : null;
 
           let spriteData = null;
-          if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite) {
-            const bodyImageData = playerSpriteData.bodySprite ? await getSpriteSheetImage(playerSpriteData.bodySprite.name) : null;
-            const headImageData = playerSpriteData.headSprite ? await getSpriteSheetImage(playerSpriteData.headSprite.name) : null;
-            const armorHelmetImageData = playerSpriteData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorHelmetSprite.name)) : null;
-            const armorShoulderguardsImageData = playerSpriteData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorShoulderguardsSprite.name)) : null;
-            const armorNeckImageData = playerSpriteData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorNeckSprite.name)) : null;
-            const armorHandsImageData = playerSpriteData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorHandsSprite.name)) : null;
-            const armorChestImageData = playerSpriteData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorChestSprite.name)) : null;
-            const armorFeetImageData = playerSpriteData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorFeetSprite.name)) : null;
-            const armorLegsImageData = playerSpriteData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorLegsSprite.name)) : null;
-            const armorWeaponImageData = playerSpriteData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorWeaponSprite.name)) : null;
-
+          if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite || mountSpriteForBatch) {
+            // Sprite URLs are now sent to the client, which fetches them from the asset server
             spriteData = {
-              bodySprite: playerSpriteData.bodySprite ? { ...playerSpriteData.bodySprite, imageData: bodyImageData } : null,
-              headSprite: playerSpriteData.headSprite ? { ...playerSpriteData.headSprite, imageData: headImageData } : null,
-              armorHelmetSprite: (playerSpriteData.armorHelmetSprite && armorHelmetImageData) ? { ...playerSpriteData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
-              armorShoulderguardsSprite: (playerSpriteData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...playerSpriteData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
-              armorNeckSprite: (playerSpriteData.armorNeckSprite && armorNeckImageData) ? { ...playerSpriteData.armorNeckSprite, imageData: armorNeckImageData } : null,
-              armorHandsSprite: (playerSpriteData.armorHandsSprite && armorHandsImageData) ? { ...playerSpriteData.armorHandsSprite, imageData: armorHandsImageData } : null,
-              armorChestSprite: (playerSpriteData.armorChestSprite && armorChestImageData) ? { ...playerSpriteData.armorChestSprite, imageData: armorChestImageData } : null,
-              armorFeetSprite: (playerSpriteData.armorFeetSprite && armorFeetImageData) ? { ...playerSpriteData.armorFeetSprite, imageData: armorFeetImageData } : null,
-              armorLegsSprite: (playerSpriteData.armorLegsSprite && armorLegsImageData) ? { ...playerSpriteData.armorLegsSprite, imageData: armorLegsImageData } : null,
-              armorWeaponSprite: (playerSpriteData.armorWeaponSprite && armorWeaponImageData) ? { ...playerSpriteData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
+              mountSprite: mountSpriteForBatch,
+              bodySprite: playerSpriteData.bodySprite || null,
+              headSprite: playerSpriteData.headSprite || null,
+              armorHelmetSprite: playerSpriteData.armorHelmetSprite || null,
+              armorShoulderguardsSprite: playerSpriteData.armorShoulderguardsSprite || null,
+              armorNeckSprite: playerSpriteData.armorNeckSprite || null,
+              armorHandsSprite: playerSpriteData.armorHandsSprite || null,
+              armorChestSprite: playerSpriteData.armorChestSprite || null,
+              armorFeetSprite: playerSpriteData.armorFeetSprite || null,
+              armorLegsSprite: playerSpriteData.armorLegsSprite || null,
+              armorWeaponSprite: playerSpriteData.armorWeaponSprite || null,
               animationState: playerSpriteData.animationState,
             };
           }
@@ -279,7 +328,6 @@ async function flushSpawnBatches() {
       const animationPromises = playersWithSprites.map(async (spawnData) => {
         const spawnedPlayer = allPlayers[spawnData.id];
         if (!spawnedPlayer) {
-          log.warn(`[BATCH] spawnedPlayer null for ${spawnData.id}`);
           return null;
         }
 
@@ -346,14 +394,20 @@ async function scheduleBatchFlush() {
   try {
     await flushAllBatches();
   } catch (error) {
-    log.error(`[BATCH] Error during batch flush: ${error}`);
+    // Silently ignore batch flush errors
   } finally {
     if (batchTimer) clearTimeout(batchTimer);
-    batchTimer = setTimeout(scheduleBatchFlush, BATCH_INTERVAL);
+    // Use adaptive interval based on current player count
+    const adaptiveInterval = getAdaptiveBatchInterval();
+    BATCH_INTERVAL = adaptiveInterval;
+    batchTimer = setTimeout(scheduleBatchFlush, adaptiveInterval);
   }
 }
 
-batchTimer = setTimeout(scheduleBatchFlush, BATCH_INTERVAL);
+// Initialize with adaptive interval
+const initialInterval = getAdaptiveBatchInterval();
+BATCH_INTERVAL = initialInterval;
+batchTimer = setTimeout(scheduleBatchFlush, initialInterval);
 
 export function clearBatchQueuesForPlayer(playerId: string, mapName: string) {
 
@@ -417,6 +471,7 @@ authWorker.on("message", async (result: any) => {
 
   const playerData = status.data as PlayerData;
   if (status.authenticated && status.completed && playerData) {
+    const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
 
     if (!playerData.isAdmin && playerData.isNoclip) {
       player.toggleNoclip(playerData.username).catch(err =>
@@ -567,8 +622,12 @@ authWorker.on("message", async (result: any) => {
       mapIndex.addPlayer(_pcache.id, _pcache.location.map);
     }
 
+    // Extract object layers from map data
+    const objectLayers = (map?.data?.layers || [])
+      .filter((layer: any) => layer.type === "objectgroup")
+      .map((layer: any) => ({ name: layer.name }));
+
     // Send map chunk metadata instead of full map
-    const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
     const mapMetadata = {
       name: spawnLocation?.map,
       assetServerUrl,
@@ -581,6 +640,9 @@ authWorker.on("message", async (result: any) => {
       spawnY: position?.y || 0,
       direction: position?.direction || "down",
       chunks: null, // Client will fetch from asset server
+      warps: player_map_properties?.warps || null,
+      graveyards: player_map_properties?.graveyards || null,
+      objectLayers: objectLayers,
     };
 
     sendPacket(ws, packetManager.loadMap(mapMetadata));
@@ -597,11 +659,10 @@ authWorker.on("message", async (result: any) => {
 
       let spriteDataForSelf = null;
       if (selfSpriteData.bodySprite || selfSpriteData.headSprite) {
-        const bodyImageData = selfSpriteData.bodySprite ? await getSpriteSheetImage(selfSpriteData.bodySprite.name) : null;
-        const headImageData = selfSpriteData.headSprite ? await getSpriteSheetImage(selfSpriteData.headSprite.name) : null;
+        // Sprite URLs are now sent to the client, which fetches them from the asset server
         spriteDataForSelf = {
-          bodySprite: selfSpriteData.bodySprite ? { ...selfSpriteData.bodySprite, imageData: bodyImageData } : null,
-          headSprite: selfSpriteData.headSprite ? { ...selfSpriteData.headSprite, imageData: headImageData } : null,
+          bodySprite: selfSpriteData.bodySprite || null,
+          headSprite: selfSpriteData.headSprite || null,
           animationState: selfSpriteData.animationState,
         };
       }
@@ -639,38 +700,26 @@ authWorker.on("message", async (result: any) => {
 
       for (const p of playersInAOI) {
 
-        const animationName = getAnimationNameForDirection(p.location.position?.direction || "down", !!p.moving, false, undefined, !!p.casting);
+        const animationName = getAnimationNameForDirection(p.location.position?.direction || "down", !!p.moving, !!p.mounted, p.mount_type, !!p.casting);
         const playerSpriteData = await getPlayerSpriteSheetData(animationName, p.equipment || null);
 
-        const extractEquipmentName = (prefixedName: string) => {
-          const firstUnderscore = prefixedName.indexOf('_');
-          return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
-        };
+        const mountSprite = p.mount_type ? getMountSpriteUrl(p.mount_type) : null;
 
         let spriteData = null;
-        if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite) {
-          const bodyImageData = playerSpriteData.bodySprite ? await getSpriteSheetImage(playerSpriteData.bodySprite.name) : null;
-          const headImageData = playerSpriteData.headSprite ? await getSpriteSheetImage(playerSpriteData.headSprite.name) : null;
-          const armorHelmetImageData = playerSpriteData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorHelmetSprite.name)) : null;
-          const armorShoulderguardsImageData = playerSpriteData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorShoulderguardsSprite.name)) : null;
-          const armorNeckImageData = playerSpriteData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorNeckSprite.name)) : null;
-          const armorHandsImageData = playerSpriteData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorHandsSprite.name)) : null;
-          const armorChestImageData = playerSpriteData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorChestSprite.name)) : null;
-          const armorFeetImageData = playerSpriteData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorFeetSprite.name)) : null;
-          const armorLegsImageData = playerSpriteData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorLegsSprite.name)) : null;
-          const armorWeaponImageData = playerSpriteData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(playerSpriteData.armorWeaponSprite.name)) : null;
-
+        if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite || mountSprite) {
+          // Sprite URLs are now sent to the client, which fetches them from the asset server
           spriteData = {
-            bodySprite: playerSpriteData.bodySprite ? { ...playerSpriteData.bodySprite, imageData: bodyImageData } : null,
-            headSprite: playerSpriteData.headSprite ? { ...playerSpriteData.headSprite, imageData: headImageData } : null,
-            armorHelmetSprite: (playerSpriteData.armorHelmetSprite && armorHelmetImageData) ? { ...playerSpriteData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
-            armorShoulderguardsSprite: (playerSpriteData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...playerSpriteData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
-            armorNeckSprite: (playerSpriteData.armorNeckSprite && armorNeckImageData) ? { ...playerSpriteData.armorNeckSprite, imageData: armorNeckImageData } : null,
-            armorHandsSprite: (playerSpriteData.armorHandsSprite && armorHandsImageData) ? { ...playerSpriteData.armorHandsSprite, imageData: armorHandsImageData } : null,
-            armorChestSprite: (playerSpriteData.armorChestSprite && armorChestImageData) ? { ...playerSpriteData.armorChestSprite, imageData: armorChestImageData } : null,
-            armorFeetSprite: (playerSpriteData.armorFeetSprite && armorFeetImageData) ? { ...playerSpriteData.armorFeetSprite, imageData: armorFeetImageData } : null,
-            armorLegsSprite: (playerSpriteData.armorLegsSprite && armorLegsImageData) ? { ...playerSpriteData.armorLegsSprite, imageData: armorLegsImageData } : null,
-            armorWeaponSprite: (playerSpriteData.armorWeaponSprite && armorWeaponImageData) ? { ...playerSpriteData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
+            mountSprite: mountSprite,
+            bodySprite: playerSpriteData.bodySprite || null,
+            headSprite: playerSpriteData.headSprite || null,
+            armorHelmetSprite: playerSpriteData.armorHelmetSprite || null,
+            armorShoulderguardsSprite: playerSpriteData.armorShoulderguardsSprite || null,
+            armorNeckSprite: playerSpriteData.armorNeckSprite || null,
+            armorHandsSprite: playerSpriteData.armorHandsSprite || null,
+            armorChestSprite: playerSpriteData.armorChestSprite || null,
+            armorFeetSprite: playerSpriteData.armorFeetSprite || null,
+            armorLegsSprite: playerSpriteData.armorLegsSprite || null,
+            armorWeaponSprite: playerSpriteData.armorWeaponSprite || null,
             animationState: playerSpriteData.animationState,
           };
         }
@@ -712,7 +761,7 @@ authWorker.on("message", async (result: any) => {
             const pcache = playerCache.get(pl.id);
             await sendAnimationTo(
               ws,
-              getAnimationNameForDirection(pl.location.direction, !!pcache?.moving, false, undefined, !!pcache?.casting),
+              getAnimationNameForDirection(pl.location.direction, !!pcache?.moving, !!pcache?.mounted, pcache?.mount_type, !!pcache?.casting),
               pl.id
             );
           }
@@ -793,34 +842,32 @@ authWorker.on("message", async (result: any) => {
     });
 
     setImmediate(async () => {
-      const npcsData = await npcs;
+      const npcsData = await assetCache.get("npcs") as Npc[];
       const npcsInMap = npcsData.filter(
         (npc: Npc) => npc.map === spawnLocation.map.replace(".json", "")
       );
+      const particlesCache = await assetCache.get("particles") as Particle[] | null;
       const npcPackets = await npcsInMap.reduce(
         async (packetsPromise: Promise<any[]>, npc: Npc) => {
           const packets = await packetsPromise;
           const particleArray =
-            typeof npc.particles === "string"
+            typeof npc.particles === "string" && particlesCache
               ? (
-                await Promise.all(
-                  (npc.particles as string)
-                    .split(",")
-                    .map(async (name) =>
-                      (
-                        await particles
-                      ).find((p: Particle) => p.name === name.trim())
-                    )
-                )
+                (npc.particles as string)
+                  .split(",")
+                  .map((name) =>
+                    particlesCache.find((p: Particle) => p.name === name.trim())
+                  )
               ).filter(Boolean)
               : [];
           const npcData = {
             id: npc.id,
             last_updated: npc.last_updated,
+            name: npc.name || null,
             location: {
               x: npc.position.x,
               y: npc.position.y,
-              direction: "down",
+              direction: npc.position.direction || "down",
             },
             script: npc.script,
             hidden: npc.hidden,
@@ -829,6 +876,8 @@ authWorker.on("message", async (result: any) => {
             quest: npc.quest,
             map: npc.map,
             position: npc.position,
+            sprite_type: npc.sprite_type,
+            spriteLayers: getNpcSpriteLayers(npc),
           };
           return [...packets, ...packetManager.createNpc(npcData)];
         },
@@ -839,11 +888,86 @@ authWorker.on("message", async (result: any) => {
       }
     });
 
+    // Send entities on map spawn (from in-memory cache, no database calls)
+    setImmediate(async () => {
+      try {
+        const mapName = spawnLocation.map.replace(".json", "");
+        const entitiesInMap = entityCache.getByMap(mapName);
+        const particlesCache = await assetCache.get("particles") as Particle[] | null;
+        const entityPackets = await entitiesInMap.reduce(
+          async (packetsPromise: Promise<any[]>, entity: any) => {
+            const packets = await packetsPromise;
+            const particleArray =
+              typeof entity.particles === "string" && particlesCache
+                ? (
+                  (entity.particles as string)
+                    .split(",")
+                    .map((name) =>
+                      particlesCache.find((p: Particle) => p.name === name.trim())
+                    )
+                ).filter(Boolean)
+                : [];
+            const entityData = {
+              id: entity.id,
+              last_updated: entity.last_updated,
+              name: entity.name || null,
+              location: {
+                x: entity.position.x,
+                y: entity.position.y,
+                direction: entity.position.direction || "down",
+              },
+              health: entity.health,
+              max_health: entity.max_health,
+              level: entity.level,
+              aggro_type: entity.aggro_type,
+              particles: particleArray,
+              map: entity.map,
+              position: entity.position,
+              sprite_type: entity.sprite_type || 'animated',
+              spriteLayers: getEntitySpriteLayers(entity),
+            };
+            return [...packets, ...packetManager.createEntity(entityData as any)];
+          },
+          Promise.resolve([] as any[])
+        );
+        if (entityPackets.length) {
+          sendPacket(ws, entityPackets);
+        }
+      } catch (error: any) {
+        log.warn(`Error loading entities: ${error.message}`);
+      }
+    });
+
     sendPacket(ws, packetManager.clientConfig(playerData.config || []));
-    sendPacket(ws, packetManager.inventory(playerData.inventory));
+
+    // Convert icon names to Asset Server URLs for inventory items
+    const inventoryWithIconUrls = playerData.inventory?.map((item: any) => ({
+      ...item,
+      iconUrl: getIconUrl(item.icon),
+      icon: undefined // Remove the old icon field
+    })) || [];
+
+    // Convert icon names to Asset Server sprite URLs for spells (icons and sprites share the same name)
+    const spellsWithSpriteUrls: Record<string, any> = {};
+    if (playerData.learnedSpells && typeof playerData.learnedSpells === 'object') {
+      for (const [spellName, spellData] of Object.entries(playerData.learnedSpells)) {
+        spellsWithSpriteUrls[spellName] = {
+          spriteUrl: (spellData as any).icon ? `${assetServerUrl}/sprite?name=${encodeURIComponent((spellData as any).icon)}` : null
+        };
+      }
+    }
+
+    // Convert icon names to Asset Server URLs for collectables (mounts)
+    const collectablesWithIconUrls = playerData.collectables?.map((collectable: any) => ({
+      ...collectable,
+      iconUrl: getIconUrl(collectable.icon),
+      icon: undefined // Remove the old icon field
+    })) || [];
+
+    sendPacket(ws, packetManager.inventory(inventoryWithIconUrls));
     sendPacket(ws, packetManager.equipment(playerData.equipment || {}));
-    sendPacket(ws, packetManager.collectables(playerData.collectables || []));
-    sendPacket(ws, packetManager.spells(playerData.learnedSpells));
+    sendPacket(ws, packetManager.collectables(collectablesWithIconUrls));
+    sendPacket(ws, packetManager.spells(spellsWithSpriteUrls));
     sendPacket(ws, packetManager.questlog(completedQuest, incompleteQuest));
   }
 });
@@ -882,6 +1006,22 @@ export default async function packetReceiver(
     }
 
     const currentPlayer = playerCache.get(ws.data.id) || null;
+
+    // Resolve a DB NPC's comma-separated particle names to full particle objects
+    async function resolveNpcParticles(npc: Npc): Promise<Npc> {
+      const particlesCache = await assetCache.get("particles") as any[] | null;
+      const resolved = typeof npc.particles === "string" && npc.particles && particlesCache
+        ? (npc.particles as string).split(",")
+            .map((name: string) => particlesCache.find((p: any) => p.name === name.trim()))
+            .filter(Boolean)
+        : (Array.isArray(npc.particles) ? npc.particles : []);
+      return { ...npc, particles: resolved as Particle[] };
+    }
+
+    async function resolveNpcForClient(npc: Npc): Promise<any> {
+      const withParticles = await resolveNpcParticles(npc);
+      return { ...withParticles, spriteLayers: getNpcSpriteLayers(npc) };
+    }
 
     switch (type) {
       case "BENCHMARK": {
@@ -1451,14 +1591,63 @@ export default async function packetReceiver(
           500
         );
 
-        if (closestPlayer) {
-          const selectPlayerData = {
-            id: closestPlayer.id || null,
-            username: closestPlayer.username || null,
-            stats: closestPlayer.stats || null,
-          };
+        // Also check for closest entity (from in-memory cache)
+        const entitiesInMap = entityCache.getByMap(currentPlayer.location.map);
+        let closestEntity: any = null;
+        let closestEntityDistance = 500;
 
-          sendPacket(ws, packetManager.selectPlayer(selectPlayerData));
+        for (const entity of entitiesInMap) {
+          // Skip dead entities - check both health and combatState
+          if ((entity.health ?? 0) <= 0 || (entity as any).combatState === 'dead') continue;
+
+          const distance = Math.sqrt(
+            Math.pow(currentPlayer.location.position.x - entity.position.x, 2) +
+            Math.pow(currentPlayer.location.position.y - entity.position.y, 2)
+          );
+
+          if (distance < closestEntityDistance) {
+            closestEntity = entity;
+            closestEntityDistance = distance;
+          }
+        }
+
+        // Determine which target is closer
+        let targetToSelect: any = null;
+        if (closestPlayer && closestEntity) {
+          const currPos = typeof currentPlayer.location.position === 'string'
+            ? { x: Number(currentPlayer.location.position.split(',')[0]), y: Number(currentPlayer.location.position.split(',')[1]) }
+            : currentPlayer.location.position;
+          const closestPos = typeof closestPlayer.location?.position === 'string'
+            ? { x: Number(closestPlayer.location.position.split(',')[0]), y: Number(closestPlayer.location.position.split(',')[1]) }
+            : closestPlayer.location?.position;
+          const playerDistance = Math.sqrt(
+            Math.pow((currPos?.x ?? 0) - (closestPos?.x ?? 0), 2) +
+            Math.pow((currPos?.y ?? 0) - (closestPos?.y ?? 0), 2)
+          );
+          targetToSelect = playerDistance < closestEntityDistance ? closestPlayer : closestEntity;
+        } else if (closestPlayer) {
+          targetToSelect = closestPlayer;
+        } else if (closestEntity) {
+          targetToSelect = closestEntity;
+        }
+
+        if (targetToSelect) {
+          if (targetToSelect.stats) {
+            // It's a player
+            const selectPlayerData = {
+              id: targetToSelect.id || null,
+              username: targetToSelect.username || null,
+              stats: targetToSelect.stats || null,
+            };
+            sendPacket(ws, packetManager.selectPlayer(selectPlayerData));
+          } else {
+            // It's an entity - set cache.targetId on client side
+            // Send entity selection as a special packet or use existing mechanism
+            const selectEntityData = {
+              id: targetToSelect.id || null,
+            };
+            sendPacket(ws, packetManager.selectPlayer(selectEntityData));
+          }
         }
         break;
       }
@@ -1585,6 +1774,10 @@ export default async function packetReceiver(
         }
 
         const spell_identifier = (data as any).spell;
+        const targetId = (data as any).target?.id;
+        const isEntityRequest = (data as any).entity === true;
+
+        log.debug(`[ATTACK] Spell cast request - spell=${spell_identifier}, targetId=${targetId}, isEntityRequest=${isEntityRequest}`);
 
         const spell = await spells.find(spell_identifier);
         const spell_id = spell?.id;
@@ -1609,16 +1802,44 @@ export default async function packetReceiver(
           return;
         }
 
-        const target = playerCache.get((data as any).target?.id) || currentPlayer;
+        log.debug(`[ATTACK] Looking for target ID: ${targetId}`);
+        let target = null;
+
+        if (isEntityRequest) {
+          // Looking for an entity target (from in-memory cache)
+          log.debug(`[ATTACK] Entity request detected, looking in entity cache...`);
+          target = entityCache.getById(targetId);
+          if (target) {
+            log.debug(`[ATTACK] Found target as entity ${target.id} with aggro_type=${target.aggro_type}`);
+          } else {
+            log.debug(`[ATTACK] Entity target not found in cache: ${targetId}`);
+          }
+        } else {
+          // Looking for a player target
+          target = playerCache.get(targetId);
+          if (target) {
+            log.debug(`[ATTACK] Found target as player: ${target.username}`);
+          } else if (targetId) {
+            log.debug(`[ATTACK] Player target not found in cache: ${targetId}`);
+          }
+        }
+
+        if (!target && !targetId) {
+          // Only default to self if no target was specified
+          target = currentPlayer;
+          log.debug(`[ATTACK] No target specified, defaulting to self`);
+        }
 
         if (!target?.id) {
+          log.debug(`[ATTACK] Player ${currentPlayer.username} attempted attack with invalid target: ${targetId}`);
           sendPacket(
             ws,
-            packetManager.notify({ message: "Target player not found." })
+            packetManager.notify({ message: "Target not found." })
           );
           return;
         }
 
+        // Only guests check applies to players, not entities
         if (target.isGuest) {
           sendPacket(
             ws,
@@ -1699,18 +1920,80 @@ export default async function packetReceiver(
           currentPlayer.location.map
         );
 
-        const canAttack = await player.canAttack(currentPlayer, target,
-          {
-            width: 24,
-            height: 40,
-          },
-          spell_range
+        // Determine if target is an entity or a player
+        const isEntityTarget = target.aggro_type !== undefined && target.health !== undefined && !target.stats;
+
+        if (isEntityTarget) {
+          log.debug(`[ATTACK] Identified target as entity. aggro_type=${target.aggro_type}, health=${target.health}, has_stats=${!!target.stats}`);
+        } else {
+          log.debug(`[ATTACK] Identified target as player. username=${target.username}`);
+        }
+
+        let canAttack: any = { value: true };
+
+        if (isEntityTarget) {
+          // For entity targets, check map first
+          if (target.map !== currentPlayer.location.map) {
+            canAttack = { value: false, reason: "different_map" };
+          } else {
+            // Check if entity is in returning state (invulnerable)
+            const entityState = entityAI.getEntityAIState(target.id);
+            if (entityState && entityState.combatState === 'returning') {
+              canAttack = { value: false, reason: "entity_returning" };
+            } else {
+              // Convert entity to player-like format for canAttack
+              const entityAsPlayer = {
+                ...target,
+                location: {
+                  map: target.map,
+                  position: target.position
+                },
+                stats: { health: target.health }
+              };
+              canAttack = await player.canAttack(currentPlayer, entityAsPlayer,
+                {
+                  width: 24,
+                  height: 40,
+                },
+                spell_range
+              );
+            }
+          }
+        } else {
+          // Perform canAttack check for player targets
+          canAttack = await player.canAttack(currentPlayer, target,
+            {
+              width: 24,
+              height: 40,
+            },
+            spell_range
+          );
+        }
+        log.debug(`[ATTACK] canAttack result: ${JSON.stringify(canAttack)}`);
+
+        // Handle both player targets (location.position) and entity targets (position)
+        const targetX = target.location?.position?.x || target.position?.x || 0;
+        const targetY = target.location?.position?.y || target.position?.y || 0;
+
+        const distance = Math.sqrt(
+          Math.pow(currentPlayer.location.position.x - targetX, 2) +
+          Math.pow(currentPlayer.location.position.y - targetY, 2)
         );
+
+        // Check range for entities and players
+        log.debug(`[ATTACK] Distance to target: ${distance}, spell_range: ${spell_range}`);
+        if (isEntityTarget && distance > spell_range) {
+          log.debug(`[ATTACK] Entity target out of range. distance=${distance} > spell_range=${spell_range}`);
+          sendPacket(
+            ws,
+            packetManager.notify({ message: "Target is out of range" })
+          );
+          return;
+        }
 
         if (target.id === currentPlayer.id && spell_damage < 0) {
           playersInAttackRange.push(target);
-        } else if (!playersInAttackRange.includes(target) || !canAttack?.value) {
-
+        } else if (!canAttack?.value) {
           if (canAttack?.reason == "nopvp") {
             sendPacket(
               ws,
@@ -1723,13 +2006,16 @@ export default async function packetReceiver(
               packetManager.notify({ message: "Target is not in line of sight" })
             );
           }
+          if (canAttack?.reason == "entity_returning") {
+            sendPacket(
+              ws,
+              packetManager.notify({ message: "The entity is returning to its home" })
+            );
+          }
+          return;
+        } else if (!isEntityTarget && !playersInAttackRange.includes(target)) {
           return;
         }
-
-        const distance = Math.sqrt(
-          Math.pow(currentPlayer.location.position.x - target.location.position.x, 2) +
-          Math.pow(currentPlayer.location.position.y - target.location.position.y, 2)
-        );
 
         let delay = 0;
         if (target.id !== currentPlayer.id) {
@@ -1786,13 +2072,39 @@ export default async function packetReceiver(
           false
         );
 
-        const canAttack2 = await player.canAttack(currentPlayer, target,
-          {
-            width: 24,
-            height: 40,
-          },
-          spell_range
-        );
+        let canAttack2: any = { value: true };
+
+        if (isEntityTarget) {
+          // Check if entity is still in returning state
+          const entityState = entityAI.getEntityAIState(target.id);
+          if (entityState && entityState.combatState === 'returning') {
+            canAttack2 = { value: false, reason: "entity_returning" };
+          } else {
+            const entityAsPlayer = {
+              ...target,
+              location: {
+                map: target.map,
+                position: target.position
+              },
+              stats: { health: target.health }
+            };
+            canAttack2 = await player.canAttack(currentPlayer, entityAsPlayer,
+              {
+                width: 24,
+                height: 40,
+              },
+              spell_range
+            );
+          }
+        } else {
+          canAttack2 = await player.canAttack(currentPlayer, target,
+            {
+              width: 24,
+              height: 40,
+            },
+            spell_range
+          );
+        }
 
         if (canAttack2?.reason == "nopvp") {
           playersInMap.forEach((player) => {
@@ -1842,11 +2154,37 @@ export default async function packetReceiver(
           return;
         }
 
+        if (canAttack2?.reason == "entity_returning") {
+          playersInMap.forEach((player) => {
+            sendPacket(
+              player.ws,
+              packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
+            );
+          });
+
+          const resetPlayer = playerCache.get(currentPlayer.id);
+          if (resetPlayer && resetPlayer.spellCooldowns) {
+            delete resetPlayer.spellCooldowns[spell_id];
+            playerCache.set(resetPlayer.id, resetPlayer);
+          }
+          return;
+        }
+
+        // If canAttack validation failed for any other reason, abort
+        if (!canAttack2?.value) {
+          const resetPlayer = playerCache.get(currentPlayer.id);
+          if (resetPlayer && resetPlayer.spellCooldowns) {
+            delete resetPlayer.spellCooldowns[spell_id];
+            playerCache.set(resetPlayer.id, resetPlayer);
+          }
+          return;
+        }
+
         if (target.id !== currentPlayer.id) {
           playersInMap.forEach((player) => {
             sendPacket(
               player.ws,
-              packetManager.projectile({ id: currentPlayer.id, time: delay / 1000, target_id: target.id, spell: spell.name, icon: spell.icon || null })
+              packetManager.projectile({ id: currentPlayer.id, time: delay / 1000, target_id: target.id, spell: spell.name, icon: getIconUrl(spell.icon), entity: isEntityTarget })
             );
           });
         }
@@ -1876,15 +2214,17 @@ export default async function packetReceiver(
           finalDamage = Math.floor(baseDamage * (1 + critDamage / 100));
         }
 
+        log.debug(`[ATTACK] Damage calculation: spell=${spell_damage}, bonus=${attackerDamageBonus}, base=${baseDamage}, crit=${isCrit}, final=${finalDamage}`);
+
         if (finalDamage > 0) {
-          const targetAvoidance = target.stats.stat_avoidance || 0;
+          const targetAvoidance = target.stats?.stat_avoidance || 0;
           const avoidanceRoll = Math.random() * 100;
           if (avoidanceRoll < targetAvoidance) {
             finalDamage = 0;
           }
 
           if (finalDamage > 0) {
-            const targetArmor = target.stats.stat_armor || 0;
+            const targetArmor = target.stats?.stat_armor || 0;
             const armorReduction = Math.min(targetArmor, 75) / 100;
             finalDamage = Math.floor(finalDamage * (1 - armorReduction));
           }
@@ -1901,21 +2241,68 @@ export default async function packetReceiver(
         }
 
         currentPlayer.stats.stamina = finalManaCheck.stats.stamina;
-
-        target.stats.health = Math.round(target.stats.health - finalDamage);
         currentPlayer.stats.stamina -= actualManaCost;
 
         if (currentPlayer.stats.stamina < 0) {
           currentPlayer.stats.stamina = 0;
         }
 
-        playerCache.set(currentPlayer.id, currentPlayer);
+        if (isEntityTarget) {
+          // Apply damage to entity using AI system with same calculation as players
+          log.debug(`[ATTACK] Applying ${finalDamage} damage to entity ${target.id}. Current health: ${target.health}`);
+          entityAI.applyDamageToEntity(target, finalDamage, currentPlayer);
 
-        if (target.stats.health > target.stats.total_max_health) {
-          target.stats.health = target.stats.total_max_health;
-        }
+          log.debug(`[ATTACK] Entity health after damage: ${target.health}`);
 
-        if (target.stats.health <= 0) {
+          // Clamp health to 0 if negative
+          if (target.health < 0) {
+            target.health = 0;
+          }
+
+          // Update entity health in cache only (not database - database is only updated on respawn/init)
+          entityCache.updateHealth(target.id, target.health);
+
+          // Broadcast entity damage to all players on the map
+          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+          log.debug(`[ATTACK] Broadcasting damage to ${playersInMap.length} players on map`);
+          playersInMap.forEach((player) => {
+            sendPacket(
+              player.ws,
+              packetManager.updateStats({
+                id: ws.data.id,
+                target: target.id,
+                stats: { health: target.health, total_max_health: target.max_health },
+                isCrit: isCrit,
+                damage: finalDamage,
+                entity: true,
+              })
+            );
+          });
+
+          // If entity died, broadcast despawn and remove from cache
+          if (target.health <= 0) {
+            log.debug(`[ATTACK] Entity ${target.id} died, broadcasting despawn`);
+            const respawnTime = 30; // 30 seconds respawn time
+            playersInMap.forEach((player) => {
+              sendPacket(
+                player.ws,
+                packetManager.despawnEntity(target.id, respawnTime)
+              );
+            });
+            // Remove entity from cache when despawned
+            entityCache.remove(target.id);
+          }
+        } else {
+          // Apply damage to player target
+          target.stats.health = Math.round(target.stats.health - finalDamage);
+
+          playerCache.set(currentPlayer.id, currentPlayer);
+
+          if (target.stats.health > target.stats.total_max_health) {
+            target.stats.health = target.stats.total_max_health;
+          }
+
+          if (target.stats.health <= 0) {
 
           const deathStats = { ...target.stats };
 
@@ -2065,14 +2452,20 @@ export default async function packetReceiver(
           sendStatsToPartyMembers(target.username, target.id, target.stats);
           sendStatsToPartyMembers(currentPlayer.username, currentPlayer.id, currentPlayer.stats);
         }
+        }
 
-        if (!isInParty) {
+        // Update attacker stats regardless of target type
+        playerCache.set(currentPlayer.id, currentPlayer);
+
+        if (!isInParty && !isEntityTarget) {
           currentPlayer.pvp = true;
           target.pvp = true;
         }
 
         currentPlayer.last_attack = performance.now();
-        target.last_attack = performance.now();
+        if (!isEntityTarget) {
+          target.last_attack = performance.now();
+        }
 
         break;
       }
@@ -2110,7 +2503,7 @@ export default async function packetReceiver(
           return;
         }
 
-        const saveData = data as unknown as { mapName: string, chunks: any[] };
+        const saveData = data as unknown as { mapName: string, chunks: any[], graveyards?: any, warps?: any };
 
         try {
           log.info(`Map save requested by ${currentPlayer.username} for map: ${saveData.mapName}, ${saveData.chunks.length} chunks modified`);
@@ -2137,6 +2530,27 @@ export default async function packetReceiver(
           }
 
           log.info(`Map chunks saved to asset server: ${saveData.mapName}`);
+
+          // Save graveyards and warps to mapProperties
+          if (saveData.graveyards !== undefined || saveData.warps !== undefined) {
+            const mapPropertiesCache = await assetCache.get("mapProperties");
+            const mapPropsIndex = mapPropertiesCache.findIndex((m: any) => m.name === `${saveData.mapName.replace('.json', '')}.json`);
+
+            if (mapPropsIndex !== -1) {
+              if (saveData.graveyards !== undefined) {
+                mapPropertiesCache[mapPropsIndex].graveyards = saveData.graveyards;
+              }
+              if (saveData.warps !== undefined) {
+                mapPropertiesCache[mapPropsIndex].warps = saveData.warps;
+              }
+
+              try {
+                await assetCache.add("mapProperties", mapPropertiesCache);
+              } catch (propError) {
+                log.warn(`Failed to update mapProperties for ${saveData.mapName}: ${propError}`);
+              }
+            }
+          }
 
           // Update local cache with the changes AND save to disk
           const cachedMaps = (await assetCache.get("maps")) as MapData[];
@@ -2167,6 +2581,14 @@ export default async function packetReceiver(
               }
             });
 
+            // Update graveyards and warps in the map data
+            if (saveData.graveyards !== undefined) {
+              cachedMaps[mapIndex].data.graveyards = saveData.graveyards;
+            }
+            if (saveData.warps !== undefined) {
+              cachedMaps[mapIndex].data.warps = saveData.warps;
+            }
+
             assetCache.add("maps", cachedMaps);
 
             // Also save chunks to disk locally for persistence
@@ -2175,6 +2597,27 @@ export default async function packetReceiver(
             } catch (diskError) {
               log.warn(`Failed to save chunks to disk locally: ${diskError}`);
               // Don't fail the request if local disk save fails, asset server has the data
+            }
+
+            // Save graveyards and warps properties and reload the map
+            if (saveData.graveyards !== undefined || saveData.warps !== undefined) {
+              try {
+                await saveMapProperties(saveData.mapName, saveData.graveyards, saveData.warps);
+
+                // Reload the map to refresh mapProperties cache
+                const { reloadMap: reloadMapFunc } = await import("../modules/assetloader");
+                const reloadedMap = await reloadMapFunc(saveData.mapName);
+
+                // Update the cached maps with the reloaded map
+                const updatedMaps = cachedMaps;
+                const mapIdx = updatedMaps.findIndex((m: any) => m.name === saveData.mapName);
+                if (mapIdx !== -1) {
+                  updatedMaps[mapIdx] = reloadedMap;
+                  assetCache.add("maps", updatedMaps);
+                }
+              } catch (propError) {
+                log.warn(`Failed to save/reload map properties: ${propError}`);
+              }
             }
 
             // Refresh collision cache since collision layer may have been updated
@@ -2209,68 +2652,583 @@ export default async function packetReceiver(
         }
         break;
       }
-      case "LOAD_CHUNK": {
+      case "SAVE_PARTICLE": {
         if (!currentPlayer) return;
 
-        const loadChunkData = data as unknown as { map: string, x: number, y: number };
-        const { map: mapName, x: chunkX, y: chunkY } = loadChunkData;
+        const userPermissions = await permissions.get(currentPlayer.username) as string;
+        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
+        const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
+
+        if (!hasPermission) {
+          sendPacket(ws, packetManager.notify({
+            message: 'You do not have permission to save particles.'
+          }));
+          return;
+        }
 
         try {
+          const particleData = data as unknown as Particle;
 
-          const mapFileName = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
-          const assetData = (await assetCache.get("mapAssetConfig") as any) || {
-            path: path.join(import.meta.dir, "../assets/maps")
+          // Check if particle already exists
+          const existingParticles = await particles.list();
+          const particleExists = existingParticles.some(p => p.name === particleData.name);
+
+          if (particleExists) {
+            await particles.update(particleData);
+            log.info(`Particle updated by ${currentPlayer.username}: ${particleData.name}`);
+          } else {
+            await particles.add(particleData);
+            log.info(`Particle added by ${currentPlayer.username}: ${particleData.name}`);
+          }
+
+          // Reload particles cache from database to ensure consistency
+          const updatedParticles = await particles.list();
+          const updatedParticleData = updatedParticles.find(p => p.name === particleData.name);
+
+          // Broadcast particle update to all connected players
+          if (updatedParticleData) {
+            const updatePacket = packetManager.particleUpdated(updatedParticleData);
+            const allPlayers = playerCache.list();
+            for (const playerId in allPlayers) {
+              const player = allPlayers[playerId];
+              if (player.ws && player.ws.readyState === 1) { // readyState 1 = OPEN
+                sendPacket(player.ws, updatePacket);
+              }
+            }
+          }
+
+          sendPacket(ws, packetManager.notify({
+            message: 'Particle saved successfully'
+          }));
+        } catch (error: any) {
+          log.error(`Error saving particle: ${error.message}`);
+          sendPacket(ws, packetManager.notify({
+            message: 'Error saving particle.'
+          }));
+        }
+        break;
+      }
+      case "DELETE_PARTICLE": {
+        if (!currentPlayer) return;
+
+        const userPermissions = await permissions.get(currentPlayer.username) as string;
+        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
+        const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
+
+        if (!hasPermission) {
+          sendPacket(ws, packetManager.notify({
+            message: 'You do not have permission to delete particles.'
+          }));
+          return;
+        }
+
+        try {
+          const { name } = data as unknown as { name: string };
+          await particles.remove({ name } as any);
+          log.info(`Particle deleted by ${currentPlayer.username}: ${name}`);
+
+          sendPacket(ws, packetManager.notify({
+            message: 'Particle deleted successfully'
+          }));
+        } catch (error: any) {
+          log.error(`Error deleting particle: ${error.message}`);
+          sendPacket(ws, packetManager.notify({
+            message: 'Error deleting particle.'
+          }));
+        }
+        break;
+      }
+      case "LIST_PARTICLES": {
+        if (!currentPlayer) return;
+
+        try {
+          const particleList = await particles.list();
+          sendPacket(ws, packetManager.custom({
+            type: "PARTICLE_LIST",
+            data: particleList
+          }));
+        } catch (error: any) {
+          log.error(`Error listing particles: ${error.message}`);
+          sendPacket(ws, packetManager.notify({
+            message: 'Error loading particles.'
+          }));
+        }
+        break;
+      }
+      case "LIST_NPCS": {
+        if (!currentPlayer) return;
+
+        try {
+          const allNpcs = await assetCache.get("npcs") as Npc[];
+          const mapName = currentPlayer.location.map;
+          const npcsInMap = (allNpcs || []).filter((npc: Npc) => npc.map === mapName);
+          sendPacket(ws, packetManager.npcList(npcsInMap));
+        } catch (error: any) {
+          log.error(`Error listing NPCs: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error loading NPCs." }));
+        }
+        break;
+      }
+      case "ADD_NPC": {
+        if (!currentPlayer) return;
+
+        if (
+          !currentPlayer.permissions.some(
+            (p: string) => p === "server.admin" || p === "server.*"
+          )
+        ) {
+          sendPacket(ws, packetManager.notify({ message: "You do not have permission to add NPCs." }));
+          return;
+        }
+
+        try {
+          const mapName = currentPlayer.location.map;
+          const clientData = data as any;
+          const newNpc: Npc = {
+            id: null,
+            last_updated: null,
+            map: mapName,
+            name: clientData?.name ?? null,
+            position: {
+              x: clientData?.position?.x ?? currentPlayer.location.position.x,
+              y: clientData?.position?.y ?? currentPlayer.location.position.y,
+              direction: clientData?.position?.direction ?? "down",
+            },
+            hidden: clientData?.hidden ?? false,
+            script: clientData?.script ?? null,
+            dialog: clientData?.dialog ?? null,
+            particles: clientData?.particles ?? [],
+            quest: clientData?.quest ?? null,
+            sprite_type: clientData?.sprite_type ?? 'animated',
+            sprite_body: clientData?.sprite_body ?? null,
+            sprite_head: clientData?.sprite_head ?? null,
+            sprite_helmet: clientData?.sprite_helmet ?? null,
+            sprite_shoulderguards: clientData?.sprite_shoulderguards ?? null,
+            sprite_neck: clientData?.sprite_neck ?? null,
+            sprite_hands: clientData?.sprite_hands ?? null,
+            sprite_chest: clientData?.sprite_chest ?? null,
+            sprite_feet: clientData?.sprite_feet ?? null,
+            sprite_legs: clientData?.sprite_legs ?? null,
+            sprite_weapon: clientData?.sprite_weapon ?? null,
           };
 
-          const mapFilePath = path.join(assetData.path, mapFileName);
+          await npcSystem.add(newNpc);
+          const updatedNpcs = await npcSystem.list();
+          await assetCache.set("npcs", updatedNpcs);
 
-          if (!fs.existsSync(mapFilePath)) {
-            sendPacket(ws, packetManager.notify({
-              message: `Map ${mapName} not found`
-            }));
+          const createdNpc = updatedNpcs
+            .filter((n: Npc) => n.map === mapName)
+            .sort((a: Npc, b: Npc) => (b.id ?? 0) - (a.id ?? 0))[0];
+
+          if (createdNpc) {
+            const resolvedNpc = await resolveNpcForClient(createdNpc);
+            const updatePacket = packetManager.npcUpdated(resolvedNpc);
+            const playersInMap = filterPlayersByMap(mapName);
+            for (const p of playersInMap) {
+              if (p.ws && p.ws.readyState === 1) {
+                sendPacket(p.ws, updatePacket);
+              }
+            }
+          }
+
+          log.info(`NPC added by ${currentPlayer.username} on map ${mapName}`);
+        } catch (error: any) {
+          log.error(`Error adding NPC: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error adding NPC." }));
+        }
+        break;
+      }
+      case "SAVE_NPC": {
+        if (!currentPlayer) return;
+
+        if (
+          !currentPlayer.permissions.some(
+            (p: string) => p === "server.admin" || p === "server.*"
+          )
+        ) {
+          sendPacket(ws, packetManager.notify({ message: "You do not have permission to save NPCs." }));
+          return;
+        }
+
+        try {
+          const npcData = data as unknown as Npc;
+          if (!npcData?.id) {
+            sendPacket(ws, packetManager.notify({ message: "Invalid NPC data." }));
             return;
           }
 
-          const mapData = JSON.parse(fs.readFileSync(mapFilePath, "utf-8"));
+          await npcSystem.update(npcData);
+          const updatedNpcs = await npcSystem.list();
+          await assetCache.set("npcs", updatedNpcs);
 
-          const CHUNK_SIZE = mapData.tilewidth;
-          const startX = chunkX * CHUNK_SIZE;
-          const startY = chunkY * CHUNK_SIZE;
-          const chunkWidth = Math.min(CHUNK_SIZE, mapData.width - startX);
-          const chunkHeight = Math.min(CHUNK_SIZE, mapData.height - startY);
-
-          const chunkLayers = mapData.layers.map((layer: any, layerIndex: number) => {
-            const chunkData = new Array(chunkWidth * chunkHeight).fill(0);
-
-            for (let y = 0; y < chunkHeight; y++) {
-              for (let x = 0; x < chunkWidth; x++) {
-                const sourceIndex = (startY + y) * mapData.width + (startX + x);
-                const destIndex = y * chunkWidth + x;
-                if (layer.data && layer.data[sourceIndex] !== undefined) {
-                  chunkData[destIndex] = layer.data[sourceIndex];
-                }
+          const updatedNpc = updatedNpcs.find((n: Npc) => n.id === npcData.id);
+          if (updatedNpc) {
+            const resolvedNpc = await resolveNpcForClient(updatedNpc);
+            const updatePacket = packetManager.npcUpdated(resolvedNpc);
+            const playersInMap = filterPlayersByMap(resolvedNpc.map);
+            for (const p of playersInMap) {
+              if (p.ws && p.ws.readyState === 1) {
+                sendPacket(p.ws, updatePacket);
               }
             }
+          }
 
-            const zIndex = typeof layer.zIndex === 'number' ? layer.zIndex : layerIndex;
+          sendPacket(ws, packetManager.notify({ message: "NPC saved successfully." }));
+          log.info(`NPC ${npcData.id} saved by ${currentPlayer.username}`);
+        } catch (error: any) {
+          log.error(`Error saving NPC: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error saving NPC." }));
+        }
+        break;
+      }
+      case "MOVE_NPC": {
+        if (!currentPlayer) return;
 
-            return {
-              name: layer.name,
-              zIndex: zIndex,
-              data: chunkData,
-              width: chunkWidth,
-              height: chunkHeight
-            };
-          });
-
-          sendPacket(ws, packetManager.chunkData(chunkX, chunkY, chunkWidth, chunkHeight, chunkLayers, mapData.tilewidth, mapData.tileheight, startX, startY));
-        } catch (error) {
-          log.error(`Error loading chunk ${chunkX},${chunkY} from map ${mapName}: ${error}`);
-          sendPacket(ws, packetManager.notify({
-            message: "Error loading chunk data"
-          }));
+        if (
+          !currentPlayer.permissions.some(
+            (p: string) => p === "server.admin" || p === "server.*"
+          )
+        ) {
+          sendPacket(ws, packetManager.notify({ message: "You do not have permission to move NPCs." }));
+          return;
         }
 
+        try {
+          const { id, position } = data as unknown as { id: number; position: { x: number; y: number } };
+          if (!id || !position) {
+            sendPacket(ws, packetManager.notify({ message: "Invalid NPC move data." }));
+            return;
+          }
+
+          const allNpcs = await assetCache.get("npcs") as Npc[];
+          const existingNpc = (allNpcs || []).find((n: Npc) => n.id === id);
+          if (!existingNpc) {
+            sendPacket(ws, packetManager.notify({ message: "NPC not found." }));
+            return;
+          }
+
+          const updatedNpcData: Npc = {
+            ...existingNpc,
+            position: {
+              x: position.x,
+              y: position.y,
+              direction: existingNpc.position.direction || "down",
+            },
+          };
+
+          await npcSystem.update(updatedNpcData);
+          const updatedNpcs = await npcSystem.list();
+          await assetCache.set("npcs", updatedNpcs);
+
+          const updatedNpc = updatedNpcs.find((n: Npc) => n.id === id);
+          if (updatedNpc) {
+            const resolvedNpc = await resolveNpcForClient(updatedNpc);
+            const updatePacket = packetManager.npcUpdated(resolvedNpc);
+            const playersInMap = filterPlayersByMap(resolvedNpc.map);
+            for (const p of playersInMap) {
+              if (p.ws && p.ws.readyState === 1) {
+                sendPacket(p.ws, updatePacket);
+              }
+            }
+          }
+
+          log.info(`NPC ${id} moved by ${currentPlayer.username}`);
+        } catch (error: any) {
+          log.error(`Error moving NPC: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error moving NPC." }));
+        }
+        break;
+      }
+      case "DELETE_NPC": {
+        if (!currentPlayer) return;
+
+        if (
+          !currentPlayer.permissions.some(
+            (p: string) => p === "server.admin" || p === "server.*"
+          )
+        ) {
+          sendPacket(ws, packetManager.notify({ message: "You do not have permission to delete NPCs." }));
+          return;
+        }
+
+        try {
+          const { id } = data as unknown as { id: number };
+          if (!id) {
+            sendPacket(ws, packetManager.notify({ message: "Invalid NPC ID." }));
+            return;
+          }
+
+          const allNpcs = await assetCache.get("npcs") as Npc[];
+          const existingNpc = (allNpcs || []).find((n: Npc) => n.id === id);
+          if (!existingNpc) {
+            sendPacket(ws, packetManager.notify({ message: "NPC not found." }));
+            return;
+          }
+
+          const mapName = existingNpc.map;
+          await npcSystem.remove({ id } as Npc);
+          const updatedNpcs = await npcSystem.list();
+          await assetCache.set("npcs", updatedNpcs);
+
+          const removePacket = packetManager.npcRemoved(id);
+          const playersInMap = filterPlayersByMap(mapName);
+          for (const p of playersInMap) {
+            if (p.ws && p.ws.readyState === 1) {
+              sendPacket(p.ws, removePacket);
+            }
+          }
+
+          sendPacket(ws, packetManager.notify({ message: "NPC deleted successfully." }));
+          log.info(`NPC ${id} deleted by ${currentPlayer.username}`);
+        } catch (error: any) {
+          log.error(`Error deleting NPC: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error deleting NPC." }));
+        }
+        break;
+      }
+      case "LIST_ENTITIES": {
+        if (!currentPlayer) return;
+
+        try {
+          let allEntities = await assetCache.get("entities") as any[];
+          if (!allEntities || allEntities.length === 0) {
+            allEntities = await entitySystem.list();
+          }
+          const mapName = currentPlayer.location.map.replace(".json", "");
+          const entitiesInMap = (allEntities || []).filter((e: any) => e.map === mapName);
+          sendPacket(ws, packetManager.entityList(entitiesInMap));
+        } catch (error: any) {
+          log.error(`Error listing entities: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error loading entities." }));
+        }
+        break;
+      }
+      case "ADD_ENTITY": {
+        if (!currentPlayer) return;
+
+        if (
+          !currentPlayer.permissions.some(
+            (p: string) => p === "server.admin" || p === "server.*"
+          )
+        ) {
+          sendPacket(ws, packetManager.notify({ message: "You do not have permission to add entities." }));
+          return;
+        }
+
+        try {
+          const mapName = currentPlayer.location.map.replace(".json", "");
+          const clientData = data as any;
+          const newEntity: any = {
+            id: null,
+            last_updated: null,
+            map: mapName,
+            name: clientData?.name ?? null,
+            position: {
+              x: clientData?.position?.x ?? currentPlayer.location.position.x,
+              y: clientData?.position?.y ?? currentPlayer.location.position.y,
+              direction: clientData?.position?.direction ?? "down",
+            },
+            max_health: clientData?.max_health ?? 100,
+            level: clientData?.level ?? 1,
+            aggro_type: clientData?.aggro_type ?? 'neutral',
+            aggro_range: clientData?.aggro_range ?? 300,
+            speed: clientData?.speed ?? 2.0,
+            aggro_leash: clientData?.aggro_leash ?? 600,
+            particles: clientData?.particles ?? [],
+            sprite_type: clientData?.sprite_type ?? 'animated',
+            sprite_body: clientData?.sprite_body ?? 'player_body_base',
+            sprite_head: clientData?.sprite_head ?? 'player_head_base',
+            sprite_helmet: clientData?.sprite_helmet ?? null,
+            sprite_shoulderguards: clientData?.sprite_shoulderguards ?? null,
+            sprite_neck: clientData?.sprite_neck ?? null,
+            sprite_hands: clientData?.sprite_hands ?? null,
+            sprite_chest: clientData?.sprite_chest ?? null,
+            sprite_feet: clientData?.sprite_feet ?? null,
+            sprite_legs: clientData?.sprite_legs ?? null,
+            sprite_weapon: clientData?.sprite_weapon ?? null,
+          };
+
+          await entitySystem.add(newEntity);
+          const updatedEntities = await entitySystem.list();
+          await assetCache.set("entities", updatedEntities);
+
+          const createdEntity = updatedEntities
+            .filter((e: any) => e.map === mapName)
+            .sort((a: any, b: any) => (b.id ?? 0) - (a.id ?? 0))[0];
+
+          if (createdEntity) {
+            // Add the new entity to the in-memory cache with health = max_health and isMoving = false
+            const entityWithHealth = { ...createdEntity, health: createdEntity.max_health, isMoving: false };
+            entityCache.add(entityWithHealth);
+
+            // Broadcast entity with a small delay to ensure sprite data is ready
+            setTimeout(() => {
+              const resolvedEntity = { ...createdEntity, sprite_type: (createdEntity as any).sprite_type || 'animated', spriteLayers: getEntitySpriteLayers(createdEntity as any) };
+              const updatePacket = packetManager.createEntity(resolvedEntity as any);
+              const playersInMap = filterPlayersByMap(mapName);
+              for (const p of playersInMap) {
+                if (p.ws && p.ws.readyState === 1) {
+                  sendPacket(p.ws, updatePacket);
+                }
+              }
+            }, 100);
+          }
+
+          log.info(`Entity added by ${currentPlayer.username} on map ${mapName}`);
+        } catch (error: any) {
+          log.error(`Error adding entity: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error adding entity." }));
+        }
+        break;
+      }
+      case "SAVE_ENTITY": {
+        if (!currentPlayer) return;
+
+        if (
+          !currentPlayer.permissions.some(
+            (p: string) => p === "server.admin" || p === "server.*"
+          )
+        ) {
+          sendPacket(ws, packetManager.notify({ message: "You do not have permission to save entities." }));
+          return;
+        }
+
+        try {
+          const entityData = data as unknown as any;
+          if (!entityData?.id) {
+            sendPacket(ws, packetManager.notify({ message: "Invalid entity ID." }));
+            return;
+          }
+
+          await entitySystem.update(entityData);
+          const updatedEntities = await entitySystem.list();
+          await assetCache.set("entities", updatedEntities);
+
+          const mapName = entityData.map;
+          const updatedEntity = updatedEntities.find((e: any) => e.id === entityData.id);
+          if (updatedEntity) {
+            // Update the entity in the in-memory cache (reset health to max_health)
+            const cachedEntity = entityCache.getById(entityData.id);
+            if (cachedEntity) {
+              // Update properties from database and reset health to max_health
+              Object.assign(cachedEntity, {
+                ...updatedEntity,
+                health: updatedEntity.max_health // Reset health to max_health when saving
+              });
+              // Reset hasMoved so the entity won't broadcast unless it actually moves
+              (cachedEntity as any).hasMoved = false;
+            } else {
+              // Entity not in cache yet, add it with health = max_health and isMoving = false
+              entityCache.add({ ...updatedEntity, health: updatedEntity.max_health, isMoving: false, hasMoved: false });
+            }
+
+            // Update the entity's spawn point so it doesn't walk back to the old position
+            entityAI.updateEntitySpawnPoint(entityData.id, updatedEntity.position);
+
+            // Include the in-memory health in the update packet to preserve health
+            const resolvedEntity = {
+              ...updatedEntity,
+              sprite_type: (updatedEntity as any).sprite_type || 'animated',
+              spriteLayers: getEntitySpriteLayers(updatedEntity as any),
+              health: cachedEntity ? cachedEntity.health : updatedEntity.max_health
+            };
+            const updatePacket = packetManager.updateEntity(resolvedEntity as any);
+            const playersInMap = filterPlayersByMap(mapName);
+            for (const p of playersInMap) {
+              if (p.ws && p.ws.readyState === 1) {
+                sendPacket(p.ws, updatePacket);
+              }
+            }
+          }
+
+          log.info(`Entity ${entityData.id} saved by ${currentPlayer.username}`);
+        } catch (error: any) {
+          log.error(`Error saving entity: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error saving entity." }));
+        }
+        break;
+      }
+      case "DELETE_ENTITY": {
+        if (!currentPlayer) return;
+
+        if (
+          !currentPlayer.permissions.some(
+            (p: string) => p === "server.admin" || p === "server.*"
+          )
+        ) {
+          sendPacket(ws, packetManager.notify({ message: "You do not have permission to delete entities." }));
+          return;
+        }
+
+        try {
+          const { id } = data as unknown as { id: number };
+          if (!id) {
+            sendPacket(ws, packetManager.notify({ message: "Invalid entity ID." }));
+            return;
+          }
+
+          const allEntities = await assetCache.get("entities") as any[];
+          const existingEntity = (allEntities || []).find((e: any) => e.id === id);
+          if (!existingEntity) {
+            sendPacket(ws, packetManager.notify({ message: "Entity not found." }));
+            return;
+          }
+
+          const mapName = existingEntity.map;
+          await entitySystem.remove({ id } as any);
+          const updatedEntities = await entitySystem.list();
+          await assetCache.set("entities", updatedEntities);
+
+          // Remove entity from in-memory cache
+          entityCache.remove(id);
+
+          const removePacket = packetManager.entityDied(id.toString());
+          const playersInMap = filterPlayersByMap(mapName);
+          for (const p of playersInMap) {
+            if (p.ws && p.ws.readyState === 1) {
+              sendPacket(p.ws, removePacket);
+            }
+          }
+
+          sendPacket(ws, packetManager.notify({ message: "Entity deleted successfully." }));
+          log.info(`Entity ${id} deleted by ${currentPlayer.username}`);
+        } catch (error: any) {
+          log.error(`Error deleting entity: ${error.message}`);
+          sendPacket(ws, packetManager.notify({ message: "Error deleting entity." }));
+        }
+        break;
+      }
+      case "TEST_PARTICLE": {
+        if (!currentPlayer) return;
+
+        const userPermissions = await permissions.get(currentPlayer.username) as string;
+        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
+        const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
+
+        if (!hasPermission) {
+          return;
+        }
+
+        try {
+          const { testType, data: testData } = data as { testType: string; data: any };
+          log.info(`Particle test by ${currentPlayer.username}: type=${testType}`);
+
+          // Broadcast test particle event to all players in the map
+          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+          playersInMap.forEach((player) => {
+            sendPacket(player.ws, packetManager.custom({
+              type: "TEST_PARTICLE_EVENT",
+              data: {
+                testType,
+                particle: testData.particle,
+                position: testData.position || currentPlayer.location,
+                npcId: testData.npcId
+              }
+            }));
+          });
+        } catch (error: any) {
+          log.error(`Error testing particle: ${error.message}`);
+        }
         break;
       }
       case "COMMAND": {
@@ -2656,6 +3614,33 @@ export default async function packetReceiver(
               await updatePlayerAOI(targetPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
               await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
 
+              const targetAnimationNameForSprite = getAnimationNameForDirection(
+                targetPlayer.location.position?.direction || "down",
+                !!targetPlayer.moving,
+                !!targetPlayer.mounted,
+                targetPlayer.mount_type,
+                !!targetPlayer.casting
+              );
+              const targetSpriteData = await getPlayerSpriteSheetData(targetAnimationNameForSprite, targetPlayer.equipment || null);
+
+              let targetSpritesData = null;
+              if (targetSpriteData?.bodySprite || targetSpriteData?.headSprite) {
+                targetSpritesData = {
+                  mountSprite: targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
+                  bodySprite: targetSpriteData.bodySprite || null,
+                  headSprite: targetSpriteData.headSprite || null,
+                  armorHelmetSprite: targetSpriteData.armorHelmetSprite || null,
+                  armorShoulderguardsSprite: targetSpriteData.armorShoulderguardsSprite || null,
+                  armorNeckSprite: targetSpriteData.armorNeckSprite || null,
+                  armorHandsSprite: targetSpriteData.armorHandsSprite || null,
+                  armorChestSprite: targetSpriteData.armorChestSprite || null,
+                  armorFeetSprite: targetSpriteData.armorFeetSprite || null,
+                  armorLegsSprite: targetSpriteData.armorLegsSprite || null,
+                  armorWeaponSprite: targetSpriteData.armorWeaponSprite || null,
+                  animationState: targetSpriteData.animationState,
+                };
+              }
+
               const targetSpawnData = {
                 id: targetPlayer.id,
                 userid: targetPlayer.userid,
@@ -2673,6 +3658,7 @@ export default async function packetReceiver(
                 isNoclip: targetPlayer.isNoclip,
                 stats: targetPlayer.stats,
                 animation: null,
+                spriteData: targetSpritesData,
                 mounted: targetPlayer.mounted,
               };
 
@@ -2874,6 +3860,33 @@ export default async function packetReceiver(
               await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
               await updatePlayerAOI(targetPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
 
+              const targetAnimationNameForSpriteTeleport = getAnimationNameForDirection(
+                targetPlayer.location.position?.direction || "down",
+                !!targetPlayer.moving,
+                !!targetPlayer.mounted,
+                targetPlayer.mount_type,
+                !!targetPlayer.casting
+              );
+              const targetSpriteDataTeleport = await getPlayerSpriteSheetData(targetAnimationNameForSpriteTeleport, targetPlayer.equipment || null);
+
+              let targetSpritesDataTeleport = null;
+              if (targetSpriteDataTeleport?.bodySprite || targetSpriteDataTeleport?.headSprite) {
+                targetSpritesDataTeleport = {
+                  mountSprite: targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
+                  bodySprite: targetSpriteDataTeleport.bodySprite || null,
+                  headSprite: targetSpriteDataTeleport.headSprite || null,
+                  armorHelmetSprite: targetSpriteDataTeleport.armorHelmetSprite || null,
+                  armorShoulderguardsSprite: targetSpriteDataTeleport.armorShoulderguardsSprite || null,
+                  armorNeckSprite: targetSpriteDataTeleport.armorNeckSprite || null,
+                  armorHandsSprite: targetSpriteDataTeleport.armorHandsSprite || null,
+                  armorChestSprite: targetSpriteDataTeleport.armorChestSprite || null,
+                  armorFeetSprite: targetSpriteDataTeleport.armorFeetSprite || null,
+                  armorLegsSprite: targetSpriteDataTeleport.armorLegsSprite || null,
+                  armorWeaponSprite: targetSpriteDataTeleport.armorWeaponSprite || null,
+                  animationState: targetSpriteDataTeleport.animationState,
+                };
+              }
+
               const targetSpawnDataTeleport = {
                 id: targetPlayer.id,
                 userid: targetPlayer.userid,
@@ -2891,6 +3904,7 @@ export default async function packetReceiver(
                 isNoclip: targetPlayer.isNoclip,
                 stats: targetPlayer.stats,
                 animation: null,
+                spriteData: targetSpritesDataTeleport,
                 mounted: targetPlayer.mounted,
               };
 
@@ -3347,6 +4361,63 @@ export default async function packetReceiver(
             }
 
             sendPacket(ws, packetManager.toggleTileEditor());
+            break;
+          }
+
+          case "PE":
+          case "PARTICLEEDITOR": {
+
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "server.admin" || p === "server.*"
+              )
+            ) {
+              const notifyData = {
+                message: "You don't have permission to use this command",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            sendPacket(ws, packetManager.toggleParticleEditor());
+            break;
+          }
+
+          case "NE":
+          case "NPCEDITOR": {
+
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "server.admin" || p === "server.*"
+              )
+            ) {
+              const notifyData = {
+                message: "You don't have permission to use this command",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            sendPacket(ws, packetManager.toggleNpcEditor());
+            break;
+          }
+
+          case "EM":
+          case "ENTITYEDITOR": {
+
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "server.admin" || p === "server.*"
+              )
+            ) {
+              const notifyData = {
+                message: "You don't have permission to use this command",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            sendPacket(ws, packetManager.toggleEntityEditor());
             break;
           }
 
@@ -3856,6 +4927,13 @@ export default async function packetReceiver(
 
               const playersInMap = filterPlayersByMap(mapName);
               const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
+              const reloadedMapProps = mapPropertiesCache.find((m: any) => m.name === `${mapName}.json`);
+
+              // Extract object layers from reloaded map data
+              const reloadedObjectLayers = (result?.data?.layers || [])
+                .filter((layer: any) => layer.type === "objectgroup")
+                .map((layer: any) => ({ name: layer.name }));
+
               playersInMap.forEach((player) => {
                 const mapMetadata = {
                   name: mapName,
@@ -3869,6 +4947,9 @@ export default async function packetReceiver(
                   spawnY: player.location.position?.y || 0,
                   direction: player.location.position?.direction || "down",
                   chunks: null,
+                  warps: reloadedMapProps?.warps || null,
+                  graveyards: reloadedMapProps?.graveyards || null,
+                  objectLayers: reloadedObjectLayers,
                 };
                 sendPacket(player.ws, packetManager.loadMap(mapMetadata));
               });
@@ -4957,6 +6038,17 @@ export default async function packetReceiver(
         }
         break;
       }
+      case "RESPAWN_ENTITY": {
+        // This is a client-side notification that entity respawn timer has expired
+        // The actual respawn is handled server-side by the entityAI system
+        // This handler just validates the request
+        if (!data || !(data as any).id) return;
+
+        log.debug(`Client requested respawn for entity ${(data as any).id}`);
+        // Server-side respawn is already handled by entityAI setTimeout in handleEntityDeath
+        break;
+      }
+
       case "GET_ONLINE_PLAYERS": {
         if (!currentPlayer?.isAdmin) return;
 
@@ -4970,6 +6062,7 @@ export default async function packetReceiver(
         sendPacket(ws, packetManager.onlinePlayersList(playerList));
         break;
       }
+
 
       default: {
         log.error(`Unknown packet type: ${type}`);
@@ -4998,8 +6091,14 @@ function filterPlayersByDistance(ws: any, distance: number, map: string) {
   const players = filterPlayersByMap(map);
   const currentPlayer = playerCache.get(ws.data.id);
   return players.filter((p) => {
-    const dx = p.location.position.x - currentPlayer.location.position.x;
-    const dy = p.location.position.y - currentPlayer.location.position.y;
+    const pPos = typeof p.location.position === 'string'
+      ? { x: Number(p.location.position.split(',')[0]), y: Number(p.location.position.split(',')[1]) }
+      : p.location.position;
+    const currPos = typeof currentPlayer.location.position === 'string'
+      ? { x: Number(currentPlayer.location.position.split(',')[0]), y: Number(currentPlayer.location.position.split(',')[1]) }
+      : currentPlayer.location.position;
+    const dx = (pPos?.x ?? 0) - (currPos?.x ?? 0);
+    const dy = (pPos?.y ?? 0) - (currPos?.y ?? 0);
     return Math.sqrt(dx * dx + dy * dy) <= distance;
   });
 }
@@ -5067,53 +6166,20 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
     return;
   }
 
-  const { getSpriteSheetImage, getSpriteSheetTemplate } = await import("../modules/spriteSheetManager");
-
-  const extractEquipmentName = (prefixedName: string) => {
-    const firstUnderscore = prefixedName.indexOf('_');
-    return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
-  };
-
-  const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
-  const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
-  const armorHelmetImageData = spriteSheetData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHelmetSprite.name)) : null;
-  const armorShoulderguardsImageData = spriteSheetData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorShoulderguardsSprite.name)) : null;
-  const armorNeckImageData = spriteSheetData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorNeckSprite.name)) : null;
-  const armorHandsImageData = spriteSheetData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHandsSprite.name)) : null;
-  const armorChestImageData = spriteSheetData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorChestSprite.name)) : null;
-  const armorFeetImageData = spriteSheetData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorFeetSprite.name)) : null;
-  const armorLegsImageData = spriteSheetData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorLegsSprite.name)) : null;
-  const armorWeaponImageData = spriteSheetData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorWeaponSprite.name)) : null;
-
-  let mountSprite = null;
-  let mountImageData = null;
-  if (currentPlayer.mounted && currentPlayer.mount_type) {
-
-    mountSprite = await getSpriteSheetTemplate('player_mount_base');
-    if (mountSprite) {
-
-      const mountImageName = currentPlayer.mount_type;
-      mountSprite.name = mountImageName;
-      mountSprite.imageSource = `mounts/${mountImageName}.png`;
-
-      mountImageData = await getSpriteSheetImage(mountImageName);
-    }
-  }
-
+  // Sprite URLs are now sent directly to the client
   const spriteSheetPacketData = {
     id: currentPlayer.id,
-    mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
-    bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
-    headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
-
-    armorHelmetSprite: (spriteSheetData.armorHelmetSprite && armorHelmetImageData) ? { ...spriteSheetData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
-    armorShoulderguardsSprite: (spriteSheetData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...spriteSheetData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
-    armorNeckSprite: (spriteSheetData.armorNeckSprite && armorNeckImageData) ? { ...spriteSheetData.armorNeckSprite, imageData: armorNeckImageData } : null,
-    armorHandsSprite: (spriteSheetData.armorHandsSprite && armorHandsImageData) ? { ...spriteSheetData.armorHandsSprite, imageData: armorHandsImageData } : null,
-    armorChestSprite: (spriteSheetData.armorChestSprite && armorChestImageData) ? { ...spriteSheetData.armorChestSprite, imageData: armorChestImageData } : null,
-    armorFeetSprite: (spriteSheetData.armorFeetSprite && armorFeetImageData) ? { ...spriteSheetData.armorFeetSprite, imageData: armorFeetImageData } : null,
-    armorLegsSprite: (spriteSheetData.armorLegsSprite && armorLegsImageData) ? { ...spriteSheetData.armorLegsSprite, imageData: armorLegsImageData } : null,
-    armorWeaponSprite: (spriteSheetData.armorWeaponSprite && armorWeaponImageData) ? { ...spriteSheetData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
+    mountSprite: currentPlayer.mount_type ? getMountSpriteUrl(currentPlayer.mount_type) : null,
+    bodySprite: spriteSheetData.bodySprite || null,
+    headSprite: spriteSheetData.headSprite || null,
+    armorHelmetSprite: spriteSheetData.armorHelmetSprite || null,
+    armorShoulderguardsSprite: spriteSheetData.armorShoulderguardsSprite || null,
+    armorNeckSprite: spriteSheetData.armorNeckSprite || null,
+    armorHandsSprite: spriteSheetData.armorHandsSprite || null,
+    armorChestSprite: spriteSheetData.armorChestSprite || null,
+    armorFeetSprite: spriteSheetData.armorFeetSprite || null,
+    armorLegsSprite: spriteSheetData.armorLegsSprite || null,
+    armorWeaponSprite: spriteSheetData.armorWeaponSprite || null,
     animationState: spriteSheetData.animationState,
     revision: revision,
   };
@@ -5198,49 +6264,20 @@ async function getAnimationData(name: string, playerId: string, revision?: numbe
     return null;
   }
 
-  const { getSpriteSheetImage, getSpriteSheetTemplate } = await import("../modules/spriteSheetManager");
-
-  const extractEquipmentName = (prefixedName: string) => {
-    const firstUnderscore = prefixedName.indexOf('_');
-    return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
-  };
-
-  const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
-  const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
-  const armorHelmetImageData = spriteSheetData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHelmetSprite.name)) : null;
-  const armorShoulderguardsImageData = spriteSheetData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorShoulderguardsSprite.name)) : null;
-  const armorNeckImageData = spriteSheetData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorNeckSprite.name)) : null;
-  const armorHandsImageData = spriteSheetData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHandsSprite.name)) : null;
-  const armorChestImageData = spriteSheetData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorChestSprite.name)) : null;
-  const armorFeetImageData = spriteSheetData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorFeetSprite.name)) : null;
-  const armorLegsImageData = spriteSheetData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorLegsSprite.name)) : null;
-  const armorWeaponImageData = spriteSheetData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorWeaponSprite.name)) : null;
-
-  let mountSprite = null;
-  let mountImageData = null;
-  if (targetPlayer.mounted && targetPlayer.mount_type) {
-    mountSprite = await getSpriteSheetTemplate('player_mount_base');
-    if (mountSprite) {
-      const mountImageName = targetPlayer.mount_type;
-      mountSprite.name = mountImageName;
-      mountSprite.imageSource = `mounts/${mountImageName}.png`;
-      mountImageData = await getSpriteSheetImage(mountImageName);
-    }
-  }
-
+  // Sprite URLs are now sent directly to the client
   return {
     id: targetPlayer.id,
-    mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
-    bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
-    headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
-    armorHelmetSprite: (spriteSheetData.armorHelmetSprite && armorHelmetImageData) ? { ...spriteSheetData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
-    armorShoulderguardsSprite: (spriteSheetData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...spriteSheetData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
-    armorNeckSprite: (spriteSheetData.armorNeckSprite && armorNeckImageData) ? { ...spriteSheetData.armorNeckSprite, imageData: armorNeckImageData } : null,
-    armorHandsSprite: (spriteSheetData.armorHandsSprite && armorHandsImageData) ? { ...spriteSheetData.armorHandsSprite, imageData: armorHandsImageData } : null,
-    armorChestSprite: (spriteSheetData.armorChestSprite && armorChestImageData) ? { ...spriteSheetData.armorChestSprite, imageData: armorChestImageData } : null,
-    armorFeetSprite: (spriteSheetData.armorFeetSprite && armorFeetImageData) ? { ...spriteSheetData.armorFeetSprite, imageData: armorFeetImageData } : null,
-    armorLegsSprite: (spriteSheetData.armorLegsSprite && armorLegsImageData) ? { ...spriteSheetData.armorLegsSprite, imageData: armorLegsImageData } : null,
-    armorWeaponSprite: (spriteSheetData.armorWeaponSprite && armorWeaponImageData) ? { ...spriteSheetData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
+    mountSprite: targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
+    bodySprite: spriteSheetData.bodySprite || null,
+    headSprite: spriteSheetData.headSprite || null,
+    armorHelmetSprite: spriteSheetData.armorHelmetSprite || null,
+    armorShoulderguardsSprite: spriteSheetData.armorShoulderguardsSprite || null,
+    armorNeckSprite: spriteSheetData.armorNeckSprite || null,
+    armorHandsSprite: spriteSheetData.armorHandsSprite || null,
+    armorChestSprite: spriteSheetData.armorChestSprite || null,
+    armorFeetSprite: spriteSheetData.armorFeetSprite || null,
+    armorLegsSprite: spriteSheetData.armorLegsSprite || null,
+    armorWeaponSprite: spriteSheetData.armorWeaponSprite || null,
     animationState: spriteSheetData.animationState,
     revision: revision,
   };
@@ -5264,53 +6301,20 @@ export async function sendAnimationTo(targetWs: any, name: string, playerId?: st
 
   }
 
-  const { getSpriteSheetImage, getSpriteSheetTemplate } = await import("../modules/spriteSheetManager");
-
-  const extractEquipmentName = (prefixedName: string) => {
-    const firstUnderscore = prefixedName.indexOf('_');
-    return firstUnderscore !== -1 ? prefixedName.substring(firstUnderscore + 1) : prefixedName;
-  };
-
-  const bodyImageData = spriteSheetData.bodySprite ? await getSpriteSheetImage(spriteSheetData.bodySprite.name) : null;
-  const headImageData = spriteSheetData.headSprite ? await getSpriteSheetImage(spriteSheetData.headSprite.name) : null;
-  const armorHelmetImageData = spriteSheetData.armorHelmetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHelmetSprite.name)) : null;
-  const armorShoulderguardsImageData = spriteSheetData.armorShoulderguardsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorShoulderguardsSprite.name)) : null;
-  const armorNeckImageData = spriteSheetData.armorNeckSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorNeckSprite.name)) : null;
-  const armorHandsImageData = spriteSheetData.armorHandsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorHandsSprite.name)) : null;
-  const armorChestImageData = spriteSheetData.armorChestSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorChestSprite.name)) : null;
-  const armorFeetImageData = spriteSheetData.armorFeetSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorFeetSprite.name)) : null;
-  const armorLegsImageData = spriteSheetData.armorLegsSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorLegsSprite.name)) : null;
-  const armorWeaponImageData = spriteSheetData.armorWeaponSprite ? await getSpriteSheetImage(extractEquipmentName(spriteSheetData.armorWeaponSprite.name)) : null;
-
-  let mountSprite = null;
-  let mountImageData = null;
-  if (targetPlayer.mounted && targetPlayer.mount_type) {
-
-    mountSprite = await getSpriteSheetTemplate('player_mount_base');
-    if (mountSprite) {
-
-      const mountImageName = targetPlayer.mount_type;
-      mountSprite.name = mountImageName;
-      mountSprite.imageSource = `mounts/${mountImageName}.png`;
-
-      mountImageData = await getSpriteSheetImage(mountImageName);
-    }
-  }
-
+  // Sprite URLs are now sent directly to the client
   const spriteSheetPacketData = {
     id: targetPlayer.id,
-    mountSprite: mountSprite ? { ...mountSprite, imageData: mountImageData } : null,
-    bodySprite: spriteSheetData.bodySprite ? { ...spriteSheetData.bodySprite, imageData: bodyImageData } : null,
-    headSprite: spriteSheetData.headSprite ? { ...spriteSheetData.headSprite, imageData: headImageData } : null,
-
-    armorHelmetSprite: (spriteSheetData.armorHelmetSprite && armorHelmetImageData) ? { ...spriteSheetData.armorHelmetSprite, imageData: armorHelmetImageData } : null,
-    armorShoulderguardsSprite: (spriteSheetData.armorShoulderguardsSprite && armorShoulderguardsImageData) ? { ...spriteSheetData.armorShoulderguardsSprite, imageData: armorShoulderguardsImageData } : null,
-    armorNeckSprite: (spriteSheetData.armorNeckSprite && armorNeckImageData) ? { ...spriteSheetData.armorNeckSprite, imageData: armorNeckImageData } : null,
-    armorHandsSprite: (spriteSheetData.armorHandsSprite && armorHandsImageData) ? { ...spriteSheetData.armorHandsSprite, imageData: armorHandsImageData } : null,
-    armorChestSprite: (spriteSheetData.armorChestSprite && armorChestImageData) ? { ...spriteSheetData.armorChestSprite, imageData: armorChestImageData } : null,
-    armorFeetSprite: (spriteSheetData.armorFeetSprite && armorFeetImageData) ? { ...spriteSheetData.armorFeetSprite, imageData: armorFeetImageData } : null,
-    armorLegsSprite: (spriteSheetData.armorLegsSprite && armorLegsImageData) ? { ...spriteSheetData.armorLegsSprite, imageData: armorLegsImageData } : null,
-    armorWeaponSprite: (spriteSheetData.armorWeaponSprite && armorWeaponImageData) ? { ...spriteSheetData.armorWeaponSprite, imageData: armorWeaponImageData } : null,
+    mountSprite: targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
+    bodySprite: spriteSheetData.bodySprite || null,
+    headSprite: spriteSheetData.headSprite || null,
+    armorHelmetSprite: spriteSheetData.armorHelmetSprite || null,
+    armorShoulderguardsSprite: spriteSheetData.armorShoulderguardsSprite || null,
+    armorNeckSprite: spriteSheetData.armorNeckSprite || null,
+    armorHandsSprite: spriteSheetData.armorHandsSprite || null,
+    armorChestSprite: spriteSheetData.armorChestSprite || null,
+    armorFeetSprite: spriteSheetData.armorFeetSprite || null,
+    armorLegsSprite: spriteSheetData.armorLegsSprite || null,
+    armorWeaponSprite: spriteSheetData.armorWeaponSprite || null,
     animationState: spriteSheetData.animationState,
     revision: revision,
   };

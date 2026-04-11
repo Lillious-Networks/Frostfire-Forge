@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
-import assetConfig from "../services/assetConfig";
+const mapDir = path.join('.', 'src', 'assets', 'maps');
 
 export function calculateFileChecksum(filePath: string): string {
   try {
@@ -18,9 +18,6 @@ export function calculateFileChecksum(filePath: string): string {
 
 export function calculateAllMapChecksums(): Record<string, string> {
   const checksums: Record<string, string> = {};
-  const assetPath = assetConfig.getAssetConfig() as string;
-  const assetData = assetConfig.getAssetData() as any;
-  const mapDir = path.join(assetPath, assetData.maps.path);
 
   if (!fs.existsSync(mapDir)) {
     console.warn(`Map directory not found at ${mapDir}`);
@@ -39,9 +36,6 @@ export function calculateAllMapChecksums(): Record<string, string> {
 
 export function getMapContent(mapName: string): any | null {
   try {
-    const assetPath = assetConfig.getAssetConfig() as string;
-    const assetData = assetConfig.getAssetData() as any;
-    const mapDir = path.join(assetPath, assetData.maps.path);
     const filePath = path.join(mapDir, mapName.endsWith(".json") ? mapName : `${mapName}.json`);
 
     if (!fs.existsSync(filePath)) {
@@ -58,9 +52,6 @@ export function getMapContent(mapName: string): any | null {
 
 export function writeMapContent(mapName: string, mapData: any): boolean {
   try {
-    const assetPath = assetConfig.getAssetConfig() as string;
-    const assetData = assetConfig.getAssetData() as any;
-    const mapDir = path.join(assetPath, assetData.maps.path);
     const filePath = path.join(mapDir, mapName.endsWith(".json") ? mapName : `${mapName}.json`);
 
     // Write with normalized JSON format to ensure checksums match after writing
