@@ -41,7 +41,6 @@ interface EntityAIState {
   isCasting: boolean;
   castStartTime: number;
   castingProgress: number;
-  healthRestored: boolean;
 }
 
 const entityAIStates = new Map<string, EntityAIState>();
@@ -82,7 +81,6 @@ export function initializeEntityAI(entity: any): EntityAIState {
     isCasting: false,
     castStartTime: 0,
     castingProgress: 0,
-    healthRestored: false,
   };
 
   const entityKey = String(entity.id);
@@ -118,6 +116,11 @@ async function findNearestPlayer(entity: any, aggroRange: number, requireLineOfS
   for (const player of allPlayers) {
     if (player.location.map !== entity.map) continue;
 
+    // Never aggro on stealthed admins
+    if (player.isStealth && player.isAdmin) {
+      continue;
+    }
+
     const playerPos = typeof player.location.position === 'string'
       ? { x: Number(player.location.position.split(',')[0]), y: Number(player.location.position.split(',')[1]) }
       : player.location.position;
@@ -147,6 +150,39 @@ async function findNearestPlayer(entity: any, aggroRange: number, requireLineOfS
   return nearest ? { player: nearest, distance: nearestDistance } : null;
 }
 
+/**
+ * Handle entity returning to spawn when target goes stealth
+ */
+function handleStealthReturn(entity: any, aiState: EntityAIState, targetPlayerId: string | null): void {
+  aiState.combatState = 'returning';
+  aiState.target = null;
+  aiState.threatTable.clear();
+  aiState.stuckFrameCount = 0;
+  aiState.lastStuckCheckDistance = Infinity;
+  aiState.lastValidDirection = null;
+  aiState.invalidDirectionFrames = 0;
+  aiState.isCasting = false;
+  aiState.castingProgress = 0;
+  clearPathState(aiState);
+
+  // Remove from aggro map if applicable (for aggressive entities)
+  if (targetPlayerId) {
+    const targetPlayer = playerCache.get(targetPlayerId);
+    if (targetPlayer) {
+      aggroMap.get(targetPlayerId)?.delete(String(entity.id));
+      if (!aggroMap.get(targetPlayerId) || aggroMap.get(targetPlayerId)!.size === 0) {
+        targetPlayer.pvp = false;
+        aggroMap.delete(targetPlayerId);
+      }
+    }
+  }
+
+  if (entity.isMoving) {
+    entity.isMoving = false;
+    entity.hasMoved = true;
+  }
+}
+
 function checkLeashRange(entity: any, aiState: EntityAIState): void {
   const entityKey = String(entity.id);
   const spawnData = entitySpawnData.get(entityKey);
@@ -171,7 +207,6 @@ function checkLeashRange(entity: any, aiState: EntityAIState): void {
     aiState.lastStuckCheckDistance = Infinity;
     aiState.lastValidDirection = null;
     aiState.invalidDirectionFrames = 0;
-    aiState.healthRestored = false;
     aiState.isCasting = false;
     aiState.castingProgress = 0;
     clearPathState(aiState);
@@ -246,6 +281,16 @@ async function updateAggroState(entity: any, aiState: EntityAIState): Promise<vo
         nearest.player.pvp = true;
       }
     } else if (aiState.combatState === 'aggro') {
+      // Check if current target went stealth as an admin
+      if (aiState.target) {
+        const targetPlayer = playerCache.get(aiState.target);
+        if (targetPlayer && targetPlayer.isStealth && targetPlayer.isAdmin) {
+          // Drop aggro immediately if target goes into stealth as admin - return to spawn like out of range
+          handleStealthReturn(entity, aiState, aiState.target);
+          return;
+        }
+      }
+
       // When already in combat, don't require line of sight to follow
       const nearest = await findNearestPlayer(entity, aggroRange * 2, false);
 
@@ -260,7 +305,6 @@ async function updateAggroState(entity: any, aiState: EntityAIState): Promise<vo
       aiState.invalidDirectionFrames = 0;
       aiState.isCasting = false;
       aiState.castingProgress = 0;
-      aiState.healthRestored = false;
       clearPathState(aiState);
 
       if (oldTargetId) {
@@ -286,6 +330,12 @@ async function updateAggroState(entity: any, aiState: EntityAIState): Promise<vo
     const targetPlayer = playerCache.get(aiState.target);
 
     if (targetPlayer) {
+      // Drop aggro if target is a stealthed admin - return to spawn like out of range
+      if (targetPlayer.isStealth && targetPlayer.isAdmin) {
+        handleStealthReturn(entity, aiState, aiState.target);
+        return;
+      }
+
       const targetPos = typeof targetPlayer.location.position === 'string'
         ? { x: Number(targetPlayer.location.position.split(',')[0]), y: Number(targetPlayer.location.position.split(',')[1]) }
         : targetPlayer.location.position;
@@ -298,9 +348,32 @@ async function updateAggroState(entity: any, aiState: EntityAIState): Promise<vo
       );
 
       if (distance < aiState.aggroRange) {
-        aiState.combatState = 'aggro';
+        if (aiState.combatState !== 'aggro') {
+          aiState.combatState = 'aggro';
+          // Set PvP flag when entering aggro
+          if (!aggroMap.has(aiState.target)) {
+            aggroMap.set(aiState.target, new Set());
+          }
+          aggroMap.get(aiState.target)!.add(String(entity.id));
+          targetPlayer.pvp = true;
+        }
+      } else if (aiState.combatState === 'aggro') {
+        // Drop aggro if target goes out of range
+        const oldTargetId = aiState.target;
+        aiState.combatState = 'returning';
+        aiState.target = null;
+        aiState.threatTable.clear();
+
+        if (oldTargetId) {
+          aggroMap.get(oldTargetId)?.delete(String(entity.id));
+          if (!aggroMap.get(oldTargetId) || aggroMap.get(oldTargetId)!.size === 0) {
+            targetPlayer.pvp = false;
+            aggroMap.delete(oldTargetId);
+          }
+        }
       }
     } else {
+      const oldTargetId = aiState.target;
       aiState.target = null;
       aiState.threatTable.clear();
       aiState.stuckFrameCount = 0;
@@ -310,6 +383,18 @@ async function updateAggroState(entity: any, aiState: EntityAIState): Promise<vo
       aiState.isCasting = false;
       aiState.castingProgress = 0;
       clearPathState(aiState);
+
+      // Remove from aggro map when target no longer exists
+      if (oldTargetId) {
+        aggroMap.get(oldTargetId)?.delete(String(entity.id));
+        if (!aggroMap.get(oldTargetId) || aggroMap.get(oldTargetId)!.size === 0) {
+          const targetPlayerRef = playerCache.get(oldTargetId);
+          if (targetPlayerRef) {
+            targetPlayerRef.pvp = false;
+          }
+          aggroMap.delete(oldTargetId);
+        }
+      }
 
       if (entity.isMoving) {
         entity.isMoving = false;
@@ -400,6 +485,21 @@ async function processCombat(entity: any, aiState: EntityAIState): Promise<void>
               freshTarget.stats.health = 0;
               freshTarget.stats.health = freshTarget.stats.total_max_health;
               freshTarget.stats.stamina = freshTarget.stats.total_max_stamina;
+
+              // Immediately untarget the player when killed
+              const killedTargetId = aiState.target;
+              aiState.target = null;
+              aiState.combatState = 'idle';
+              aiState.threatTable.clear();
+
+              // Clean up aggro map
+              if (killedTargetId) {
+                aggroMap.get(killedTargetId)?.delete(String(entity.id));
+                if (!aggroMap.get(killedTargetId) || aggroMap.get(killedTargetId)!.size === 0) {
+                  freshTarget.pvp = false;
+                  aggroMap.delete(killedTargetId);
+                }
+              }
 
               const currentMapName = freshTarget.location.map;
               const mapPropertiesCache = await assetCache.get("mapProperties");
@@ -518,45 +618,61 @@ async function moveTowardsSpawn(entity: any, aiState?: EntityAIState): Promise<v
   const distance = Math.sqrt(dx * dx + dy * dy);
 
   const threshold = 10;
+
+  // If entity is close to spawn, snap it to exact spawn position and stop moving
   if (distance < threshold) {
-    // Entity reached spawn
-    entity.position.x = spawnPos.x;
-    entity.position.y = spawnPos.y;
-    entity.position.direction = spawnPos.direction || 'down';
-    entity.isMoving = false;
-    entity.hasMoved = false;
+    if (entity.position.x !== spawnPos.x || entity.position.y !== spawnPos.y || entity.isMoving) {
+      entity.position.x = spawnPos.x;
+      entity.position.y = spawnPos.y;
+      entity.position.direction = spawnPos.direction || 'down';
+      entity.isMoving = false;
+      entity.hasMoved = true;
+      entity.action = 'idle';
+      entity.velocity = { x: 0, y: 0 };
+      entityCache.updatePosition(entity.id, entity.position.x, entity.position.y);
+    }
+  }
 
-    if (aiState && aiState.combatState === 'returning') {
-      aiState.combatState = 'idle';
-      aiState.isCasting = false;
-      aiState.castingProgress = 0;
-      clearPathState(aiState);
+  // Only process return-to-spawn logic if entity is actually in "returning" state
+  if (aiState && aiState.combatState === 'returning' && distance < threshold) {
+    // Entity reached spawn - transition to idle
+    entity.isCasting = false;
+    entity.castingProgress = 0;
+    entity.action = 'idle';
 
-      // Broadcast entity state reset to all players
-      const allPlayers = Object.values(playerCache.list()) as any[];
-      const playersOnMap = allPlayers.filter((p: any) => p && p.location && p.location.map === entity.map && p.ws);
+    aiState.combatState = 'idle';
+    aiState.isCasting = false;
+    aiState.castingProgress = 0;
+    clearPathState(aiState);
+
+    // Broadcast entity state reset to all players
+    const allPlayers = Object.values(playerCache.list()) as any[];
+    const playersOnMap = allPlayers.filter((p: any) => p && p.location && p.location.map === entity.map && p.ws);
+
+    if (playersOnMap.length > 0) {
+      // Send entity update with direction and idle combat state
+      const updatePacket = packetManager.updateEntity({
+        id: entity.id,
+        combatState: 'idle',
+        direction: entity.position.direction,
+        position: { x: entity.position.x, y: entity.position.y, direction: entity.position.direction },
+        isMoving: false,
+        velocity: { x: 0, y: 0 },
+        isCasting: false,
+        castingProgress: 0,
+        action: 'idle'
+      });
+      broadcastToAOI(playersOnMap[0], updatePacket, true);
+    }
+
+    // Restore health to full when returning to spawn
+    if (entity.health < entity.max_health) {
+      entityCache.resetHealth(entity.id);
+      entity.health = entity.max_health;
 
       if (playersOnMap.length > 0) {
-        // Send entity update with direction and idle combat state
-        const updatePacket = packetManager.updateEntity({
-          id: entity.id,
-          combatState: 'idle',
-          direction: entity.position.direction,
-          position: { x: entity.position.x, y: entity.position.y, direction: entity.position.direction }
-        });
-        broadcastToAOI(playersOnMap[0], updatePacket, true);
-      }
-
-      // Only restore health once when returning to spawn
-      if (!aiState.healthRestored) {
-        entityCache.resetHealth(entity.id);
-        entity.health = entity.max_health;
-        aiState.healthRestored = true;
-
-        if (playersOnMap.length > 0) {
-          const healthPacket = packetManager.updateEntityHealth(entity.id, entity.health, entity.max_health);
-          broadcastToAOI(playersOnMap[0], healthPacket, true);
-        }
+        const healthPacket = packetManager.updateEntityHealth(entity.id, entity.health, entity.max_health);
+        broadcastToAOI(playersOnMap[0], healthPacket, true);
       }
     }
     return;
@@ -590,6 +706,21 @@ async function moveTowardsSpawn(entity: any, aiState?: EntityAIState): Promise<v
   const moveSpeed = (entity as any).speed || 2;
   const prevX = entity.position.x;
   const prevY = entity.position.y;
+
+  // Heal entity while returning to spawn
+  const healAmount = Math.ceil(entity.max_health / 30); // Heal to full in ~30 ticks (~0.5 seconds)
+  if (entity.health < entity.max_health) {
+    entity.health = Math.min(entity.health + healAmount, entity.max_health);
+    entityCache.resetHealth(entity.id);
+
+    // Broadcast health update to players
+    const allPlayers = Object.values(playerCache.list()) as any[];
+    const playersOnMap = allPlayers.filter((p: any) => p && p.location && p.location.map === entity.map && p.ws);
+    if (playersOnMap.length > 0) {
+      const healthPacket = packetManager.updateEntityHealth(entity.id, entity.health, entity.max_health);
+      broadcastToAOI(playersOnMap[0], healthPacket, true);
+    }
+  }
 
   // Use pathfinding to navigate back to spawn
   const pathState: PathState = {
@@ -910,7 +1041,7 @@ export function applyDamageToEntity(entity: any, damage: number, attacker: any):
 
   if (
     (entity.aggro_type === 'neutral' || entity.aggro_type === 'aggressive') &&
-    aiState.combatState === 'idle'
+    (aiState.combatState === 'idle' || aiState.combatState === 'returning')
   ) {
     aiState.target = playerId;
     aiState.combatState = 'aggro';
@@ -933,9 +1064,10 @@ export function applyDamageToEntity(entity: any, damage: number, attacker: any):
   }
 }
 
-async function respawnEntity(entityId: string): Promise<void> {
+async function respawnEntity(entityId: string | number): Promise<void> {
   try {
-    const spawnData = entitySpawnData.get(entityId);
+    const entityKey = String(entityId);
+    const spawnData = entitySpawnData.get(entityKey);
     if (!spawnData) {
       log.warn(`No spawn data found for entity ${entityId}, cannot respawn`);
       return;
@@ -964,19 +1096,14 @@ async function respawnEntity(entityId: string): Promise<void> {
         particles: entityFromDb.particles,
       };
 
-      log.debug(`[RESPAWN] Entity ${entityId} spawning at position X: ${entityFromDb.position.x}, Y: ${entityFromDb.position.y} on map ${entityFromDb.map}`);
-
       const spawnPacket = packetManager.spawnEntity(spawnPacketData);
-      log.debug(`[RESPAWN] Created spawn packet: ${JSON.stringify(spawnPacket)}`);
 
       const playerCacheData = playerCache.list();
       const allPlayers = Object.values(playerCacheData) as any[];
       const playerOnMap = allPlayers.find((p: any) => p && p.location && p.location.map === entityFromDb.map);
 
       if (playerOnMap && playerOnMap.aoi) {
-        log.debug(`[RESPAWN] Broadcasting entity spawn via AOI from player ${playerOnMap.username}`);
         broadcastToAOI(playerOnMap, spawnPacket, true);
-        log.debug(`[RESPAWN] Broadcast completed`);
       } else {
         log.warn(`[RESPAWN] No player on map ${entityFromDb.map} to broadcast entity spawn`);
       }
@@ -1041,6 +1168,43 @@ export function updateEntitySpawnPoint(entityId: string, position: any): void {
   });
 }
 
+export function getEntitySpawnData(entityId: string | number): any {
+  const entityKey = String(entityId);
+  return entitySpawnData.get(entityKey);
+}
+
+export function resetEntityAI(entityId: string | number): void {
+  const entityKey = String(entityId);
+  const aiState = entityAIStates.get(entityKey);
+
+  if (aiState) {
+    // Clear aggro state
+    if (aiState.target) {
+      const oldTargetId = aiState.target;
+      aggroMap.get(oldTargetId)?.delete(entityKey);
+      if (!aggroMap.get(oldTargetId) || aggroMap.get(oldTargetId)!.size === 0) {
+        const targetPlayer = playerCache.get(oldTargetId);
+        if (targetPlayer) {
+          targetPlayer.pvp = false;
+        }
+        aggroMap.delete(oldTargetId);
+      }
+    }
+
+    // Reset AI state
+    aiState.combatState = 'idle';
+    aiState.target = null;
+    aiState.threatTable.clear();
+    aiState.isCasting = false;
+    aiState.castingProgress = 0;
+    aiState.stuckFrameCount = 0;
+    aiState.lastStuckCheckDistance = Infinity;
+    aiState.lastValidDirection = null;
+    aiState.invalidDirectionFrames = 0;
+    clearPathState(aiState);
+  }
+}
+
 setInterval(() => {
   tickEntityAI().catch((error: any) => {
     log.error(`Unhandled error in entity AI loop: ${error.message}`);
@@ -1055,4 +1219,6 @@ export default {
   tickEntityAI,
   respawnEntity,
   updateEntitySpawnPoint,
+  getEntitySpawnData,
+  resetEntityAI,
 };

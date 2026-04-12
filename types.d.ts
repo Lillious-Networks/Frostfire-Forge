@@ -351,6 +351,7 @@ declare interface WarpObject {
     width: number;
     height: number;
   };
+  layer?: string;
 }
 
 declare interface GraveyardObject {
@@ -359,6 +360,7 @@ declare interface GraveyardObject {
     x: number;
     y: number;
   };
+  layer?: string;
 }
 
 declare interface Currency {

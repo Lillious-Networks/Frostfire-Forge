@@ -1322,15 +1322,16 @@ export default async function packetReceiver(
               const currentMap = currentPlayer.location.map;
               const warp = collision.warp as {
                 map: string;
-                position: PositionData;
+                x: number;
+                y: number;
               };
 
               const result = await player.setLocation(
                 currentPlayer.id,
                 warp.map.replace(".json", ""),
                 {
-                  x: warp.position.x || 0,
-                  y: warp.position.y || 0,
+                  x: warp.x || 0,
+                  y: warp.y || 0,
                   direction: currentPlayer.location.position?.direction || "down",
                 }
               );
@@ -1343,8 +1344,8 @@ export default async function packetReceiver(
               ) {
                 const newMap = warp.map.replace(".json", "");
                 const newPosition = {
-                  x: warp.position.x || 0,
-                  y: warp.position.y || 0
+                  x: warp.x || 0,
+                  y: warp.y || 0
                 };
 
                 await handleMapChangeAOI(currentPlayer, newMap, newPosition, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
@@ -1753,15 +1754,9 @@ export default async function packetReceiver(
           return;
         }
 
-        const timeSinceInterrupt = performance.now() - (currentPlayer.lastInterruptTime || 0);
-        if (timeSinceInterrupt < 1500) {
-
-          return;
-        }
 
         const casting = playerCache.get(currentPlayer.id)?.casting;
         if (casting) {
-
           return;
         }
 
@@ -1886,11 +1881,13 @@ export default async function packetReceiver(
 
         if (!spell_damage) return;
 
-        freshPlayerForMana.lastCastTime = performance.now();
-
+        // ATOMIC: Set cooldown immediately to prevent race condition with mana deduction
+        // This must happen before any other async operations
+        // Only apply spell cooldown (not cast_time) for faster feel
         freshPlayerForMana.spellCooldowns = freshPlayerForMana.spellCooldowns || {};
-        const totalCooldownTime = (spell.cast_time * 1000) + (spell.cooldown * 1000);
-        freshPlayerForMana.spellCooldowns[spell_id] = performance.now() + totalCooldownTime;
+        const spellCooldownTime = spell.cooldown * 1000;
+        freshPlayerForMana.spellCooldowns[spell_id] = performance.now() + spellCooldownTime;
+        freshPlayerForMana.lastCastTime = performance.now();
 
         playerCache.set(freshPlayerForMana.id, freshPlayerForMana);
 
@@ -1925,6 +1922,11 @@ export default async function packetReceiver(
 
         if (isEntityTarget) {
           log.debug(`[ATTACK] Identified target as entity. aggro_type=${target.aggro_type}, health=${target.health}, has_stats=${!!target.stats}`);
+
+          // Prevent casting on friendly entities
+          if (target.aggro_type === 'friendly') {
+            return;
+          }
         } else {
           log.debug(`[ATTACK] Identified target as player. username=${target.username}`);
         }
@@ -2028,13 +2030,20 @@ export default async function packetReceiver(
         }
 
         currentPlayer.casting = true;
+        const spellStartTime = performance.now();
+
+        // Dismount player if they're mounted
+        if (currentPlayer.mounted) {
+          currentPlayer.mounted = false;
+          playerCache.set(currentPlayer.id, currentPlayer);
+        }
 
         globalStateRevision++;
         await sendPositionAnimation(
           ws,
           currentPlayer.location.position?.direction || "down",
           currentPlayer.moving || false,
-          currentPlayer.mounted,
+          false,
           currentPlayer.mount_type || "unicorn",
           undefined,
           globalStateRevision,
@@ -2048,6 +2057,25 @@ export default async function packetReceiver(
           );
         });
         await new Promise((resolve) => setTimeout(resolve, spell.cast_time * 1000));
+
+        // Check if spell was manually cancelled via ESC during cast time
+        const updatedPlayer = playerCache.get(currentPlayer.id);
+        if (updatedPlayer && updatedPlayer.manualSpellCancel && updatedPlayer.manualSpellCancel >= spellStartTime) {
+          // Spell was cancelled during cast time, abort execution
+          // Clear the manual cancel flag so next cast is allowed
+          if (updatedPlayer.spellCooldowns) {
+            delete updatedPlayer.spellCooldowns[spell_id];
+          }
+          delete updatedPlayer.manualSpellCancel;
+          updatedPlayer.casting = false;
+          playerCache.set(updatedPlayer.id, updatedPlayer);
+          // Sync back to currentPlayer so ws.data stays current
+          currentPlayer.spellCooldowns = updatedPlayer.spellCooldowns;
+          currentPlayer.manualSpellCancel = undefined;
+          currentPlayer.casting = false;
+          return;
+        }
+
         if (!spell.can_move && !playerCache.get(currentPlayer.id)?.casting) {
 
           const resetPlayer = playerCache.get(currentPlayer.id);
@@ -2058,6 +2086,8 @@ export default async function packetReceiver(
           return;
         }
         currentPlayer.casting = false;
+        // After cast, mounted should always be false (player was dismounted at start of cast)
+        currentPlayer.mounted = false;
         playerCache.set(currentPlayer.id, currentPlayer);
 
         globalStateRevision++;
@@ -2065,7 +2095,7 @@ export default async function packetReceiver(
           ws,
           currentPlayer.location.position?.direction || "down",
           currentPlayer.moving || false,
-          currentPlayer.mounted,
+          false,
           currentPlayer.mount_type || "unicorn",
           undefined,
           globalStateRevision,
@@ -2469,6 +2499,31 @@ export default async function packetReceiver(
 
         break;
       }
+      case "CANCEL_SPELL": {
+        if (!currentPlayer) return;
+
+        // Treat ESC cancel as spell interruption
+        const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+        playersInMap.forEach((player) => {
+          sendPacket(
+            player.ws,
+            packetManager.castSpell({ id: currentPlayer.id, spell: 'interrupted', time: 1 })
+          );
+        });
+        // Mark this as a manual cancel (not a movement interrupt)
+        // Don't set lastInterruptTime to allow immediate recast
+        currentPlayer.manualSpellCancel = performance.now();
+
+        // Also update in playerCache so spell execution can detect it
+        const cachedPlayer = playerCache.get(currentPlayer.id);
+        if (cachedPlayer) {
+          cachedPlayer.manualSpellCancel = performance.now();
+          playerCache.set(cachedPlayer.id, cachedPlayer);
+        }
+
+        log.debug(`[SPELL] Player ${currentPlayer.username} cancelled spell via ESC`);
+        break;
+      }
       case "QUESTDETAILS": {
         const questId = data as unknown as number;
         const quest = await quests.find(questId);
@@ -2530,6 +2585,33 @@ export default async function packetReceiver(
           }
 
           log.info(`Map chunks saved to asset server: ${saveData.mapName}`);
+
+          // Also sync graveyards and warps to asset server if present
+          if (saveData.graveyards || saveData.warps) {
+            try {
+              const syncResponse = await fetch(`${assetServerUrl}/save-map-properties`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                  mapName: saveData.mapName,
+                  graveyards: saveData.graveyards,
+                  warps: saveData.warps,
+                  authKey: authKey
+                })
+              });
+
+              if (!syncResponse.ok) {
+                const syncErrorData = await syncResponse.json().catch(() => ({ error: syncResponse.statusText }));
+                log.warn(`Failed to sync graveyards/warps to asset server: ${syncErrorData.error || syncResponse.status}`);
+              } else {
+                log.info(`Map graveyards/warps synced to asset server: ${saveData.mapName}`);
+              }
+            } catch (syncError) {
+              log.warn(`Error syncing graveyards/warps to asset server: ${syncError}`);
+            }
+          }
 
           // Save graveyards and warps to mapProperties
           if (saveData.graveyards !== undefined || saveData.warps !== undefined) {
@@ -2602,18 +2684,26 @@ export default async function packetReceiver(
             // Save graveyards and warps properties and reload the map
             if (saveData.graveyards !== undefined || saveData.warps !== undefined) {
               try {
-                await saveMapProperties(saveData.mapName, saveData.graveyards, saveData.warps);
+                log.debug(`[SAVE_MAP] Graveyards: ${saveData.graveyards ? `${saveData.graveyards.length} items` : 'undefined'}`);
+                log.debug(`[SAVE_MAP] Warps: ${saveData.warps ? `${saveData.warps.length} items` : 'undefined'}`);
 
-                // Reload the map to refresh mapProperties cache
-                const { reloadMap: reloadMapFunc } = await import("../modules/assetloader");
-                const reloadedMap = await reloadMapFunc(saveData.mapName);
+                // Only call saveMapProperties if there's actual data to save
+                if ((saveData.graveyards && saveData.graveyards.length > 0) || (saveData.warps && saveData.warps.length > 0)) {
+                  await saveMapProperties(saveData.mapName, saveData.graveyards, saveData.warps);
 
-                // Update the cached maps with the reloaded map
-                const updatedMaps = cachedMaps;
-                const mapIdx = updatedMaps.findIndex((m: any) => m.name === saveData.mapName);
-                if (mapIdx !== -1) {
-                  updatedMaps[mapIdx] = reloadedMap;
-                  assetCache.add("maps", updatedMaps);
+                  // Reload the map to refresh mapProperties cache
+                  const { reloadMap: reloadMapFunc } = await import("../modules/assetloader");
+                  const reloadedMap = await reloadMapFunc(saveData.mapName);
+
+                  // Update the cached maps with the reloaded map
+                  const updatedMaps = cachedMaps;
+                  const mapIdx = updatedMaps.findIndex((m: any) => m.name === saveData.mapName);
+                  if (mapIdx !== -1) {
+                    updatedMaps[mapIdx] = reloadedMap;
+                    assetCache.add("maps", updatedMaps);
+                  }
+                } else {
+                  log.debug(`[SAVE_MAP] No graveyards or warps to save`);
                 }
               } catch (propError) {
                 log.warn(`Failed to save/reload map properties: ${propError}`);
@@ -3057,6 +3147,9 @@ export default async function packetReceiver(
             .sort((a: any, b: any) => (b.id ?? 0) - (a.id ?? 0))[0];
 
           if (createdEntity) {
+            // Initialize AI and spawn data for the new entity
+            entityAI.initializeEntityAI(createdEntity);
+
             // Add the new entity to the in-memory cache with health = max_health and isMoving = false
             const entityWithHealth = { ...createdEntity, health: createdEntity.max_health, isMoving: false };
             entityCache.add(entityWithHealth);
@@ -3122,8 +3215,18 @@ export default async function packetReceiver(
               entityCache.add({ ...updatedEntity, health: updatedEntity.max_health, isMoving: false, hasMoved: false });
             }
 
-            // Update the entity's spawn point so it doesn't walk back to the old position
-            entityAI.updateEntitySpawnPoint(entityData.id, updatedEntity.position);
+            // Reset entity to its original spawn position
+            const spawnData = entityAI.getEntitySpawnData(entityData.id);
+            if (spawnData && spawnData.position && cachedEntity) {
+              cachedEntity.position = {
+                x: spawnData.position.x,
+                y: spawnData.position.y,
+                direction: spawnData.position.direction || 'down'
+              };
+            }
+
+            // Reset entity AI state (aggro, target, etc.) when saving
+            entityAI.resetEntityAI(entityData.id);
 
             // Include the in-memory health in the update packet to preserve health
             const resolvedEntity = {
@@ -3626,7 +3729,7 @@ export default async function packetReceiver(
               let targetSpritesData = null;
               if (targetSpriteData?.bodySprite || targetSpriteData?.headSprite) {
                 targetSpritesData = {
-                  mountSprite: targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
+                  mountSprite: targetPlayer.mounted && targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
                   bodySprite: targetSpriteData.bodySprite || null,
                   headSprite: targetSpriteData.headSprite || null,
                   armorHelmetSprite: targetSpriteData.armorHelmetSprite || null,
@@ -3872,7 +3975,7 @@ export default async function packetReceiver(
               let targetSpritesDataTeleport = null;
               if (targetSpriteDataTeleport?.bodySprite || targetSpriteDataTeleport?.headSprite) {
                 targetSpritesDataTeleport = {
-                  mountSprite: targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
+                  mountSprite: targetPlayer.mounted && targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
                   bodySprite: targetSpriteDataTeleport.bodySprite || null,
                   headSprite: targetSpriteDataTeleport.headSprite || null,
                   armorHelmetSprite: targetSpriteDataTeleport.armorHelmetSprite || null,
@@ -5721,6 +5824,25 @@ export default async function packetReceiver(
       }
       case "MOUNT": {
         if (!currentPlayer) return;
+
+        // Prevent mounting while casting
+        if (currentPlayer.casting) {
+          sendPacket(
+            ws,
+            packetManager.notify({ message: "Cannot mount while casting." })
+          );
+          return;
+        }
+
+        // Prevent mounting when PvP flag is enabled
+        if (currentPlayer.pvp) {
+          sendPacket(
+            ws,
+            packetManager.notify({ message: "Cannot mount while in PvP." })
+          );
+          return;
+        }
+
         const canMount = player.canMount(currentPlayer);
         const mount = (data as any).mount;
         if (!mount) {
@@ -6169,7 +6291,7 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
   // Sprite URLs are now sent directly to the client
   const spriteSheetPacketData = {
     id: currentPlayer.id,
-    mountSprite: currentPlayer.mount_type ? getMountSpriteUrl(currentPlayer.mount_type) : null,
+    mountSprite: currentPlayer.mounted && currentPlayer.mount_type ? getMountSpriteUrl(currentPlayer.mount_type) : null,
     bodySprite: spriteSheetData.bodySprite || null,
     headSprite: spriteSheetData.headSprite || null,
     armorHelmetSprite: spriteSheetData.armorHelmetSprite || null,
@@ -6267,7 +6389,7 @@ async function getAnimationData(name: string, playerId: string, revision?: numbe
   // Sprite URLs are now sent directly to the client
   return {
     id: targetPlayer.id,
-    mountSprite: targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
+    mountSprite: targetPlayer.mounted && targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
     bodySprite: spriteSheetData.bodySprite || null,
     headSprite: spriteSheetData.headSprite || null,
     armorHelmetSprite: spriteSheetData.armorHelmetSprite || null,
@@ -6304,7 +6426,7 @@ export async function sendAnimationTo(targetWs: any, name: string, playerId?: st
   // Sprite URLs are now sent directly to the client
   const spriteSheetPacketData = {
     id: targetPlayer.id,
-    mountSprite: targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
+    mountSprite: targetPlayer.mounted && targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
     bodySprite: spriteSheetData.bodySprite || null,
     headSprite: spriteSheetData.headSprite || null,
     armorHelmetSprite: spriteSheetData.armorHelmetSprite || null,

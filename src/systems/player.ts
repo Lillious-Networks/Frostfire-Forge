@@ -862,7 +862,7 @@ const player = {
         return {
           value: true,
           reason: "warp_collision",
-          warp: { map: warp.map, position: { x: warp.x, y: warp.y } },
+          warp: { map: warp.map, x: warp.x, y: warp.y },
         };
       }
     }
