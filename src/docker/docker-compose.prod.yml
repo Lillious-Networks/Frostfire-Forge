@@ -5,15 +5,8 @@ services:
       dockerfile: src/docker/Dockerfile.prod
     container_name: frostfire-forge-prod
     restart: unless-stopped
-    ports:
-      - "3000:3000"
+    network_mode: "host"
     volumes:
       - ../../.env.production:/app/.env.production:ro
     env_file:
       - ../../.env.production
-    networks:
-      - frostfire-network-prod
-
-networks:
-  frostfire-network-prod:
-    driver: bridge
