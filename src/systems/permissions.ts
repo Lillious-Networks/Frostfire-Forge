@@ -21,8 +21,8 @@ const permissions = {
     get: async (username: string) => {
 
         const response = await query("SELECT permissions FROM permissions WHERE username = ?", [username]) as { permissions: string }[];
-        if (response.length === 0) return [];
-        return response[0]?.permissions || [];
+        if (response.length === 0) return "";
+        return response[0]?.permissions || "";
     },
     add: async (username: string, permission: string) => {
 

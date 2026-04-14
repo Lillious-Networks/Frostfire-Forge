@@ -127,32 +127,45 @@ async function hasLineOfSight(
 
 const player = {
   clear: async () => {
+    log.info("Clearing guest data and resetting server state...");
 
+    // Reset all accounts
     await query(
       "UPDATE accounts SET session_id = NULL, online = 0, token = NULL, verified = 0, verification_code = NULL, party_id = NULL"
     );
 
+    // Get guest usernames for cleanup
+    const guestUsernames = "(SELECT username FROM accounts WHERE guest_mode = 1)";
+
+    // Delete guest data from all related tables with username columns
+    await query(`DELETE FROM inventory WHERE username IN ${guestUsernames}`);
+    await query(`DELETE FROM stats WHERE username IN ${guestUsernames}`);
+    await query(`DELETE FROM clientconfig WHERE username IN ${guestUsernames}`);
+    await query(`DELETE FROM quest_log WHERE username IN ${guestUsernames}`);
+    await query(`DELETE FROM currency WHERE username IN ${guestUsernames}`);
+    await query(`DELETE FROM collectables WHERE username IN ${guestUsernames}`);
+    await query(`DELETE FROM equipment WHERE username IN ${guestUsernames}`);
+    await query(`DELETE FROM learned_spells WHERE username IN ${guestUsernames}`);
+    await query(`DELETE FROM permissions WHERE username IN ${guestUsernames}`);
+    await query(`DELETE FROM friendslist WHERE username IN ${guestUsernames}`);
+
+    // Delete parties led by guests
+    await query(`DELETE FROM parties WHERE leader IN ${guestUsernames}`);
+
+    // Delete guilds led by guests
+    await query(`DELETE FROM guilds WHERE leader IN ${guestUsernames}`);
+
+    // Clear all parties
     if (process.env.DATABASE_ENGINE === "sqlite") {
       await query("DELETE FROM parties");
     } else {
       await query("TRUNCATE TABLE parties");
     }
 
-    await query("DELETE FROM stats WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
-
-    await query("DELETE FROM clientconfig WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
-
-    await query("DELETE FROM quest_log WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
-
-    await query("DELETE FROM currency WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
-
-    await query("DELETE FROM collectables WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
-
-    await query("DELETE FROM equipment WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
-
-    await query("DELETE FROM learned_spells WHERE username IN (SELECT username FROM accounts WHERE guest_mode = 1)");
-
+    // Delete guest accounts
     await query("DELETE FROM accounts WHERE guest_mode = 1");
+
+    log.success("Guest data cleared successfully");
   },
   register: async (
     username: string,
@@ -218,7 +231,10 @@ const player = {
       [username]
     );
 
-    await query("INSERT INTO collectables (type, item, username) VALUES (?, ?, ?)", ["mount", "horse", username]);
+    await query("INSERT INTO collectables (type, item, username) VALUES (?, ?, ?)", ["mount", "unicorn", username]);
+
+    await query("INSERT INTO learned_spells (spell, username) VALUES (?, ?)", ["frost_bolt", username]);
+
     return username;
   },
   verify: async (session_id: string) => {
