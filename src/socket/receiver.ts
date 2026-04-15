@@ -4453,7 +4453,7 @@ export default async function packetReceiver(
 
             if (
               !currentPlayer.permissions.some(
-                (p: string) => p === "server.admin" || p === "server.*"
+                (p: string) => p === "tools.tile_editor" || p === "tools.*"
               )
             ) {
               const notifyData = {
@@ -4472,7 +4472,7 @@ export default async function packetReceiver(
 
             if (
               !currentPlayer.permissions.some(
-                (p: string) => p === "server.admin" || p === "server.*"
+                (p: string) => p === "tools.particle_editor" || p === "tools.*"
               )
             ) {
               const notifyData = {
@@ -4491,7 +4491,7 @@ export default async function packetReceiver(
 
             if (
               !currentPlayer.permissions.some(
-                (p: string) => p === "server.admin" || p === "server.*"
+                (p: string) => p === "tools.npc_editor" || p === "tools.*"
               )
             ) {
               const notifyData = {
@@ -4505,12 +4505,12 @@ export default async function packetReceiver(
             break;
           }
 
-          case "EM":
+          case "EE":
           case "ENTITYEDITOR": {
 
             if (
               !currentPlayer.permissions.some(
-                (p: string) => p === "server.admin" || p === "server.*"
+                (p: string) => p === "tools.entity_editor" || p === "tools.*"
               )
             ) {
               const notifyData = {

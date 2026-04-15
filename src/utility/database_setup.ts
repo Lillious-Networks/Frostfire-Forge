@@ -237,7 +237,12 @@ const createPermissionTypesTable = async () => {
         ('server.admin'),
         ('server.notify'),
         ('server.restart'),
-        ('server.shutdown')
+        ('server.shutdown'),
+        ('tools.*'),
+        ('tools.tile_editor'),
+        ('tools.npc_editor'),
+        ('tools.entity_editor'),
+        ('tools.particle_editor')
     `;
     await query(insertPermissionsSql);
   } else {

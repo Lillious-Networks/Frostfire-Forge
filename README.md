@@ -310,6 +310,51 @@ bun setup-production
 - `list` - Permission: `permission.list` | `permission.*`
 </details>
 
+<details>
+<summary><strong>Tile Editor</strong></summary>
+
+```bash
+/tileeditor
+```
+- **Aliases**: `te`
+- **Permission**: `tools.tile_editor` | `tools.*`
+
+</details>
+
+<details>
+<summary><strong>NPC Editor</strong></summary>
+
+```bash
+/npceditor
+```
+- **Aliases**: `ne`
+- **Permission**: `tools.npc_editor` | `tools.*`
+
+</details>
+
+<details>
+<summary><strong>Particle Editor</strong></summary>
+
+```bash
+/particleeditor
+```
+- **Aliases**: `pe`
+- **Permission**: `tools.particle_editor` | `tools.*`
+
+</details>
+
+<details>
+<summary><strong>Entity Editor</strong></summary>
+
+```bash
+/entityeditor
+```
+- **Aliases**: `ee`
+- **Permission**: `tools.entity_editor` | `tools.*`
+
+</details>
+
+
 ---
 
 ### Player Commands
@@ -332,6 +377,16 @@ bun setup-production
 - **Aliases**: `p`
 - **Requirement**: Must be in a party
 - **Description**: Send a message to all party members
+</details>
+
+<details>
+<summary><strong>Local Chat</strong></summary>
+
+```bash
+/say [message]
+```
+- **Aliases**: `s`
+- **Description**: Send a message to local players
 </details>
 
 ---
