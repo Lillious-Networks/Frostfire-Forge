@@ -497,7 +497,7 @@ listener.on("onServerTick", async () => {
   }
 
   for (const playerData of players) {
-    if (!playerData || inactiveSet.has(playerData.id)) continue;
+    if (!playerData || inactiveSet.has(playerData.id) || !playerData.ws) continue;
 
     handleBackpressure(playerData.ws, () =>
       playerData.ws.send(packetManager.serverTime()[0])
@@ -719,7 +719,7 @@ function handleBackpressure(ws: any, action: () => void, retryCount = 0) {
     return;
   }
 
-  if (ws.readyState !== WebSocket.OPEN) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
     log.warn("WebSocket is not open. Action cannot proceed.");
     return;
   }

@@ -4389,7 +4389,7 @@ export default async function packetReceiver(
 
             const admin = await player.toggleAdmin(targetPlayer.username);
 
-            if (targetPlayer) {
+            if (targetPlayer && targetPlayer.ws) {
               targetPlayer.isAdmin = admin;
               playerCache.set(targetPlayer.id, targetPlayer);
             }
