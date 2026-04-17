@@ -22,7 +22,6 @@ src/assets/sfx/*
 !src/assets/sfx/music_entry.mp3
 
 src/assets/tilesets/*
-!src/assets/tilesets/tiles.png
 !src/assets/tilesets/MystcialValley_Environment.png
 !src/assets/tilesets/MystcialValley_Structures.png
 
@@ -38,4 +37,5 @@ bun.lockb
 .claude/
 swark-output/
 CLAUDE.md
-/src/assets/maps
+/src/assets/maps/*
+!src/assets/maps/overworld.json

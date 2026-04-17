@@ -1060,6 +1060,127 @@ const player = {
     }
     return closestPlayer;
   },
+
+  findPlayersInFacingCone: (
+    self: Player,
+    players: Player[],
+    range: number,
+    coneAngle: number = 90
+  ): Player[] => {
+    if (!players || !self.location?.position) return [];
+
+    const selfPosition = self.location.position as unknown as PositionData;
+    const direction = selfPosition.direction || "down";
+
+    const directionAngles: { [key: string]: number } = {
+      right: 0,
+      downright: 45,
+      down: 90,
+      downleft: 135,
+      left: 180,
+      upleft: -135,
+      up: -90,
+      upright: -45,
+    };
+
+    const facingAngle = directionAngles[direction] ?? 90;
+    const tolerance = coneAngle / 2; // Divide cone angle in half for each side
+
+    const isFacingTarget = (targetAngle: number): boolean => {
+      const minAngle = facingAngle - tolerance;
+      const maxAngle = facingAngle + tolerance;
+
+      if (minAngle < -180) {
+        return targetAngle >= (minAngle + 360) || targetAngle <= maxAngle;
+      } else if (maxAngle > 180) {
+        return targetAngle >= minAngle || targetAngle <= (maxAngle - 360);
+      }
+
+      return targetAngle >= minAngle && targetAngle <= maxAngle;
+    };
+
+    const playersInCone: Player[] = [];
+
+    for (const player of players) {
+      if (!player.location || player.isStealth || player.id === self.id) continue;
+
+      const position = player.location.position as unknown as PositionData;
+      const dx = position.x - selfPosition.x;
+      const dy = position.y - selfPosition.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+      if (distance > range) continue;
+
+      const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+
+      if (isFacingTarget(angle)) {
+        playersInCone.push(player);
+      }
+    }
+
+    // Sort by distance (closest first)
+    playersInCone.sort((a, b) => {
+      const posA = a?.location?.position as unknown as PositionData;
+      const posB = b?.location?.position as unknown as PositionData;
+      const distA = Math.sqrt(
+        Math.pow(selfPosition.x - posA.x, 2) +
+          Math.pow(selfPosition.y - posA.y, 2)
+      );
+      const distB = Math.sqrt(
+        Math.pow(selfPosition.x - posB.x, 2) +
+          Math.pow(selfPosition.y - posB.y, 2)
+      );
+      return distA - distB;
+    });
+
+    return playersInCone;
+  },
+
+  findClosestPlayerInCone: (
+    self: Player,
+    players: Player[],
+    range: number,
+    coneAngle: number = 90
+  ): NullablePlayer => {
+    const playersInCone = player.findPlayersInFacingCone(
+      self,
+      players,
+      range,
+      coneAngle
+    );
+    return playersInCone.length > 0 ? playersInCone[0] : null;
+  },
+
+  getNextTargetInCone: (
+    self: Player,
+    players: Player[],
+    range: number,
+    currentTargetId: string | null,
+    coneAngle: number = 90
+  ): NullablePlayer => {
+    const playersInCone = player.findPlayersInFacingCone(
+      self,
+      players,
+      range,
+      coneAngle
+    );
+
+    if (playersInCone.length === 0) return null;
+    if (!currentTargetId) return playersInCone[0];
+
+    // Find current target index
+    const currentIndex = playersInCone.findIndex(
+      (p) => p.id === currentTargetId
+    );
+
+    // If current target not in cone or is last in list, return first
+    if (currentIndex === -1 || currentIndex === playersInCone.length - 1) {
+      return playersInCone[0];
+    }
+
+    // Return next target
+    return playersInCone[currentIndex + 1];
+  },
   canMount: (player: Player): boolean => {
 
     if (!player || !player.stats) return false;

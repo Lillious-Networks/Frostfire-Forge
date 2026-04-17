@@ -8,6 +8,10 @@ const authentication_queue = new Set<string>();
 const authentication_session_queue = new Set<string>();
 
 const pendingAuthentications = new Map<string, { ws: any; token: string; language: string }>();
+
+// Track current target for target cycling
+const currentTargetMap = new Map<string, string | null>();
+
 import playerCache from "../services/playermanager.ts";
 import layerManager from "../services/layermanager";
 import mapIndex from "../services/mapindex";
@@ -441,6 +445,13 @@ export function clearBatchQueuesForPlayer(playerId: string, mapName: string) {
 
   despawnBatchQueue.delete(playerId);
 
+}
+
+/**
+ * Clean up target cycling state when a player disconnects
+ */
+export function clearPlayerTarget(playerId: string) {
+  currentTargetMap.delete(playerId);
 }
 
 const authWorker = await getAuthWorker();
@@ -1580,59 +1591,121 @@ export default async function packetReceiver(
       }
       case "TARGETCLOSEST": {
         if (!currentPlayer) return;
+
+        const TARGETING_RANGE = 500;
+        const CONE_ANGLE = 90; // 90 degree cone (45 degrees on each side of facing direction)
+
+        // Get all players on the same map
         const playersInRange = filterPlayersByDistance(
           ws,
-          500,
+          TARGETING_RANGE,
           currentPlayer.location.map
         ).filter((p) => !p.isStealth && p.id !== currentPlayer.id);
 
-        const closestPlayer = player.findClosestPlayer(
+        // Find next player target using cone-based directional targeting with cycling
+        const currentTargetId = currentTargetMap.get(currentPlayer.id) || null;
+        let nextPlayer = player.getNextTargetInCone(
           currentPlayer,
           playersInRange,
-          500
+          TARGETING_RANGE,
+          currentTargetId,
+          CONE_ANGLE
         );
 
-        // Also check for closest entity (from in-memory cache)
+        // Also check for closest entity in facing cone (from in-memory cache)
         const entitiesInMap = entityCache.getByMap(currentPlayer.location.map);
-        let closestEntity: any = null;
-        let closestEntityDistance = 500;
+        let entitiesInCone: any[] = [];
 
-        for (const entity of entitiesInMap) {
-          // Skip dead entities - check both health and combatState
-          if ((entity.health ?? 0) <= 0 || (entity as any).combatState === 'dead') continue;
+        if (entitiesInMap && entitiesInMap.length > 0) {
+          const selfPosition = currentPlayer.location.position as any;
+          const direction = selfPosition.direction || "down";
 
-          const distance = Math.sqrt(
-            Math.pow(currentPlayer.location.position.x - entity.position.x, 2) +
-            Math.pow(currentPlayer.location.position.y - entity.position.y, 2)
-          );
+          const directionAngles: { [key: string]: number } = {
+            right: 0,
+            downright: 45,
+            down: 90,
+            downleft: 135,
+            left: 180,
+            upleft: -135,
+            up: -90,
+            upright: -45,
+          };
 
-          if (distance < closestEntityDistance) {
-            closestEntity = entity;
-            closestEntityDistance = distance;
+          const facingAngle = directionAngles[direction] ?? 90;
+          const tolerance = CONE_ANGLE / 2;
+
+          const isFacingTarget = (targetAngle: number): boolean => {
+            const minAngle = facingAngle - tolerance;
+            const maxAngle = facingAngle + tolerance;
+
+            if (minAngle < -180) {
+              return targetAngle >= (minAngle + 360) || targetAngle <= maxAngle;
+            } else if (maxAngle > 180) {
+              return targetAngle >= minAngle || targetAngle <= (maxAngle - 360);
+            }
+
+            return targetAngle >= minAngle && targetAngle <= maxAngle;
+          };
+
+          for (const entity of entitiesInMap) {
+            // Skip dead entities - check both health and combatState
+            if ((entity.health ?? 0) <= 0 || (entity as any).combatState === 'dead') continue;
+
+            const dx = entity.position.x - selfPosition.x;
+            const dy = entity.position.y - selfPosition.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            if (distance > TARGETING_RANGE) continue;
+
+            const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+
+            if (isFacingTarget(angle)) {
+              entitiesInCone.push({
+                ...entity,
+                distance: distance,
+              });
+            }
+          }
+
+          // Sort entities by distance (closest first)
+          entitiesInCone.sort((a, b) => a.distance - b.distance);
+        }
+
+        // Get next entity target (cycling through cone)
+        let nextEntity: any = null;
+        if (entitiesInCone.length > 0) {
+          const currentTargetId = currentTargetMap.get(currentPlayer.id) || null;
+          if (!currentTargetId) {
+            nextEntity = entitiesInCone[0];
+          } else {
+            const currentIndex = entitiesInCone.findIndex((e) => e.id === currentTargetId);
+            if (currentIndex === -1 || currentIndex === entitiesInCone.length - 1) {
+              nextEntity = entitiesInCone[0];
+            } else {
+              nextEntity = entitiesInCone[currentIndex + 1];
+            }
           }
         }
 
-        // Determine which target is closer
+        // Determine which target is closer (player vs entity)
         let targetToSelect: any = null;
-        if (closestPlayer && closestEntity) {
-          const currPos = typeof currentPlayer.location.position === 'string'
-            ? { x: Number(currentPlayer.location.position.split(',')[0]), y: Number(currentPlayer.location.position.split(',')[1]) }
-            : currentPlayer.location.position;
-          const closestPos = typeof closestPlayer.location?.position === 'string'
-            ? { x: Number(closestPlayer.location.position.split(',')[0]), y: Number(closestPlayer.location.position.split(',')[1]) }
-            : closestPlayer.location?.position;
+        if (nextPlayer && nextEntity) {
+          const playerPos = nextPlayer?.location?.position as any;
           const playerDistance = Math.sqrt(
-            Math.pow((currPos?.x ?? 0) - (closestPos?.x ?? 0), 2) +
-            Math.pow((currPos?.y ?? 0) - (closestPos?.y ?? 0), 2)
+            Math.pow(currentPlayer.location.position.x - playerPos.x, 2) +
+            Math.pow(currentPlayer.location.position.y - playerPos.y, 2)
           );
-          targetToSelect = playerDistance < closestEntityDistance ? closestPlayer : closestEntity;
-        } else if (closestPlayer) {
-          targetToSelect = closestPlayer;
-        } else if (closestEntity) {
-          targetToSelect = closestEntity;
+          targetToSelect = playerDistance < nextEntity.distance ? nextPlayer : nextEntity;
+        } else if (nextPlayer) {
+          targetToSelect = nextPlayer;
+        } else if (nextEntity) {
+          targetToSelect = nextEntity;
         }
 
         if (targetToSelect) {
+          // Update current target for cycling
+          currentTargetMap.set(currentPlayer.id, targetToSelect.id);
+
           if (targetToSelect.stats) {
             // It's a player
             const selectPlayerData = {
@@ -1642,8 +1715,7 @@ export default async function packetReceiver(
             };
             sendPacket(ws, packetManager.selectPlayer(selectPlayerData));
           } else {
-            // It's an entity - set cache.targetId on client side
-            // Send entity selection as a special packet or use existing mechanism
+            // It's an entity
             const selectEntityData = {
               id: targetToSelect.id || null,
             };

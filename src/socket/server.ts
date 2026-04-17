@@ -4,7 +4,7 @@ const packetQueue = new Map<string, (() => void)[]>();
 import "../utility/validate_config.ts";
 import crypto from "crypto";
 import { packetManager } from "./packet_manager.ts";
-import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, sendAnimationTo, spriteDataCacheReady } from "./receiver.ts";
+import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady } from "./receiver.ts";
 import eventEmitter from "node:events";
 export const listener = new eventEmitter();
 const event = new eventEmitter();
@@ -601,6 +601,8 @@ listener.on("onDisconnect", async (data) => {
     mapIndex.removePlayer(playerData.id);
 
     clearBatchQueuesForPlayer(playerData.id, playerData.location.map);
+
+    clearPlayerTarget(playerData.id);
 
     despawnPlayerFromAllAOI(playerData, "disconnect", despawnBatchQueue);
 
