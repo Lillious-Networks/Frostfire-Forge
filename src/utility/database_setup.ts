@@ -31,7 +31,7 @@ const createAccountsTable = async () => {
         geo_location VARCHAR(255) DEFAULT NULL,
         verification_code VARCHAR(1000) DEFAULT NULL,
         reset_password_code VARCHAR(1000) DEFAULT NULL,
-        map VARCHAR(255) DEFAULT 'main' NOT NULL,
+        map VARCHAR(255) DEFAULT 'overworld' NOT NULL,
         position VARCHAR(255) DEFAULT '0,0' NOT NULL,
         session_id VARCHAR(255) UNIQUE DEFAULT NULL,
         stealth INT DEFAULT 0 NOT NULL,
@@ -810,7 +810,6 @@ const setupDatabase = async () => {
   await createWeatherTable();
   await createDefaultWeather();
   await createWorldTable();
-  await createWorld('default', 'clear', 200, 'main');
   await createWorld('overworld', 'rainy', 200, 'overworld');
   await createQuestsTable();
   await createQuestLogTable();
