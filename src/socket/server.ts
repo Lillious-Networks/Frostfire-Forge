@@ -75,6 +75,36 @@ const ClientRateLimit = new Map<string, ClientRateLimit>();
 
 const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
 
+// Load realm whitelist from whitelist.txt if WHITELIST=true
+export const realmWhitelist = new Set<string>();
+export const isWhitelistEnabled = process.env.WHITELIST === 'true';
+
+if (isWhitelistEnabled) {
+  const whitelistPath = path.join(import.meta.dir, "../../whitelist.txt");
+  if (fs.existsSync(whitelistPath)) {
+    try {
+      const whitelistContent = fs.readFileSync(whitelistPath, "utf8");
+      const usernames = whitelistContent
+        .split("\n")
+        .map(line => line.trim())
+        .filter(line => line.length > 0 && !line.startsWith("#"))
+        .map(line => line.toLowerCase());
+
+      usernames.forEach(username => realmWhitelist.add(username));
+
+      if (realmWhitelist.size > 0) {
+        log.success(`Loaded ${realmWhitelist.size} whitelisted usernames from whitelist.txt`);
+      } else {
+        log.warn("Whitelist enabled but no usernames found in whitelist.txt");
+      }
+    } catch (error) {
+      log.error(`Failed to read whitelist.txt: ${error}`);
+    }
+  } else {
+    log.warn(`Whitelist enabled but whitelist.txt not found at ${whitelistPath}`);
+  }
+}
+
 await spriteDataCacheReady;
 
 // Parse allowed CORS origins from environment variable
@@ -85,8 +115,6 @@ const ALLOWED_HEADERS = "Content-Type,Authorization";
 // Warn if CORS origins are not configured
 if (ALLOWED_ORIGINS.length === 0) {
   log.warn("CORS_ALLOWED_ORIGINS environment variable is not set - cross-origin requests will be blocked");
-} else {
-  log.info(`CORS allowed origins: ${ALLOWED_ORIGINS.join(", ")}`);
 }
 
 // Helper function to get CORS headers

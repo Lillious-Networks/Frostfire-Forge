@@ -89,17 +89,24 @@ function loadAllMaps() {
   for (const file of mapFiles) {
     const map = processMapFile(file);
     if (map) {
-      maps.push(map);
-      mapProperties.push({
-        name: map.name,
-        width: map.data.layers[0].width,
-        height: map.data.layers[0].height,
-        tileWidth: map.data.tilewidth,
-        tileHeight: map.data.tileheight,
-        warps: null,
-        graveyards: null
-      });
-      extractAndCompressLayers(map);
+      try {
+        maps.push(map);
+        mapProperties.push({
+          name: map.name,
+          width: map.data.layers[0].width,
+          height: map.data.layers[0].height,
+          tileWidth: map.data.tilewidth,
+          tileHeight: map.data.tileheight,
+          warps: null,
+          graveyards: null
+        });
+        extractAndCompressLayers(map);
+      } catch (error) {
+        log.error(`Failed to load map ${file}: ${error}`);
+        // Remove the map from arrays if it was added
+        maps.pop();
+        mapProperties.pop();
+      }
     }
   }
 
@@ -143,8 +150,6 @@ function extractAndCompressLayers(map: MapData) {
   const warps: any[] = [];
   const graveyards: any[] = [];
 
-  log.info(`[EXTRACT] Processing ${map.data.layers.length} layers from ${map.name}`);
-
   map.data.layers.forEach((layer: any) => {
 
     if (layer.type === "objectgroup") {
@@ -152,11 +157,9 @@ function extractAndCompressLayers(map: MapData) {
     }
 
     const layerName = layer.name ? layer.name.toLowerCase() : "";
-    log.debug(`[EXTRACT] Checking layer: ${layer.name} (type: ${layer.type})`);
 
     if ((layer.properties?.[0]?.name.toLowerCase() === "collision" && layer.properties[0].value === true) ||
         layerName.includes("collision")) {
-      log.info(`[EXTRACT] Found collision layer: ${layer.name}`);
       collisions.push(layer.data);
     }
 

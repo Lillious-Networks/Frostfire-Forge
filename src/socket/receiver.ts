@@ -40,6 +40,7 @@ import { randomBytes } from "../modules/hash";
 import { saveMapChunks, saveMapProperties } from "../modules/assetloader";
 import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers, getEntitySpriteLayers } from "../modules/spriteSheetManager";
 import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers } from "./aoi";
+import { realmWhitelist, isWhitelistEnabled } from "./server.ts";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
 const useSpriteSheets = (settings as any).animation_system?.use_sprite_sheets ?? true;
@@ -482,6 +483,14 @@ authWorker.on("message", async (result: any) => {
 
   const playerData = status.data as PlayerData;
   if (status.authenticated && status.completed && playerData) {
+    // Check realm whitelist
+    if (isWhitelistEnabled && !realmWhitelist.has(playerData.username.toLowerCase())) {
+      log.warn(`[Whitelist] Access denied for ${playerData.username} - not in whitelist`);
+      sendPacket(ws, packetManager.loginFailed());
+      ws.close(1008, "Username not whitelisted on this realm");
+      return;
+    }
+
     const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
 
     if (!playerData.isAdmin && playerData.isNoclip) {
@@ -1604,7 +1613,7 @@ export default async function packetReceiver(
 
         // Find next player target using cone-based directional targeting with cycling
         const currentTargetId = currentTargetMap.get(currentPlayer.id) || null;
-        let nextPlayer = player.getNextTargetInCone(
+        const nextPlayer = player.getNextTargetInCone(
           currentPlayer,
           playersInRange,
           TARGETING_RANGE,
@@ -1614,7 +1623,7 @@ export default async function packetReceiver(
 
         // Also check for closest entity in facing cone (from in-memory cache)
         const entitiesInMap = entityCache.getByMap(currentPlayer.location.map);
-        let entitiesInCone: any[] = [];
+        const entitiesInCone: any[] = [];
 
         if (entitiesInMap && entitiesInMap.length > 0) {
           const selfPosition = currentPlayer.location.position as any;
@@ -3562,6 +3571,16 @@ export default async function packetReceiver(
               break;
             }
 
+            if (username === currentPlayer.username.toLowerCase()) {
+              sendPacket(
+                ws,
+                packetManager.notify({
+                  message: "You cannot invite yourself to a party.",
+                })
+              );
+              break;
+            }
+
             const players = Object.values(playerCache.list());
             const targetPlayer = players.find(
               (p: any) => p.username && p.username.toLowerCase() === username.toLowerCase()
@@ -4475,6 +4494,86 @@ export default async function packetReceiver(
               sendPacket(targetPlayer.ws, packetManager.reconnect());
             }
             sendPacket(ws, packetManager.notify(notifyData));
+            break;
+          }
+
+          case "WHITELIST": {
+            // Check if whitelist is enabled
+            const { isWhitelistEnabled } = await import("../socket/server.ts");
+            if (!isWhitelistEnabled) {
+              const notifyData = {
+                message: "Whitelist is not enabled on this realm",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "admin.whitelist" || p === "admin.*"
+              )
+            ) {
+              const notifyData = {
+                message: "You don't have permission to use this command",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            const whitelistMode = args[0]?.toLowerCase() || null;
+            const whitelistUsername = args[1] || null;
+
+            if (!whitelistMode || !["add", "remove"].includes(whitelistMode)) {
+              const notifyData = {
+                message: "Usage: /whitelist add|remove [username]",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            if (!whitelistUsername) {
+              const notifyData = {
+                message: `Usage: /whitelist ${whitelistMode} [username]`,
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            try {
+              if (whitelistMode === "add") {
+                if (whitelistUsername.toLowerCase() === currentPlayer.username.toLowerCase()) {
+                  const notifyData = {
+                    message: "You cannot add yourself to the whitelist",
+                  };
+                  sendPacket(ws, packetManager.notify(notifyData));
+                  break;
+                }
+                const result = await player.whitelistAdd(whitelistUsername);
+                const notifyData = {
+                  message: result.message,
+                };
+                sendPacket(ws, packetManager.notify(notifyData));
+              } else if (whitelistMode === "remove") {
+                if (whitelistUsername.toLowerCase() === currentPlayer.username.toLowerCase()) {
+                  const notifyData = {
+                    message: "You cannot remove yourself from the whitelist",
+                  };
+                  sendPacket(ws, packetManager.notify(notifyData));
+                  break;
+                }
+                const result = await player.whitelistRemove(whitelistUsername);
+                const notifyData = {
+                  message: result.message,
+                };
+                sendPacket(ws, packetManager.notify(notifyData));
+              }
+            } catch (error) {
+              log.error(`Whitelist command error: ${error}`);
+              const notifyData = {
+                message: "An error occurred while processing the whitelist command",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+            }
             break;
           }
 
@@ -5594,12 +5693,22 @@ export default async function packetReceiver(
           return;
         }
 
+        const get_friend = playerCache.get(id);
+        if (!get_friend) return;
+
+        if (get_friend.id === currentPlayer.id || get_friend.username.toLowerCase() === currentPlayer.username.toLowerCase()) {
+          sendPacket(
+            ws,
+            packetManager.notify({
+              message: "You cannot add yourself as a friend.",
+            })
+          );
+          return;
+        }
+
         const player_username =
           currentPlayer.username.charAt(0).toUpperCase() +
           currentPlayer.username.slice(1);
-
-        const get_friend = playerCache.get(id);
-        if (!get_friend) return;
 
         if (get_friend.isGuest) {
           sendPacket(

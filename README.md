@@ -42,11 +42,12 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
 - [Architecture](#-architecture)
   - [Gateway (Authentication & Reverse Proxy)](#gateway-authentication--reverse-proxy)
   - [Asset Server (Media & Resources)](#asset-server-media--resources)
+- [Environment Variables](#-environment-variables)
+- [Realm Whitelist Configuration](#️-realm-whitelist-configuration)
 - [Quick Start](#-quick-start)
   - [Development Setup](#development-setup)
   - [Production Setup](#production-setup)
   - [Docker Deployment](#docker-deployment)
-- [Environment Variables](#-environment-variables)
 - [Commands Reference](#-commands-reference)
   - [Admin Commands](#admin-commands)
   - [Player Commands](#player-commands)
@@ -138,7 +139,68 @@ SERVER_DESCRIPTION="The server description"     # Game server description
 # Asset Server (Required)
 ASSET_SERVER_URL="http://assets:8000"           # Asset server endpoint
 ASSET_SERVER_AUTH_KEY="your_secret_key"         # Asset server authentication token
+
+# Realm Configuration
+WHITELIST="true" | "false"                       # Enable/disable username whitelist for this realm
 ```
+
+---
+
+## 🛡️ Realm Whitelist Configuration
+
+### Overview
+
+The whitelist feature restricts user access to a specific realm to only approved usernames. When enabled, any user attempting to authenticate with a username not in the whitelist will be disconnected with the message "Username not whitelisted on this realm".
+
+### Setup Instructions
+
+**1. Enable the whitelist for the realm:**
+
+Set the environment variable in your `.env` file:
+```bash
+WHITELIST=true
+```
+
+**2. Create/update the whitelist file:**
+
+Create a `whitelist.txt` file in the project root directory (same directory as the game server binary):
+
+```
+admin
+moderator
+testuser
+approved_player
+```
+
+**3. File Format:**
+
+- One username per line
+- Usernames are case-insensitive (converted to lowercase on matching)
+- Lines starting with `#` are treated as comments
+- Empty lines are ignored
+- Whitespace at the beginning and end of each line is trimmed
+
+Example `whitelist.txt`:
+```
+# Game Admins
+admin
+moderator
+
+# Test Players
+testuser
+lillious
+
+# Developer Accounts
+dev_account
+```
+
+**4. Restart the server:**
+
+The whitelist is loaded at server startup. After updating `whitelist.txt`, restart the game server for changes to take effect.
+
+**5. Realm Status in Gateway:**
+
+The realm will display a "whitelist" badge in the realm selection UI when `WHITELIST=true`, allowing players to see which realms have restricted access.
 
 ---
 
@@ -354,6 +416,18 @@ bun setup-production
 
 </details>
 
+<details>
+<summary><strong>Manage Whitelist</strong></summary>
+
+```bash
+/whitelist [mode] [username]
+```
+- **Permission**: `admin.whitelist` | `admin.*`
+
+**Modes**:
+- `add` - Add a player to the whitelist
+- `remove` - Remove a player from the whitelist
+</details>
 
 ---
 

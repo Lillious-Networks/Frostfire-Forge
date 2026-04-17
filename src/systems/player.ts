@@ -4,6 +4,7 @@ import log from "../modules/logger";
 import assetCache from "../services/assetCache";
 import * as settings from "../config/settings.json";
 import playerCache from "../services/playermanager.ts";
+import path from "path";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 const mapCache: Map<
   string,
@@ -127,8 +128,6 @@ async function hasLineOfSight(
 
 const player = {
   clear: async () => {
-    log.info("Clearing guest data and resetting server state...");
-
     // Reset all accounts
     await query(
       "UPDATE accounts SET session_id = NULL, online = 0, token = NULL, verified = 0, verification_code = NULL, party_id = NULL"
@@ -164,8 +163,6 @@ const player = {
 
     // Delete guest accounts
     await query("DELETE FROM accounts WHERE guest_mode = 1");
-
-    log.success("Guest data cleared successfully");
   },
   register: async (
     username: string,
@@ -1255,6 +1252,75 @@ const player = {
     }
 
     return currentStats;
+  },
+  whitelistAdd: async (username: string): Promise<{ success: boolean; message: string }> => {
+    if (!username) return { success: false, message: "Username is required" };
+    username = username.toLowerCase().trim();
+
+    // Add to in-memory set
+    const { realmWhitelist } = await import("../socket/server.ts");
+    if (realmWhitelist.has(username)) {
+      return { success: false, message: `${username} is already whitelisted` };
+    }
+
+    realmWhitelist.add(username);
+
+    // Write to file
+    try {
+      const filePath = path.join(import.meta.dir, "../../whitelist.txt");
+      let existingContent = "";
+      try {
+        existingContent = await Bun.file(filePath).text();
+      } catch {
+        // File doesn't exist yet
+        existingContent = "";
+      }
+      const lines = existingContent.split("\n").map(line => line.trim()).filter(line => line && !line.startsWith("#"));
+
+      if (!lines.includes(username)) {
+        lines.push(username);
+      }
+
+      await Bun.write(filePath, lines.join("\n") + "\n");
+      return { success: true, message: `Added ${username} to whitelist` };
+    } catch (error) {
+      log.error(`Failed to write whitelist file: ${error}`);
+      return { success: false, message: "Failed to save whitelist to file" };
+    }
+  },
+  whitelistRemove: async (username: string): Promise<{ success: boolean; message: string }> => {
+    if (!username) return { success: false, message: "Username is required" };
+    username = username.toLowerCase().trim();
+
+    // Remove from in-memory set
+    const { realmWhitelist } = await import("../socket/server.ts");
+    if (!realmWhitelist.has(username)) {
+      return { success: false, message: `${username} is not whitelisted` };
+    }
+
+    realmWhitelist.delete(username);
+
+    // Write to file
+    try {
+      const filePath = path.join(import.meta.dir, "../../whitelist.txt");
+      let existingContent = "";
+      try {
+        existingContent = await Bun.file(filePath).text();
+      } catch {
+        // File doesn't exist yet
+        existingContent = "";
+      }
+      const lines = existingContent
+        .split("\n")
+        .map(line => line.trim())
+        .filter(line => line && !line.startsWith("#") && line.toLowerCase() !== username);
+
+      await Bun.write(filePath, lines.length > 0 ? lines.join("\n") + "\n" : "");
+      return { success: true, message: `Removed ${username} from whitelist` };
+    } catch (error) {
+      log.error(`Failed to write whitelist file: ${error}`);
+      return { success: false, message: "Failed to save whitelist to file" };
+    }
   },
   GetPlayerLoginData: async (username: string) => {
     if (!username) return null;

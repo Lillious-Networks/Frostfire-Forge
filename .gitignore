@@ -39,3 +39,5 @@ swark-output/
 CLAUDE.md
 /src/assets/maps/*
 !src/assets/maps/overworld.json
+
+whitelist.txt

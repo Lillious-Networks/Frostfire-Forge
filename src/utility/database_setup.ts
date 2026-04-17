@@ -229,6 +229,7 @@ const createPermissionTypesTable = async () => {
         ('admin.permission'),
         ('admin.respawn'),
         ('admin.unban'),
+        ('admin.whitelist'),
         ('permission.*'),
         ('permission.add'),
         ('permission.list'),

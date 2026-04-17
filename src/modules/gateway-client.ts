@@ -42,7 +42,8 @@ class GatewayClient {
           wsPort: this.config.wsPort,
           useSSL: process.env.WEB_SOCKET_USE_SSL === 'true',
           maxConnections: this.config.maxConnections,
-          authKey: process.env.GATEWAY_AUTH_KEY
+          authKey: process.env.GATEWAY_AUTH_KEY,
+          whitelisted: process.env.WHITELIST === 'true'
         })
       });
 

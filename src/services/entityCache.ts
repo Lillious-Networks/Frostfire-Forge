@@ -23,7 +23,7 @@ const entityCache = {
         isMoving: false,
       })) || [];
       isLoaded = true;
-      log.success(`Entity cache initialized with ${cachedEntities.length} entities`);
+      log.success(`Loaded ${cachedEntities.length} entities`);
       return cachedEntities;
     } catch (error: any) {
       log.error(`Error initializing entity cache: ${error.message}`);
