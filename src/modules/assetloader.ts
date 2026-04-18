@@ -77,6 +77,61 @@ const quests = await assetCache.get("quests") as Quest[];
 log.success(`Loaded ${quests.length} quest(s) from the database in ${(performance.now() - questNow).toFixed(2)}ms`);
 
 const mapProperties: MapProperties[] = [];
+
+async function syncMapsBeforeLoading(): Promise<void> {
+  const assetServerUrl = process.env.ASSET_SERVER_URL;
+  if (!assetServerUrl) {
+    log.warn("ASSET_SERVER_URL not configured, skipping map sync");
+    return;
+  }
+
+  const { calculateAllMapChecksums, writeMapContent } = await import("./checksums.ts");
+
+  if (!fs.existsSync(mapDir)) {
+    fs.mkdirSync(mapDir, { recursive: true });
+  }
+
+  try {
+    const localChecksums = calculateAllMapChecksums();
+    const response = await fetch(`${assetServerUrl}/map-checksums`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        checksums: localChecksums,
+        serverId: "game-server",
+        authKey: process.env.ASSET_SERVER_AUTH_KEY || process.env.GATEWAY_AUTH_KEY
+      })
+    });
+
+    if (!response.ok) {
+      log.warn(`Map sync request failed with status ${response.status}`);
+      return;
+    }
+
+    const result = await response.json();
+    if (!result.success) {
+      log.warn(`Map sync failed: ${result.error}`);
+      return;
+    }
+
+    if (result.outdatedMaps && result.outdatedMaps.length > 0) {
+      log.info(`Syncing ${result.outdatedMaps.length} map(s) from asset server...`);
+      for (const mapUpdate of result.outdatedMaps) {
+        const success = writeMapContent(mapUpdate.name, mapUpdate.data);
+        if (success) {
+          log.success(`Synced map: ${mapUpdate.name}`);
+        } else {
+          log.error(`Failed to sync map: ${mapUpdate.name}`);
+        }
+      }
+    } else {
+      log.info("All maps are up to date");
+    }
+  } catch (error) {
+    log.warn(`Failed to sync maps from asset server: ${error}`);
+  }
+}
+
 function loadAllMaps() {
   const now = performance.now();
   const maps: MapData[] = [];
@@ -686,7 +741,7 @@ export async function reloadMap(mapName: string): Promise<MapData> {
     assetCache.removeNested(mapName, "collision");
     assetCache.removeNested(mapName, "nopvp");
 
-    extractAndCompressLayers(newMap);
+    await extractAndCompressLayers(newMap);
 
     const maps = await assetCache.get("maps") as MapData[];
     const mapProps = await assetCache.get("mapProperties") as MapProperties[];
@@ -726,6 +781,7 @@ export async function reloadMap(mapName: string): Promise<MapData> {
   }
 }
 
+await syncMapsBeforeLoading();
 loadAllMaps();
 
 function tryParse(data: string): any {
