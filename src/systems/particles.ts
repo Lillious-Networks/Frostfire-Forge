@@ -16,7 +16,7 @@ const particlesNow = performance.now();
 
 const particles = {
   async add(particle: Particle) {
-    const response = await query("INSERT INTO particles (size, color, velocity, lifetime, opacity, visible, gravity, name, localposition, `interval`, amount, staggertime, spread, affected_by_weather) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [particle.size, particle.color, particle.velocity, particle.lifetime, particle.opacity, particle.visible, particle.gravity, particle.name, particle.localposition, particle.interval, particle.amount, particle.staggertime, particle.spread, particle.affected_by_weather]);
+    const response = await query("INSERT INTO particles (size, color, velocity, lifetime, opacity, visible, gravity, name, localposition, `interval`, amount, staggertime, spread, affected_by_weather, zIndex) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [particle.size, particle.color, particle.velocity, particle.lifetime, particle.opacity, particle.visible, particle.gravity, particle.name, particle.localposition, particle.interval, particle.amount, particle.staggertime, particle.spread, particle.affected_by_weather, particle.zIndex || 0]);
     await assetCache.set("particles", response);
     return response;
   },
@@ -28,7 +28,7 @@ const particles = {
   },
 
   async update(particle: Particle) {
-    const response = await query("UPDATE particles SET size = ?, color = ?, velocity = ?, lifetime = ?, opacity = ?, visible = ?, gravity = ?, name = ?, localposition = ?, `interval` = ?, amount = ?, staggertime = ?, spread = ?, affected_by_weather = ? WHERE name = ?", [particle.size, particle.color, particle.velocity, particle.lifetime, particle.opacity, particle.visible, particle.gravity, particle.name, particle.localposition, particle.interval, particle.amount, particle.staggertime, particle.spread, particle.affected_by_weather, particle.name]);
+    const response = await query("UPDATE particles SET size = ?, color = ?, velocity = ?, lifetime = ?, opacity = ?, visible = ?, gravity = ?, name = ?, localposition = ?, `interval` = ?, amount = ?, staggertime = ?, spread = ?, affected_by_weather = ?, zIndex = ? WHERE name = ?", [particle.size, particle.color, particle.velocity, particle.lifetime, particle.opacity, particle.visible, particle.gravity, particle.name, particle.localposition, particle.interval, particle.amount, particle.staggertime, particle.spread, particle.affected_by_weather, particle.zIndex || 0, particle.name]);
     await assetCache.set("particles", response);
     return response;
   },
@@ -67,7 +67,8 @@ const particles = {
         },
         currentLife: null,
         initialVelocity: null,
-        weather: particle.affected_by_weather ? weather : 'none'
+        weather: particle.affected_by_weather ? weather : 'none',
+        zIndex: particle.zIndex || 0
       };
       particles.push(p);
     }
@@ -107,6 +108,7 @@ const particles = {
       currentLife: null,
       initialVelocity: null,
       weather: response[0]?.affected_by_weather ? weather : 'none',
+      zIndex: response[0]?.zIndex || 0
     };
     await assetCache.set("particles", p);
     return p;

@@ -266,7 +266,7 @@ const createNpcTable = async () => {
       script VARCHAR(5000) DEFAULT NULL,
       particles VARCHAR(500) DEFAULT NULL,
       quest INT DEFAULT NULL,
-      sprite_type VARCHAR(10) NOT NULL DEFAULT 'none',
+      sprite_type VARCHAR(10) NOT NULL DEFAULT 'animated',
       sprite_body VARCHAR(255) DEFAULT NULL,
       sprite_head VARCHAR(255) DEFAULT NULL,
       sprite_helmet VARCHAR(255) DEFAULT NULL,
@@ -348,7 +348,8 @@ const createParticleTable = async () => {
       \`interval\` INT NOT NULL DEFAULT '1',
       staggertime FLOAT NOT NULL DEFAULT '0',
       spread VARCHAR(45) NOT NULL DEFAULT '0,0',
-      affected_by_weather INT NOT NULL DEFAULT 0
+      affected_by_weather INT NOT NULL DEFAULT 0,
+      zIndex INT NOT NULL DEFAULT 0
     )
   `;
   await query(sql);

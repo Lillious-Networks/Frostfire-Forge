@@ -121,6 +121,7 @@ declare interface Particle {
   };
   weather: WeatherData | 'none';
   affected_by_weather?: boolean;
+  zIndex: number;
 }
 
 type NullablePlayer = Player | null;
