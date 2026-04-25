@@ -353,6 +353,16 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "NOCLIP", data })),
     ] as any[];
   },
+  dragPlayerStart: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "DRAG_PLAYER_START", data })),
+    ] as any[];
+  },
+  dragPlayerStop: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "DRAG_PLAYER_STOP", data })),
+    ] as any[];
+  },
   revive: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "REVIVE", data })),

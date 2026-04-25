@@ -12,6 +12,9 @@ const pendingAuthentications = new Map<string, { ws: any; token: string; languag
 // Track current target for target cycling
 const currentTargetMap = new Map<string, string | null>();
 
+// Track who is being dragged by whom (draggedPlayerId -> adminId)
+const draggedPlayersMap = new Map<number, number>();
+
 import playerCache from "../services/playermanager.ts";
 import layerManager from "../services/layermanager";
 import mapIndex from "../services/mapindex";
@@ -39,7 +42,7 @@ import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks, saveMapProperties } from "../modules/assetloader";
 import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers, getEntitySpriteLayers } from "../modules/spriteSheetManager";
-import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers } from "./aoi";
+import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket } from "./aoi";
 import { realmWhitelist, isWhitelistEnabled } from "./server.ts";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
@@ -1118,6 +1121,36 @@ export default async function packetReceiver(
           currentPlayer.location.position
         );
         player.clearSessionId(currentPlayer.id);
+
+        // If this admin was dragging any players, release them
+        const adminId = currentPlayer.id;
+        const draggedPlayerIds: number[] = [];
+        for (const [draggedId, dragByAdminId] of draggedPlayersMap.entries()) {
+          if (dragByAdminId === adminId) {
+            draggedPlayerIds.push(draggedId);
+          }
+        }
+
+        // Release all dragged players
+        for (const draggedPlayerId of draggedPlayerIds) {
+          draggedPlayersMap.delete(draggedPlayerId);
+
+          const draggedPlayer = playerCache.get(draggedPlayerId.toString());
+          if (draggedPlayer) {
+            // Notify all players that the dragged player was released
+            const dragStopData = {
+              id: draggedPlayerId,
+              adminId: adminId,
+            };
+            const playersInMap = filterPlayersByMap(draggedPlayer.location.map);
+            playersInMap.forEach((p) => {
+              if (p.ws && p.ws.readyState === 1) {
+                sendPacket(p.ws, packetManager.dragPlayerStop(dragStopData));
+              }
+            });
+          }
+        }
+
         break;
       }
       case "MOVEXY": {
@@ -1782,8 +1815,57 @@ export default async function packetReceiver(
           };
           sendPacket(player.ws, packetManager.stealth(stealthData));
         });
-        if (!isStealth) {
+        if (isStealth) {
+          // When stealthing, despawn from other players
+          playersInMap.forEach((player) => {
+            if (player.id === currentPlayer.id) return;
+            sendPacket(player.ws, packetManager.despawnPlayer(currentPlayer.id as string));
+          });
+        } else if (!isStealth) {
           globalStateRevision++;
+          // Spawn the admin to all other players using the same spawn packet format
+          // First fetch sprite data asynchronously
+          const animationName = getAnimationNameForDirection(
+            currentPlayer.location.position?.direction || "down",
+            !!currentPlayer.moving,
+            !!currentPlayer.mounted,
+            currentPlayer.mount_type,
+            !!currentPlayer.casting
+          );
+          const playerSpriteData = await getPlayerSpriteSheetData(animationName, currentPlayer.equipment || null);
+          const mountSpriteForBatch = currentPlayer.mount_type ? getMountSpriteUrl(currentPlayer.mount_type) : null;
+
+          let spriteData = null;
+          if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite || mountSpriteForBatch) {
+            spriteData = {
+              mountSprite: mountSpriteForBatch,
+              bodySprite: playerSpriteData.bodySprite || null,
+              headSprite: playerSpriteData.headSprite || null,
+              armorHelmetSprite: playerSpriteData.armorHelmetSprite || null,
+              armorShoulderguardsSprite: playerSpriteData.armorShoulderguardsSprite || null,
+              armorNeckSprite: playerSpriteData.armorNeckSprite || null,
+              armorHandsSprite: playerSpriteData.armorHandsSprite || null,
+              armorChestSprite: playerSpriteData.armorChestSprite || null,
+              armorFeetSprite: playerSpriteData.armorFeetSprite || null,
+              armorLegsSprite: playerSpriteData.armorLegsSprite || null,
+              armorWeaponSprite: playerSpriteData.armorWeaponSprite || null,
+              animationState: playerSpriteData.animationState,
+            };
+          }
+
+          playersInMap.forEach((player) => {
+            // Skip sending to self
+            if (player.id === currentPlayer.id) return;
+
+            const spawnData = queueSpawnPlayerPacket(currentPlayer);
+            if (spawnData) {
+              spawnData.spriteData = spriteData;
+              // Only spawn if player doesn't already exist on the receiving client
+              // (don't want to create duplicates on re-unstealth)
+              sendPacket(player.ws, packetManager.spawnPlayer(spawnData));
+            }
+          });
+
           playersInMap.forEach(async (player) => {
             const moveXYData = {
               i: ws.data.id,
@@ -1811,6 +1893,142 @@ export default async function packetReceiver(
             }
           });
         }
+        break;
+      }
+      case "DRAG_PLAYER_START": {
+        // Check for admin.drag or admin.* permission
+        if (!currentPlayer || !Array.isArray(currentPlayer.permissions)) {
+          sendPacket(ws, packetManager.notify({ message: "Permissions not loaded" }));
+          break;
+        }
+
+        const hasPermission = currentPlayer.permissions.some(
+          (p: string) => p === "admin.drag" || p === "admin.*"
+        );
+
+        if (!hasPermission) {
+          sendPacket(
+            ws,
+            packetManager.notify({ message: "You don't have permission to drag players" })
+          );
+          break;
+        }
+
+        const targetPlayerId = (data as any)?.id;
+        if (!targetPlayerId) break;
+
+        const targetPlayer = playerCache.get(targetPlayerId);
+        if (!targetPlayer) break;
+
+        // Track that this player is being dragged
+        draggedPlayersMap.set(targetPlayerId, ws.data.id);
+
+        // Send confirmation to admin that drag started
+        const dragStartData = {
+          id: targetPlayerId,
+          adminId: ws.data.id,
+        };
+        sendPacket(ws, packetManager.dragPlayerStart(dragStartData));
+
+        // Notify all players on the map that drag started
+        const playersInMap = filterPlayersByMap(targetPlayer.location.map);
+        playersInMap.forEach((p) => {
+          if (p.ws && p.ws.readyState === 1) {
+            sendPacket(p.ws, packetManager.dragPlayerStart(dragStartData));
+          }
+        });
+        break;
+      }
+      case "DRAG_PLAYER_STOP": {
+        // Check for admin.drag or admin.* permission
+        if (!currentPlayer || !Array.isArray(currentPlayer.permissions)) break;
+
+        const hasPermission = currentPlayer.permissions.some(
+          (p: string) => p === "admin.drag" || p === "admin.*"
+        );
+
+        if (!hasPermission) break;
+
+        const targetPlayerId = (data as any)?.id;
+        if (!targetPlayerId) break;
+
+        const targetPlayer = playerCache.get(targetPlayerId);
+        if (!targetPlayer) break;
+
+        // Remove tracking that this player was being dragged
+        draggedPlayersMap.delete(targetPlayerId);
+
+        // Send confirmation to admin that drag stopped
+        const dragStopData = {
+          id: targetPlayerId,
+          adminId: ws.data.id,
+        };
+        sendPacket(ws, packetManager.dragPlayerStop(dragStopData));
+
+        // Notify all players on the map that drag stopped
+        const playersInMap = filterPlayersByMap(targetPlayer.location.map);
+        playersInMap.forEach((p) => {
+          if (p.ws && p.ws.readyState === 1) {
+            sendPacket(p.ws, packetManager.dragPlayerStop(dragStopData));
+          }
+        });
+        break;
+      }
+      case "DRAG_UPDATE": {
+        // Check for admin.drag or admin.* permission
+        if (!currentPlayer || !Array.isArray(currentPlayer.permissions)) break;
+
+        const hasPermission = currentPlayer.permissions.some(
+          (p: string) => p === "admin.drag" || p === "admin.*"
+        );
+
+        if (!hasPermission) break;
+
+        const targetPlayerId = (data as any)?.id;
+        const newX = (data as any)?.x;
+        const newY = (data as any)?.y;
+
+        if (targetPlayerId === undefined || newX === undefined || newY === undefined) break;
+
+        const targetPlayer = playerCache.get(targetPlayerId);
+        if (!targetPlayer) break;
+
+        // Update target player position without collision check (admin drag bypasses collision)
+        targetPlayer.location.position.x = newX;
+        targetPlayer.location.position.y = newY;
+
+        // Persist to database
+        try {
+          await player.setLocation(
+            targetPlayer.session_id,
+            targetPlayer.location.map,
+            {
+              x: newX,
+              y: newY,
+              direction: targetPlayer.location.position.direction,
+            }
+          );
+        } catch (e) {
+          log.error(`Failed to set location for dragged player: ${e}`);
+        }
+
+        // Update AOI boundaries for the dragged player to handle visibility changes
+        await updatePlayerAOI(targetPlayer, sendAnimationTo);
+
+        // Broadcast position update to all players in AOI
+        globalStateRevision++;
+        const moveXYData = {
+          i: targetPlayerId,
+          d: {
+            x: Number(newX),
+            y: Number(newY),
+            dr: targetPlayer.location.position.direction,
+          },
+          r: globalStateRevision,
+          s: targetPlayer.isStealth ? 1 : 0,
+        };
+
+        broadcastToAOI(targetPlayer, packetManager.moveXY(moveXYData), true);
         break;
       }
       case "SAVE_HOTBAR": {
