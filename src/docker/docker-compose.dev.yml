@@ -4,7 +4,7 @@ services:
       context: ../../
       dockerfile: src/docker/Dockerfile.dev
     container_name: frostfire-forge-dev
-    restart: unless-stopped
+    restart: always
     ports:
       - "3000:3000"
     environment:
