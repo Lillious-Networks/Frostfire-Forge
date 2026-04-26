@@ -1,8 +1,6 @@
 # Production Dockerfile for Frostfire Forge Game Server
-# Requires Frostfire Forge Gateway to be running before starting this container
-FROM oven/bun:canary-slim AS base
+FROM oven/bun-slim AS base
 WORKDIR /app
-
 
 # Install dependencies
 FROM base AS deps
@@ -19,14 +17,11 @@ ARG BUILD_DATE=unknown
 
 LABEL org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
-      org.opencontainers.image.title="Frostfire Forge Gateway (Production)" \
-      org.opencontainers.image.description="Production gateway with SSL and realm-based server routing"
+      org.opencontainers.image.title="Frostfire Forge (Production)" \
+      org.opencontainers.image.description="Frostfire Forge Game Server"
 
 EXPOSE 3000
 
 RUN bun create-config --environment production
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD curl -f http://localhost:3000 || exit 1
 
 CMD ["sh", "-c", "bun setup-production && bun run production"]

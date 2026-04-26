@@ -1,43 +1,27 @@
 # Development Dockerfile for Frostfire Forge Game Server
-# Requires Frostfire Forge Gateway to be running before starting this container
-FROM oven/bun:canary-slim AS base
+FROM oven/bun-slim AS base
 WORKDIR /app
 
-# Copy .env file stage
-FROM base AS envcopy
-WORKDIR /app
-# Copy if exists otherwise create during build
-COPY .env.development .env.development
-
-# Install dependencies stage
+# Install dependencies
 FROM base AS deps
 COPY package.json bun.lockb* ./
 RUN bun install --frozen-lockfile
 
-# Build stage
-FROM base AS build
-COPY package.json bun.lockb* ./
-RUN bun install --frozen-lockfile
-COPY . .
-
 # Development stage
 FROM base AS development
-WORKDIR /app
-
-# Copy dependencies from deps stage
 COPY --from=deps /app/node_modules ./node_modules
-COPY --from=build /app .
-COPY --from=envcopy /app/.env.development .env.development
+COPY . .
 
-RUN bun create-config --environment development
-RUN bun setup-development
+ARG VERSION=unknown
+ARG BUILD_DATE=unknown
 
-# Expose WebSocket port only (no webserver)
+LABEL org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.title="Frostfire Forge (Development)" \
+      org.opencontainers.image.description="Frostfire Forge Game Server"
+
 EXPOSE 3000
 
-# Health check - verify WebSocket server is running
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD bun -e "fetch('http://localhost:3000').then(r => process.exit(0)).catch(() => process.exit(1))"
+RUN bun create-config --environment development
 
-# Start game server - first initialize database, then start server
-CMD ["sh", "-c", "bun --env-file=.env.development ./src/utility/database_setup.ts && bun run development"]
+CMD ["sh", "-c", "bun setup-development && bun --env-file=.env.development ./src/utility/database_setup.ts && bun run development"]

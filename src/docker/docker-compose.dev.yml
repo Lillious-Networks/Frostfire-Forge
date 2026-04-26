@@ -7,13 +7,12 @@ services:
     restart: always
     ports:
       - "3000:3000"
-    environment:
-      DATABASE_HOST: mysql-dev
-      DATABASE_PORT: 3306
-    volumes:
-      - ../../.env.development:/app/.env.development:ro
     env_file:
       - ../../.env.development
+    volumes:
+      - ../../src/certs:/app/certs:ro
+      - ../../src/logs:/app/logs
+      - ../../config:/app/config
     networks:
       - frostfire-network-dev
 

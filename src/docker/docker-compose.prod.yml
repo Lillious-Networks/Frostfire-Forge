@@ -1,7 +1,7 @@
 services:
   frostfire-forge-prod:
     build:
-      context: ../..
+      context: ../../
       dockerfile: src/docker/Dockerfile.prod
     container_name: frostfire-forge-prod
     restart: always
@@ -12,9 +12,3 @@ services:
       - ../../src/certs:/app/certs:ro
       - ../../src/logs:/app/logs
       - ../../config:/app/config
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
