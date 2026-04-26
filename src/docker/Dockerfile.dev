@@ -1,5 +1,5 @@
 # Development Dockerfile for Frostfire Forge Game Server
-FROM oven/bun-slim AS base
+FROM oven/bun:latest AS base
 WORKDIR /app
 
 # Install dependencies
