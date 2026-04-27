@@ -158,11 +158,13 @@ async function createSQLControllerWithRetry(): Promise<any> {
   throw new Error(`Database connection timeout: ${lastError?.message}`);
 }
 
-createSQLControllerWithRetry().then(controller => {
+let initializationPromise: Promise<any> = createSQLControllerWithRetry().then(controller => {
   sqlController = controller;
   self.postMessage({ type: 'ready' });
+  return controller;
 }).catch(error => {
   self.postMessage({ type: 'error', error: error.message });
+  throw error;
 });
 
 self.onmessage = async (event: MessageEvent) => {
@@ -171,6 +173,16 @@ self.onmessage = async (event: MessageEvent) => {
   const retryDelay = 1000;
   const queryTimeout = 15000;
   let lastError: Error | null = null;
+
+  // Wait for initialization to complete before processing queries
+  if (!sqlController) {
+    try {
+      await initializationPromise;
+    } catch (error: any) {
+      self.postMessage({ id, error: error.message });
+      return;
+    }
+  }
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
