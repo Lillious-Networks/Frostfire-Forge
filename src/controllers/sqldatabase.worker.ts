@@ -158,7 +158,7 @@ async function createSQLControllerWithRetry(): Promise<any> {
   throw new Error(`Database connection timeout: ${lastError?.message}`);
 }
 
-let initializationPromise: Promise<any> = createSQLControllerWithRetry().then(controller => {
+const initializationPromise: Promise<any> = createSQLControllerWithRetry().then(controller => {
   sqlController = controller;
   self.postMessage({ type: 'ready' });
   return controller;
