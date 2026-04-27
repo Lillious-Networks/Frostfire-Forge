@@ -190,7 +190,7 @@ jobs:
         run: |
           echo "Checking if game server synced with asset server..."
           sleep 5
-          ASSET_LOGS=$(docker compose -p gateway -f assets/src/docker/docker-compose.dev.yml logs)
+          ASSET_LOGS=$(docker compose -p gateway -f assets/src/docker/docker-compose.dev.yml --env-file assets/.env.development logs)
           if echo "$ASSET_LOGS" | grep -q "Map sync for server-1"; then
             echo "✅ Game server successfully synced with asset server"
             echo "$ASSET_LOGS" | grep "Map sync for server-1"
@@ -218,7 +218,7 @@ jobs:
             echo "Game server logs:"
             docker compose -p gateway -f src/docker/docker-compose.dev.yml logs
             echo "Asset server logs:"
-            docker compose -p gateway -f assets/src/docker/docker-compose.dev.yml logs
+            docker compose -p gateway -f assets/src/docker/docker-compose.dev.yml --env-file assets/.env.development logs
             exit 1
           fi
 
@@ -229,7 +229,7 @@ jobs:
         run: |
           docker compose -p gateway -f src/docker/docker-compose.dev.yml down
           docker compose -p gateway -f gateway/src/docker/docker-compose.dev.yml down
-          docker compose -p gateway -f assets/src/docker/docker-compose.dev.yml down
+          docker compose -p gateway -f assets/src/docker/docker-compose.dev.yml --env-file assets/.env.development down
 
   publish:
     name: Publish Docker Image to GitHub Packages
