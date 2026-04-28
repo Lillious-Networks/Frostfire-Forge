@@ -184,7 +184,7 @@ jobs:
       - name: Start Game Server with Docker Compose
         env:
           GAME_SERVER_IMAGE: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:latest
-        run: docker compose -p gateway -f src/docker/docker-compose.dev.yml up -d && sleep 10
+        run: docker compose -p gateway -f src/docker/docker-compose.dev.yml --env-file .env.development up -d && sleep 10
 
       - name: Verify Asset Server Connectivity
         run: |
@@ -199,7 +199,7 @@ jobs:
             echo "Asset server logs:"
             echo "$ASSET_LOGS"
             echo "Game server logs:"
-            docker compose -p gateway -f src/docker/docker-compose.dev.yml logs
+            docker compose -p gateway -f src/docker/docker-compose.dev.yml --env-file .env.development logs
             exit 1
           fi
 
@@ -216,7 +216,7 @@ jobs:
             echo "Gateway logs:"
             echo "$GATEWAY_LOGS"
             echo "Game server logs:"
-            docker compose -p gateway -f src/docker/docker-compose.dev.yml logs
+            docker compose -p gateway -f src/docker/docker-compose.dev.yml --env-file .env.development logs
             echo "Asset server logs:"
             docker compose -p gateway -f assets/src/docker/docker-compose.dev.yml --env-file assets/.env.development logs
             exit 1
@@ -227,7 +227,7 @@ jobs:
         env:
           GAME_SERVER_IMAGE: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:latest
         run: |
-          docker compose -p gateway -f src/docker/docker-compose.dev.yml down
+          docker compose -p gateway -f src/docker/docker-compose.dev.yml --env-file .env.development down
           docker compose -p gateway -f gateway/src/docker/docker-compose.dev.yml down
           docker compose -p gateway -f assets/src/docker/docker-compose.dev.yml --env-file assets/.env.development down
 

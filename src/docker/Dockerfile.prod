@@ -24,4 +24,7 @@ EXPOSE 3000
 
 RUN bun create-config --environment production
 
+HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
+  CMD bun --eval "const useSSL = process.env.WEB_SOCKET_USE_SSL === 'true'; const port = process.env.WEB_SOCKET_PORT || 3000; const protocol = useSSL ? 'https' : 'http'; const res = await fetch(protocol + '://localhost:' + port + '/status').catch(() => ({ok: false})); process.exit(res.ok ? 0 : 1)"
+
 CMD ["sh", "-c", "bun setup-production && bun run production"]

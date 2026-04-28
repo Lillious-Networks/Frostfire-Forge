@@ -146,9 +146,13 @@ const Server = Bun.serve<Packet, any>({
   port: process.env.WEB_SOCKET_PORT || 3000,
   reusePort: false,
   fetch(req, Server) {
-
     const url = new URL(req.url, `http://${req.headers.get("host")}`);
     const requestOrigin = req.headers.get("origin");
+
+    // Return 200 OK
+    if (url.pathname === "/status" && req.method === "GET") {
+      return new Response(JSON.stringify({ status: "ok" }));
+    }
 
     if (req.method === "OPTIONS") {
       const corsHeaders = getCORSHeaders(requestOrigin);
