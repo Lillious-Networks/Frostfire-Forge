@@ -95,7 +95,7 @@ const authentication = {
                 spellsByName[sp.name] = sp;
             }
 
-            const learnedSpells: Record<string, { icon: string | null }> = Object.create(null);
+            const learnedSpells: Record<string, { icon: string | null, sprite: string | null }> = Object.create(null);
 
             for (const row of learnedSpellsData) {
                 const name = row.spell;
@@ -105,6 +105,7 @@ const authentication = {
 
                 learnedSpells[name] = {
                     icon: spellDetails.icon ?? null,
+                    sprite: spellDetails.sprite ?? null,
                 };
             }
 
@@ -121,7 +122,8 @@ const authentication = {
             return {
                 authenticated: true,
                 completed: true,
-                data: playerData
+                data: playerData,
+                error: null
             }
 
         } catch (err) {

@@ -4,7 +4,6 @@ import layerManager from "../services/layermanager";
 import mapIndex from "../services/mapindex";
 import parties from "../systems/parties";
 import { packetManager } from "./packet_manager";
-import log from "../modules/logger";
 import spatialGrid from "../services/spatialgrid";
 
 export interface PlayerAOIState {
@@ -242,7 +241,6 @@ export function queueSpawnPlayerPacket(
 
 export async function updatePlayerAOI(
   player: any,
-  sendAnimationToFn: (targetWs: any, name: string, playerId: string) => Promise<void>,
   spawnBatchQueue?: Map<string, Map<string, any>>,
   despawnBatchQueue?: Map<string, Set<string>>
 ): Promise<void> {
@@ -350,11 +348,6 @@ export async function updatePlayerAOI(
     player.aoi.lastAOIUpdatePosition = { x: currentPos.x, y: currentPos.y };
     player.aoi.gridX = Math.floor(currentPos.x / AOI_CONFIG.GRID_CELL_SIZE);
     player.aoi.gridY = Math.floor(currentPos.y / AOI_CONFIG.GRID_CELL_SIZE);
-
-    if (AOI_CONFIG.USE_SPATIAL_GRID) {
-      const mapName = currentMap.replaceAll(".json", "");
-      const cellChanged = spatialGrid.updatePlayer(player.id, currentPos.x, currentPos.y, mapName);
-    }
 
     playerCache.set(player.id, player);
   } catch (error) {
@@ -468,7 +461,6 @@ export async function handleMapChangeAOI(
   player: any,
   newMapName: string,
   newPosition: { x: number; y: number },
-  sendAnimationToFn: (targetWs: any, name: string, playerId: string) => Promise<void>,
   spawnBatchQueue?: Map<string, Map<string, any>>,
   despawnBatchQueue?: Map<string, Set<string>>
 ): Promise<void> {
@@ -513,7 +505,7 @@ export async function handleMapChangeAOI(
     player.aoi.lastAOIUpdatePosition = { x: newPosition.x, y: newPosition.y };
     playerCache.set(player.id, player);
 
-    await updatePlayerAOI(player, sendAnimationToFn, spawnBatchQueue, despawnBatchQueue);
+    await updatePlayerAOI(player, spawnBatchQueue, despawnBatchQueue);
   } catch (error) {
     // Silently ignore map change errors
   }
@@ -654,7 +646,7 @@ export async function syncPartyLayers(
 
     for (const { player } of playersNeedingUpdate) {
 
-      await updatePlayerAOI(player, sendAnimationToFn, spawnBatchQueue, despawnBatchQueue);
+      await updatePlayerAOI(player, spawnBatchQueue, despawnBatchQueue);
     }
 
     let totalSpawns = 0;
@@ -814,7 +806,7 @@ export function startAutoLayerCondensation(
         });
       }
 
-      for (const [mapName, layers] of layersByMap.entries()) {
+      for (const [_, layers] of layersByMap.entries()) {
         if (layers.length <= 1) {
           continue;
         }
@@ -881,7 +873,7 @@ export function startAutoLayerCondensation(
 
             despawnPlayerFromAllAOI(player, "map_change", despawnBatchQueue);
 
-            await updatePlayerAOI(player, sendAnimationToFn, spawnBatchQueue, despawnBatchQueue);
+            await updatePlayerAOI(player, spawnBatchQueue, despawnBatchQueue);
           }
 
           // Update actual layerManager state instead of temporary array

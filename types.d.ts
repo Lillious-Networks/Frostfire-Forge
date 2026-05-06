@@ -63,24 +63,24 @@ declare interface ScriptData {
 }
 
 declare interface Player {
-  id?: string;
-  username?: string;
-  position?: PositionData;
-  location?: LocationData;
-  map?: string;
-  layer?: string | null;
-  stats?: StatsData;
-  isStealth?: boolean;
-  isAdmin?: boolean;
-  isGuest?: boolean;
-  isNoclip?: boolean;
-  pvp?: boolean;
-  last_attack?: number;
-  animation?: string;
-  friends?: string[];
-  invitiations?: string[];
+  id: Nullable<string>;
+  username: Nullable<string>;
+  position: PositionData;
+  location: Nullable<LocationData>;
+  map: Nullable<string>;
+  layer: Nullable<string>;
+  stats: Nullable<StatsData>;
+  isStealth: boolean;
+  isAdmin: Nullable<boolean>;
+  isGuest: Nullable<boolean>;
+  isNoclip: Nullable<boolean>;
+  pvp: Nullable<boolean>;
+  last_attack: Nullable<number>;
+  animation: Nullable<string>;
+  friends: Nullable<string[]>;
+  invitiations: Nullable<string[]>;
   mounted: boolean;
-  mount_type?: string | null;
+  mount_type: Nullable<string>;
 }
 
 declare interface QuestLogData {
@@ -120,7 +120,7 @@ declare interface Particle {
     y: number;
   };
   weather: WeatherData | 'none';
-  affected_by_weather?: boolean;
+  affected_by_weather: Nullable<boolean>;
   zIndex: number;
 }
 
@@ -141,13 +141,13 @@ declare interface Item {
   type: ItemType;
   description: string;
   icon: Nullable<string>;
-  stat_armor?: Nullable<number>;
-  stat_damage?: Nullable<number>;
-  stat_critical_chance?: Nullable<number>;
-  stat_critical_damage?: Nullable<number>;
-  stat_health?: Nullable<number>;
-  stat_stamina?: Nullable<number>;
-  stat_avoidance?: Nullable<number>;
+  stat_armor: Nullable<number>;
+  stat_damage: Nullable<number>;
+  stat_critical_chance: Nullable<number>;
+  stat_critical_damage: Nullable<number>;
+  stat_health: Nullable<number>;
+  stat_stamina: Nullable<number>;
+  stat_avoidance: Nullable<number>;
   level_requirement: Nullable<number>;
   equipable: boolean;
   equipment_slot: Nullable<ItemSlot>;
@@ -249,7 +249,7 @@ declare interface WeaponData {
 declare interface SoundData {
   name: string;
   data: Buffer;
-  pitch?: number;
+  pitch: Nullable<number>;
 }
 
 declare interface SpriteSheetData {
@@ -262,11 +262,11 @@ declare interface SpriteSheetData {
 declare interface SpriteData {
   name: string;
   data: Buffer;
-  hash?: string;
+  hash: Nullable<string>;
 }
 
 declare interface SpellData {
-  id?: number;
+  id: Nullable<number>;
   name: string;
   damage: number;
   mana: number;
@@ -303,7 +303,7 @@ declare interface WeatherData {
 declare interface WorldData {
   name: string;
   weather: string;
-  players?: number;
+  players: Nullable<number>;
   max_players: number;
   default_map: string;
 }
@@ -330,8 +330,8 @@ declare interface MapProperties {
   height: number;
   tileWidth: number;
   tileHeight: number;
-  warps?: Nullable<WarpObject[]>;
-  graveyards?: Nullable<GraveyardObject[]>;
+  warps: Nullable<WarpObject[]>;
+  graveyards: Nullable<GraveyardObject[]>;
 }
 
 declare interface PlayerProperties {
@@ -352,7 +352,7 @@ declare interface WarpObject {
     width: number;
     height: number;
   };
-  layer?: string;
+  layer: Nullable<string>;
 }
 
 declare interface GraveyardObject {
@@ -361,7 +361,7 @@ declare interface GraveyardObject {
     x: number;
     y: number;
   };
-  layer?: string;
+  layer: Nullable<string>;
 }
 
 declare interface Currency {
@@ -380,8 +380,8 @@ declare interface Mount {
 declare interface Authentication {
   authenticated: boolean;
   completed: boolean;
-  error?: string;
-  data?: PlayerData;
+  error: Nullable<string>;
+  data: Nullable<PlayerData>;
 }
 
 declare interface PlayerData {
@@ -432,7 +432,7 @@ declare interface Collectable {
   type: string;
   item: string;
   username: string;
-  icon?: string | null | Buffer<any>;
+  icon: Nullable<string | null | Buffer<any>>;
 }
 
 declare interface SpriteSheetTemplate {
@@ -452,10 +452,10 @@ declare interface SpriteSheetAnimation {
   frames: number[];
   frameDuration: number;
   loop: boolean;
-  offset?: {
+  offset: Nullable<{
     x: number;
     y: number;
-  };
+  }>;
 }
 
 declare interface AnimationFrame {
@@ -463,10 +463,10 @@ declare interface AnimationFrame {
   width: number;
   height: number;
   delay: number;
-  offset?: {
+  offset: Nullable<{
     x: number;
     y: number;
-  };
+  }>;
 }
 
 declare interface AnimationLayer {
@@ -491,11 +491,11 @@ declare interface SpriteSheetCache {
 
 declare interface ServerRegistrationConfig {
   gatewayUrl: string;
-  assetServerUrl?: string;
+  assetServerUrl: Nullable<string>;
   serverId: string;
-  description?: string;
+  description: Nullable<string>;
   host: string;
-  publicHost?: string;
+  publicHost: Nullable<string>;
   port: number;
   wsPort: number;
   maxConnections: number;
@@ -504,28 +504,28 @@ declare interface ServerRegistrationConfig {
 
 declare interface Entity {
   id: Nullable<number>;
-  isMoving?: boolean;
-  hasMoved?: boolean;
-  tileSize?: number;
-  last_updated?: Nullable<number>;
+  isMoving: Nullable<boolean>;
+  hasMoved: Nullable<boolean>;
+  tileSize: Nullable<number>;
+  last_updated: Nullable<number>;
   map: string;
-  name?: string | null;
+  name: Nullable<string>;
   position: PositionData;
-  aggro_type?: string;
-  level?: number;
-  health?: number;
-  max_health?: number;
-  particles?: Particle[] | null;
-  sprite_type?: 'none' | 'static' | 'animated';
-  sprite_body?: string | null;
-  sprite_head?: string | null;
-  sprite_helmet?: string | null;
-  sprite_shoulderguards?: string | null;
-  sprite_neck?: string | null;
-  sprite_hands?: string | null;
-  sprite_chest?: string | null;
-  sprite_feet?: string | null;
-  sprite_legs?: string | null;
-  sprite_weapon?: string | null;
-  initialize?: () => Promise<void>;
+  aggro_type: Nullable<string>;
+  level: Nullable<number>;
+  health: Nullable<number>;
+  max_health: Nullable<number>;
+  particles: Nullable<Particle[]>;
+  sprite_type: Nullable<'none' | 'static' | 'animated'>;
+  sprite_body: Nullable<string>;
+  sprite_head: Nullable<string>;
+  sprite_helmet: Nullable<string>;
+  sprite_shoulderguards: Nullable<string>;
+  sprite_neck: Nullable<string>;
+  sprite_hands: Nullable<string>;
+  sprite_chest: Nullable<string>;
+  sprite_feet: Nullable<string>;
+  sprite_legs: Nullable<string>;
+  sprite_weapon: Nullable<string>;
+  initialize: Nullable<() => Promise<void>>;
 }

@@ -379,6 +379,7 @@ gatewayClient = new GatewayClient({
   wsPort: wsPort,
   maxConnections: settings?.websocket?.maxConnections || 500,
   heartbeatInterval: settings?.gateway?.heartbeatInterval || 5000,
+  assetServerUrl: process.env.ASSET_SERVER_URL || "http://localhost:8000",
 });
 
 await gatewayClient.registerWithRetry();

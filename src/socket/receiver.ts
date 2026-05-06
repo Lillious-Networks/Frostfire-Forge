@@ -675,7 +675,7 @@ authWorker.on("message", async (result: any) => {
       const currentPlayer = playerCache.get(ws.data.id);
       if (!currentPlayer) return;
 
-      await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+      await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
 
       const animationName = getAnimationNameForDirection(position?.direction || "down", false, false, undefined, false);
       const selfSpriteData = await getPlayerSpriteSheetData(animationName, _pcache?.equipment || null);
@@ -1401,7 +1401,7 @@ export default async function packetReceiver(
                   y: warp.y || 0
                 };
 
-                await handleMapChangeAOI(currentPlayer, newMap, newPosition, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+                await handleMapChangeAOI(currentPlayer, newMap, newPosition, spawnBatchQueue, despawnBatchQueue);
 
                 currentPlayer.location.position.direction = currentPlayer.location.position?.direction || "down";
 
@@ -1432,7 +1432,7 @@ export default async function packetReceiver(
 
           const aoiUpdateCounter = gameLoop.getAOIUpdateCounter(currentPlayer.id);
           if (aoiUpdateCounter % 10 === 0 && shouldUpdateAOI(currentPlayer)) {
-            await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+            await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
           }
 
           const movementData = {
@@ -1476,7 +1476,7 @@ export default async function packetReceiver(
         globalStateRevision++;
 
         if (shouldUpdateAOI(currentPlayer)) {
-          await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+          await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
         }
 
         const movementData = {
@@ -2013,7 +2013,7 @@ export default async function packetReceiver(
         }
 
         // Update AOI boundaries for the dragged player to handle visibility changes
-        await updatePlayerAOI(targetPlayer, sendAnimationTo);
+        await updatePlayerAOI(targetPlayer);
 
         // Broadcast position update to all players in AOI
         globalStateRevision++;
@@ -4023,8 +4023,8 @@ export default async function packetReceiver(
 
               playerCache.set(targetPlayer.id, targetPlayer);
 
-              await updatePlayerAOI(targetPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
-              await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+              await updatePlayerAOI(targetPlayer, spawnBatchQueue, despawnBatchQueue);
+              await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
 
               const targetAnimationNameForSprite = getAnimationNameForDirection(
                 targetPlayer.location.position?.direction || "down",
@@ -4269,8 +4269,8 @@ export default async function packetReceiver(
 
               playerCache.set(currentPlayer.id, currentPlayer);
 
-              await updatePlayerAOI(currentPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
-              await updatePlayerAOI(targetPlayer, sendAnimationTo, spawnBatchQueue, despawnBatchQueue);
+              await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
+              await updatePlayerAOI(targetPlayer, spawnBatchQueue, despawnBatchQueue);
 
               const targetAnimationNameForSpriteTeleport = getAnimationNameForDirection(
                 targetPlayer.location.position?.direction || "down",

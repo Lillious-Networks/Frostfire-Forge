@@ -114,6 +114,10 @@ export async function spawnEntityAtPoint(spawnPoint: SpawnPoint): Promise<any> {
       sprite_feet: (templateEntity as any).sprite_feet,
       sprite_legs: (templateEntity as any).sprite_legs,
       sprite_weapon: (templateEntity as any).sprite_weapon,
+      isMoving: null,
+      hasMoved: null,
+      tileSize: null,
+      initialize: null,
     };
 
     // Add to database
