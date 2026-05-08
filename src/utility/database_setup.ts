@@ -46,41 +46,6 @@ const createAccountsTable = async () => {
   await query(sql);
 };
 
-const createAllowedIpsTable = async () => {
-  log.info("Creating allowed_ips table...");
-  const sql = `
-    CREATE TABLE IF NOT EXISTS allowed_ips (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        ip VARCHAR(45) NOT NULL UNIQUE
-    )
-  `;
-  await query(sql);
-};
-
-const createBlockedIpsTable = async () => {
-  log.info("Creating blocked_ips table...");
-  const sql = `
-    CREATE TABLE IF NOT EXISTS blocked_ips (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        ip VARCHAR(45) NOT NULL UNIQUE
-    )
-  `;
-  await query(sql);
-};
-
-const insertLocalhost = async () => {
-  log.info("Inserting localhost and ::1 as allowed IPs...");
-  const checkSql = `SELECT COUNT(*) as count FROM allowed_ips WHERE ip IN ('127.0.0.1', '::1')`;
-  const result = await query(checkSql) as Array<{ count: number }>;
-
-  if (result[0]?.count === 0) {
-    const sql = `INSERT INTO allowed_ips (ip) VALUES ('127.0.0.1'), ('::1')`;
-    await query(sql);
-  } else {
-    log.debug("Localhost IPs already exist - skipping");
-  }
-};
-
 const createInventoryTable = async () => {
   log.info("Creating inventory table...");
   const sql = `
@@ -795,9 +760,6 @@ const setupDatabase = async () => {
   await createDatabase();
   await useDatabase();
   await createAccountsTable();
-  await createAllowedIpsTable();
-  await createBlockedIpsTable();
-  await insertLocalhost();
   await createInventoryTable();
   await createItemsTable();
   await createStatsTable();
