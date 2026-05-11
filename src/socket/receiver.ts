@@ -1038,6 +1038,8 @@ export default async function packetReceiver(
             .map((name: string) => particlesCache.find((p: any) => p.name === name.trim()))
             .filter(Boolean)
         : (Array.isArray(npc.particles) ? npc.particles : []);
+
+
       return { ...npc, particles: resolved as Particle[] };
     }
 
@@ -3151,7 +3153,11 @@ export default async function packetReceiver(
           const allNpcs = await assetCache.get("npcs") as Npc[];
           const mapName = currentPlayer.location.map;
           const npcsInMap = (allNpcs || []).filter((npc: Npc) => npc.map === mapName);
-          sendPacket(ws, packetManager.npcList(npcsInMap));
+          // Resolve particles to include all particle data (including time fields)
+          const resolvedNpcs = await Promise.all(npcsInMap.map(resolveNpcForClient));
+
+
+          sendPacket(ws, packetManager.npcList(resolvedNpcs));
         } catch (error: any) {
           log.error(`Error listing NPCs: ${error.message}`);
           sendPacket(ws, packetManager.notify({ message: "Error loading NPCs." }));
