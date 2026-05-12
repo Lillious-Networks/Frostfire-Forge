@@ -23,13 +23,13 @@ const worlds = {
     return worldData?.max_players || 100;
   },
   async add(world: WorldData) {
-    await query("INSERT INTO worlds (name, weather, max_players, default_map) VALUES (?, ?, ?, ?)", [world.name, world.weather, world.max_players, world.default_map]);
+    await query("INSERT INTO worlds (name, weather, max_players) VALUES (?, ?, ?)", [world.name, world.weather, world.max_players]);
   },
   async remove(world: WorldData) {
     await query("DELETE FROM worlds WHERE name = ?", [world.name]);
   },
   async update(world: WorldData) {
-    await query("UPDATE worlds SET name = ?, weather = ?, max_players = ?, default_map = ? WHERE name = ?", [world.name, world.weather, world.max_players, world.default_map, world.name]);
+    await query("UPDATE worlds SET name = ?, weather = ?, max_players = ? WHERE name = ?", [world.name, world.weather, world.max_players, world.name]);
   },
 };
 

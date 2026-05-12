@@ -359,20 +359,19 @@ const createWorldTable = async () => {
     CREATE TABLE IF NOT EXISTS worlds (
       name VARCHAR(100) NOT NULL UNIQUE PRIMARY KEY,
       weather VARCHAR(45) NOT NULL DEFAULT 'none',
-      max_players INT NOT NULL DEFAULT 100,
-      default_map VARCHAR(255) NOT NULL DEFAULT 'main'
+      max_players INT NOT NULL DEFAULT 100
     )
   `;
   await query(sql);
 };
 
-const createWorld = async (name: string, weather: string, max_players: number, default_map: string) => {
+const createWorld = async (name: string, weather: string, max_players: number) => {
   log.info(`Creating world '${name}'...`);
   const checkSql = `SELECT COUNT(*) as count FROM worlds WHERE name = '${name}'`;
   const result = await query(checkSql) as Array<{ count: number }>;
 
   if (result[0]?.count === 0) {
-    const sql = `INSERT INTO worlds (name, weather, max_players, default_map) VALUES ('${name}', '${weather}', ${max_players}, '${default_map}')`;
+    const sql = `INSERT INTO worlds (name, weather, max_players) VALUES ('${name}', '${weather}', ${max_players})`;
     await query(sql);
   } else {
     log.debug(`World '${name}' already exists - skipping`);
@@ -778,7 +777,7 @@ const setupDatabase = async () => {
   await createWeatherTable();
   await createDefaultWeather();
   await createWorldTable();
-  await createWorld('overworld', 'rainy', 200, 'overworld');
+  await createWorld('overworld', 'rainy', 200);
   await createQuestsTable();
   await createQuestLogTable();
   await createFriendsListTable();

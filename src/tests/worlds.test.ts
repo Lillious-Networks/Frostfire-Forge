@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { mockAssetCache } from "./setup";
 
 const worldsDatabase: Record<string, any> = {
-  main: { name: "main", weather: "clear", max_players: 100, default_map: "main" },
-  dungeon: { name: "dungeon", weather: "dark", max_players: 50, default_map: "dungeon_1" },
+  main: { name: "main", weather: "clear", max_players: 100 },
+  dungeon: { name: "dungeon", weather: "dark", max_players: 50 },
 };
 
 const mockQuery = async (sql: string, params: any[]) => {
@@ -11,8 +11,8 @@ const mockQuery = async (sql: string, params: any[]) => {
     return Object.values(worldsDatabase).map((world) => ({ ...world, players: 0 }));
   }
   if (sql.includes("INSERT INTO worlds")) {
-    const [name, weather, maxPlayers, defaultMap] = params;
-    worldsDatabase[name] = { name, weather, max_players: maxPlayers, default_map: defaultMap };
+    const [name, weather, maxPlayers] = params;
+    worldsDatabase[name] = { name, weather, max_players: maxPlayers };
     return { affectedRows: 1 };
   }
   if (sql.includes("DELETE FROM worlds")) {
@@ -24,10 +24,10 @@ const mockQuery = async (sql: string, params: any[]) => {
     return { affectedRows: 0 };
   }
   if (sql.includes("UPDATE worlds")) {
-    const [name, weather, maxPlayers, defaultMap, updateName] = params;
+    const [name, weather, maxPlayers, updateName] = params;
     if (worldsDatabase[updateName]) {
       delete worldsDatabase[updateName];
-      worldsDatabase[name] = { name, weather, max_players: maxPlayers, default_map: defaultMap };
+      worldsDatabase[name] = { name, weather, max_players: maxPlayers };
     }
     return { affectedRows: 1 };
   }
@@ -60,11 +60,10 @@ const worlds = {
   },
 
   async add(world: any) {
-    await mockQuery("INSERT INTO worlds (name, weather, max_players, default_map) VALUES (?, ?, ?, ?)", [
+    await mockQuery("INSERT INTO worlds (name, weather, max_players) VALUES (?, ?, ?)", [
       world.name,
       world.weather,
       world.max_players,
-      world.default_map,
     ]);
   },
 
@@ -73,11 +72,10 @@ const worlds = {
   },
 
   async update(world: any) {
-    await mockQuery("UPDATE worlds SET name = ?, weather = ?, max_players = ?, default_map = ? WHERE name = ?", [
+    await mockQuery("UPDATE worlds SET name = ?, weather = ?, max_players = ? WHERE name = ?", [
       world.name,
       world.weather,
       world.max_players,
-      world.default_map,
       world.name,
     ]);
   },
@@ -125,7 +123,7 @@ test("worlds.getMaxPlayers returns default if world not found", async () => {
 });
 
 test("worlds.add creates new world", async () => {
-  const world = { name: "newworld", weather: "clear", max_players: 150, default_map: "new_main" };
+  const world = { name: "newworld", weather: "clear", max_players: 150 };
   await worlds.add(world);
   expect(worldsDatabase["newworld"]).toBeDefined();
 });
