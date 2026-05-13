@@ -259,7 +259,12 @@ const createParticleTable = async () => {
         interval INTEGER NOT NULL DEFAULT 1,
         staggertime FLOAT NOT NULL DEFAULT 0,
         spread TEXT NOT NULL DEFAULT '0,0',
-        affected_by_weather INTEGER NOT NULL DEFAULT 0
+        affected_by_weather INTEGER NOT NULL DEFAULT 0,
+        zIndex INTEGER NOT NULL DEFAULT 0,
+        glow_intensity FLOAT NOT NULL DEFAULT 0,
+        affected_by_time INTEGER DEFAULT 0,
+        time_on TEXT DEFAULT NULL,
+        time_off TEXT DEFAULT NULL
     );
   `;
   await query(sql);

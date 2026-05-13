@@ -25,6 +25,8 @@ src/assets/tilesets/*
 !src/assets/tilesets/MystcialValley_Environment.png
 !src/assets/tilesets/MystcialValley_Structures.png
 
+src/assets/maps/*
+
 src/webserver/www/public/js/web/*.js
 *.sqlite
 *.sqlite-wal

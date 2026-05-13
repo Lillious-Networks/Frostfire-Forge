@@ -316,6 +316,7 @@ const createParticleTable = async () => {
       spread VARCHAR(45) NOT NULL DEFAULT '0,0',
       affected_by_weather INT NOT NULL DEFAULT 0,
       zIndex INT NOT NULL DEFAULT 0,
+      glow_intensity FLOAT NOT NULL DEFAULT 0,
       affected_by_time INT DEFAULT 0,
       time_on VARCHAR(5) DEFAULT NULL,
       time_off VARCHAR(5) DEFAULT NULL

@@ -563,9 +563,20 @@ authWorker.on("message", async (result: any) => {
       );
     }
 
-    const weather = world?.weather || "clear";
-    if (weather) {
-      sendPacket(ws, packetManager.weather({ weather }));
+    const weatherName = world?.weather || "clear";
+    let weatherData = null;
+
+    if (weatherName && weatherName !== "clear") {
+      try {
+        const allWeathers = await assetCache.get("weather") as WeatherData[];
+        weatherData = allWeathers?.find((w: WeatherData) => w.name === weatherName);
+      } catch (err) {
+        log.warn(`Failed to fetch weather data for ${weatherName}: ${err}`);
+      }
+    }
+
+    if (weatherName) {
+      sendPacket(ws, packetManager.weather({ weather: weatherName, weatherData }));
     }
 
     const limitedInventory = Array.isArray(playerData.inventory) ? playerData.inventory.slice(0, 30) : [];

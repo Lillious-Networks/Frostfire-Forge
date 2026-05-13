@@ -122,6 +122,7 @@ declare interface Particle {
   weather: WeatherData | 'none';
   affected_by_weather: Nullable<boolean>;
   zIndex: number;
+  glow_intensity: number;
   affected_by_time: Nullable<boolean>;
   time_on: Nullable<string>;
   time_off: Nullable<string>;
