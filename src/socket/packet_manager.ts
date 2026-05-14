@@ -189,6 +189,16 @@ export const packetManager = {
       )
     ] as any[];
   },
+  preloadMapChunks: (data: any) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "PRELOAD_MAP_CHUNKS",
+          data
+        })
+      )
+    ] as any[];
+  },
   spawnPlayer: (data: any) => {
     return [
       packet.encode(

@@ -1443,6 +1443,119 @@ export default async function packetReceiver(
 
           globalStateRevision++;
 
+          // Check for nearby warps and preload their destination maps
+          const mapNameWithJson = currentPlayer.location.map.endsWith('.json')
+            ? currentPlayer.location.map
+            : `${currentPlayer.location.map}.json`;
+          const playerMapProperties = mapPropertiesCache.find(
+            (m: any) => m.name === mapNameWithJson
+          );
+          if (playerMapProperties?.warps && Array.isArray(playerMapProperties.warps)) {
+            const WARP_PRELOAD_DISTANCE = 100; // pixels
+            const now = performance.now();
+            const preloadedDestinations = new Set<string>();
+
+            for (const warp of playerMapProperties.warps) {
+              const warpX = warp.position?.x || warp.x;
+              const warpY = warp.position?.y || warp.y;
+              const distance = Math.hypot(
+                currentPlayer.location.position.x - warpX,
+                currentPlayer.location.position.y - warpY
+              );
+
+              if (distance < WARP_PRELOAD_DISTANCE) {
+                const destMapName = warp.map.replace(".json", "");
+
+                if (!currentPlayer._warpPreloadTimes) {
+                  currentPlayer._warpPreloadTimes = {};
+                }
+
+                // Skip if already preloaded
+                if (currentPlayer._warpPreloadTimes[destMapName]) {
+                  continue;
+                }
+
+                // Skip if already preloaded in this movement frame
+                if (preloadedDestinations.has(destMapName)) {
+                  continue;
+                }
+
+                // Mark as preloaded immediately to prevent re-preloading
+                currentPlayer._warpPreloadTimes[destMapName] = now;
+                preloadedDestinations.add(destMapName);
+
+                try {
+                  // Find the destination map
+                  const destMap = maps.find((m: MapData) =>
+                    m.name === (warp.map.endsWith('.json') ? warp.map : `${warp.map}.json`)
+                  );
+
+                  if (destMap) {
+                    // Calculate chunks around the warp destination
+                    const tilewidth = destMap.data?.tilewidth || 32;
+                    const tileheight = destMap.data?.tileheight || 32;
+                    const CHUNK_SIZE_CONFIG: { [key: number]: number } = {
+                      16: 64,
+                      32: 32,
+                      64: 16,
+                    };
+                    const CHUNK_SIZE = CHUNK_SIZE_CONFIG[tilewidth] || 32;
+                    const chunkPixelSize = CHUNK_SIZE * tilewidth;
+
+                    const chunksX = Math.ceil((destMap.data?.width || 0) / CHUNK_SIZE);
+                    const chunksY = Math.ceil((destMap.data?.height || 0) / CHUNK_SIZE);
+
+                    // Clamp warp position to valid chunk range
+                    let spawnChunkX = Math.floor(warpX / chunkPixelSize);
+                    let spawnChunkY = Math.floor(warpY / chunkPixelSize);
+                    spawnChunkX = Math.max(0, Math.min(spawnChunkX, Math.max(0, chunksX - 1)));
+                    spawnChunkY = Math.max(0, Math.min(spawnChunkY, Math.max(0, chunksY - 1)));
+
+                    const viewportWidth = 1920; // Standard viewport
+                    const viewportHeight = 1080;
+                    const padding = chunkPixelSize;
+
+                    const chunksNeededX = Math.ceil(
+                      (viewportWidth + padding * 2) / chunkPixelSize / 2
+                    );
+                    const chunksNeededY = Math.ceil(
+                      (viewportHeight + padding * 2) / chunkPixelSize / 2
+                    );
+
+                    const chunksToPreload: Array<{ x: number; y: number; data?: any }> = [];
+                    for (let dy = -chunksNeededY; dy <= chunksNeededY; dy++) {
+                      for (let dx = -chunksNeededX; dx <= chunksNeededX; dx++) {
+                        const chunkX = spawnChunkX + dx;
+                        const chunkY = spawnChunkY + dy;
+                        if (chunkX >= 0 && chunkY >= 0 && chunkX < chunksX && chunkY < chunksY) {
+                          chunksToPreload.push({ x: chunkX, y: chunkY });
+                        }
+                      }
+                    }
+
+                    if (chunksToPreload.length > 0) {
+                      sendPacket(
+                        ws,
+                        packetManager.preloadMapChunks({
+                          mapName: destMapName,
+                          chunks: chunksToPreload,
+                          tilewidth: tilewidth,
+                          tileheight: tileheight,
+                          chunkSize: CHUNK_SIZE,
+                          width: destMap.data?.width || 0,
+                          height: destMap.data?.height || 0,
+                          tilesets: destMap.data?.tilesets || [],
+                        })
+                      );
+                    }
+                  }
+                } catch (err) {
+                  log.warn(`Failed to preload warp chunks: ${err}`);
+                }
+              }
+            }
+          }
+
           const aoiUpdateCounter = gameLoop.getAOIUpdateCounter(currentPlayer.id);
           if (aoiUpdateCounter % 10 === 0 && shouldUpdateAOI(currentPlayer)) {
             await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
