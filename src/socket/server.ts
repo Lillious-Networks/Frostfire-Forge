@@ -287,7 +287,7 @@ const Server = Bun.serve<Packet, any>({
       if (clientToDelete) {
         const deleted = connections.delete(clientToDelete);
         if (deleted) {
-          listener.emit("onDisconnect", { id: ws.data.id });
+          listener.emit("onDisconnect", { id: ws.data.id, reason: "player_left" });
 
           const _packet = {
             type: "CONNECTION_COUNT",
@@ -657,7 +657,6 @@ listener.on("onDisconnect", async (data) => {
     ) || null;
 
     if (thisWorld) {
-
       thisWorld.players = Math.max(0, (thisWorld.players || 0) - 1);
       await assetCache.set("worlds", JSON.stringify(_worlds));
       log.info(

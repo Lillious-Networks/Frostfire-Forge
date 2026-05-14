@@ -551,6 +551,9 @@ authWorker.on("message", async (result: any) => {
 
     if (world) {
       world.players = (world.players || 0) + 1;
+      log.info(
+        `World: ${world.name} now has ${world.players} players. (player_join)`
+      );
 
       assetCache.set("worlds", JSON.stringify(worldData)).catch(err =>
         log.error(`Failed to update world player count: ${err}`)
