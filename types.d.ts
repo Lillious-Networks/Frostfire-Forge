@@ -308,7 +308,6 @@ declare interface WorldData {
   name: string;
   weather: string;
   players: Nullable<number>;
-  max_players: number;
 }
 
 declare interface Quest {

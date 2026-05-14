@@ -18,18 +18,14 @@ const worlds = {
     const worldData = await this.get(world);
     return worldData?.weather || "clear";
   },
-  async getMaxPlayers(world: string) {
-    const worldData = await this.get(world);
-    return worldData?.max_players || 100;
-  },
   async add(world: WorldData) {
-    await query("INSERT INTO worlds (name, weather, max_players) VALUES (?, ?, ?)", [world.name, world.weather, world.max_players]);
+    await query("INSERT INTO worlds (name, weather) VALUES (?, ?)", [world.name, world.weather]);
   },
   async remove(world: WorldData) {
     await query("DELETE FROM worlds WHERE name = ?", [world.name]);
   },
   async update(world: WorldData) {
-    await query("UPDATE worlds SET name = ?, weather = ?, max_players = ? WHERE name = ?", [world.name, world.weather, world.max_players, world.name]);
+    await query("UPDATE worlds SET name = ?, weather = ? WHERE name = ?", [world.name, world.weather, world.name]);
   },
 };
 

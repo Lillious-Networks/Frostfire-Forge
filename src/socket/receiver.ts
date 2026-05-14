@@ -548,12 +548,6 @@ authWorker.on("message", async (result: any) => {
       (w) => w.name === spawnLocation.map.replace(".json", "")
     );
 
-    const playerCount = (world?.players || 0) + 1;
-    const maxPlayers = world?.max_players || 100;
-    if (world && maxPlayers && playerCount > maxPlayers) {
-      ws.close(1008, "World is full");
-      return;
-    }
 
     if (world) {
       world.players = (world.players || 0) + 1;

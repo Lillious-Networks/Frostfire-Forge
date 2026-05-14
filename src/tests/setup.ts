@@ -15,7 +15,7 @@ export const mockAssetCache = {
       spells: [{ name: "test_spell", id: 1, damage: 10, mana: 5 }],
       quests: [{ id: 1, name: "test_quest", description: "A test quest", reward: 100, xp_gain: 50, required_quest: 0, required_level: 1 }],
       weather: [{ name: "clear", temperature: 20, humidity: 50, wind_speed: 0, wind_direction: "N", precipitation: 0, ambience: "clear" }],
-      worlds: [{ name: "test_world", weather: "clear", max_players: 100 }],
+      worlds: [{ name: "test_world", weather: "clear" }],
       mapProperties: [{ name: "main", warps: [], tileWidth: 32, tileHeight: 32 }],
       particles: [{ name: "test_particle" }],
       npcs: [{ id: 1, map: "main", position: { x: 100, y: 100 } }],
