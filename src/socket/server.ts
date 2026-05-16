@@ -24,13 +24,13 @@ import assetCache from "../services/assetCache.ts";
 import entityCache from "../services/entityCache.ts";
 import { GatewayClient } from "../modules/gateway-client.ts";
 
-const _cert = path.join(import.meta.dir, "../certs/cert.pem");
-const _key = path.join(import.meta.dir, "../certs/key.pem");
-const _ca = path.join(import.meta.dir, "../certs/cert.ca-bundle");
-const useSSL = process.env.WEB_SOCKET_USE_SSL === "true";
+const _cert = process.env.WEB_SOCKET_CERT_PATH || path.join(import.meta.dir, "../certs/cert.pem");
+const _key = process.env.WEB_SOCKET_KEY_PATH || path.join(import.meta.dir, "../certs/key.pem");
+const _ca = process.env.WEB_SOCKET_CA_PATH || path.join(import.meta.dir, "../certs/cert.ca-bundle");
+const _https = process.env.WEB_SOCKET_USE_SSL === "true" && fs.existsSync(_cert) && fs.existsSync(_key);
 let options: Bun.TLSOptions | undefined = undefined;
 
-if (useSSL) {
+if (_https) {
   if (!fs.existsSync(_cert) || !fs.existsSync(_key)) {
     log.error(`Attempted to locate certificate and key but failed`);
     log.error(`Certificate: ${_cert}`);
