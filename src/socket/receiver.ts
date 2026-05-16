@@ -417,6 +417,236 @@ const initialInterval = getAdaptiveBatchInterval();
 BATCH_INTERVAL = initialInterval;
 batchTimer = setTimeout(scheduleBatchFlush, initialInterval);
 
+function constructMapMetadata(
+  mapName: string,
+  spawnX: number,
+  spawnY: number,
+  direction: string,
+  maps: MapData[],
+  mapPropertiesCache: any[]
+): any {
+  const normalizedName = mapName.replace(".json", "");
+  const map = maps.find((m: MapData) => m.name === `${normalizedName}.json` || m.name === normalizedName);
+  const mapProps = mapPropertiesCache.find((m: any) => m.name === `${normalizedName}.json`);
+  const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
+
+  const worldsArr: WorldData[] = Array.isArray(worldsCache) ? worldsCache : (typeof worldsCache === "string" ? JSON.parse(worldsCache) : []);
+
+  const objectLayers = (map?.data?.layers || [])
+    .filter((layer: any) => layer.type === "objectgroup")
+    .map((layer: any) => ({ name: layer.name }));
+
+  return {
+    name: normalizedName,
+    assetServerUrl,
+    width: map?.data?.width || 0,
+    height: map?.data?.height || 0,
+    tilewidth: map?.data?.tilewidth || 32,
+    tileheight: map?.data?.tileheight || 32,
+    tilesets: map?.data?.tilesets || [],
+    spawnX,
+    spawnY,
+    direction,
+    chunks: null,
+    warps: mapProps?.warps || null,
+    graveyards: mapProps?.graveyards || null,
+    hasWeather: !!worldsArr.find((w) => w.name === normalizedName),
+    objectLayers,
+  };
+}
+
+async function transitionPlayerToMap(
+  player: any,
+  newMapName: string,
+  newPosition: { x: number; y: number; direction?: string },
+  ws: any,
+  spawnBatchQueue: Map<string, Map<string, any>>,
+  despawnBatchQueue: Map<string, Set<string>>
+): Promise<void> {
+  await handleMapChangeAOI(player, newMapName, { x: newPosition.x, y: newPosition.y }, spawnBatchQueue, despawnBatchQueue);
+
+  const updatedPlayer = playerCache.get(player.id);
+  if (!updatedPlayer) return;
+
+  const direction = newPosition.direction || updatedPlayer.location.position?.direction || "down";
+  const mapMetadata = constructMapMetadata(newMapName, newPosition.x, newPosition.y, direction, maps, mapPropertiesCache);
+  sendPacket(ws, packetManager.loadMap(mapMetadata));
+
+  setImmediate(async () => {
+    try {
+      const world = worldsCache.find((w) => w.name === newMapName);
+      if (world) {
+        const weatherName = world.weather || "clear";
+        let weatherData = null;
+        if (weatherName && weatherName !== "clear") {
+          try {
+            const allWeathers = await assetCache.get("weather") as WeatherData[];
+            weatherData = allWeathers?.find((w: WeatherData) => w.name === weatherName);
+          } catch (e) {
+            log.warn(`Failed to fetch weather data for ${weatherName}: ${e}`);
+          }
+        }
+        if (weatherName) {
+          sendPacket(ws, packetManager.weather({ weather: weatherName, weatherData }));
+        }
+      }
+    } catch (e) {
+      log.warn(`Failed to fetch weather data for ${newMapName}: ${e}`);
+    }
+
+    try {
+      const npcsData = await assetCache.get("npcs") as Npc[];
+      const npcsInMap = (npcsData || []).filter((npc: Npc) => npc.map === newMapName);
+      const particlesCache = await assetCache.get("particles") as Particle[] | null;
+      const npcPackets = await npcsInMap.reduce(
+        async (packetsPromise: Promise<any[]>, npc: Npc) => {
+          const packets = await packetsPromise;
+          const particleArray =
+            typeof npc.particles === "string" && particlesCache
+              ? (
+                (npc.particles as string)
+                  .split(",")
+                  .map((name) =>
+                    particlesCache.find((p: Particle) => p.name === name.trim())
+                  )
+              ).filter(Boolean)
+              : [];
+          const npcData = {
+            id: npc.id,
+            last_updated: npc.last_updated,
+            name: npc.name || null,
+            location: {
+              x: npc.position.x,
+              y: npc.position.y,
+              direction: npc.position.direction || "down",
+            },
+            script: npc.script,
+            hidden: npc.hidden,
+            dialog: npc.dialog,
+            particles: particleArray,
+            quest: npc.quest,
+            map: npc.map,
+            position: npc.position,
+            sprite_type: npc.sprite_type,
+            spriteLayers: getNpcSpriteLayers(npc),
+          };
+          return [...packets, ...packetManager.createNpc(npcData)];
+        },
+        Promise.resolve([] as any[])
+      );
+      if (npcPackets.length) {
+        sendPacket(ws, npcPackets);
+      }
+    } catch (e) {
+      log.warn(`Failed to fetch NPC data for ${newMapName}: ${e}`);
+    }
+
+    try {
+      const entitiesInMap = entityCache.getByMap(newMapName);
+      const particlesCache = await assetCache.get("particles") as Particle[] | null;
+      const entityPackets = await entitiesInMap.reduce(
+        async (packetsPromise: Promise<any[]>, entity: any) => {
+          const packets = await packetsPromise;
+          const particleArray =
+            typeof entity.particles === "string" && particlesCache
+              ? (
+                (entity.particles as string)
+                  .split(",")
+                  .map((name) =>
+                    particlesCache.find((p: Particle) => p.name === name.trim())
+                  )
+              ).filter(Boolean)
+              : [];
+          const entityData = {
+            id: entity.id,
+            last_updated: entity.last_updated,
+            name: entity.name || null,
+            location: {
+              x: entity.position.x,
+              y: entity.position.y,
+              direction: entity.position.direction || "down",
+            },
+            health: entity.health,
+            max_health: entity.max_health,
+            level: entity.level,
+            aggro_type: entity.aggro_type,
+            particles: particleArray,
+            map: entity.map,
+            position: entity.position,
+            sprite_type: entity.sprite_type || 'animated',
+            spriteLayers: getEntitySpriteLayers(entity),
+          };
+          return [...packets, ...packetManager.createEntity(entityData as any)];
+        },
+        Promise.resolve([] as any[])
+      );
+      if (entityPackets.length) {
+        sendPacket(ws, entityPackets);
+      }
+    } catch (e) {
+      log.warn(`Failed to fetch entity data for ${newMapName}: ${e}`);
+    }
+
+    const p = playerCache.get(player.id);
+    if (!p) return;
+
+    const dir = newPosition.direction || p.location.position?.direction || "down";
+    const animationName = getAnimationNameForDirection(dir, false, !!p.mounted, p.mount_type, false);
+    let spriteData: any = null;
+    try {
+      const selfSpriteData = await getPlayerSpriteSheetData(animationName, p.equipment || null);
+      if (selfSpriteData.bodySprite || selfSpriteData.headSprite) {
+        spriteData = {
+          mountSprite: p.mount_type ? getMountSpriteUrl(p.mount_type) : null,
+          bodySprite: selfSpriteData.bodySprite || null,
+          headSprite: selfSpriteData.headSprite || null,
+          armorHelmetSprite: selfSpriteData.armorHelmetSprite || null,
+          armorShoulderguardsSprite: selfSpriteData.armorShoulderguardsSprite || null,
+          armorNeckSprite: selfSpriteData.armorNeckSprite || null,
+          armorHandsSprite: selfSpriteData.armorHandsSprite || null,
+          armorChestSprite: selfSpriteData.armorChestSprite || null,
+          armorFeetSprite: selfSpriteData.armorFeetSprite || null,
+          armorLegsSprite: selfSpriteData.armorLegsSprite || null,
+          armorWeaponSprite: selfSpriteData.armorWeaponSprite || null,
+          animationState: selfSpriteData.animationState,
+        };
+      }
+    } catch (e) {
+      log.warn(`Failed to fetch player sprite data for ${player.id}: ${e}`);
+    }
+
+    const spawnData = {
+      id: player.id,
+      userid: p.userid,
+      location: {
+        map: `${newMapName}.json`,
+        x: newPosition.x,
+        y: newPosition.y,
+        direction: dir,
+      },
+      username: p.username,
+      isAdmin: p.isAdmin,
+      isGuest: p.isGuest,
+      isStealth: p.isStealth,
+      isNoclip: p.isNoclip,
+      stats: p.stats || {},
+      animation: null,
+      spriteData,
+      friends: p.friends || [],
+      party_id: p.party_id ? Number(p.party_id) : null,
+      party: p.party || [],
+      currency: p.currency || { copper: 0, silver: 0, gold: 0 },
+    };
+    sendPacket(ws, packetManager.spawnPlayer(spawnData));
+
+    try {
+      await sendAnimationTo(ws, animationName, player.id);
+    } catch (e) {
+      log.warn(`Failed to send animation for ${player.id}: ${e}`);
+    }
+  });
+}
+
 export function clearBatchQueuesForPlayer(playerId: string, mapName: string) {
 
   const mapMovements = movementBatchQueue.get(mapName);
@@ -657,28 +887,15 @@ authWorker.on("message", async (result: any) => {
     }
 
     // Extract object layers from map data
-    const objectLayers = (map?.data?.layers || [])
-      .filter((layer: any) => layer.type === "objectgroup")
-      .map((layer: any) => ({ name: layer.name }));
-
     // Send map chunk metadata instead of full map
-    const mapMetadata = {
-      name: spawnLocation?.map,
-      assetServerUrl,
-      width: map?.data?.width || 0,
-      height: map?.data?.height || 0,
-      tilewidth: map?.data?.tilewidth || 32,
-      tileheight: map?.data?.tileheight || 32,
-      tilesets: map?.data?.tilesets || [], // Tileset metadata (not images, just definitions)
-      spawnX: position?.x || 0,
-      spawnY: position?.y || 0,
-      direction: position?.direction || "down",
-      chunks: null, // Client will fetch from asset server
-      warps: player_map_properties?.warps || null,
-      graveyards: player_map_properties?.graveyards || null,
-      objectLayers: objectLayers,
-    };
-
+    const mapMetadata = constructMapMetadata(
+      spawnLocation?.map,
+      position?.x || 0,
+      position?.y || 0,
+      position?.direction || "down",
+      maps,
+      mapPropertiesCache
+    );
     sendPacket(ws, packetManager.loadMap(mapMetadata));
 
     setImmediate(async () => {
@@ -695,8 +912,17 @@ authWorker.on("message", async (result: any) => {
       if (selfSpriteData.bodySprite || selfSpriteData.headSprite) {
         // Sprite URLs are now sent to the client, which fetches them from the asset server
         spriteDataForSelf = {
+          mountSprite: _pcache?.mount_type ? getMountSpriteUrl(_pcache.mount_type) : null,
           bodySprite: selfSpriteData.bodySprite || null,
           headSprite: selfSpriteData.headSprite || null,
+          armorHelmetSprite: selfSpriteData.armorHelmetSprite || null,
+          armorShoulderguardsSprite: selfSpriteData.armorShoulderguardsSprite || null,
+          armorNeckSprite: selfSpriteData.armorNeckSprite || null,
+          armorHandsSprite: selfSpriteData.armorHandsSprite || null,
+          armorChestSprite: selfSpriteData.armorChestSprite || null,
+          armorFeetSprite: selfSpriteData.armorFeetSprite || null,
+          armorLegsSprite: selfSpriteData.armorLegsSprite || null,
+          armorWeaponSprite: selfSpriteData.armorWeaponSprite || null,
           animationState: selfSpriteData.animationState,
         };
       }
@@ -1414,13 +1640,13 @@ export default async function packetReceiver(
                   y: warp.y || 0
                 };
 
-                await handleMapChangeAOI(currentPlayer, newMap, newPosition, spawnBatchQueue, despawnBatchQueue);
-
-                currentPlayer.location.position.direction = currentPlayer.location.position?.direction || "down";
-
                 if (currentMap !== warp.map) {
-                  sendPacket(ws, packetManager.reconnect());
+                  await transitionPlayerToMap(currentPlayer, newMap, newPosition, ws, spawnBatchQueue, despawnBatchQueue);
                 } else {
+                  await handleMapChangeAOI(currentPlayer, newMap, newPosition, spawnBatchQueue, despawnBatchQueue);
+
+                  currentPlayer.location.position.direction = currentPlayer.location.position?.direction || "down";
+
                   globalStateRevision++;
 
                   const movementData = {
@@ -4082,14 +4308,6 @@ export default async function packetReceiver(
                 "affectedRows" in result &&
                 (result as { affectedRows: number }).affectedRows != 0
               ) {
-
-                targetPlayer.location.map = currentPlayer.location.map;
-                targetPlayer.location.position = {
-                  x: Math.round(currentPlayer.location.position.x),
-                  y: Math.round(currentPlayer.location.position.y),
-                  direction: targetPlayer.location.position?.direction || "down",
-                };
-
                 if (!currentPlayer.forceVisibleTo) currentPlayer.forceVisibleTo = new Set();
                 currentPlayer.forceVisibleTo.add(targetPlayer.id);
 
@@ -4103,7 +4321,18 @@ export default async function packetReceiver(
                   }
                 }, 5000);
 
-                sendPacket(targetPlayer.ws, packetManager.reconnect());
+                await transitionPlayerToMap(
+                  targetPlayer,
+                  currentPlayer.location.map,
+                  {
+                    x: Math.round(currentPlayer.location.position.x),
+                    y: Math.round(currentPlayer.location.position.y),
+                    direction: targetPlayer.location.position?.direction || "down",
+                  },
+                  targetPlayer.ws,
+                  spawnBatchQueue,
+                  despawnBatchQueue
+                );
 
                 sendPacket(
                   targetPlayer.ws,
@@ -4334,14 +4563,6 @@ export default async function packetReceiver(
                 "affectedRows" in result &&
                 (result as { affectedRows: number }).affectedRows != 0
               ) {
-
-                currentPlayer.location.map = targetPlayer.location.map;
-                currentPlayer.location.position = {
-                  x: Math.round(targetPlayer.location.position.x),
-                  y: Math.round(targetPlayer.location.position.y),
-                  direction: currentPlayer.location.position?.direction || "down",
-                };
-
                 if (!currentPlayer.forceVisibleTo) currentPlayer.forceVisibleTo = new Set();
                 currentPlayer.forceVisibleTo.add(targetPlayer.id);
 
@@ -4356,7 +4577,18 @@ export default async function packetReceiver(
                   }
                 }, 5000);
 
-                sendPacket(ws, packetManager.reconnect());
+                await transitionPlayerToMap(
+                  currentPlayer,
+                  targetPlayer.location.map,
+                  {
+                    x: Math.round(targetPlayer.location.position.x),
+                    y: Math.round(targetPlayer.location.position.y),
+                    direction: currentPlayer.location.position?.direction || "down",
+                  },
+                  ws,
+                  spawnBatchQueue,
+                  despawnBatchQueue
+                );
 
                 sendPacket(
                   ws,
@@ -5548,31 +5780,16 @@ export default async function packetReceiver(
               map.data = result.data;
 
               const playersInMap = filterPlayersByMap(mapName);
-              const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
-              const reloadedMapProps = mapPropertiesCache.find((m: any) => m.name === `${mapName}.json`);
-
-              // Extract object layers from reloaded map data
-              const reloadedObjectLayers = (result?.data?.layers || [])
-                .filter((layer: any) => layer.type === "objectgroup")
-                .map((layer: any) => ({ name: layer.name }));
 
               playersInMap.forEach((player) => {
-                const mapMetadata = {
-                  name: mapName,
-                  assetServerUrl,
-                  width: result?.data?.width || 0,
-                  height: result?.data?.height || 0,
-                  tilewidth: result?.data?.tilewidth || 32,
-                  tileheight: result?.data?.tileheight || 32,
-                  tilesets: result?.data?.tilesets || [], // Tileset metadata (not images, just definitions)
-                  spawnX: player.location.position?.x || 0,
-                  spawnY: player.location.position?.y || 0,
-                  direction: player.location.position?.direction || "down",
-                  chunks: null,
-                  warps: reloadedMapProps?.warps || null,
-                  graveyards: reloadedMapProps?.graveyards || null,
-                  objectLayers: reloadedObjectLayers,
-                };
+                const mapMetadata = constructMapMetadata(
+                  mapName,
+                  player.location.position?.x || 0,
+                  player.location.position?.y || 0,
+                  player.location.position?.direction || "down",
+                  maps,
+                  mapPropertiesCache
+                );
                 sendPacket(player.ws, packetManager.loadMap(mapMetadata));
               });
             } else {
@@ -5656,14 +5873,18 @@ export default async function packetReceiver(
                 "affectedRows" in result &&
                 (result as { affectedRows: number }).affectedRows != 0
               ) {
-                currentPlayer.location = {
-                  map: mapName,
-                  x: centerX,
-                  y: centerY,
-                  direction: currentPlayer.location.position?.direction || "down",
-                };
-
-                sendPacket(ws, packetManager.reconnect());
+                await transitionPlayerToMap(
+                  currentPlayer,
+                  mapName,
+                  {
+                    x: centerX,
+                    y: centerY,
+                    direction: currentPlayer.location.position?.direction || "down",
+                  },
+                  ws,
+                  spawnBatchQueue,
+                  despawnBatchQueue
+                );
               } else {
                 const notifyData = {
                   message: "Failed to update location",
