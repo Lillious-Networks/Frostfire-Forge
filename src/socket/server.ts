@@ -47,7 +47,6 @@ if (_https) {
     options = {
       key: key,
       cert: fullChain,
-      ALPNProtocols: "http/1.1,h2",
     };
     log.success(`SSL enabled for WebSocket with certificate chain`);
   } catch (e) {
