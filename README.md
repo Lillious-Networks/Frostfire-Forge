@@ -121,9 +121,9 @@ OPENAI_MODEL="gpt-4.1-nano-2025-04-14"
 # Application Settings
 WEB_SOCKET_PORT="3000"                    # Internal WebSocket port
 WEB_SOCKET_USE_SSL="true" | "false"       # Enable SSL/TLS for WebSocket
-WEB_SOCKET_CERT_PATH="./certs/cert.pem"
-WEB_SOCKET_KEY_PATH="./certs/key.pem"
-WEB_SOCKET_CA_PATH="./certs/cert.ca-bundle"
+WEB_SOCKET_CERT_PATH="./src/certs/cert.pem"
+WEB_SOCKET_KEY_PATH="./src/certs/key.pem"
+WEB_SOCKET_CA_PATH="./src/certs/cert.ca-bundle"
 GAME_NAME="Your Game Name"
 LOG_LEVEL="info"                          # Logging level: trace, debug, info, warn, error
 
