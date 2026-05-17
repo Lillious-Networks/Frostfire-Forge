@@ -223,10 +223,7 @@ const Server = Bun.serve<Packet, any>({
   },
   tls: options,
   websocket: {
-    perMessageDeflate: {
-      compress: true,
-      decompress: true,
-    },
+    perMessageDeflate: false,
     maxPayloadLength: 1024 * 1024 * settings?.websocket?.maxPayloadMB || 1024 * 1024,
     idleTimeout: settings?.websocket?.idleTimeout || 120,
     sendPings: true,
