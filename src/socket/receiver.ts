@@ -854,6 +854,7 @@ authWorker.on("message", async (result: any) => {
       casting: false,
       lastInterruptTime: 0,
       interruptableSpell: false,
+      castId: 0,
       learnedSpells: limitedLearnedSpells,
       inventory: limitedInventory,
       equipment: playerData.equipment || {},
@@ -1439,6 +1440,7 @@ export default async function packetReceiver(
 
         if (currentPlayer.casting && currentPlayer.interruptableSpell) {
           currentPlayer.casting = false;
+          currentPlayer.castId = (currentPlayer.castId || 0) + 1;
           currentPlayer.lastInterruptTime = performance.now();
 
           const playersInMap = filterPlayersByMap(currentPlayer.location.map);
@@ -2681,6 +2683,9 @@ export default async function packetReceiver(
         }
 
         currentPlayer.casting = true;
+        currentPlayer.castId = (currentPlayer.castId || 0) + 1;
+        playerCache.set(currentPlayer.id, currentPlayer);
+        const thisCastId = currentPlayer.castId;
         const spellStartTime = performance.now();
 
         // Dismount player if they're mounted
@@ -2708,6 +2713,12 @@ export default async function packetReceiver(
           );
         });
         await new Promise((resolve) => setTimeout(resolve, spell.cast_time * 1000));
+
+        // Abort if this cast was superseded by a new cast (e.g. interrupted then recast)
+        const castCheckPlayer = playerCache.get(currentPlayer.id);
+        if (castCheckPlayer && castCheckPlayer.castId !== thisCastId) {
+          return;
+        }
 
         // Check if spell was manually cancelled via ESC during cast time
         const updatedPlayer = playerCache.get(currentPlayer.id);
@@ -3153,6 +3164,9 @@ export default async function packetReceiver(
       case "CANCEL_SPELL": {
         if (!currentPlayer) return;
 
+        // Only process if actually casting
+        if (!currentPlayer.casting) return;
+
         // Treat ESC cancel as spell interruption
         const playersInMap = filterPlayersByMap(currentPlayer.location.map);
         playersInMap.forEach((player) => {
@@ -3161,13 +3175,30 @@ export default async function packetReceiver(
             packetManager.castSpell({ id: currentPlayer.id, spell: 'interrupted', time: 1 })
           );
         });
+
+        globalStateRevision++;
+        await sendPositionAnimation(
+          ws,
+          currentPlayer.location.position?.direction || "down",
+          currentPlayer.moving || false,
+          currentPlayer.mounted,
+          currentPlayer.mount_type || "unicorn",
+          undefined,
+          globalStateRevision,
+          false
+        );
+
         // Mark this as a manual cancel (not a movement interrupt)
         // Don't set lastInterruptTime to allow immediate recast
+        currentPlayer.casting = false;
+        currentPlayer.castId = (currentPlayer.castId || 0) + 1;
         currentPlayer.manualSpellCancel = performance.now();
 
         // Also update in playerCache so spell execution can detect it
         const cachedPlayer = playerCache.get(currentPlayer.id);
         if (cachedPlayer) {
+          cachedPlayer.casting = false;
+          cachedPlayer.castId = currentPlayer.castId;
           cachedPlayer.manualSpellCancel = performance.now();
           playerCache.set(cachedPlayer.id, cachedPlayer);
         }
