@@ -7,7 +7,7 @@ const parties = {
         try {
             const result = await query("SELECT party_id FROM accounts WHERE username = ?", [username]) as any[];
             if (result.length === 0) return false;
-            return result.length > 0;
+            return result[0].party_id != null;
         } catch (error) {
             log.error(`Error checking if user is in party: ${error}`);
             return false;

@@ -221,11 +221,27 @@ export function queueSpawnPlayerPacket(
       mounted: spawnedPlayer.mounted,
       animation: null,
       spriteData: null,
+      guild: spawnedPlayer.guild || [],
+      guild_name: spawnedPlayer.guild_name || null,
     };
 
     return spawnData;
   } catch (error) {
     return null;
+  }
+}
+
+export function broadcastPlayerUpdate(player: any): void {
+  if (!player || !player.aoi) return;
+
+  const spawnData = queueSpawnPlayerPacket(player);
+  if (!spawnData) return;
+
+  const viewers = findPlayersWithTargetInAOI(player.id);
+  for (const viewer of viewers) {
+    if (viewer.ws) {
+      sendPacket(viewer.ws, packetManager.spawnPlayer(spawnData));
+    }
   }
 }
 

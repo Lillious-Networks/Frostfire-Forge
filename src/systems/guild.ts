@@ -1,5 +1,6 @@
 import query from "../controllers/sqldatabase";
 import log from "../modules/logger";
+import swears from "../utility/swears.json";
 
 const guilds = {
     async isInGuild(username: string): Promise<boolean> {
@@ -7,7 +8,7 @@ const guilds = {
         try {
             const result = await query("SELECT guild_id FROM accounts WHERE username = ?", [username]) as any[];
             if (result.length === 0) return false;
-            return result.length > 0;
+            return result[0].guild_id != null;
         } catch (error) {
             log.error(`Error checking if user is in guild: ${error}`);
             return false;
@@ -71,7 +72,7 @@ const guilds = {
     async exists(name: string): Promise<boolean> {
         if (!name) return false;
         try {
-            const result = await query("SELECT id FROM guilds WHERE name = ?", [name]) as any[];
+            const result = await query("SELECT id FROM guilds WHERE LOWER(name) = LOWER(?)", [name]) as any[];
             return result.length > 0;
         } catch (error) {
             log.error(`Error checking if guild exists: ${error}`);
@@ -82,7 +83,7 @@ const guilds = {
         if (!username) return [];
         try {
 
-            const existingGuild = await this.exists(username);
+            const existingGuild = await this.isInGuild(username);
             if (existingGuild) return [];
 
             const members = await this.getGuildMembers(guildId) as string[];
@@ -172,14 +173,26 @@ const guilds = {
     async create(username: string, name: string): Promise<string[] | boolean> {
         if (!username || !name) return false;
         try {
-            const existingGuild = await this.exists(name);
+            const trimmed = name.trim();
+            if (trimmed.length === 0 || trimmed.length > 20) return false;
+            if (!/^[A-Za-z ]+$/.test(trimmed)) return false;
+
+            const lowerName = trimmed.toLowerCase();
+            for (const swear of swears) {
+                if (lowerName.includes(swear.id.toLowerCase())) {
+                    log.warn(`Blocked guild creation with bad word: "${trimmed}" matched "${swear.id}" by user ${username}`);
+                    return false;
+                }
+            }
+
+            const existingGuild = await this.exists(trimmed);
             if (existingGuild) return false;
 
             const inGuild = await this.isInGuild(username);
             if (inGuild) return false;
 
             const members = username;;
-            const result = await query("INSERT INTO guilds (leader, name, members) VALUES (?, ?, ?)", [username, name, members]) as any;
+            const result = await query("INSERT INTO guilds (leader, name, members) VALUES (?, ?, ?)", [username, trimmed, members]) as any;
             const guildId = result.lastInsertRowid;
 
             await query("UPDATE accounts SET guild_id = ? WHERE username = ?", [guildId, username]);

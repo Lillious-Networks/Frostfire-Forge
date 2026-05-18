@@ -3,6 +3,7 @@ import player from "../systems/player.ts";
 import query from "../controllers/sqldatabase.ts";
 import log from "../modules/logger.ts";
 import parties from "../systems/parties.ts";
+import guilds from "../systems/guild.ts";
 import collectables from "../systems/collectables.ts";
 
 const items = workerData?.assets?.items ? JSON.parse(workerData.assets.items) : [];
@@ -87,8 +88,11 @@ const authentication = {
 
             const partyMembers = playerData.party_id ? await parties.getPartyMembers(Number(playerData.party_id)) : null;
 
+            const guildMembers = playerData.guild_id ? await guilds.getGuildMembers(Number(playerData.guild_id)) : null;
+
             playerData.inventory = playerInventoryData;
             playerData.party = partyMembers || [];
+            playerData.guild = guildMembers || [];
 
             const spellsByName: Record<string, SpellData> = Object.create(null);
             for (const sp of spells) {

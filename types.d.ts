@@ -406,6 +406,9 @@ declare interface PlayerData {
   };
   friends: string[];
   party_id: string;
+  guild_id: string;
+  guild_name: string;
+  guild: string[];
   config: Array<{
     fps: number;
     music_volume: number;

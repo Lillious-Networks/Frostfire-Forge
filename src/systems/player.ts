@@ -1338,6 +1338,8 @@ const player = {
         a.stealth,
         a.noclip,
         a.party_id,
+        a.guild_id,
+        g.name AS guild_name,
         p.permissions,
         s.max_health,
         s.health,
@@ -1389,6 +1391,7 @@ const player = {
       LEFT JOIN clientconfig cc ON a.username = cc.username
       LEFT JOIN quest_log ql ON a.username = ql.username
       LEFT JOIN equipment eq ON a.username = eq.username
+      LEFT JOIN guilds g ON a.guild_id = g.id
       WHERE a.username = ?
     `;
 
@@ -1434,6 +1437,8 @@ const player = {
       },
       friends: data.friends ? data.friends.split(",").map((f: string) => f.trim()).filter((f: string) => f !== "") : [],
       party_id: data.party_id,
+      guild_id: data.guild_id,
+      guild_name: data.guild_name || null,
       config: data.fps ? [{
         fps: data.fps,
         music_volume: data.music_volume,

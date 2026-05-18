@@ -224,6 +224,8 @@ export const packetManager = {
             spriteData: data.spriteData || null,
             ...(data.friends ? { friends: data.friends } : {}),
             ...(data.party ? { party: data.party } : {}),
+            guild: data.guild ?? [],
+            guild_name: data.guild_name ?? null,
             ...(data.currency ? { currency: data.currency } : { copper: 0, silver: 0, gold: 0 }),
           },
         })
@@ -343,6 +345,16 @@ export const packetManager = {
       )
     ] as any[];
   },
+  guildChat: (data: any) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "GUILD_CHAT",
+          data,
+        })
+      )
+    ] as any[];
+  },
   selectPlayer: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "SELECTPLAYER", data })),
@@ -441,6 +453,11 @@ export const packetManager = {
   updateParty: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "UPDATE_PARTY", data })),
+    ] as any[];
+  },
+  updateGuild: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "UPDATE_GUILD", data })),
     ] as any[];
   },
   currency: (data: Currency) => {

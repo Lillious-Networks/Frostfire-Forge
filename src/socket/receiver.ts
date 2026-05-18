@@ -26,6 +26,7 @@ import language from "../systems/language";
 import quests from "../systems/quests";
 import friends from "../systems/friends";
 import parties from "../systems/parties.ts";
+import guilds from "../systems/guild.ts";
 import spells from "../systems/spells";
 import equipment from "../systems/equipment.ts";
 import inventory from "../systems/inventory";
@@ -42,7 +43,7 @@ import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks, saveMapProperties } from "../modules/assetloader";
 import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers, getEntitySpriteLayers } from "../modules/spriteSheetManager";
-import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket } from "./aoi";
+import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate } from "./aoi";
 import { realmWhitelist, isWhitelistEnabled } from "./server.ts";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
@@ -635,6 +636,9 @@ async function transitionPlayerToMap(
       friends: p.friends || [],
       party_id: p.party_id ? Number(p.party_id) : null,
       party: p.party || [],
+      guild_id: p.guild_id ? Number(p.guild_id) : null,
+      guild: p.guild || [],
+      guild_name: p.guild_name || null,
       currency: p.currency || { copper: 0, silver: 0, gold: 0 },
     };
     sendPacket(ws, packetManager.spawnPlayer(spawnData));
@@ -843,6 +847,9 @@ authWorker.on("message", async (result: any) => {
       invitations: [],
       party_id: playerData.party_id ? Number(playerData.party_id) : null,
       party: playerData.party || null,
+      guild_id: playerData.guild_id ? Number(playerData.guild_id) : null,
+      guild: playerData.guild || [],
+      guild_name: playerData.guild_name || null,
       currency: playerData.currency || { copper: 0, silver: 0, gold: 0 },
       isGuest: playerData.isGuest,
       created: performance.now(),
@@ -948,6 +955,9 @@ authWorker.on("message", async (result: any) => {
         friends: playerData.friends || [],
         party_id: playerData.party_id ? Number(playerData.party_id) : null,
         party: playerData.party || [],
+        guild_id: playerData.guild_id ? Number(playerData.guild_id) : null,
+        guild: playerData.guild || [],
+        guild_name: playerData.guild_name || null,
         currency: playerData.currency || { copper: 0, silver: 0, gold: 0 },
       };
       sendPacket(ws, packetManager.spawnPlayer(spawnDataForAll));
@@ -1005,6 +1015,8 @@ authWorker.on("message", async (result: any) => {
           animation: null,
           spriteData: spriteData,
           mounted: p.mounted,
+          guild: p.guild || [],
+          guild_name: p.guild_name || null,
         }
         playerDataForLoad.push(loadPlayerData);
       }
@@ -4262,6 +4274,145 @@ export default async function packetReceiver(
             break;
           }
 
+          case "G":
+          case "GUILD": {
+            if (!currentPlayer) return;
+            const message = args.join(" ");
+            if (!message) {
+              sendPacket(ws, packetManager.notify({ message: "Please provide a message" }));
+              break;
+            }
+
+            const guildId = currentPlayer.guild_id;
+            if (!guildId) {
+              sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+              break;
+            }
+
+            const guildMembers = await guilds.getGuildMembers(guildId);
+            if (!guildMembers || guildMembers.length === 0) {
+              sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+              break;
+            }
+
+            guildMembers.forEach(async (member: any) => {
+              const session_id = await player.getSessionIdByUsername(member);
+              const memberPlayer = playerCache.get(session_id);
+              if (memberPlayer) {
+                sendPacket(
+                  memberPlayer.ws,
+                  packetManager.guildChat({
+                    id: ws.data.id,
+                    message,
+                    username:
+                      currentPlayer.username.charAt(0).toUpperCase() +
+                      currentPlayer.username.slice(1),
+                  })
+                );
+              }
+            });
+
+            break;
+          }
+
+          case "GINVITE": {
+            if (!currentPlayer) return;
+            if (currentPlayer.isGuest) {
+              sendPacket(ws, packetManager.notify({ message: "Please create an account to use that feature." }));
+              break;
+            }
+
+            const guildId = currentPlayer.guild_id;
+            if (!guildId) {
+              sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+              break;
+            }
+
+            const isLeader = await guilds.isGuildLeader(currentPlayer.username);
+            if (!isLeader) {
+              sendPacket(ws, packetManager.notify({ message: "You are not the guild leader" }));
+              break;
+            }
+
+            const username = args[0]?.toLowerCase() || null;
+            if (!username) {
+              sendPacket(ws, packetManager.notify({ message: "Usage: /ginvite <username>" }));
+              break;
+            }
+
+            if (username === currentPlayer.username.toLowerCase()) {
+              sendPacket(ws, packetManager.notify({ message: "You cannot invite yourself to your guild." }));
+              break;
+            }
+
+            const players = Object.values(playerCache.list());
+            const targetPlayer = players.find(
+              (p: any) => p.username && p.username.toLowerCase() === username.toLowerCase()
+            );
+
+            if (!targetPlayer) {
+              sendPacket(ws, packetManager.notify({ message: `Player ${username} is not online.` }));
+              break;
+            }
+
+            if (targetPlayer.isGuest) {
+              sendPacket(ws, packetManager.notify({ message: `${targetPlayer.username} is a guest and cannot join a guild.` }));
+              break;
+            }
+
+            const targetInGuild = await guilds.isInGuild(targetPlayer.username);
+            if (targetInGuild) {
+              sendPacket(ws, packetManager.notify({ message: `${targetPlayer.username} is already in a guild` }));
+              break;
+            }
+
+            const existingInvite = targetPlayer.invitations?.find(
+              (invite: any) => invite?.action === "INVITE_GUILD" && invite?.originator === currentPlayer.id.toString()
+            );
+
+            if (existingInvite) {
+              sendPacket(ws, packetManager.notify({ message: `You have already sent a guild invite to ${targetPlayer.username}.` }));
+              break;
+            }
+
+            const player_username =
+              currentPlayer.username.charAt(0).toUpperCase() +
+              currentPlayer.username.slice(1);
+
+            const guildName = currentPlayer.guild_name || "Unknown Guild";
+
+            const invite_data = {
+              action: "INVITE_GUILD",
+              message: `${player_username} wants to invite you to join "${guildName}"`,
+              originator: currentPlayer.id.toString(),
+              authorization: randomBytes(16).toString(),
+            };
+
+            if (!currentPlayer.invitations) {
+              currentPlayer.invitations = [];
+            }
+
+            currentPlayer.invitations.push({
+              action: invite_data.action,
+              originator: invite_data.originator,
+              authorization: invite_data.authorization,
+            });
+
+            playerCache.set(currentPlayer.id, currentPlayer);
+
+            sendPacket(targetPlayer.ws, packetManager.invitation(invite_data));
+
+            sendPacket(
+              ws,
+              packetManager.notify({
+                message: `Invitation sent to ${targetPlayer.username.charAt(0).toUpperCase() +
+                  targetPlayer.username.slice(1)}`,
+              })
+            );
+
+            break;
+          }
+
           case "SUMMON": {
 
             if (
@@ -4462,6 +4613,8 @@ export default async function packetReceiver(
                 animation: null,
                 spriteData: targetSpritesData,
                 mounted: targetPlayer.mounted,
+                guild: targetPlayer.guild || [],
+                guild_name: targetPlayer.guild_name || null,
               };
 
               sendPacket(ws, packetManager.loadPlayers({
@@ -4711,6 +4864,8 @@ export default async function packetReceiver(
                 animation: null,
                 spriteData: targetSpritesDataTeleport,
                 mounted: targetPlayer.mounted,
+                guild: targetPlayer.guild || [],
+                guild_name: targetPlayer.guild_name || null,
               };
 
               sendPacket(ws, packetManager.loadPlayers({
@@ -6163,6 +6318,317 @@ export default async function packetReceiver(
         }
         break;
       }
+      case "DISBAND_GUILD": {
+        if (!currentPlayer) return;
+
+        const guildId = currentPlayer.guild_id;
+        if (!guildId) {
+          sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+          return;
+        }
+
+        const isLeader = await guilds.isGuildLeader(currentPlayer.username);
+        if (!isLeader) {
+          sendPacket(ws, packetManager.notify({ message: "You are not the guild leader" }));
+          return;
+        }
+
+        const members = await guilds.getGuildMembers(guildId);
+        if (!members || members.length === 0) {
+          sendPacket(ws, packetManager.notify({ message: "Your guild has no members" }));
+          return;
+        }
+
+        for (const member of members) {
+          const session_id = await player.getSessionIdByUsername(member);
+          const p = session_id && playerCache.get(session_id);
+          if (p) {
+            sendPacket(p.ws, packetManager.updateGuild({ members: [] }));
+            if (p.id !== currentPlayer.id) {
+              sendPacket(p.ws, packetManager.notify({ message: "The guild has been disbanded" }));
+            }
+            p.guild_id = null;
+            p.guild = [];
+            p.guild_name = null;
+            playerCache.set(p.id, p);
+            broadcastPlayerUpdate(p);
+          }
+        }
+
+        await guilds.disband(currentPlayer.username);
+
+        break;
+      }
+      case "LEAVE_GUILD": {
+        if (!currentPlayer) return;
+
+        const guildId = currentPlayer.guild_id;
+        if (!guildId) {
+          sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+          return;
+        }
+
+        const isLeader = await guilds.isGuildLeader(currentPlayer.username);
+        if (isLeader) {
+          sendPacket(ws, packetManager.notify({ message: "You cannot leave your own guild." }));
+          return;
+        }
+
+        const members = await guilds.getGuildMembers(guildId);
+        if (!members || members.length === 0) {
+          sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+          return;
+        }
+
+        const result = await guilds.leave(currentPlayer.username);
+
+        if (typeof result === "boolean" && !result) {
+          sendPacket(ws, packetManager.notify({ message: "Failed to leave guild" }));
+          return;
+        }
+
+        currentPlayer.guild_id = null;
+        currentPlayer.guild = [];
+        currentPlayer.guild_name = null;
+        playerCache.set(currentPlayer.id, currentPlayer);
+
+        broadcastPlayerUpdate(currentPlayer);
+        sendPacket(ws, packetManager.updateGuild({ members: [] }));
+
+        if (Array.isArray(result) && result.length > 0) {
+          for (const member of result) {
+            const session_id = await player.getSessionIdByUsername(member);
+            const p = session_id && playerCache.get(session_id);
+            if (p) {
+              if (p.id !== currentPlayer.id) {
+                sendPacket(p.ws, packetManager.updateGuild({ members: result, guild_name: currentPlayer.guild_name || await guilds.getGuildName(guildId) }));
+              }
+            }
+          }
+        }
+
+        break;
+      }
+      case "KICK_GUILD_MEMBER": {
+        if (!currentPlayer) return;
+
+        const guildId = currentPlayer.guild_id;
+        if (!guildId) {
+          sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+          return;
+        }
+
+        const isLeader = await guilds.isGuildLeader(currentPlayer.username);
+        if (!isLeader) {
+          sendPacket(ws, packetManager.notify({ message: "You are not the guild leader" }));
+          return;
+        }
+
+        const memberUsername = (data as any)?.username;
+        if (!memberUsername) {
+          sendPacket(ws, packetManager.notify({ message: "Please provide a username" }));
+          return;
+        }
+
+        const members = await guilds.getGuildMembers(guildId);
+        if (!members || members.length === 0) {
+          sendPacket(ws, packetManager.notify({ message: "Your guild has no members" }));
+          return;
+        }
+
+        if (!members.includes(memberUsername)) {
+          sendPacket(ws, packetManager.notify({
+            message: `${memberUsername} is not in your guild`,
+          }));
+          return;
+        }
+
+        if (memberUsername.toLowerCase() === currentPlayer.username.toLowerCase()) {
+          sendPacket(ws, packetManager.notify({ message: "You cannot kick yourself." }));
+          return;
+        }
+
+        const result = await guilds.remove(memberUsername);
+
+        if (typeof result === "boolean" && !result) {
+          sendPacket(ws, packetManager.notify({ message: `Failed to kick ${memberUsername} from the guild` }));
+          return;
+        }
+
+        sendPacket(ws, packetManager.notify({ message: `${memberUsername} has been kicked from the guild` }));
+
+        if (Array.isArray(result) && result.length > 0) {
+          for (const member of result) {
+            const session_id = await player.getSessionIdByUsername(member);
+            const p = session_id && playerCache.get(session_id);
+            if (p) {
+              sendPacket(p.ws, packetManager.updateGuild({ members: result, guild_name: currentPlayer.guild_name }));
+              p.guild = result;
+              playerCache.set(p.id, p);
+            }
+          }
+        }
+
+        const kickedSessionId = await player.getSessionIdByUsername(memberUsername);
+        const kickedPlayer = kickedSessionId && playerCache.get(kickedSessionId);
+        if (kickedPlayer) {
+          sendPacket(kickedPlayer.ws, packetManager.updateGuild({ members: [] }));
+          sendPacket(kickedPlayer.ws, packetManager.notify({ message: "You have been kicked from the guild" }));
+          kickedPlayer.guild_id = null;
+          kickedPlayer.guild = [];
+          kickedPlayer.guild_name = null;
+          playerCache.set(kickedPlayer.id, kickedPlayer);
+        }
+
+        break;
+      }
+      case "CREATE_GUILD": {
+        if (!currentPlayer) return;
+        if (currentPlayer.isGuest) {
+          sendPacket(ws, packetManager.notify({ message: "Please create an account to use that feature." }));
+          return;
+        }
+
+        const guildName = (data as any)?.name;
+        if (!guildName || !guildName.trim()) {
+          sendPacket(ws, packetManager.notify({ message: "Please provide a guild name" }));
+          return;
+        }
+
+        const alreadyInGuild = await guilds.isInGuild(currentPlayer.username);
+        if (alreadyInGuild) {
+          sendPacket(ws, packetManager.notify({ message: "You are already in a guild" }));
+          return;
+        }
+
+        const nameExists = await guilds.exists(guildName.trim());
+        if (nameExists) {
+          sendPacket(ws, packetManager.notify({ message: "A guild with that name already exists" }));
+          return;
+        }
+
+        const result = await guilds.create(currentPlayer.username.toLowerCase(), guildName.trim());
+        if (!result) {
+          sendPacket(ws, packetManager.notify({ message: "Failed to create guild" }));
+          return;
+        }
+
+        const guildId = await guilds.getGuildId(currentPlayer.username);
+        currentPlayer.guild_id = guildId;
+        currentPlayer.guild = result as string[];
+        currentPlayer.guild_name = guildName.trim();
+        playerCache.set(currentPlayer.id, currentPlayer);
+
+        broadcastPlayerUpdate(currentPlayer);
+        sendPacket(ws, packetManager.updateGuild({ members: result, guild_name: guildName.trim() }));
+        sendPacket(ws, packetManager.notify({ message: `Guild "${guildName.trim()}" created successfully` }));
+        break;
+      }
+      case "INVITE_GUILD": {
+        const invited_user = (data as any).id;
+        const invitedUser = playerCache.get(invited_user);
+        const invitedUserUsername = invitedUser?.username || invited_user;
+        if (!currentPlayer || !invited_user || !invitedUserUsername) return;
+
+        if (currentPlayer.isGuest) {
+          sendPacket(ws, packetManager.notify({ message: "Please create an account to use that feature." }));
+          return;
+        }
+
+        if (invitedUser.isGuest) {
+          sendPacket(ws, packetManager.notify({
+            message: `${invitedUserUsername.charAt(0).toUpperCase() + invitedUserUsername.slice(1)} is a guest and cannot join a guild.`,
+          }));
+          return;
+        }
+
+        const guildId = currentPlayer.guild_id;
+        if (!guildId) {
+          sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+          return;
+        }
+
+        const isLeader = await guilds.isGuildLeader(currentPlayer.username);
+        if (!isLeader) {
+          sendPacket(ws, packetManager.notify({ message: "You are not the guild leader" }));
+          return;
+        }
+
+        const invitedUserInGuild = await guilds.isInGuild(invitedUserUsername);
+        if (invitedUserInGuild) {
+          sendPacket(ws, packetManager.notify({
+            message: `${invitedUserUsername.charAt(0).toUpperCase() + invitedUserUsername.slice(1)} is already in a guild`,
+          }));
+          return;
+        }
+
+        const player_username =
+          currentPlayer.username.charAt(0).toUpperCase() +
+          currentPlayer.username.slice(1);
+
+        const guildName = currentPlayer.guild_name || "Unknown Guild";
+
+        const invite_data = {
+          action: "INVITE_GUILD",
+          message: `${player_username} wants to invite you to join "${guildName}"`,
+          originator: currentPlayer.id.toString(),
+          authorization: randomBytes(16).toString(),
+        };
+
+        currentPlayer.invitations.push({
+          action: invite_data.action,
+          originator: invite_data.originator,
+          authorization: invite_data.authorization,
+        });
+
+        playerCache.set(currentPlayer.id, currentPlayer);
+
+        sendPacket(invitedUser.ws, packetManager.invitation(invite_data));
+        sendPacket(
+          ws,
+          packetManager.notify({
+            message: `Invitation sent to ${invitedUserUsername.charAt(0).toUpperCase() + invitedUserUsername.slice(1)}`,
+          })
+        );
+        break;
+      }
+      case "GUILD_CHAT": {
+        if (!currentPlayer) return;
+
+        const { message } = data as any;
+        if (!message) return;
+
+        const guildId = currentPlayer.guild_id;
+        if (!guildId) {
+          sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+          return;
+        }
+
+        const guildMembers = await guilds.getGuildMembers(guildId);
+        if (!guildMembers || guildMembers.length === 0) {
+          sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+          return;
+        }
+
+        for (const member of guildMembers) {
+          const session_id = await player.getSessionIdByUsername(member);
+          const memberPlayer = playerCache.get(session_id);
+          if (memberPlayer) {
+            sendPacket(
+              memberPlayer.ws,
+              packetManager.guildChat({
+                id: ws.data.id,
+                message,
+                username:
+                  currentPlayer.username.charAt(0).toUpperCase() +
+                  currentPlayer.username.slice(1),
+              })
+            );
+          }
+        }
+
+        break;
+      }
       case "INVITE_PARTY": {
         const invited_user = (data as any).id;
         const invitedUser = playerCache.get(invited_user);
@@ -6537,6 +7003,65 @@ export default async function packetReceiver(
 
                 if (Array.isArray(updatedPartyMembers) && updatedPartyMembers.length > 0) {
                   await syncPartyLayers(inviter.username.toLowerCase(), updatedPartyMembers as string[], playerCache, sendAnimationTo);
+                }
+              }
+            }
+            break;
+          }
+          case "INVITE_GUILD": {
+            if (response.toUpperCase() === "ACCEPT") {
+
+              const guildId = await guilds.getGuildId(inviter.username);
+              if (!guildId) {
+                sendPacket(ws, packetManager.notify({ message: "That guild no longer exists" }));
+                return;
+              }
+
+              const isLeader = await guilds.isGuildLeader(inviter.username);
+              if (!isLeader) {
+                sendPacket(ws, packetManager.notify({ message: "The inviter is no longer the guild leader" }));
+                return;
+              }
+
+              const targetInGuild = await guilds.isInGuild(currentPlayer.username);
+              if (targetInGuild) {
+                sendPacket(ws, packetManager.notify({ message: "You are already in a guild" }));
+                return;
+              }
+
+              const updatedGuildMembers = await guilds.add(
+                currentPlayer.username.toLowerCase(),
+                guildId
+              );
+              if (!updatedGuildMembers || updatedGuildMembers.length === 0) {
+                sendPacket(ws, packetManager.notify({ message: "Failed to join guild" }));
+                return;
+              }
+
+              const guildName = await guilds.getGuildName(guildId);
+
+              sendPacket(ws, packetManager.notify({
+                message: `You have joined "${guildName}"`,
+              }));
+              sendPacket(inviter.ws, packetManager.notify({
+                message: `${currentPlayer.username} has joined your guild`,
+              }));
+
+              currentPlayer.guild_id = guildId;
+              currentPlayer.guild = updatedGuildMembers;
+              currentPlayer.guild_name = guildName;
+              playerCache.set(currentPlayer.id, currentPlayer);
+
+              broadcastPlayerUpdate(currentPlayer);
+              sendPacket(ws, packetManager.updateGuild({ members: updatedGuildMembers, guild_name: guildName }));
+
+              for (const member of updatedGuildMembers) {
+                const session_id = await player.getSessionIdByUsername(member);
+                const p = session_id && playerCache.get(session_id);
+                if (p && p.id !== currentPlayer.id) {
+                  sendPacket(p.ws, packetManager.updateGuild({ members: updatedGuildMembers, guild_name: guildName }));
+                  p.guild = updatedGuildMembers;
+                  playerCache.set(p.id, p);
                 }
               }
             }
