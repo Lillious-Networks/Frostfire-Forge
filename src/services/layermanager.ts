@@ -1,3 +1,4 @@
+import AOI_CONFIG from "../config/aoi.json";
 import log from "../modules/logger";
 
 interface LayerInfo {
@@ -10,7 +11,7 @@ interface LayerInfo {
 class LayerManager {
   private layers: Map<string, LayerInfo>;
   private playerToLayer: Map<string, string>;
-  private readonly MAX_PLAYERS_PER_LAYER = 50;
+  private readonly MAX_PLAYERS_PER_LAYER = AOI_CONFIG.MAX_PLAYERS_PER_LAYER;
 
   constructor() {
     this.layers = new Map();
@@ -48,9 +49,20 @@ class LayerManager {
     return newLayerId;
   }
 
-  assignPlayerToLayer(playerId: string, mapName: string): string {
+  assignPlayerToLayer(playerId: string, mapName: string, preferredLayerId?: string): string {
 
     this.removePlayerFromLayer(playerId);
+
+    if (preferredLayerId) {
+      const preferredLayer = this.layers.get(preferredLayerId);
+      if (preferredLayer && preferredLayer.mapName === mapName &&
+          preferredLayer.playerCount < this.MAX_PLAYERS_PER_LAYER) {
+        preferredLayer.players.add(playerId);
+        preferredLayer.playerCount++;
+        this.playerToLayer.set(playerId, preferredLayerId);
+        return preferredLayerId;
+      }
+    }
 
     const layerId = this.findAvailableLayer(mapName);
     const layer = this.layers.get(layerId)!;
@@ -149,72 +161,32 @@ class LayerManager {
       return null;
     }
 
-    const membersNotInLeaderLayer = partyMemberPlayerIds.filter(id => {
-      const memberLayerId = this.playerToLayer.get(id);
-      return memberLayerId !== leaderLayerId;
-    });
-
-    const spaceNeeded = membersNotInLeaderLayer.length;
-    const availableSpace = this.MAX_PLAYERS_PER_LAYER - leaderLayer.playerCount;
-
-    let targetLayerId = leaderLayerId;
-
-    if (spaceNeeded > availableSpace) {
-      log.debug(`[LAYER] Leader's layer ${leaderLayerId} cannot fit party (need ${spaceNeeded} slots, have ${availableSpace}). Finding new layer...`);
-
-      const totalPartySize = partyMemberPlayerIds.length + 1;
-
-      let foundLayer: LayerInfo | null = null;
-      for (const [layerId, layer] of this.layers.entries()) {
-        if (layer.mapName === mapName &&
-            (this.MAX_PLAYERS_PER_LAYER - layer.playerCount) >= totalPartySize) {
-          foundLayer = layer;
-          targetLayerId = layerId;
-          break;
-        }
-      }
-
-      if (!foundLayer) {
-        targetLayerId = this.generateLayerId(mapName);
-        this.layers.set(targetLayerId, {
-          layerId: targetLayerId,
-          mapName: mapName,
-          playerCount: 0,
-          players: new Set<string>(),
-        });
-        log.debug(`[LAYER] Created new layer ${targetLayerId} for party`);
-      } else {
-        log.debug(`[LAYER] Found existing layer ${targetLayerId} with space for party`);
-      }
-
-      this.removePlayerFromLayer(partyLeaderPlayerId);
-      const targetLayer = this.layers.get(targetLayerId)!;
-      targetLayer.players.add(partyLeaderPlayerId);
-      targetLayer.playerCount++;
-      this.playerToLayer.set(partyLeaderPlayerId, targetLayerId);
-      log.debug(`[LAYER] Moved party leader ${partyLeaderPlayerId} to ${targetLayerId}`);
-    }
-
     for (const memberId of partyMemberPlayerIds) {
       const currentLayerId = this.playerToLayer.get(memberId);
 
-      if (currentLayerId !== targetLayerId) {
-
-        this.removePlayerFromLayer(memberId);
-
-        const targetLayer = this.layers.get(targetLayerId)!;
-        targetLayer.players.add(memberId);
-        targetLayer.playerCount++;
-        this.playerToLayer.set(memberId, targetLayerId);
-
-        log.debug(`[LAYER] Synced party member ${memberId} to ${targetLayerId}`);
+      if (!currentLayerId || currentLayerId === leaderLayerId) {
+        continue;
       }
+
+      const availableSpace = this.MAX_PLAYERS_PER_LAYER - leaderLayer.playerCount;
+      if (availableSpace <= 0) {
+        break;
+      }
+
+      this.removePlayerFromLayer(memberId);
+
+      const targetLayer = this.layers.get(leaderLayerId)!;
+      targetLayer.players.add(memberId);
+      targetLayer.playerCount++;
+      this.playerToLayer.set(memberId, leaderLayerId);
+
+      log.debug(`[LAYER] Synced party member ${memberId} to ${leaderLayerId}`);
     }
 
-    const finalLayer = this.layers.get(targetLayerId)!;
-    log.debug(`[LAYER] Party synced to ${targetLayerId} (${finalLayer.playerCount}/${this.MAX_PLAYERS_PER_LAYER})`);
+    const finalLayer = this.layers.get(leaderLayerId)!;
+    log.debug(`[LAYER] Party synced to ${leaderLayerId} (${finalLayer.playerCount}/${this.MAX_PLAYERS_PER_LAYER})`);
 
-    return targetLayerId;
+    return leaderLayerId;
   }
 }
 

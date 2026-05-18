@@ -64,16 +64,10 @@ export async function initializePlayerAOI(player: any): Promise<void> {
         }
 
         if (targetLayer) {
-
           const targetLayerInfo = layerManager.getLayerInfo(targetLayer);
           if (targetLayerInfo && targetLayerInfo.playerCount < AOI_CONFIG.MAX_PLAYERS_PER_LAYER) {
-            layerId = targetLayer;
-            layerManager.removePlayerFromLayer(player.id);
-            const layer = layerManager.getLayerInfo(targetLayer)!;
-            layer.players.add(player.id);
-            layer.playerCount++;
+            layerId = layerManager.assignPlayerToLayer(player.id, mapName, targetLayer);
           } else {
-
             layerId = layerManager.assignPlayerToLayer(player.id, mapName);
           }
         } else {
@@ -90,11 +84,7 @@ export async function initializePlayerAOI(player: any): Promise<void> {
           const leaderLayerInfo = layerManager.getLayerInfo(leaderLayerId);
 
           if (leaderLayerInfo && leaderLayerInfo.playerCount < AOI_CONFIG.MAX_PLAYERS_PER_LAYER) {
-            layerId = leaderLayerId;
-            layerManager.removePlayerFromLayer(player.id);
-            const layer = layerManager.getLayerInfo(leaderLayerId)!;
-            layer.players.add(player.id);
-            layer.playerCount++;
+            layerId = layerManager.assignPlayerToLayer(player.id, mapName, leaderLayerId);
           } else {
 
             layerId = layerManager.assignPlayerToLayer(player.id, mapName);
@@ -615,37 +605,24 @@ export async function syncPartyLayers(
     const spawnBatchQueue = new Map<string, Map<string, any>>();
     const despawnBatchQueue = new Map<string, Set<string>>();
 
-    const playersNeedingUpdate: any[] = [];
-
-    const leaderOldLayerId = leaderPlayer.aoi?.layerId;
-
-    if (leaderPlayer.aoi) {
-      playersNeedingUpdate.push({ player: leaderPlayer, oldLayerId: leaderOldLayerId });
-
-      leaderPlayer.aoi.layerId = targetLayerId;
-      playerCache.set(leaderPlayer.id, leaderPlayer);
-    }
+    const movedPlayers: any[] = [];
 
     for (const member of membersOnSameMap) {
       const oldLayerId = member.aoi?.layerId;
+      const actualLayerId = layerManager.getPlayerLayer(member.id);
 
-      if (member.aoi) {
-        playersNeedingUpdate.push({ player: member, oldLayerId: oldLayerId });
-
-        member.aoi.layerId = targetLayerId;
+      if (actualLayerId && actualLayerId !== oldLayerId && member.aoi) {
+        member.aoi.layerId = actualLayerId;
         playerCache.set(member.id, member);
+        movedPlayers.push({ player: member, oldLayerId });
       }
     }
 
-    for (const { player, oldLayerId } of playersNeedingUpdate) {
-      if (oldLayerId !== targetLayerId) {
-
-        despawnPlayerFromAllAOI(player, "map_change", despawnBatchQueue);
-      }
+    for (const { player } of movedPlayers) {
+      despawnPlayerFromAllAOI(player, "map_change", despawnBatchQueue);
     }
 
-    for (const { player } of playersNeedingUpdate) {
-
+    for (const { player } of movedPlayers) {
       await updatePlayerAOI(player, spawnBatchQueue, despawnBatchQueue);
     }
 
