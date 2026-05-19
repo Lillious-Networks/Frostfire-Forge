@@ -1,6 +1,6 @@
 
 
-export const mockQuery = async (sql: string, params?: any[]) => {
+export const mockQuery = async (_sql: string, _params?: any[]) => {
   return [];
 };
 
@@ -22,11 +22,11 @@ export const mockAssetCache = {
     };
     return mockData[key] || [];
   },
-  set: async (key: string, value: any) => {},
-  getNested: async (key: string, nestedKey: string) => {
+  set: async (_key: string, _value: any) => {},
+  getNested: async (_key: string, _nestedKey: string) => {
     return [512, 512, 0, 262144];
   },
-  add: async (key: string, value: any) => {},
+  add: async (_key: string, _value: any) => {},
 };
 
 export const mockLog = {
@@ -44,9 +44,9 @@ export const mockPlayerCache = {
     level: 1,
     experience: 0,
   }),
-  set: (playerId: string, data: any) => {},
-  has: (playerId: string) => true,
-  delete: (playerId: string) => {},
+  set: (_playerId: string, _data: any) => {},
+  has: (_playerId: string) => true,
+  delete: (_playerId: string) => {},
 };
 
 export function createMockQueryResult(data: any[] = [], affectedRows = 1, lastInsertRowid = 1) {
