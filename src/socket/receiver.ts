@@ -6436,6 +6436,8 @@ export default async function packetReceiver(
         listener.emit(Events.GUILD_CHANGED, { type: "disband", guildId, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username });
 
         break;
+      }
+      case "LEAVE_GUILD": {
         if (!currentPlayer) return;
 
         const guildId = currentPlayer.guild_id;
