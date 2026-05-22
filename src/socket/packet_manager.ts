@@ -772,15 +772,5 @@ export const packetManager = {
     return [
       packet.encode(JSON.stringify({ type: "TOGGLE_ENTITY_EDITOR", data: null })),
     ] as any[];
-  },
-  debugAstar: (data: any) => {
-    return [
-      packet.encode(
-        JSON.stringify({
-          type: "DEBUG_ASTAR",
-          data
-        })
-      )
-    ] as any[];
   }
 };

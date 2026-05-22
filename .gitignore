@@ -40,4 +40,6 @@ bun.lockb
 swark-output/
 CLAUDE.md
 
+src/plugins/
+
 whitelist.txt

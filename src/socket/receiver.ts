@@ -4,6 +4,8 @@ import log from "../modules/logger";
 import player, { clearMapCache } from "../systems/player.ts";
 import permissions from "../systems/permissions";
 import { getAuthWorker } from "./authentication_pool.ts";
+import { listener } from "../modules/event_bus";
+import { Events } from "../systems/events";
 const authentication_queue = new Set<string>();
 const authentication_session_queue = new Set<string>();
 
@@ -63,6 +65,12 @@ let restartScheduled: boolean;
 let restartTimers: ReturnType<typeof setTimeout>[];
 
 let globalStateRevision: number = 0;
+
+export const pluginHandlers = new Map<string, PluginHandlerFn>();
+
+export const warpInterceptors: Array<(warp: { map: string; x: number; y: number }, ws: any, player: any, sendPacket: (ws: any, packets: any[]) => void) => Promise<boolean>> = [];
+
+export const packetInterceptors: Array<(type: string, data: any, ws: any, player: any) => boolean> = [];
 
 export const movementBatchQueue = new Map<string, Map<string, any>>();
 
@@ -437,7 +445,7 @@ function constructMapMetadata(
     .filter((layer: any) => layer.type === "objectgroup")
     .map((layer: any) => ({ name: layer.name }));
 
-  return {
+  const metadata = {
     name: normalizedName,
     assetServerUrl,
     width: map?.data?.width || 0,
@@ -454,6 +462,9 @@ function constructMapMetadata(
     hasWeather: !!worldsArr.find((w) => w.name === normalizedName),
     objectLayers,
   };
+
+  listener.emit(Events.WARP, { mapName, metadata });
+  return metadata;
 }
 
 async function transitionPlayerToMap(
@@ -468,6 +479,8 @@ async function transitionPlayerToMap(
 
   const updatedPlayer = playerCache.get(player.id);
   if (!updatedPlayer) return;
+
+  listener.emit(Events.MAP_ENTER, { player: updatedPlayer, mapName: newMapName, position: { x: newPosition.x, y: newPosition.y } });
 
   const direction = newPosition.direction || updatedPlayer.location.position?.direction || "down";
   const mapMetadata = constructMapMetadata(newMapName, newPosition.x, newPosition.y, direction, maps, mapPropertiesCache);
@@ -692,6 +705,19 @@ export function clearPlayerTarget(playerId: string) {
   currentTargetMap.delete(playerId);
 }
 
+export async function teleportPlayerWrapper(playerObj: any, mapName: string, x: number, y: number): Promise<void> {
+  const ws = playerObj.ws;
+  if (!ws) return;
+  await transitionPlayerToMap(
+    playerObj,
+    mapName.replace(".json", ""),
+    { x, y, direction: playerObj.location?.position?.direction || "down" },
+    ws,
+    spawnBatchQueue,
+    despawnBatchQueue
+  );
+}
+
 const authWorker = await getAuthWorker();
 authWorker.on("message", async (result: any) => {
   const status = result as Authentication;
@@ -758,6 +784,8 @@ authWorker.on("message", async (result: any) => {
         direction: position.direction || "down",
       };
     }
+
+    listener.emit(Events.PLAYER_AUTH_COMPLETE, { username: playerData.username, spawnLocation, playerData });
 
     const map =
       maps.find((m: MapData) => m.name === spawnLocation.map) ||
@@ -1298,6 +1326,14 @@ export default async function packetReceiver(
       return { ...withParticles, spriteLayers: getNpcSpriteLayers(npc) };
     }
 
+    for (const interceptor of packetInterceptors) {
+      try {
+        if (interceptor(String(type), data, ws, currentPlayer)) return;
+      } catch (err) {
+        log.error(`[PacketInterceptor] Error: ${err}`);
+      }
+    }
+
     switch (type) {
       case "BENCHMARK": {
         (data as any)["returned_timestamp"] = Date.now();
@@ -1363,6 +1399,7 @@ export default async function packetReceiver(
           currentPlayer.location.position
         );
         player.logout(currentPlayer.id);
+        listener.emit(Events.PLAYER_LOGOUT, { player: currentPlayer });
         break;
       }
       case "DISCONNECT": {
@@ -1625,12 +1662,29 @@ export default async function packetReceiver(
             }
 
             if (reason === "warp_collision" && collision?.warp) {
-              const currentMap = currentPlayer.location.map;
               const warp = collision.warp as {
                 map: string;
                 x: number;
                 y: number;
               };
+
+              let handled = false;
+              for (const interceptor of warpInterceptors) {
+                try {
+                  if (await interceptor(warp, ws, currentPlayer, sendPacket)) {
+                    handled = true;
+                    break;
+                  }
+                } catch (err) {
+                  log.error(`[WarpInterceptor] Error: ${err}`);
+                }
+              }
+
+              if (handled) {
+                return;
+              }
+
+              const currentMap = currentPlayer.location.map;
 
               const result = await player.setLocation(
                 currentPlayer.id,
@@ -1826,6 +1880,7 @@ export default async function packetReceiver(
         await movePlayer();
 
         gameLoop.registerMovingPlayer(currentPlayer.id, movePlayer);
+        listener.emit(Events.PLAYER_MOVED, { player: currentPlayer, position: currentPlayer.location.position });
         break;
       }
       case "TELEPORTXY": {
@@ -1941,6 +1996,7 @@ export default async function packetReceiver(
 
           sendPacket(player.ws, packetManager.chat(chatData));
         });
+        listener.emit(Events.PLAYER_CHAT, { player: currentPlayer, message: decryptedMessage || data?.toString(), mapName: currentPlayer.location.map });
         break;
       }
       case "TYPING": {
@@ -2259,6 +2315,7 @@ export default async function packetReceiver(
             }
           });
         }
+        listener.emit(Events.PLAYER_STEALTH_CHANGE, { player: currentPlayer, isStealth: currentPlayer.isStealth });
         break;
       }
       case "DRAG_PLAYER_START": {
@@ -2999,6 +3056,7 @@ export default async function packetReceiver(
         } else {
           // Apply damage to player target
           target.stats.health = Math.round(target.stats.health - finalDamage);
+          listener.emit(Events.PLAYER_DAMAGED, { attacker: currentPlayer, target, damage: finalDamage, isCrit });
 
           playerCache.set(currentPlayer.id, currentPlayer);
 
@@ -3064,9 +3122,13 @@ export default async function packetReceiver(
           }
 
           if (xpResult && typeof xpResult === 'object' && 'xp' in xpResult) {
+            const oldLevel = currentPlayer.stats.level;
             currentPlayer.stats.xp = xpResult.xp;
             currentPlayer.stats.level = xpResult.level;
             currentPlayer.stats.max_xp = xpResult.max_xp;
+            if (xpResult.level > oldLevel) {
+              listener.emit(Events.PLAYER_LEVEL_UP, { player: currentPlayer, oldLevel, newLevel: xpResult.level });
+            }
           }
 
           playerCache.set(currentPlayer.id, currentPlayer);
@@ -3129,6 +3191,7 @@ export default async function packetReceiver(
 
           sendStatsToPartyMembers(currentPlayer.username, currentPlayer.id, currentPlayer.stats);
           sendStatsToPartyMembers(target.username, target.id, target.stats);
+          listener.emit(Events.PLAYER_DEATH, { player: target, killer: currentPlayer });
         } else {
 
           playersInMap.forEach((player) => {
@@ -3170,6 +3233,7 @@ export default async function packetReceiver(
         if (!isEntityTarget) {
           target.last_attack = performance.now();
         }
+        listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target, isEntityTarget });
 
         break;
       }
@@ -3216,6 +3280,7 @@ export default async function packetReceiver(
         }
 
         log.debug(`[SPELL] Player ${currentPlayer.username} cancelled spell via ESC`);
+        listener.emit(Events.SPELL_INTERRUPTED, { player: currentPlayer });
         break;
       }
       case "QUESTDETAILS": {
@@ -5656,6 +5721,7 @@ export default async function packetReceiver(
                 }`,
             };
             sendPacket(ws, packetManager.notify(notifyData));
+            listener.emit(Events.PLAYER_RESPAWN, { player: targetPlayer, mapName: targetPlayer.location.map, x: targetPlayer.location.position.x, y: targetPlayer.location.position.y });
             break;
           }
 
@@ -6076,11 +6142,13 @@ export default async function packetReceiver(
                   message: "Failed to update location",
                 };
                 sendPacket(ws, packetManager.notify(notifyData));
-              }
-              break;
             }
-
+            listener.emit(Events.GUILD_CHANGED, { type: "join", guildId, guildName, playerUsername: currentPlayer.username });
             break;
+        }
+        listener.emit(Events.PLAYER_DISCONNECT, { player: currentPlayer });
+
+        break;
           }
           default: {
             const notifyData = {
@@ -6172,6 +6240,7 @@ export default async function packetReceiver(
               playerCache.set(p.id, p);
             }
           });
+          listener.emit(Events.PARTY_CHANGED, { type: "disband", members });
           return;
         }
 
@@ -6223,6 +6292,12 @@ export default async function packetReceiver(
           const partyLeader = await parties.getPartyLeader(currentPlayer.party_id as number);
           if (partyLeader && result.length > 0) {
             await syncPartyLayers(partyLeader, result, playerCache, sendAnimationTo);
+          }
+
+          const kickedSessionId = await player.getSessionIdByUsername(member);
+          const kickedPlayer = kickedSessionId && playerCache.get(kickedSessionId);
+          if (kickedPlayer) {
+            listener.emit(Events.PARTY_CHANGED, { type: "kick", username: currentPlayer.username, kickedUsername: member, members: [member] });
           }
         }
 
@@ -6276,6 +6351,7 @@ export default async function packetReceiver(
               playerCache.set(p.id, p);
             }
           });
+          listener.emit(Events.PARTY_CHANGED, { type: "disband", members });
           return;
         }
 
@@ -6287,6 +6363,7 @@ export default async function packetReceiver(
           currentPlayer.party = [];
           playerCache.set(currentPlayer.id, currentPlayer);
           sendPacket(ws, packetManager.updateParty({ members: [] }));
+          listener.emit(Events.PARTY_CHANGED, { type: "leave", username: currentPlayer.username, members: [currentPlayer.username] });
 
           (result as string[]).forEach(async (member: string) => {
             const session_id = await player.getSessionIdByUsername(member);
@@ -6356,10 +6433,9 @@ export default async function packetReceiver(
         }
 
         await guilds.disband(currentPlayer.username);
+        listener.emit(Events.GUILD_CHANGED, { type: "disband", guildId, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username });
 
         break;
-      }
-      case "LEAVE_GUILD": {
         if (!currentPlayer) return;
 
         const guildId = currentPlayer.guild_id;
@@ -6386,6 +6462,8 @@ export default async function packetReceiver(
           sendPacket(ws, packetManager.notify({ message: "Failed to leave guild" }));
           return;
         }
+
+        listener.emit(Events.GUILD_CHANGED, { type: "leave", guildId, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username });
 
         currentPlayer.guild_id = null;
         currentPlayer.guild = [];
@@ -6479,6 +6557,7 @@ export default async function packetReceiver(
           kickedPlayer.guild_name = null;
           playerCache.set(kickedPlayer.id, kickedPlayer);
         }
+        listener.emit(Events.GUILD_CHANGED, { type: "kick", guildId, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username, kickedUsername: memberUsername });
 
         break;
       }
@@ -6522,6 +6601,7 @@ export default async function packetReceiver(
         broadcastPlayerUpdate(currentPlayer);
         sendPacket(ws, packetManager.updateGuild({ members: result, guild_name: guildName.trim() }));
         sendPacket(ws, packetManager.notify({ message: `Guild "${guildName.trim()}" created successfully` }));
+        listener.emit(Events.GUILD_CHANGED, { type: "create", guildId: currentPlayer.guild_id, guildName: guildName.trim(), playerUsername: currentPlayer.username });
         break;
       }
       case "INVITE_GUILD": {
@@ -6741,6 +6821,7 @@ export default async function packetReceiver(
               }`,
           })
         );
+        listener.emit(Events.PARTY_INVITE, { inviterUsername: currentPlayer.username, invitedUsername: invitedUserUsername });
         break;
       }
       case "ADD_FRIEND": {
@@ -6887,6 +6968,7 @@ export default async function packetReceiver(
                 packetManager.updateFriends({ friends: updatedFriendsList })
               );
             }
+            listener.emit(Events.FRIEND_ADDED, { type: "add", playerUsername: currentPlayer.username, friendUsername: inviter.username });
             break;
           }
           case "INVITE_PARTY": {
@@ -7006,6 +7088,7 @@ export default async function packetReceiver(
                 }
               }
             }
+            listener.emit(Events.PARTY_JOIN, { playerUsername: currentPlayer.username, partyMembers: updatedPartyMembers as string[] });
             break;
           }
           case "INVITE_GUILD": {
@@ -7126,6 +7209,7 @@ export default async function packetReceiver(
               } from your friends list`,
           })
         );
+        listener.emit(Events.FRIEND_REMOVED, { type: "remove", playerUsername: currentPlayer.username, friendUsername: get_friend.username });
         break;
       }
       case "MOUNT": {
@@ -7164,11 +7248,12 @@ export default async function packetReceiver(
             ws,
             packetManager.notify({
               message: "Mount feature is currently locked.",
-            })
-          );
-          break;
-        }
+              })
+            );
+            listener.emit(Events.WHISPER, { fromUsername: currentPlayer.username, toUsername: targetPlayer.username, message: args.slice(1).join(" ") });
 
+            break;
+          }
         if (!currentPlayer.mounted) {
 
           const hasMount = currentPlayer.collectables.some((c: any) => c.type === "mount" && c.item === mount);
@@ -7212,6 +7297,7 @@ export default async function packetReceiver(
 
           await packetReceiver(server, ws, JSON.stringify({ type: "MOVEXY", data: moveDirection }));
         }
+        listener.emit(Events.PLAYER_MOUNT, { player: currentPlayer, mounted: currentPlayer.mounted, mountType: currentPlayer.mount_type });
         break;
       }
       case "EQUIP_ITEM": {
@@ -7350,6 +7436,7 @@ export default async function packetReceiver(
             await sendSpriteSheetAnimation(ws, currentAnimationName, currentPlayer.id);
           }
         }
+        listener.emit(Events.ITEM_EQUIP, { player: currentPlayer, item: foundEquipment, slot });
         break;
       }
       case "UNEQUIP_ITEM": {
@@ -7464,6 +7551,7 @@ export default async function packetReceiver(
             await sendSpriteSheetAnimation(ws, currentAnimationName, currentPlayer.id);
           }
         }
+        listener.emit(Events.ITEM_UNEQUIP, { player: currentPlayer, slot });
         break;
       }
       case "RESPAWN_ENTITY": {
@@ -7491,8 +7579,13 @@ export default async function packetReceiver(
         break;
       }
 
-
       default: {
+        const handler = pluginHandlers.get(String(type));
+        if (handler) {
+          await handler(ws, currentPlayer, data, sendPacket);
+          break;
+        }
+
         log.error(`Unknown packet type: ${type}`);
         break;
       }

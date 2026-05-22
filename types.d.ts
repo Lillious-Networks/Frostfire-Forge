@@ -534,3 +534,39 @@ declare interface Entity {
   sprite_weapon: Nullable<string>;
   initialize: Nullable<() => Promise<void>>;
 }
+
+declare interface PluginHandlerFn {
+  (ws: any, currentPlayer: any, data: any, sendPacketFn: (ws: any, packets: any[]) => void): Promise<void>;
+}
+
+declare interface EngineAPI {
+  addPacketTypes(types: string[]): void;
+  addPacketBuilders(builders: Record<string, (...args: any[]) => any[]>): void;
+  registerHandlers(handlers: Record<string, PluginHandlerFn>): void;
+  onWarpCollision(interceptor: (warp: any, ws: any, player: any, sendPacket: any) => Promise<boolean>): void;
+  onPacket(interceptor: (type: string, data: any, ws: any, player: any) => boolean): void;
+  addHttpRoute(method: string, route: string, handler: (req: Request) => Promise<Response>): void;
+  teleportPlayer(playerObj: any, mapName: string, x: number, y: number): Promise<void>;
+}
+
+declare interface GamePlugin {
+  register: (engine: EngineAPI, manifest: PluginManifest) => void | Promise<void>;
+  unregister?: () => void | Promise<void>;
+}
+
+declare interface PluginManifest {
+    name: string;
+    version: string;
+    description?: string;
+    entry: string;
+    requires?: {
+        engine?: string;
+    };
+    provides: string[];
+}
+
+declare interface LoadedPlugin {
+    manifest: PluginManifest;
+    module: GamePlugin;
+    dirPath: string;
+}

@@ -52,10 +52,11 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
   - [Admin Commands](#admin-commands)
   - [Player Commands](#player-commands)
 - [API Documentation](#-api-documentation)
-  - [Packet Types](#authorized-packet-types)
+  - [Plugin System](#plugin-system)
+  - [Listener Events](#listener-events)
+  - [Packet Types](#packet-types)
   - [Caching](#caching)
   - [Events](#events)
-  - [Listener Events](#listener-events)
 - [System API Reference](#-system-api-reference)
 
 ---
@@ -470,7 +471,157 @@ bun setup-production
 
 ## 📚 API Documentation
 
-### Authorized Packet Types
+### Plugin System
+
+Plugins are self-contained modules that extend the engine without modifying engine source code. They live under `src/plugins/` and are auto-discovered via `manifest.json` manifests.
+
+#### Creating a Plugin
+
+**1. Directory structure:**
+
+```
+src/plugins/
+└── MyPlugin/
+    ├── manifest.json       # Manifest
+    └── src/
+        └── index.ts      # Entry point
+```
+
+**2. Manifest file (`manifest.json`):**
+
+```json
+{
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "description": "What this plugin does",
+  "entry": "./src/index.ts",
+  "requires": {
+    "engine": ">=1.0.0"
+  },
+  "provides": [
+    "feature.one",
+    "feature.two"
+  ]
+}
+```
+
+**3. Entry point (`src/index.ts`):**
+
+```ts
+import { listener, Events } from "@engine/systems/events";
+
+export default {
+  async register(engine: EngineAPI, manifest: PluginManifest) {
+    // `manifest` contains name, version, description from manifest.json
+    // Register packet types, builders, interceptors, and event listeners
+    listener.on(Events.PARTY_CHANGED, (data) => { ... });
+  },
+
+  async unregister() {
+    // Cleanup
+  },
+};
+```
+
+The loader reads `name`, `version`, and `description` from `manifest.json`. The plugin module only exports `register` and optionally `unregister`.
+
+#### Engine API
+
+The `engine` object passed to `register()` provides these methods:
+
+| Method | Description |
+|--------|-------------|
+| `engine.addPacketTypes(types: string[])` | Register custom packet type constants |
+| `engine.addPacketBuilders(builders: Record<string, Function>)` | Register packet builder functions |
+| `engine.registerHandlers(handlers: Record<string, Function>)` | Register packet handlers |
+| `engine.onWarpCollision(fn)` | Push a warp collision interceptor. Receives `(warp, ws, player, sendPacket)`. Return `true` to suppress engine handling, `false` to let engine proceed. |
+| `engine.onPacket(fn)` | Push a packet interceptor. Receives `(type, data, ws, player)`. Return `true` to suppress engine handling. |
+| `engine.addHttpRoute(method, path, handler)` | Register an HTTP route. `handler` receives `(req: Request)` and returns `Response`. |
+| `engine.teleportPlayer(playerObj, mapName, x, y)` | Teleport a player to a map position. |
+
+#### Imports Available to Plugins
+
+Use the `@engine/` prefix to import engine modules:
+
+```ts
+import log from "@engine/modules/logger.ts";
+import playerCache from "@engine/services/playermanager.ts";
+import assetCache from "@engine/services/assetCache.ts";
+import packet from "@engine/modules/packet.ts";
+import { listener, Events } from "@engine/systems/events";
+```
+
+Types (`EngineAPI`, `PluginManifest`, `PluginHandlerFn`) are declared globally in `types.d.ts` - no import required.
+
+---
+
+### Listener Events
+
+Import the listener from `@engine/systems/events`:
+
+```ts
+import { listener } from "@engine/systems/events";
+```
+
+#### Lifecycle Events
+
+| Event | Payload | When |
+|-------|---------|------|
+| `onAwake` | - | Server starts |
+| `onStart` | - | After `onAwake` |
+| `onPluginLoad` | `{ name, version, dirPath }` | Plugin manifest discovered and module imported |
+| `onPluginInitialize` | `{ name, engine }` | Before `plugin.register()` is called |
+| `onPluginRegister` | `{ name }` | After `plugin.register()` succeeds |
+| `onPluginUnregister` | `{ name }` | Plugin unloaded |
+
+#### Tick Events
+
+| Event | Interval |
+|-------|----------|
+| `onUpdate` | Every frame (~60 FPS) |
+| `onFixedUpdate` | Every 100ms |
+| `onSave` | Every 60 seconds |
+| `onServerTick` | Every 1 second |
+
+#### Network Events
+
+| Event | Payload | When |
+|-------|---------|------|
+| `onConnection` | `{ id, ... }` | New WebSocket connection |
+| `onDisconnect` | `{ id, ... }` | WebSocket disconnected |
+
+#### Game Events (Plugin Hooks)
+
+| Event | Payload | When |
+|-------|---------|------|
+| `onWarp` | `{ mapName, metadata }` | `constructMapMetadata()` builds a LOAD_MAP packet. `metadata` is mutable - modify `metadata.name` to change the map name sent to the client. |
+| `onMapEnter` | `{ player, mapName, position }` | Player enters a new map (after AOI update, before LOAD_MAP sent) |
+| `onPlayerAuthComplete` | `{ username, spawnLocation, playerData }` | After login spawn location is resolved, before map validation. `spawnLocation` is mutable - modify `.map`, `.x`, `.y` to redirect. |
+| `onPartyChanged` | `{ type, members, username?, kickedUsername? }` | After party kick/leave/disband. `type` = `"kick"` \| `"leave"` \| `"disband"`. `members` = affected usernames. |
+| `onPlayerChat` | `{ player, message, mapName, language? }` | After chat message is decrypted and broadcast to map |
+| `onPlayerDeath` | `{ player, killer? }` | After a player dies (health ≤ 0) and death packets are sent |
+| `onPlayerRespawn` | `{ player, mapName, x, y }` | After a player is respawned via admin command |
+| `onGuildChanged` | `{ type, guildId, guildName, playerUsername, kickedUsername? }` | After guild create/join/leave/kick/disband. `type` = `"create"` \| `"join"` \| `"leave"` \| `"kick"` \| `"disband"` |
+| `onItemEquip` | `{ player, item, slot }` | After an item is equipped and stats are recalculated |
+| `onItemUnequip` | `{ player, slot }` | After an item is unequipped and stats are recalculated |
+| `onPlayerMount` | `{ player, mounted, mountType? }` | After mount/dismount toggle |
+| `onPlayerMoved` | `{ player, position }` | After MOVEXY processes and game loop registers player |
+| `onPlayerLogout` | `{ player }` | After player state saved and logout cleanup |
+| `onPlayerDisconnect` | `{ player }` | After WebSocket disconnect and drag-release cleanup |
+| `onSpellCast` | `{ player, spellName, target, isEntityTarget }` | After spell effects applied, last-attack timers set |
+| `onSpellInterrupted` | `{ player }` | After spell cancelled via ESC and state cleared |
+| `onPlayerDamaged` | `{ attacker, target, damage, isCrit }` | After damage applied to player target health |
+| `onPlayerLevelUp` | `{ player, oldLevel, newLevel }` | After XP reward causes level increase |
+| `onFriendAdded` | `{ type, playerUsername, friendUsername }` | After friend request accepted and lists updated |
+| `onFriendRemoved` | `{ type, playerUsername, friendUsername }` | After friend removed and list synced |
+| `onPartyInvite` | `{ inviterUsername, invitedUsername }` | After party invitation sent |
+| `onPartyJoin` | `{ playerUsername, partyMembers }` | After party invitation accepted and layers synced |
+| `onWhisper` | `{ fromUsername, toUsername, message }` | After private message sent |
+| `onPlayerStealthChange` | `{ player, isStealth }` | After stealth/unstealth toggle and spawn/despawn packets |
+
+---
+
+### Packet Types
 
 ```ts
 import { packetTypes } from "./types";
@@ -483,115 +634,42 @@ Packet type definitions for client-server communication.
 ### Caching
 
 ```ts
-import cache from '../services/cache'; // Main player cache
-import assetCache from '../services/assetCache'; // Asset caching
+import playerCache from "../services/playermanager"; // Player cache
+import assetCache from "../services/assetCache";    // Asset cache
 ```
 
 | Method | Description |
 |--------|-------------|
-| `cache.add(key, value)` | Adds an item to the cache |
-| `cache.addNested(key, nestedKey, value)` | Adds a nested item to the cache |
-| `cache.get(key)` | Fetches an item from the cache |
-| `cache.remove(key)` | Removes an item from the cache |
-| `cache.clear()` | Clears the cache |
-| `cache.list()` | Fetches all items from the cache |
-| `cache.set()` | Updates an item in cache |
-| `cache.setNested()` | Updates a nested item in cache |
-
-> Same methods apply to `assetCache`
+| `playerCache.add(key, value)` | Add a player to cache |
+| `playerCache.get(key)` | Get a player by key |
+| `playerCache.list()` | Get all cached players |
+| `playerCache.remove(key)` | Remove a player from cache |
+| `playerCache.set(key, value)` | Update a player in cache |
+| `playerCache.setNested(key, nestedKey, value)` | Set a nested property on a player |
+| `assetCache.add(key, value)` | Add an asset to cache |
+| `assetCache.get(key)` | Get an asset by key |
+| `assetCache.addNested(key, nestedKey, value)` | Add nested asset data |
+| `assetCache.getNested(key, nestedKey)` | Get nested asset data |
+| `assetCache.set(key, value)` | Update an asset in cache |
+| `assetCache.setNested(key, nestedKey, value)` | Update nested asset data |
 
 ---
 
 ### Events
 
+The event bus is available via `@engine/systems/events`:
+
 ```ts
-import { Events } from "../socket/server";
+import { listener } from "@engine/systems/events";
 ```
 
 | Method | Description |
 |--------|-------------|
-| `events.GetOnlineCount()` | Returns the amount of clients currently connected |
-| `events.GetOnlineData()` | Returns a list containing client connection data |
-| `events.Broadcast(packet)` | Broadcasts a message to all connected clients |
-| `events.GetClientRequests()` | Returns a list containing client request data |
-| `events.GetRateLimitedClients()` | Returns a list of rate limited clients |
+| `listener.on(event, handler)` | Register an event handler |
+| `listener.emit(event, payload)` | Emit an event |
+| `listener.off(event, handler)` | Remove an event handler |
 
 ---
-
-### Listener Events
-
-#### onAwake
-Fires immediately after the server starts.
-
-```ts
-Listener.on("onAwake", (data) => {
-  console.log("Awake event emitted");
-});
-```
-
-#### onStart
-Fires immediately after **onAwake**.
-
-```ts
-Listener.on("onStart", (data) => {
-  console.log("Start event emitted");
-});
-```
-
-#### onUpdate
-Fires immediately after **onStart** every 60 frames.
-
-```ts
-Listener.on("onUpdate", (data) => {
-  console.log("Update event emitted");
-});
-```
-
-#### onFixedUpdate
-Fires immediately after **onStart** every 100ms.
-
-```ts
-Listener.on("onFixedUpdate", (data) => {
-  console.log("Fixed update event emitted");
-});
-```
-
-#### onSave
-Runs every 1 minute.
-
-```ts
-Listener.on("onSave", (data) => {
-  console.log("Save event emitted");
-});
-```
-
-#### onConnection
-Fires when a new connection is established.
-
-```ts
-Listener.on("onConnection", (data) => {
-  console.log(`New connection: ${data}`);
-});
-```
-
-#### onDisconnect
-Fires when a connection is dropped.
-
-```ts
-Listener.on("onDisconnect", (data) => {
-  console.log(`Disconnected: ${data}`);
-});
-```
-
-#### onServerTick
-Fires every 1 second.
-
-```ts
-Listener.on("onServerTick", (data) => {
-  console.log(`Server tick: ${data}`);
-});
-```
-
 <p align="center">
   <sub>Built with ❤️ by the Frostfire Forge Team</sub>
 </p>

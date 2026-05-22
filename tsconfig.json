@@ -19,6 +19,11 @@
     "verbatimModuleSyntax": false,
     "noEmit": true,
 
+    // Path aliases
+    "paths": {
+      "@engine/*": ["./src/*"]
+    },
+
     // Best practices
     "strict": true,
     "alwaysStrict": true,
@@ -30,6 +35,6 @@
     "noUnusedParameters": true,
     "noPropertyAccessFromIndexSignature": false,
     "strictNullChecks": true,
-    "strictFunctionTypes": true,
+    "strictFunctionTypes": true
   }
 }

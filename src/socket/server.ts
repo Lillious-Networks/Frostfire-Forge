@@ -4,9 +4,11 @@ const packetQueue = new Map<string, (() => void)[]>();
 import "../utility/validate_config.ts";
 import crypto from "crypto";
 import { packetManager } from "./packet_manager.ts";
-import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady } from "./receiver.ts";
+import { packetTypes } from "./types.ts";
+import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady, teleportPlayerWrapper } from "./receiver.ts";
 import eventEmitter from "node:events";
-export const listener = new eventEmitter();
+import { listener } from "../modules/event_bus.ts";
+import { Events } from "../systems/events";
 const event = new eventEmitter();
 import log from "../modules/logger.ts";
 import player from "../systems/player.ts";
@@ -18,6 +20,10 @@ import path from "node:path";
 import fs from "node:fs";
 import { generateKeyPair } from "../modules/cipher.ts";
 import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondensation, findPlayersWithTargetInAOI } from "./aoi.ts";
+import { loadPlugins, registerAllPlugins } from "../modules/plugin_loader.ts";
+import { pluginHandlers, warpInterceptors, packetInterceptors } from "./receiver.ts";
+
+const httpRouteHandlers = new Map<string, (req: Request) => Promise<Response>>();
 
 import * as settings from "../config/settings.json";
 import assetCache from "../services/assetCache.ts";
@@ -144,7 +150,7 @@ function getCORSHeaders(requestOrigin: string | null): Record<string, string> {
 const Server = Bun.serve<Packet, any>({
   port: process.env.WEB_SOCKET_PORT || 3000,
   reusePort: false,
-  fetch(req, Server) {
+  async fetch(req, Server) {
     const url = new URL(req.url, `http://${req.headers.get("host")}`);
     const requestOrigin = req.headers.get("origin");
 
@@ -177,6 +183,12 @@ const Server = Bun.serve<Packet, any>({
           ...corsHeaders
         }
       });
+    }
+
+    const routeKey = `${req.method}:${url.pathname}`;
+    const httpHandler = httpRouteHandlers.get(routeKey);
+    if (httpHandler) {
+      return await httpHandler(req);
     }
 
     const id = parseInt(crypto.randomBytes(2).toString("hex"), 16);
@@ -343,11 +355,11 @@ const Server = Bun.serve<Packet, any>({
   },
 });
 
-listener.on("onAwake", async () => {
+listener.on(Events.AWAKE, async () => {
   await player.clear();
 });
 
-listener.on("onStart", async () => {
+listener.on(Events.START, async () => {
   // Load entities into in-memory cache with full health
   try {
     const entitySystem = (await import("../systems/entities")).default;
@@ -380,8 +392,53 @@ gatewayClient = new GatewayClient({
 
 await gatewayClient.registerWithRetry();
 
-listener.emit("onAwake");
-listener.emit("onStart");
+listener.emit(Events.AWAKE);
+listener.emit(Events.START);
+
+try {
+  await loadPlugins(listener);
+
+  const engineApi: EngineAPI = {
+    addPacketTypes: (types: string[]) => {
+      for (const t of types) {
+        (packetTypes as any)[t] = t;
+      }
+      log.success(`Registered ${types.length} plugin packet types`);
+    },
+    addPacketBuilders: (builders: Record<string, (...args: unknown[]) => unknown>): void => {
+      for (const [name, fn] of Object.entries(builders)) {
+        (packetManager as any)[name] = fn;
+      }
+      log.success(`Registered ${Object.keys(builders).length} plugin packet builders`);
+    },
+    registerHandlers: (handlers: Record<string, PluginHandlerFn>) => {
+      for (const [type, handler] of Object.entries(handlers)) {
+        pluginHandlers.set(type, handler);
+      }
+      log.success(`Registered ${Object.keys(handlers).length} plugin packet handlers`);
+    },
+    onWarpCollision: (interceptor: (warp: any, ws: any, player: any, sendPacket: any) => Promise<boolean>) => {
+      warpInterceptors.push(interceptor);
+    },
+    onPacket: (interceptor: (type: string, data: any, ws: any, player: any) => boolean) => {
+      packetInterceptors.push(interceptor);
+    },
+    addHttpRoute: (method: string, route: string, handler: (req: Request) => Promise<Response>) => {
+      httpRouteHandlers.set(`${method}:${route}`, handler);
+      log.success(`Registered plugin HTTP route: ${method} ${route}`);
+    },
+    teleportPlayer: async (playerObj: any, mapName: string, x: number, y: number) => {
+      await teleportPlayerWrapper(playerObj, mapName, x, y);
+    },
+  };
+
+  const registered = await registerAllPlugins(engineApi, listener);
+  if (registered.length > 0) {
+    log.success(`Plugins loaded: ${registered.join(", ")}`);
+  }
+} catch (err) {
+  log.warn(`Plugin loading skipped: ${err}`);
+}
 
 gameLoop.start();
 
@@ -390,19 +447,19 @@ startAutoPartyLayerSync(sendAnimationTo);
 startAutoLayerCondensation(sendAnimationTo);
 
 setInterval(() => {
-  listener.emit("onUpdate");
+  listener.emit(Events.UPDATE);
 }, 1000 / 60);
 
 setInterval(() => {
-  listener.emit("onFixedUpdate");
+  listener.emit(Events.FIXED_UPDATE);
 }, 100);
 
 setInterval(() => {
-  listener.emit("onSave");
+  listener.emit(Events.SAVE);
 }, 60000);
 
 setInterval(() => {
-  listener.emit("onServerTick");
+  listener.emit(Events.SERVER_TICK);
 }, 1000);
 
 setInterval(() => {
@@ -480,9 +537,9 @@ if (settings?.websocketRatelimit?.enabled) {
   }, 1000);
 }
 
-listener.on("onUpdate", async () => {});
+listener.on(Events.UPDATE, async () => {});
 
-listener.on("onFixedUpdate", async () => {
+listener.on(Events.FIXED_UPDATE, async () => {
   if (settings?.websocketRatelimit?.enabled) {
     if (ClientRateLimit.size < 1) return;
     const timestamp = Date.now();
@@ -499,7 +556,7 @@ listener.on("onFixedUpdate", async () => {
   }
 });
 
-listener.on("onServerTick", async () => {
+listener.on(Events.SERVER_TICK, async () => {
   const playersObj = playerCache.list() as any;
   const players = Object.values(playersObj) as any[];
 
@@ -682,7 +739,7 @@ listener.on("onDisconnect", async (data) => {
   }
 });
 
-listener.on("onSave", async () => {
+listener.on(Events.SAVE, async () => {
   const cache = playerCache.list();
   if (!cache) return;
   if (Object.keys(cache).length < 1) return;
@@ -692,6 +749,7 @@ listener.on("onSave", async () => {
   const savePromises = Object.entries(cache).map(async ([playerId, row]) => {
     if (!row) return { success: false, playerId, reason: "no_row" };
     if (row.isGuest) return { success: true, playerId, reason: "guest_skipped" };
+    if (row.saveLocked) return { success: true, playerId, reason: "save_locked" };
 
     if (!row.stats || !row.location) {
       playerCache.remove(playerId);
