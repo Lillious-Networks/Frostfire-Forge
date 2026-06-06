@@ -6117,7 +6117,7 @@ export default async function packetReceiver(
                 };
                 sendPacket(ws, packetManager.notify(notifyData));
             }
-            listener.emit(Events.GUILD_CHANGED, { type: "join", guildId, guildName, playerUsername: currentPlayer.username });
+            listener.emit(Events.GUILD_CHANGED, { type: "join", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username });
             break;
         }
         listener.emit(Events.PLAYER_DISCONNECT, { player: currentPlayer });
@@ -6950,11 +6950,12 @@ export default async function packetReceiver(
           case "INVITE_PARTY": {
 
             const partyId = await parties.getPartyId(inviter.username);
+            let updatedPartyMembers: string[] | boolean = false;
             if (response.toUpperCase() === "ACCEPT") {
 
               if (partyId) {
 
-                const updatedPartyMembers = await parties.add(
+                updatedPartyMembers = await parties.add(
                   currentPlayer.username.toLowerCase(),
                   partyId
                 );
@@ -7005,7 +7006,7 @@ export default async function packetReceiver(
                 }
               } else {
 
-                const updatedPartyMembers = await parties.create(
+                updatedPartyMembers = await parties.create(
                   inviter.username.toLowerCase(),
                   currentPlayer.username.toLowerCase()
                 );
@@ -7226,7 +7227,6 @@ export default async function packetReceiver(
               message: "Mount feature is currently locked.",
               })
             );
-            listener.emit(Events.WHISPER, { fromUsername: currentPlayer.username, toUsername: targetPlayer.username, message: args.slice(1).join(" ") });
 
             break;
           }

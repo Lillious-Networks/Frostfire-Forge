@@ -147,7 +147,7 @@ class LayerManager {
     };
   }
 
-  syncPartyToLeaderLayer(partyLeaderPlayerId: string, partyMemberPlayerIds: string[], mapName: string): string | null {
+  syncPartyToLeaderLayer(partyLeaderPlayerId: string, partyMemberPlayerIds: string[], _mapName: string): string | null {
     const leaderLayerId = this.playerToLayer.get(partyLeaderPlayerId);
 
     if (!leaderLayerId) {
