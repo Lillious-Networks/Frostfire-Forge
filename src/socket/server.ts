@@ -151,7 +151,7 @@ const Server = Bun.serve<Packet, any>({
   port: process.env.WEB_SOCKET_PORT || 3000,
   reusePort: false,
   development: false,
-  async fetch(req, Server) {
+  fetch(req, Server) {
     const url = new URL(req.url, `http://${req.headers.get("host")}`);
     const requestOrigin = req.headers.get("origin");
 
@@ -189,7 +189,7 @@ const Server = Bun.serve<Packet, any>({
     const routeKey = `${req.method}:${url.pathname}`;
     const httpHandler = httpRouteHandlers.get(routeKey);
     if (httpHandler) {
-      return await httpHandler(req);
+      return httpHandler(req);
     }
 
     const id = parseInt(crypto.randomBytes(2).toString("hex"), 16);

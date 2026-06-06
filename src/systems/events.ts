@@ -225,12 +225,4 @@ const now = performance.now();
 event.on("online", () => {
     const readyTimeMs = performance.now() - now;
     log.success(`TCP server is listening on port 3000 - Ready in ${(readyTimeMs / 1000).toFixed(3)}s (${readyTimeMs.toFixed(0)}ms)`);
-
-    listener.emit(Events.AWAKE);
-    listener.emit(Events.START);
-
-    setInterval(() => listener.emit(Events.UPDATE), 1000 / 60);
-    setInterval(() => listener.emit(Events.FIXED_UPDATE), 100);
-    setInterval(() => listener.emit(Events.SAVE), 60000);
-    setInterval(() => listener.emit(Events.SERVER_TICK), 1000);
 });
