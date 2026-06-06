@@ -150,6 +150,7 @@ function getCORSHeaders(requestOrigin: string | null): Record<string, string> {
 const Server = Bun.serve<Packet, any>({
   port: process.env.WEB_SOCKET_PORT || 3000,
   reusePort: false,
+  development: false,
   async fetch(req, Server) {
     const url = new URL(req.url, `http://${req.headers.get("host")}`);
     const requestOrigin = req.headers.get("origin");
