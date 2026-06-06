@@ -396,6 +396,10 @@ await gatewayClient.registerWithRetry();
 listener.emit(Events.AWAKE);
 listener.emit(Events.START);
 
+gameLoop.start();
+startAutoPartyLayerSync(sendAnimationTo);
+startAutoLayerCondensation(sendAnimationTo);
+
 try {
   await loadPlugins(listener);
 
@@ -440,12 +444,6 @@ try {
 } catch (err) {
   log.warn(`Plugin loading skipped: ${err}`);
 }
-
-gameLoop.start();
-
-startAutoPartyLayerSync(sendAnimationTo);
-
-startAutoLayerCondensation(sendAnimationTo);
 
 setInterval(() => {
   listener.emit(Events.UPDATE);
