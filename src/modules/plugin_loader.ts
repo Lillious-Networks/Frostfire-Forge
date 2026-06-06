@@ -102,16 +102,14 @@ export async function registerPlugin(engine: EngineAPI, pluginName: string, emit
 }
 
 export async function registerAllPlugins(engine: EngineAPI, emitter?: EventEmitter): Promise<string[]> {
-    const registered: string[] = [];
+    const names = [...loadedPlugins.keys()];
 
-    for (const [name] of loadedPlugins) {
-        const success = await registerPlugin(engine, name, emitter);
-        if (success) {
-            registered.push(name);
-        }
+    for (const name of names) {
+        registerPlugin(engine, name, emitter)
+            .catch(err => log.error(`Failed to register plugin ${name}: ${err}`));
     }
 
-    return registered;
+    return names;
 }
 
 export async function unregisterPlugin(pluginName: string, emitter?: EventEmitter): Promise<void> {

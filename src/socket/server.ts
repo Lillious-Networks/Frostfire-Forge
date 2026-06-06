@@ -439,7 +439,7 @@ try {
 
   const registered = await registerAllPlugins(engineApi, listener);
   if (registered.length > 0) {
-    log.success(`Plugins loaded: ${registered.join(", ")}`);
+    log.success(`Auto-starting ${registered.length} plugin(s): ${registered.join(", ")}`);
   }
 } catch (err) {
   log.warn(`Plugin loading skipped: ${err}`);
