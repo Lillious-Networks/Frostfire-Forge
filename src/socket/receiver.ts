@@ -1326,14 +1326,6 @@ export default async function packetReceiver(
       return { ...withParticles, spriteLayers: getNpcSpriteLayers(npc) };
     }
 
-    for (const interceptor of packetInterceptors) {
-      try {
-        if (interceptor(String(type), data, ws, currentPlayer)) return;
-      } catch (err) {
-        log.error(`[PacketInterceptor] Error: ${err}`);
-      }
-    }
-
     switch (type) {
       case "BENCHMARK": {
         (data as any)["returned_timestamp"] = Date.now();
@@ -1662,29 +1654,12 @@ export default async function packetReceiver(
             }
 
             if (reason === "warp_collision" && collision?.warp) {
+              const currentMap = currentPlayer.location.map;
               const warp = collision.warp as {
                 map: string;
                 x: number;
                 y: number;
               };
-
-              let handled = false;
-              for (const interceptor of warpInterceptors) {
-                try {
-                  if (await interceptor(warp, ws, currentPlayer, sendPacket)) {
-                    handled = true;
-                    break;
-                  }
-                } catch (err) {
-                  log.error(`[WarpInterceptor] Error: ${err}`);
-                }
-              }
-
-              if (handled) {
-                return;
-              }
-
-              const currentMap = currentPlayer.location.map;
 
               const result = await player.setLocation(
                 currentPlayer.id,
@@ -1880,7 +1855,6 @@ export default async function packetReceiver(
         await movePlayer();
 
         gameLoop.registerMovingPlayer(currentPlayer.id, movePlayer);
-        listener.emit(Events.PLAYER_MOVED, { player: currentPlayer, position: currentPlayer.location.position });
         break;
       }
       case "TELEPORTXY": {
@@ -7582,12 +7556,6 @@ export default async function packetReceiver(
       }
 
       default: {
-        const handler = pluginHandlers.get(String(type));
-        if (handler) {
-          await handler(ws, currentPlayer, data, sendPacket);
-          break;
-        }
-
         log.error(`Unknown packet type: ${type}`);
         break;
       }
