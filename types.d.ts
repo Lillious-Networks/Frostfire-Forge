@@ -551,7 +551,7 @@ declare interface EngineAPI {
 
 declare interface GamePlugin {
   register: (engine: EngineAPI, manifest: PluginManifest) => void | Promise<void>;
-  unregister?: () => void | Promise<void>;
+  unregister?: (manifest: PluginManifest) => void | Promise<void>;
 }
 
 declare interface PluginManifest {

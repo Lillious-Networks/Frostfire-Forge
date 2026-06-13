@@ -1944,6 +1944,8 @@ export default async function packetReceiver(
             p.location.map === currentPlayer.location.map && p.id !== ws.data.id
         );
 
+        listener.emit(Events.PLAYER_CHAT, { player: currentPlayer, message: decryptedMessage || data?.toString(), mapName: currentPlayer.location.map });
+
         if (currentPlayer.isStealth) {
 
           playersInMap = playersInMap.filter((p) => p.isAdmin);
@@ -1970,7 +1972,6 @@ export default async function packetReceiver(
 
           sendPacket(player.ws, packetManager.chat(chatData));
         });
-        listener.emit(Events.PLAYER_CHAT, { player: currentPlayer, message: decryptedMessage || data?.toString(), mapName: currentPlayer.location.map });
         break;
       }
       case "TYPING": {

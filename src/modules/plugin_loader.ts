@@ -117,7 +117,7 @@ export async function unregisterPlugin(pluginName: string, emitter?: EventEmitte
     if (!plugin || !plugin.module.unregister) return;
 
     try {
-        await plugin.module.unregister();
+        await plugin.module.unregister(plugin.manifest);
         if (emitter) emitter.emit(Events.PLUGIN_UNREGISTER, { name: pluginName });
         log.info(`Unregistered plugin: ${pluginName}`);
     } catch (err) {
