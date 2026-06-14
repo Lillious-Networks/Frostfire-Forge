@@ -4,7 +4,6 @@ import log from "../modules/logger";
 import assetCache from "../services/assetCache";
 import * as settings from "../config/settings.json";
 import playerCache from "../services/playermanager.ts";
-import path from "path";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 const mapCache: Map<
   string,
@@ -1265,27 +1264,17 @@ const player = {
 
     realmWhitelist.add(username);
 
-    // Write to file
     try {
-      const filePath = path.join(import.meta.dir, "../../whitelist.txt");
-      let existingContent = "";
-      try {
-        existingContent = await Bun.file(filePath).text();
-      } catch {
-        // File doesn't exist yet
-        existingContent = "";
-      }
-      const lines = existingContent.split("\n").map(line => line.trim()).filter(line => line && !line.startsWith("#"));
-
-      if (!lines.includes(username)) {
-        lines.push(username);
-      }
-
-      await Bun.write(filePath, lines.join("\n") + "\n");
+      const realmId = process.env.SERVER_ID || "default";
+      await query("INSERT INTO whitelist (realm, username) VALUES (?, ?)", [realmId, username]);
       return { success: true, message: `Added ${username} to whitelist` };
-    } catch (error) {
-      log.error(`Failed to write whitelist file: ${error}`);
-      return { success: false, message: "Failed to save whitelist to file" };
+    } catch (error: any) {
+      realmWhitelist.delete(username);
+      if (error?.code === 'ER_DUP_ENTRY' || error?.message?.includes('UNIQUE constraint')) {
+        return { success: false, message: `${username} is already whitelisted` };
+      }
+      log.error(`Failed to add whitelist entry: ${error}`);
+      return { success: false, message: "Failed to save whitelist to database" };
     }
   },
   whitelistRemove: async (username: string): Promise<{ success: boolean; message: string }> => {
@@ -1300,26 +1289,14 @@ const player = {
 
     realmWhitelist.delete(username);
 
-    // Write to file
     try {
-      const filePath = path.join(import.meta.dir, "../../whitelist.txt");
-      let existingContent = "";
-      try {
-        existingContent = await Bun.file(filePath).text();
-      } catch {
-        // File doesn't exist yet
-        existingContent = "";
-      }
-      const lines = existingContent
-        .split("\n")
-        .map(line => line.trim())
-        .filter(line => line && !line.startsWith("#") && line.toLowerCase() !== username);
-
-      await Bun.write(filePath, lines.length > 0 ? lines.join("\n") + "\n" : "");
+      const realmId = process.env.SERVER_ID || "default";
+      await query("DELETE FROM whitelist WHERE realm = ? AND username = ?", [realmId, username]);
       return { success: true, message: `Removed ${username} from whitelist` };
     } catch (error) {
-      log.error(`Failed to write whitelist file: ${error}`);
-      return { success: false, message: "Failed to save whitelist to file" };
+      realmWhitelist.add(username);
+      log.error(`Failed to remove whitelist entry: ${error}`);
+      return { success: false, message: "Failed to remove whitelist from database" };
     }
   },
   GetPlayerLoginData: async (username: string) => {

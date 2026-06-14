@@ -59,6 +59,19 @@ const createBlockedIpsTable = async () => {
   await query(sql);
 };
 
+// Create whitelist table if it doesn't exist
+const createWhitelistTable = async () => {
+  log.info("Creating whitelist table...");
+  const sql = `
+    CREATE TABLE IF NOT EXISTS whitelist (
+        realm TEXT NOT NULL,
+        username TEXT NOT NULL,
+        UNIQUE(realm, username)
+    );
+  `;
+  await query(sql);
+};
+
 // Insert 127.0.0.1 and ::1 as allowed IPs if they doesn't exist
 const insertLocalhost = async () => {
   log.info("Inserting localhost and ::1 as allowed IPs...");
@@ -657,6 +670,7 @@ const setupDatabase = async () => {
   await createAccountsTable();
   await createAllowedIpsTable();
   await createBlockedIpsTable();
+  await createWhitelistTable();
   await insertLocalhost();
   await createInventoryTable();
   await createItemsTable();

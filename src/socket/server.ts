@@ -18,6 +18,7 @@ import gameLoop from "../services/gameloop";
 import packet from "../modules/packet.ts";
 import path from "node:path";
 import fs from "node:fs";
+import query from "../controllers/sqldatabase";
 import { generateKeyPair } from "../modules/cipher.ts";
 import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondensation, findPlayersWithTargetInAOI } from "./aoi.ts";
 import { loadPlugins, registerAllPlugins } from "../modules/plugin_loader.ts";
@@ -80,34 +81,27 @@ const ClientRateLimit = new Map<string, ClientRateLimit>();
 
 const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
 
-// Load realm whitelist from whitelist.txt if WHITELIST=true
+// Load realm whitelist from database if WHITELIST=true
 export const realmWhitelist = new Set<string>();
 export const isWhitelistEnabled = process.env.WHITELIST === 'true';
 
+const realmId = process.env.SERVER_ID || "default";
+
 if (isWhitelistEnabled) {
-  const whitelistPath = path.join(import.meta.dir, "../../whitelist.txt");
-  if (fs.existsSync(whitelistPath)) {
-    try {
-      const whitelistContent = fs.readFileSync(whitelistPath, "utf8");
-      const usernames = whitelistContent
-        .split("\n")
-        .map(line => line.trim())
-        .filter(line => line.length > 0 && !line.startsWith("#"))
-        .map(line => line.toLowerCase());
-
-      usernames.forEach(username => realmWhitelist.add(username));
-
-      if (realmWhitelist.size > 0) {
-        log.success(`Loaded ${realmWhitelist.size} whitelisted usernames from whitelist.txt`);
-      } else {
-        log.warn("Whitelist enabled but no usernames found in whitelist.txt");
+  query("SELECT username FROM whitelist WHERE realm = ?", [realmId])
+    .then((rows: any[]) => {
+      for (const row of rows) {
+        realmWhitelist.add(row.username.toLowerCase());
       }
-    } catch (error) {
-      log.error(`Failed to read whitelist.txt: ${error}`);
-    }
-  } else {
-    log.warn(`Whitelist enabled but whitelist.txt not found at ${whitelistPath}`);
-  }
+      if (realmWhitelist.size > 0) {
+        log.success(`Loaded ${realmWhitelist.size} whitelisted usernames for realm ${realmId} from database`);
+      } else {
+        log.warn(`Whitelist enabled but no usernames found for realm ${realmId}`);
+      }
+    })
+    .catch((error: any) => {
+      log.error(`Failed to load whitelist from database: ${error}`);
+    });
 }
 
 await spriteDataCacheReady;

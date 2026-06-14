@@ -686,6 +686,18 @@ const insertDemoMount = async () => {
   }
 }
 
+const createWhitelistTable = async () => {
+  log.info("Creating whitelist table...");
+  const sql = `
+    CREATE TABLE IF NOT EXISTS whitelist (
+      realm VARCHAR(255) NOT NULL,
+      username VARCHAR(255) NOT NULL,
+      UNIQUE KEY unique_realm_username (realm, username)
+    )
+  `;
+  await query(sql);
+};
+
 const createIndexes = async () => {
   log.info("Creating performance indexes...");
 
@@ -786,6 +798,7 @@ const setupDatabase = async () => {
   await createGuildsTable();
   await createMountsTable();
   await insertDefaultMount();
+  await createWhitelistTable();
   await createCollectablesTable();
   await createLearnedSpellsTable();
   await createEquipmentTable();
