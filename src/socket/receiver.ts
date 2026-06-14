@@ -767,6 +767,34 @@ authWorker.on("message", async (result: any) => {
       );
     }
 
+    // Kick any existing session for this username (duplicate login prevention)
+    const newUsername = playerData.username.toLowerCase();
+    for (const [_id, p] of Object.entries(playerCache.list()) as [string, any][]) {
+      if (p.username?.toLowerCase() === newUsername) {
+        log.info(`Kicking existing session for ${playerData.username} (duplicate login)`);
+
+        if (p.ws && p.ws.readyState === 1) {
+          p.ws.send(packetManager.notify({
+            message: "You have been logged in from another location."
+          }));
+        }
+
+        const map = p.location?.map;
+        if (map) {
+          for (const [, other] of Object.entries(playerCache.list()) as [string, any][]) {
+            if (other.location?.map === map && other.id !== p.id && other.ws?.readyState === 1) {
+              other.ws.send(packetManager.disconnect(p.id));
+            }
+          }
+        }
+
+        if (p.ws && p.ws.readyState === 1) {
+          p.ws.close(1000, "Logged in from another location");
+        }
+        break;
+      }
+    }
+
     const default_map_properties = mapPropertiesCache.find((m: any) => m.name === `${defaultMap}.json`);
     const default_map_spawnpoint_x = default_map_properties ? (default_map_properties.width * default_map_properties.tileWidth) / 2 : 0;
     const default_map_spawnpoint_y = default_map_properties ? (default_map_properties.height * default_map_properties.tileHeight) / 2 : 0;

@@ -308,6 +308,10 @@ const player = {
     sessionId: string
   ): Promise<boolean | string> => {
     if (!token || !sessionId) return false;
+
+    // sessionId comes from ws.data.id which is a number via parseInt(),
+    // but the DB column is VARCHAR. Normalize to string for comparisons.
+    const sid = String(sessionId);
     const getUsername = (await player.getUsernameByToken(token)) as any[];
     const username = getUsername[0]?.username as string;
     if (!username) return false;
@@ -317,70 +321,64 @@ const player = {
 
     if (isBanned[0]?.banned === 1) {
       log.debug(`User ${username} is banned`);
-      await player.logout(sessionId);
+      await player.logout(sid);
       return false;
     }
 
+    // Attempt to atomically claim the session.
+    // The WHERE clause only matches if no other session is active
+    // (online=0 OR session_id IS NULL) or this is a re-auth.
+    await query(
+      `UPDATE accounts
+       SET session_id = ?, online = 1
+       WHERE token = ?
+         AND (online = 0 OR session_id IS NULL OR session_id = ?)`,
+      [sid, token, sid]
+    );
+
+    // Verify the claim succeeded by reading back the session_id
+    const verifyResult = await query(
+      "SELECT session_id FROM accounts WHERE token = ?",
+      [token]
+    ) as any[];
+
+    if (String(verifyResult[0]?.session_id ?? "") === sid) {
+      return true;
+    }
+
+    // Claim failed — another session is active. Resolve it.
     const existingSessionResult = await query(
       "SELECT session_id FROM accounts WHERE username = ?",
       [username]
     ) as any[];
 
     const existingSessionId = existingSessionResult[0]?.session_id;
-    if (existingSessionId && existingSessionId !== sessionId) {
 
-      const playerCache = (await import("../services/playermanager.ts")).default;
-      const existingPlayer = playerCache.get(existingSessionId);
-
-      if (existingPlayer && existingPlayer.ws) {
-        log.info(`Kicking existing session for ${username} on THIS server`);
-
-        const packetManager = (await import("../socket/packet_manager.ts")).packetManager;
-        const sendPacket = (ws: any, packet: any) => {
-          if (ws.readyState === 1) ws.send(packet);
-        };
-
-        sendPacket(existingPlayer.ws, packetManager.notify({
-          message: "You have been logged in from another location."
-        }));
-
-        const map = existingPlayer.location?.map;
-        if (map) {
-          const playersInMap = Object.values(playerCache.list()).filter(
-            (p) => p.location?.map === map && p.id !== existingPlayer.id
-          );
-
-          playersInMap.forEach((p) => {
-            sendPacket(p.ws, packetManager.disconnect(existingPlayer.id));
-          });
-        }
-
-        setTimeout(() => {
-
-          playerCache.remove(existingSessionId);
-
-          if (existingPlayer.ws && existingPlayer.ws.readyState === 1) {
-            existingPlayer.ws.close(1000, "Logged in from another location");
-          }
-        }, 500);
-
-        await player.logout(existingSessionId);
-
-        await new Promise(resolve => setTimeout(resolve, 600));
-      } else {
-
-        log.info(`Found stale session for ${username} (from another server or dead session), overwriting with new session`);
-
-        await player.clearSessionId(existingSessionId);
-      }
+    if (String(existingSessionId ?? "") === sid) {
+      return false;
     }
 
+    if (existingSessionId) {
+      log.info(`Clearing existing session for ${username} to allow new login`);
+      await player.clearSessionId(existingSessionId);
+    }
+
+    // Retry the atomic claim now that the existing session is cleared
     await query(
-      "UPDATE accounts SET session_id = ?, online = ? WHERE token = ?",
-      [sessionId, 1, token]
+      `UPDATE accounts
+       SET session_id = ?, online = 1
+       WHERE token = ?
+         AND (online = 0 OR session_id IS NULL OR session_id = ?)`,
+      [sid, token, sid]
     );
 
-    return true;
+    // Verify the retry claim succeeded
+    const retryVerifyResult = await query(
+      "SELECT session_id FROM accounts WHERE token = ?",
+      [token]
+    ) as any[];
+
+    return String(retryVerifyResult[0]?.session_id ?? "") === sid;
   },
   getSessionId: async (token: string) => {
     if (!token) return;
@@ -945,7 +943,7 @@ const player = {
 
     if (target.isStealth || self.isStealth) return { value: false, reason: "path_blocked" };
 
-    if (self.id === target.id) return { value: false, reason: "self" };
+    if ((self.id === target.id) || (self.username === target.username)) return { value: false, reason: "self" };
 
     if (!self.stats || self.stats.health <= 0)
       return { value: false, reason: "dead" };
