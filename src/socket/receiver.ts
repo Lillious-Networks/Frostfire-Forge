@@ -2971,16 +2971,15 @@ export default async function packetReceiver(
 
         const attackerDamageBonus = currentPlayer.stats.stat_damage || 0;
         const baseDamage = spellDamage + attackerDamageBonus;
-
+        const healingDamage = spellDamage < 0 ? spellDamage : 0;
         const critChance = currentPlayer.stats.stat_critical_chance || 0;
         const critDamage = currentPlayer.stats.stat_critical_damage || 0;
         const critRoll = Math.random() * 100;
         const isCrit = critRoll < critChance;
 
-        let finalDamage = baseDamage;
+        let finalDamage = healingDamage !== 0 ? healingDamage : baseDamage;
         if (isCrit) {
-
-          finalDamage = Math.floor(baseDamage * (1 + critDamage / 100));
+          finalDamage = Math.floor(healingDamage !== 0 ? healingDamage * (1 + critDamage / 100) : baseDamage * (1 + critDamage / 100));
         }
 
         log.debug(`[ATTACK] Damage calculation: spell=${spell_damage}, bonus=${attackerDamageBonus}, base=${baseDamage}, crit=${isCrit}, final=${finalDamage}`);
@@ -3063,7 +3062,12 @@ export default async function packetReceiver(
           }
         } else {
           // Apply damage to player target
-          target.stats.health = Math.round(target.stats.health - finalDamage);
+          // Add if negative damage (healing) to current health, subtract positive damage
+          if (healingDamage !== 0) {
+            target.stats.health = Math.round(target.stats.health - finalDamage);
+          } else {
+            target.stats.health = Math.round(target.stats.health - finalDamage);
+          }
           listener.emit(Events.PLAYER_DAMAGED, { attacker: currentPlayer, target, damage: finalDamage, isCrit });
 
           playerCache.set(currentPlayer.id, currentPlayer);
@@ -3232,7 +3236,8 @@ export default async function packetReceiver(
         // Update attacker stats regardless of target type
         playerCache.set(currentPlayer.id, currentPlayer);
 
-        if (!isInParty && !isEntityTarget) {
+        // Is not in the targets party and is not an entity (entities don't have PvP flag), and is not self, then set PvP flag on both
+        if (!isInParty && !isEntityTarget && !isSelf) {
           currentPlayer.pvp = true;
           target.pvp = true;
         }
