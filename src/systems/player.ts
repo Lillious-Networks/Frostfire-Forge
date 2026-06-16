@@ -943,8 +943,6 @@ const player = {
 
     if (target.isStealth || self.isStealth) return { value: false, reason: "path_blocked" };
 
-    if ((self.id === target.id) || (self.username === target.username)) return { value: false, reason: "self" };
-
     if (!self.stats || self.stats.health <= 0)
       return { value: false, reason: "dead" };
 

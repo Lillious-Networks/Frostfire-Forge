@@ -2718,9 +2718,12 @@ export default async function packetReceiver(
           return;
         }
 
-        if (target.id === currentPlayer.id && spell_damage < 0) {
-          playersInAttackRange.push(target);
-        } else if (!canAttack?.value) {
+        const isSelf = (target.id === currentPlayer.id) || (currentPlayer.username === target.username);
+        
+        // Prevent self-targeting for damaging spells, but allow self-targeting for healing/buff spells
+        if (isSelf && spell_damage > 0) return;
+
+        if (!canAttack?.value) {
           if (canAttack?.reason == "nopvp") {
             sendPacket(
               ws,
