@@ -2838,21 +2838,31 @@ export default async function packetReceiver(
 
         let canAttack2: any = { value: true };
 
-        if (isEntityTarget) {
-          // Check if entity is still in returning state
-          const entityState = entityAI.getEntityAIState(target.id);
-          if (entityState && entityState.combatState === 'returning') {
-            canAttack2 = { value: false, reason: "entity_returning" };
+        if (spell.cast_time > 0) {
+          if (isEntityTarget) {
+            // Check if entity is still in returning state
+            const entityState = entityAI.getEntityAIState(target.id);
+            if (entityState && entityState.combatState === 'returning') {
+              canAttack2 = { value: false, reason: "entity_returning" };
+            } else {
+              const entityAsPlayer = {
+                ...target,
+                location: {
+                  map: target.map,
+                  position: target.position
+                },
+                stats: { health: target.health }
+              };
+              canAttack2 = await player.canAttack(currentPlayer, entityAsPlayer,
+                {
+                  width: 24,
+                  height: 40,
+                },
+                spell_range
+              );
+            }
           } else {
-            const entityAsPlayer = {
-              ...target,
-              location: {
-                map: target.map,
-                position: target.position
-              },
-              stats: { health: target.health }
-            };
-            canAttack2 = await player.canAttack(currentPlayer, entityAsPlayer,
+            canAttack2 = await player.canAttack(currentPlayer, target,
               {
                 width: 24,
                 height: 40,
@@ -2860,14 +2870,6 @@ export default async function packetReceiver(
               spell_range
             );
           }
-        } else {
-          canAttack2 = await player.canAttack(currentPlayer, target,
-            {
-              width: 24,
-              height: 40,
-            },
-            spell_range
-          );
         }
 
         if (canAttack2?.reason == "nopvp") {
