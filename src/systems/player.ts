@@ -939,6 +939,8 @@ const player = {
     maxPathfindingDistance: number = 300
   ): Promise<{ value: boolean; reason?: string }> => {
 
+    const isSelf = self.id === target.id || self.username === target.username;
+
     if (!self || !target) return { value: false, reason: "invalid" };
 
     if (target.isStealth || self.isStealth) return { value: false, reason: "path_blocked" };
@@ -992,9 +994,11 @@ const player = {
       upright: -45,
     };
 
-    const targetAngle = directionAngles[direction];
-    if (targetAngle === undefined || !isFacingTarget(targetAngle)) {
-      return { value: false, reason: "direction" };
+    if (!isSelf) {
+      const targetAngle = directionAngles[direction];
+      if (targetAngle === undefined || !isFacingTarget(targetAngle)) {
+        return { value: false, reason: "direction" };
+      }
     }
 
     const isPvpAllowedTarget = await player.isInPvPZone(
@@ -1019,8 +1023,10 @@ const player = {
       maxPathfindingDistance
     );
 
-    if (!hasPath) {
-      return { value: false, reason: "path_blocked" };
+    if (!isSelf) {
+      if (!hasPath) {
+        return { value: false, reason: "path_blocked" };
+      }
     }
 
     return { value: true, reason: "pvp" };

@@ -7226,8 +7226,12 @@ export default async function packetReceiver(
       case "MOUNT": {
         if (!currentPlayer) return;
 
+        // Dismounting if mounted is already true
+        const dismounting = currentPlayer.mounted === true;
+
+
         // Prevent mounting while casting
-        if (currentPlayer.casting) {
+        if (currentPlayer.casting && !dismounting) {
           sendPacket(
             ws,
             packetManager.notify({ message: "Cannot mount while casting." })
@@ -7236,7 +7240,7 @@ export default async function packetReceiver(
         }
 
         // Prevent mounting when PvP flag is enabled
-        if (currentPlayer.pvp) {
+        if (currentPlayer.pvp && !dismounting) {
           sendPacket(
             ws,
             packetManager.notify({ message: "Cannot mount while in PvP." })
@@ -7264,8 +7268,8 @@ export default async function packetReceiver(
 
             break;
           }
-        if (!currentPlayer.mounted) {
 
+        if (!dismounting) {
           const hasMount = currentPlayer.collectables.some((c: any) => c.type === "mount" && c.item === mount);
           if (!hasMount) {
             sendPacket(
