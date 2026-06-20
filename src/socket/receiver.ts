@@ -2748,7 +2748,7 @@ export default async function packetReceiver(
         }
 
         let delay = 0;
-        if (target.id !== currentPlayer.id) {
+        if (target.id !== currentPlayer.id && spell_damage >= 0) {
           const maxTravelTime = 500;
           const speedMultiplier = 1000;
 
