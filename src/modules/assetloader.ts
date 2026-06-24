@@ -173,6 +173,55 @@ function loadAllMaps() {
   log.success(`Loaded ${maps.length} map(s) in ${(performance.now() - now).toFixed(2)}ms`);
 }
 
+// Tiled stores "infinite" maps as per-layer `chunks` arrays instead of a flat
+// `data` array. The rest of the pipeline assumes finite maps (flat `layer.data`
+// sized width*height), so flatten infinite maps in place. Tiles outside the
+// declared map bounds are clipped. This must run AFTER any checksum/compression
+// of the raw JSON so map-sync between engine and asset server stays stable.
+function normalizeInfiniteMap(mapData: any): void {
+  if (!mapData || mapData.infinite !== true || !Array.isArray(mapData.layers)) return;
+
+  const mapWidth = Number(mapData.width);
+  const mapHeight = Number(mapData.height);
+  if (!mapWidth || !mapHeight) return;
+
+  for (const layer of mapData.layers) {
+    if (layer.type !== "tilelayer") continue;
+
+    const flat = new Array(mapWidth * mapHeight).fill(0);
+
+    if (Array.isArray(layer.chunks)) {
+      for (const chunk of layer.chunks) {
+        const data = chunk?.data;
+        if (!Array.isArray(data)) continue;
+        const cw = chunk.width;
+        const ch = chunk.height;
+        const cx = chunk.x;
+        const cy = chunk.y;
+        for (let row = 0; row < ch; row++) {
+          const gy = cy + row;
+          if (gy < 0 || gy >= mapHeight) continue;
+          for (let col = 0; col < cw; col++) {
+            const gx = cx + col;
+            if (gx < 0 || gx >= mapWidth) continue;
+            const val = data[row * cw + col];
+            if (val) flat[gy * mapWidth + gx] = val;
+          }
+        }
+      }
+    }
+
+    layer.data = flat;
+    layer.width = mapWidth;
+    layer.height = mapHeight;
+    layer.startx = 0;
+    layer.starty = 0;
+    delete layer.chunks;
+  }
+
+  mapData.infinite = false;
+}
+
 function processMapFile(file: string): MapData | null {
   const fullPath = path.join(mapDir, file);
   const parsed = tryParse(fs.readFileSync(fullPath, "utf-8"));
@@ -191,6 +240,8 @@ function processMapFile(file: string): MapData | null {
   - Compressed: ${compressedData.length} bytes
   - Compression Ratio: ${(jsonString.length / compressedData.length).toFixed(2)}x
   - Compression Savings: ${(((jsonString.length - compressedData.length) / jsonString.length) * 100).toFixed(2)}%`);
+
+  normalizeInfiniteMap(parsed);
 
   return {
     name: file,
@@ -445,12 +496,15 @@ export async function saveMapChunks(mapName: string, chunks: any[]): Promise<voi
     }
 
     const mapData = JSON.parse(fs.readFileSync(fullPath, "utf-8"));
-    const CHUNK_SIZE = mapData.tilewidth;
-    const chunkSize = CHUNK_SIZE;
+
+    // Infinite maps store tiles in per-layer `chunks` instead of a flat `data`
+    // array. Flatten to finite so the per-layer write-back below works; the file
+    // is then persisted (and reprocessed) as a finite map.
+    normalizeInfiniteMap(mapData);
 
     for (const chunk of chunks) {
-      const startX = chunk.chunkX * chunkSize;
-      const startY = chunk.chunkY * chunkSize;
+      const startX = chunk.chunkX * chunk.width;
+      const startY = chunk.chunkY * chunk.height;
 
       log.debug(`Saving chunk (${chunk.chunkX}, ${chunk.chunkY}) - startX: ${startX}, startY: ${startY}, mapData.width: ${mapData.width}`);
 
