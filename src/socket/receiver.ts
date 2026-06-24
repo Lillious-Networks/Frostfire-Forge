@@ -477,6 +477,8 @@ async function transitionPlayerToMap(
 ): Promise<void> {
   await handleMapChangeAOI(player, newMapName, { x: newPosition.x, y: newPosition.y }, spawnBatchQueue, despawnBatchQueue);
 
+  clearTargetOnMapChange(player.id);
+
   const updatedPlayer = playerCache.get(player.id);
   if (!updatedPlayer) return;
 
@@ -703,6 +705,31 @@ export function clearBatchQueuesForPlayer(playerId: string, mapName: string) {
  */
 export function clearPlayerTarget(playerId: string) {
   currentTargetMap.delete(playerId);
+}
+
+/**
+ * Untarget when a player changes maps. The moving player can no longer see
+ * their previous target, and any players that were targeting the mover can no
+ * longer see them, so clear both server-side target state and notify clients.
+ */
+export function clearTargetOnMapChange(playerId: string) {
+  if (currentTargetMap.has(playerId)) {
+    currentTargetMap.delete(playerId);
+    const mover = playerCache.get(playerId);
+    if (mover?.ws && mover.ws.readyState === 1) {
+      sendPacket(mover.ws, packetManager.selectPlayer({ id: playerId, data: null }));
+    }
+  }
+
+  for (const [observerId, targetedId] of currentTargetMap.entries()) {
+    if (targetedId === playerId) {
+      currentTargetMap.delete(observerId);
+      const observer = playerCache.get(observerId);
+      if (observer?.ws && observer.ws.readyState === 1) {
+        sendPacket(observer.ws, packetManager.selectPlayer({ id: observerId, data: null }));
+      }
+    }
+  }
 }
 
 export async function teleportPlayerWrapper(playerObj: any, mapName: string, x: number, y: number): Promise<void> {
@@ -1467,7 +1494,6 @@ export default async function packetReceiver(
 
         const baseSpeed = 6;
         const mountSpeedMultiplier = 1.35;
-        const speed = currentPlayer.mounted ? baseSpeed * mountSpeedMultiplier : baseSpeed;
         const lastDirection =
           currentPlayer.location.position?.direction || "down";
 
@@ -1576,6 +1602,8 @@ export default async function packetReceiver(
           const tempPosition = { ...currentPlayer.location.position };
           const playerHeight = 40;
           const playerWidth = 24;
+
+          const speed = currentPlayer.mounted ? baseSpeed * mountSpeedMultiplier : baseSpeed;
 
           const directionOffsets: Record<string, { dx: number; dy: number }> = {
             up: { dx: 0, dy: -speed },
@@ -2241,9 +2269,10 @@ export default async function packetReceiver(
           sendPacket(player.ws, packetManager.stealth(stealthData));
         });
         if (isStealth) {
-          // When stealthing, despawn from other players
+          // When stealthing, despawn from other players (admins can still see stealthed players)
           playersInMap.forEach((player) => {
             if (player.id === currentPlayer.id) return;
+            if (player.isAdmin) return;
             sendPacket(player.ws, packetManager.despawnPlayer(currentPlayer.id as string));
           });
         } else if (!isStealth) {
@@ -2281,6 +2310,8 @@ export default async function packetReceiver(
           playersInMap.forEach((player) => {
             // Skip sending to self
             if (player.id === currentPlayer.id) return;
+            // Admins never lost sight of the stealthed player, so skip to avoid duplicate entities
+            if (player.isAdmin) return;
 
             const spawnData = queueSpawnPlayerPacket(currentPlayer);
             if (spawnData) {
