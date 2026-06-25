@@ -177,7 +177,8 @@ const createSpellsTable = async () => {
         cooldown INTEGER NOT NULL,
         can_move INTEGER NOT NULL DEFAULT 0,
         description TEXT DEFAULT NULL,
-        icon TEXT DEFAULT NULL
+        icon TEXT DEFAULT NULL,
+        effects TEXT DEFAULT NULL
     );
   `;
   await query(sql);

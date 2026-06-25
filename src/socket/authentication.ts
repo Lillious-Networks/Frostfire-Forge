@@ -99,7 +99,17 @@ const authentication = {
                 spellsByName[sp.name] = sp;
             }
 
-            const learnedSpells: Record<string, { icon: string | null, sprite: string | null }> = Object.create(null);
+            const learnedSpells: Record<string, {
+                icon: string | null,
+                sprite: string | null,
+                description: string | null,
+                mana: number,
+                cooldown: number,
+                cast_time: number,
+                damage: number,
+                type: string | null,
+                effects: SpellEffect[]
+            }> = Object.create(null);
 
             for (const row of learnedSpellsData) {
                 const name = row.spell;
@@ -110,6 +120,13 @@ const authentication = {
                 learnedSpells[name] = {
                     icon: spellDetails.icon ?? null,
                     sprite: spellDetails.sprite ?? null,
+                    description: spellDetails.description ?? null,
+                    mana: spellDetails.mana ?? 0,
+                    cooldown: spellDetails.cooldown ?? 0,
+                    cast_time: spellDetails.cast_time ?? 0,
+                    damage: spellDetails.damage ?? 0,
+                    type: spellDetails.type ?? null,
+                    effects: Array.isArray(spellDetails.effects) ? spellDetails.effects : [],
                 };
             }
 

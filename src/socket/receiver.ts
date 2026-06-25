@@ -36,6 +36,7 @@ import particles from "../systems/particles";
 import npcSystem from "../systems/npcs";
 import entitySystem from "../systems/entities";
 import entityAI from "../systems/entityAI";
+import spellEffects from "../systems/spelleffects";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const mapPropertiesCache = await assetCache.get("mapProperties");
@@ -1308,7 +1309,14 @@ authWorker.on("message", async (result: any) => {
     if (playerData.learnedSpells && typeof playerData.learnedSpells === 'object') {
       for (const [spellName, spellData] of Object.entries(playerData.learnedSpells)) {
         spellsWithSpriteUrls[spellName] = {
-          spriteUrl: (spellData as any).icon ? `${assetServerUrl}/sprite?name=${encodeURIComponent((spellData as any).icon)}` : null
+          spriteUrl: (spellData as any).icon ? `${assetServerUrl}/sprite?name=${encodeURIComponent((spellData as any).icon)}` : null,
+          description: (spellData as any).description ?? null,
+          mana: (spellData as any).mana ?? 0,
+          cooldown: (spellData as any).cooldown ?? 0,
+          cast_time: (spellData as any).cast_time ?? 0,
+          damage: (spellData as any).damage ?? 0,
+          type: (spellData as any).type ?? null,
+          effects: (spellData as any).effects ?? []
         };
       }
     }
@@ -2610,6 +2618,7 @@ export default async function packetReceiver(
         const spell_range = spell.range || 100;
         const spell_damage = spell?.damage;
         const spell_mana = spell?.mana || 0;
+        const hasEffects = Array.isArray(spell?.effects) && spell.effects.length > 0;
 
         currentPlayer.interruptableSpell = !spell?.can_move || false;
 
@@ -2635,7 +2644,7 @@ export default async function packetReceiver(
           return;
         }
 
-        if (!spell_damage) return;
+        if (!spell_damage && !hasEffects) return;
 
         // ATOMIC: Set cooldown immediately to prevent race condition with mana deduction
         // This must happen before any other async operations
@@ -2663,7 +2672,7 @@ export default async function packetReceiver(
           return;
         }
 
-        if (spell_damage < 0 && target.id !== currentPlayer.id && !isInParty) return;
+        if ((spell_damage < 0 || (spell_damage === 0 && hasEffects)) && target.id !== currentPlayer.id && !isInParty) return;
 
         const playersInMap = filterPlayersByMap(currentPlayer.location.map);
 
@@ -3013,6 +3022,9 @@ export default async function packetReceiver(
           finalDamage = Math.floor(healingDamage !== 0 ? healingDamage * (1 + critDamage / 100) : baseDamage * (1 + critDamage / 100));
         }
 
+        // Utility/effect-only spells (base damage 0) never deal damage and skip avoidance/armor
+        if (spell_damage === 0) finalDamage = 0;
+
         log.debug(`[ATTACK] Damage calculation: spell=${spell_damage}, bonus=${attackerDamageBonus}, base=${baseDamage}, crit=${isCrit}, final=${finalDamage}`);
 
         if (finalDamage > 0) {
@@ -3094,11 +3106,16 @@ export default async function packetReceiver(
         } else {
           // Apply damage to player target
           // Add if negative damage (healing) to current health, subtract positive damage
-          if (healingDamage !== 0) {
-            target.stats.health = Math.round(target.stats.health - finalDamage);
-          } else {
-            target.stats.health = Math.round(target.stats.health - finalDamage);
+          // Positive damage is first absorbed by absorbtion, remainder hits health
+          let damageToHealth = finalDamage;
+          if (finalDamage > 0) {
+            const absorbed = spellEffects.consumeBarrier(target, finalDamage);
+            damageToHealth = finalDamage - absorbed;
+            if (absorbed > 0 && target.ws) {
+              sendPacket(target.ws, packetManager.effects(spellEffects.getEffectsPayload(target)));
+            }
           }
+          target.stats.health = Math.round(target.stats.health - damageToHealth);
           listener.emit(Events.PLAYER_DAMAGED, { attacker: currentPlayer, target, damage: finalDamage, isCrit });
 
           playerCache.set(currentPlayer.id, currentPlayer);
@@ -3113,6 +3130,8 @@ export default async function packetReceiver(
 
           target.stats.health = target.stats.total_max_health;
           target.stats.stamina = target.stats.total_max_stamina;
+          spellEffects.clearBarriers(target);
+          if (target.ws) sendPacket(target.ws, packetManager.effects([]));
 
           const currentMapName = target.location.map;
           const respawnMapProps = mapPropertiesCache.find((m: any) => m.name === `${currentMapName}.json`);
@@ -3237,6 +3256,19 @@ export default async function packetReceiver(
           listener.emit(Events.PLAYER_DEATH, { player: target, killer: currentPlayer });
         } else {
 
+          const broadcastStats = (p: any) => {
+            const pls = filterPlayersByMap(p.location.map);
+            pls.forEach((pl: any) =>
+              sendPacket(pl.ws, packetManager.updateStats({ id: p.id, target: p.id, stats: p.stats }))
+            );
+            sendStatsToPartyMembers(p.username, p.id, p.stats);
+          };
+          const broadcastEffects = (p: any) => {
+            if (!p?.ws) return;
+            sendPacket(p.ws, packetManager.effects(spellEffects.getEffectsPayload(p)));
+          };
+          const effectResult = spellEffects.applySpellEffects(spell, currentPlayer, target, broadcastStats, broadcastEffects);
+
           playersInMap.forEach((player) => {
             sendPacket(
               player.ws,
@@ -3246,6 +3278,7 @@ export default async function packetReceiver(
                 stats: target.stats,
                 isCrit: isCrit,
                 damage: finalDamage,
+                absorb: effectResult.absorb || 0,
               })
             );
 

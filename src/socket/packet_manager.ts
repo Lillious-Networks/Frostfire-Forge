@@ -108,6 +108,16 @@ export const packetManager = {
       )
     ] as any[];
   },
+  effects: (data: any) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "EFFECTS",
+          data,
+        }),
+      )
+    ] as any[];
+  },
   loadHotBar: (data: any) => {
     return [
       packet.encode(

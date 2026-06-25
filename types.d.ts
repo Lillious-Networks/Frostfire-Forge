@@ -238,6 +238,7 @@ declare interface StatsData {
   stat_health: number;
   stat_stamina: number;
   stat_avoidance: number;
+  absorbtion: number;
 }
 
 declare interface WeaponData {
@@ -269,6 +270,12 @@ declare interface SpriteData {
   hash: Nullable<string>;
 }
 
+declare interface SpellEffect {
+  type: string;
+  value: number;
+  duration?: number;
+}
+
 declare interface SpellData {
   id: Nullable<number>;
   name: string;
@@ -282,6 +289,7 @@ declare interface SpellData {
   cooldown: number;
   icon: Nullable<string>;
   sprite: Nullable<string>;
+  effects: SpellEffect[];
 }
 
 declare interface LearnedSpell {

@@ -47,8 +47,19 @@ log.success(`Loaded ${mountList.length} mount(s) from the database in ${(perform
 log.info(`Mounts loaded: ${mountList.map((m) => m.name).join(", ")}`);
 
 const spellnow = performance.now();
-const spellList = await spell.list();
+const spellList = await spell.list() as any[];
 // Icons and sprites are now served from asset server, not stored in cache
+// Parse the JSON `effects` column into a SpellEffect[] so callers always get an array
+for (const s of spellList) {
+  if (typeof s.effects === "string") {
+    try {
+      s.effects = JSON.parse(s.effects);
+    } catch {
+      s.effects = [];
+    }
+  }
+  if (!Array.isArray(s.effects)) s.effects = [];
+}
 
 await assetCache.add("spells", spellList);
 const spells = await assetCache.get("spells") as SpellData[];

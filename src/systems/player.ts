@@ -1407,7 +1407,8 @@ const player = {
         stat_damage: data.stat_damage || 0,
         stat_health: data.stat_health || 0,
         stat_stamina: data.stat_stamina || 0,
-        stat_avoidance: data.stat_avoidance || 0
+        stat_avoidance: data.stat_avoidance || 0,
+        absorbtion: 0
       },
       currency: {
         copper: data.copper || 0,

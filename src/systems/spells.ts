@@ -5,8 +5,8 @@ const spells = {
   async add(spell: SpellData) {
     if (!spell?.name) return;
     return await query(
-      "INSERT IGNORE INTO spells (name, damage, mana, type, range, cast_time, description, can_move) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [spell.name, spell.damage, spell.mana, spell.type, spell.range, spell.cast_time, spell.description, spell.can_move || 0]
+      "INSERT IGNORE INTO spells (name, damage, mana, type, range, cast_time, description, can_move, effects) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [spell.name, spell.damage, spell.mana, spell.type, spell.range, spell.cast_time, spell.description, spell.can_move || 0, JSON.stringify(spell.effects || [])]
     );
   },
   async remove(spell: SpellData) {
@@ -24,8 +24,8 @@ const spells = {
   async update(spell: SpellData) {
     if (!spell?.name) return;
     const result = await query(
-        "UPDATE spells SET damage = ?, mana = ?, type = ?, range = ?, cast_time = ?, description = ?, can_move = ? WHERE name = ?",
-        [spell.damage, spell.mana, spell.type, spell.range, spell.cast_time, spell.description, spell.can_move, spell.name]
+        "UPDATE spells SET damage = ?, mana = ?, type = ?, range = ?, cast_time = ?, description = ?, can_move = ?, effects = ? WHERE name = ?",
+        [spell.damage, spell.mana, spell.type, spell.range, spell.cast_time, spell.description, spell.can_move, JSON.stringify(spell.effects || []), spell.name]
     );
     if (result) {
       const spells = await assetCache.get("spells") as SpellData[];

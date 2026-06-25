@@ -4,6 +4,7 @@ import entityCache from "../services/entityCache.ts";
 import playerCache from "../services/playermanager";
 import log from "../modules/logger";
 import { packetManager } from "../socket/packet_manager";
+import spellEffects from "./spelleffects";
 import { getEntitySpriteLayers, getIconUrl } from "../modules/spriteSheetManager";
 import assetCache from "../services/assetCache";
 import * as settings from "../config/settings.json";
@@ -476,7 +477,13 @@ async function processCombat(entity: any, aiState: EntityAIState): Promise<void>
           if (!aiState.target) return;
           const freshTarget = playerCache.get(aiState.target);
           if (freshTarget && freshTarget.stats) {
-            freshTarget.stats.health = Math.max(0, freshTarget.stats.health - damageAmount);
+            let dmg = damageAmount;
+            const absorbed = spellEffects.consumeBarrier(freshTarget, dmg);
+            dmg -= absorbed;
+            if (absorbed > 0 && freshTarget.ws && freshTarget.ws.readyState === 1) {
+              freshTarget.ws.send(packetManager.effects(spellEffects.getEffectsPayload(freshTarget))[0]);
+            }
+            freshTarget.stats.health = Math.max(0, freshTarget.stats.health - dmg);
 
             const allPlayers = Object.values(playerCache.list()) as any[];
             const playersOnMap = allPlayers.filter((p: any) => p && p.location && p.location.map === entity.map);
@@ -485,6 +492,10 @@ async function processCombat(entity: any, aiState: EntityAIState): Promise<void>
               freshTarget.stats.health = 0;
               freshTarget.stats.health = freshTarget.stats.total_max_health;
               freshTarget.stats.stamina = freshTarget.stats.total_max_stamina;
+              spellEffects.clearBarriers(freshTarget);
+              if (freshTarget.ws && freshTarget.ws.readyState === 1) {
+                freshTarget.ws.send(packetManager.effects([])[0]);
+              }
 
               // Immediately untarget the player when killed
               const killedTargetId = aiState.target;
@@ -567,7 +578,7 @@ async function processCombat(entity: any, aiState: EntityAIState): Promise<void>
               const updateStatsPacket = packetManager.updateStats({
                 id: entity.id,
                 target: freshTarget.id,
-                stats: { health: freshTarget.stats.health, total_max_health: freshTarget.stats.total_max_health },
+                stats: { health: freshTarget.stats.health, total_max_health: freshTarget.stats.total_max_health, absorbtion: freshTarget.stats.absorbtion },
                 isCrit: false,
                 damage: damageAmount,
                 entity: false,
