@@ -192,8 +192,33 @@ function loadAllMaps() {
 function normalizeInfiniteMap(mapData: any): void {
   if (!mapData || mapData.infinite !== true || !Array.isArray(mapData.layers)) return;
 
-  const mapWidth = Number(mapData.width);
-  const mapHeight = Number(mapData.height);
+  // The map's declared width/height go stale the moment "infinite" is enabled in
+  // Tiled. Derive the true size from the actual painted tiles across all layers
+  // (not the 16-aligned chunk bounds) so we don't report empty padding that would
+  // render as a black border and let the camera pan into nothing. Origin stays at
+  // tile 0,0; any negative-coordinate tiles are clipped.
+  let mapWidth = 0;
+  let mapHeight = 0;
+  for (const layer of mapData.layers) {
+    if (layer.type !== "tilelayer" || !Array.isArray(layer.chunks)) continue;
+    for (const chunk of layer.chunks) {
+      const data = chunk?.data;
+      if (!Array.isArray(data)) continue;
+      const cw = chunk.width || 0;
+      const ch = chunk.height || 0;
+      const cx = chunk.x || 0;
+      const cy = chunk.y || 0;
+      for (let row = 0; row < ch; row++) {
+        for (let col = 0; col < cw; col++) {
+          if (!data[row * cw + col]) continue;
+          const gx = cx + col + 1;
+          const gy = cy + row + 1;
+          if (gx > mapWidth) mapWidth = gx;
+          if (gy > mapHeight) mapHeight = gy;
+        }
+      }
+    }
+  }
   if (!mapWidth || !mapHeight) return;
 
   for (const layer of mapData.layers) {
@@ -230,6 +255,8 @@ function normalizeInfiniteMap(mapData: any): void {
     delete layer.chunks;
   }
 
+  mapData.width = mapWidth;
+  mapData.height = mapHeight;
   mapData.infinite = false;
 }
 
