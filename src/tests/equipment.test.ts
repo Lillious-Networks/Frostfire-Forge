@@ -74,7 +74,7 @@ const equipment = {
     return false;
   },
 
-  async unEquipItem(username: string, slot: string, item: string) {
+  async unEquipItem(username: string, slot: string) {
     if (!username || !slot) return false;
     if (!validSlots.includes(slot)) return false;
     await mockQuery(`UPDATE equipment SET ${slot} = NULL WHERE username = ?`, [username]);
@@ -116,16 +116,16 @@ test("equipment.equipItem fails for mismatched equipment slot", async () => {
 });
 
 test("equipment.unEquipItem requires username and slot", async () => {
-  const result = await equipment.unEquipItem("", "helmet", "test_item");
+  const result = await equipment.unEquipItem("", "helmet");
   expect(result).toBe(false);
 });
 
 test("equipment.unEquipItem validates slot", async () => {
-  const result = await equipment.unEquipItem("user1", "invalid_slot", "test_item");
+  const result = await equipment.unEquipItem("user1", "invalid_slot");
   expect(result).toBe(false);
 });
 
 test("equipment.unEquipItem unequips item", async () => {
-  const result = await equipment.unEquipItem("user1", "helmet", "iron_helmet");
+  const result = await equipment.unEquipItem("user1", "helmet");
   expect(result).toBe(true);
 });

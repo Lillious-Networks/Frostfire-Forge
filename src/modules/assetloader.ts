@@ -257,7 +257,9 @@ function normalizeInfiniteMap(mapData: any): void {
 
   mapData.width = mapWidth;
   mapData.height = mapHeight;
-  mapData.infinite = false;
+  // Keep mapData.infinite = true so the flag reaches the client/editor. Re-running
+  // this is safe: once chunks are flattened away the bounds loop finds none and
+  // returns early before touching layer data.
 }
 
 function processMapFile(file: string): MapData | null {
@@ -524,7 +526,158 @@ function extractAndCompressLayers(map: MapData) {
   if (noPvpZones.length > 0) compressLayer(noPvpZones, "nopvp");
 }
 
-export async function saveMapChunks(mapName: string, chunks: any[]): Promise<void> {
+// Apply edited chunks to a finite map: grow the flat storage to fit the edits,
+// then (for infinite maps) trim the result back to the tight content bounds so
+// empty expansion isn't persisted. Existing tiles and object-group objects are
+// shifted by the actual amount the content moved. `bounds` is the editor's claimed
+// extent (minTileX/minTileY <= 0, width/height exclusive max). Returns the net
+// world shift (in tiles) and the final map dimensions.
+export function applyChunksWithRebase(
+  mapData: any,
+  chunks: any[],
+  bounds?: { minTileX?: number; minTileY?: number; width?: number; height?: number; infinite?: boolean } | null
+): { shiftX: number; shiftY: number; width: number; height: number } {
+  if (!mapData || !Array.isArray(mapData.layers)) {
+    return { shiftX: 0, shiftY: 0, width: mapData?.width || 0, height: mapData?.height || 0 };
+  }
+
+  const refLayer = mapData.layers.find((l: any) => l.type === "tilelayer" && Array.isArray(l.data));
+  const oldWidth = refLayer?.width || mapData.width || 0;
+  const oldHeight = refLayer?.height || mapData.height || 0;
+
+  const minTileX = Math.min(0, bounds?.minTileX ?? 0);
+  const minTileY = Math.min(0, bounds?.minTileY ?? 0);
+  const reqWidth = bounds?.width ?? oldWidth;
+  const reqHeight = bounds?.height ?? oldHeight;
+
+  // Provisional grow + shift to make room for the claimed expansion.
+  const provShiftX = -minTileX;
+  const provShiftY = -minTileY;
+  const provWidth = Math.max(reqWidth, oldWidth) + provShiftX;
+  const provHeight = Math.max(reqHeight, oldHeight) + provShiftY;
+
+  if (provWidth !== oldWidth || provHeight !== oldHeight || provShiftX > 0 || provShiftY > 0) {
+    for (const layer of mapData.layers) {
+      if (layer.type !== "tilelayer" || !Array.isArray(layer.data)) continue;
+      const ow = layer.width || oldWidth;
+      const oh = layer.height || oldHeight;
+      const newData = new Array(provWidth * provHeight).fill(0);
+      for (let oy = 0; oy < oh; oy++) {
+        for (let ox = 0; ox < ow; ox++) {
+          const v = layer.data[oy * ow + ox];
+          if (!v) continue;
+          const nx = ox + provShiftX;
+          const ny = oy + provShiftY;
+          if (nx >= 0 && nx < provWidth && ny >= 0 && ny < provHeight) {
+            newData[ny * provWidth + nx] = v;
+          }
+        }
+      }
+      layer.data = newData;
+      layer.width = provWidth;
+      layer.height = provHeight;
+    }
+    mapData.width = provWidth;
+    mapData.height = provHeight;
+  }
+
+  for (const chunk of chunks || []) {
+    const cw = chunk.width;
+    const ch = chunk.height;
+    const startX = chunk.chunkX * cw + provShiftX;
+    const startY = chunk.chunkY * ch + provShiftY;
+    for (const chunkLayer of chunk.layers || []) {
+      const mapLayer = mapData.layers.find((l: any) => l.name === chunkLayer.name);
+      if (!mapLayer || !Array.isArray(mapLayer.data)) continue;
+      for (let y = 0; y < ch; y++) {
+        for (let x = 0; x < cw; x++) {
+          const mapX = startX + x;
+          const mapY = startY + y;
+          if (mapX < 0 || mapX >= provWidth || mapY < 0 || mapY >= provHeight) continue;
+          const ci = y * cw + x;
+          if (ci < chunkLayer.data.length) {
+            mapLayer.data[mapY * provWidth + mapX] = chunkLayer.data[ci];
+          }
+        }
+      }
+    }
+  }
+
+  let netShiftX = provShiftX;
+  let netShiftY = provShiftY;
+  let finalWidth = provWidth;
+  let finalHeight = provHeight;
+
+  // Trim empty expansion (infinite maps only): shrink back to the tight content
+  // bounds. Left/up is only trimmed up to the expansion amount, so intentional
+  // empty borders at the original origin are preserved. Use the client's infinite
+  // flag when provided (the in-memory map's flag can be stale).
+  if ((bounds?.infinite ?? mapData.infinite) === true) {
+    let tMinX = Infinity, tMinY = Infinity, tMaxX = -1, tMaxY = -1;
+    for (const layer of mapData.layers) {
+      if (layer.type !== "tilelayer" || !Array.isArray(layer.data)) continue;
+      const w = layer.width;
+      const data = layer.data;
+      for (let i = 0; i < data.length; i++) {
+        if (!data[i]) continue;
+        const x = i % w;
+        const y = (i - x) / w;
+        if (x < tMinX) tMinX = x;
+        if (x > tMaxX) tMaxX = x;
+        if (y < tMinY) tMinY = y;
+        if (y > tMaxY) tMaxY = y;
+      }
+    }
+
+    if (tMaxX >= 0) {
+      const leftTrim = Math.min(tMinX, provShiftX);
+      const topTrim = Math.min(tMinY, provShiftY);
+      const tightW = (tMaxX + 1) - leftTrim;
+      const tightH = (tMaxY + 1) - topTrim;
+
+      if (leftTrim > 0 || topTrim > 0 || tightW < provWidth || tightH < provHeight) {
+        for (const layer of mapData.layers) {
+          if (layer.type !== "tilelayer" || !Array.isArray(layer.data)) continue;
+          const ow = layer.width;
+          const old = layer.data;
+          const nd = new Array(tightW * tightH).fill(0);
+          for (let y = 0; y < tightH; y++) {
+            for (let x = 0; x < tightW; x++) {
+              const v = old[(y + topTrim) * ow + (x + leftTrim)];
+              if (v) nd[y * tightW + x] = v;
+            }
+          }
+          layer.data = nd;
+          layer.width = tightW;
+          layer.height = tightH;
+        }
+        mapData.width = tightW;
+        mapData.height = tightH;
+      }
+
+      finalWidth = tightW;
+      finalHeight = tightH;
+      netShiftX = provShiftX - leftTrim;
+      netShiftY = provShiftY - topTrim;
+    }
+  }
+
+  if (netShiftX !== 0 || netShiftY !== 0) {
+    const dpx = netShiftX * (mapData.tilewidth || 32);
+    const dpy = netShiftY * (mapData.tileheight || 32);
+    for (const layer of mapData.layers) {
+      if (layer.type !== "objectgroup" || !Array.isArray(layer.objects)) continue;
+      for (const obj of layer.objects) {
+        if (typeof obj.x === "number") obj.x += dpx;
+        if (typeof obj.y === "number") obj.y += dpy;
+      }
+    }
+  }
+
+  return { shiftX: netShiftX, shiftY: netShiftY, width: finalWidth, height: finalHeight };
+}
+
+export async function saveMapChunks(mapName: string, chunks: any[], bounds?: { minTileX?: number; minTileY?: number; width?: number; height?: number } | null): Promise<void> {
   try {
     const file = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
     const fullPath = path.join(mapDir, file);
@@ -540,34 +693,7 @@ export async function saveMapChunks(mapName: string, chunks: any[]): Promise<voi
     // is then persisted (and reprocessed) as a finite map.
     normalizeInfiniteMap(mapData);
 
-    for (const chunk of chunks) {
-      const startX = chunk.chunkX * chunk.width;
-      const startY = chunk.chunkY * chunk.height;
-
-      log.debug(`Saving chunk (${chunk.chunkX}, ${chunk.chunkY}) - startX: ${startX}, startY: ${startY}, mapData.width: ${mapData.width}`);
-
-      for (const chunkLayer of chunk.layers) {
-
-        const mapLayer = mapData.layers.find((l: any) => l.name === chunkLayer.name);
-
-        if (mapLayer && mapLayer.data) {
-          log.debug(`  Layer: ${chunkLayer.name}, layer width: ${mapLayer.width}, layer height: ${mapLayer.height}`);
-
-          for (let y = 0; y < chunk.height; y++) {
-            for (let x = 0; x < chunk.width; x++) {
-              const chunkIndex = y * chunk.width + x;
-              const mapX = startX + x;
-              const mapY = startY + y;
-              const mapIndex = mapY * mapLayer.width + mapX;
-
-              if (mapIndex < mapLayer.data.length) {
-                mapLayer.data[mapIndex] = chunkLayer.data[chunkIndex];
-              }
-            }
-          }
-        }
-      }
-    }
+    applyChunksWithRebase(mapData, chunks, bounds);
 
     fs.writeFileSync(fullPath, JSON.stringify(mapData, null, 2), "utf-8");
     log.success(`Saved ${chunks.length} chunk(s) to ${file}`);

@@ -44,7 +44,7 @@ import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 
 import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
-import { saveMapChunks, saveMapProperties } from "../modules/assetloader";
+import { saveMapChunks, saveMapProperties, applyChunksWithRebase } from "../modules/assetloader";
 import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers, getEntitySpriteLayers } from "../modules/spriteSheetManager";
 import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate } from "./aoi";
 import { realmWhitelist, isWhitelistEnabled } from "./server.ts";
@@ -454,6 +454,7 @@ function constructMapMetadata(
     tilewidth: map?.data?.tilewidth || 32,
     tileheight: map?.data?.tileheight || 32,
     tilesets: map?.data?.tilesets || [],
+    infinite: map?.data?.infinite === true,
     spawnX,
     spawnY,
     direction,
@@ -2052,6 +2053,22 @@ export default async function packetReceiver(
         });
         break;
       }
+      case "EDITOR_TILE_EDIT": {
+        // Relay live tile edits from one admin/editor to other admins editing the
+        // same map so concurrent editors stay in sync (no save-time clobbering).
+        if (!currentPlayer || !currentPlayer.isAdmin) return;
+        const editData = data as any;
+        if (!editData || !Array.isArray(editData.edits)) return;
+        const targets = filterPlayersByMap(currentPlayer.location.map).filter(
+          (p) => p.isAdmin && p.id !== ws.data.id && p.ws?.readyState === 1
+        );
+        if (targets.length === 0) break;
+        const relay = { senderId: ws.data.id, mapName: editData.mapName, edits: editData.edits };
+        targets.forEach((player) => {
+          sendPacket(player.ws, packetManager.editorTileEdit(relay));
+        });
+        break;
+      }
       case "CLIENTCONFIG": {
         if (!currentPlayer) return;
         await player.setConfig(ws.data.id, data);
@@ -3411,6 +3428,7 @@ export default async function packetReceiver(
             body: JSON.stringify({
               mapName: saveData.mapName,
               chunks: saveData.chunks,
+              bounds: (saveData as any).bounds,
               authKey: authKey
             })
           });
@@ -3473,31 +3491,13 @@ export default async function packetReceiver(
           // Update local cache with the changes AND save to disk
           const cachedMaps = (await assetCache.get("maps")) as MapData[];
           const mapIndex = cachedMaps.findIndex((m: any) => m.name === saveData.mapName);
+          let rebaseResult: { shiftX: number; shiftY: number; width: number; height: number } | null = null;
 
           if (mapIndex !== -1) {
-            // Update actual map layers with chunk data
+            // Update actual map layers with chunk data (growing / re-basing the
+            // origin for infinite-map expansion; empty expansion is trimmed away).
             const mapData = cachedMaps[mapIndex].data;
-            saveData.chunks.forEach((chunkData: any) => {
-              const startX = chunkData.chunkX * chunkData.width;
-              const startY = chunkData.chunkY * chunkData.height;
-
-              for (const chunkLayer of chunkData.layers) {
-                const mapLayer = mapData.layers.find((l: any) => l.name === chunkLayer.name);
-                if (mapLayer && mapLayer.data) {
-                  for (let y = 0; y < chunkData.height; y++) {
-                    for (let x = 0; x < chunkData.width; x++) {
-                      const chunkIndex = y * chunkData.width + x;
-                      const mapX = startX + x;
-                      const mapY = startY + y;
-                      const mapIndex = mapY * mapLayer.width + mapX;
-                      if (mapIndex < mapLayer.data.length && chunkIndex < chunkLayer.data.length) {
-                        mapLayer.data[mapIndex] = chunkLayer.data[chunkIndex];
-                      }
-                    }
-                  }
-                }
-              }
-            });
+            rebaseResult = applyChunksWithRebase(mapData, saveData.chunks, (saveData as any).bounds);
 
             // Update graveyards and warps in the map data
             if (saveData.graveyards !== undefined) {
@@ -3511,7 +3511,7 @@ export default async function packetReceiver(
 
             // Also save chunks to disk locally for persistence
             try {
-              await saveMapChunks(saveData.mapName, saveData.chunks);
+              await saveMapChunks(saveData.mapName, saveData.chunks, (saveData as any).bounds);
             } catch (diskError) {
               log.warn(`Failed to save chunks to disk locally: ${diskError}`);
               // Don't fail the request if local disk save fails, asset server has the data
@@ -3561,15 +3561,55 @@ export default async function packetReceiver(
             message: `Map saved successfully! ${saveData.chunks.length} chunks updated.`
           }));
 
-          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-          const chunkCoords = saveData.chunks.map((chunk: any) => ({
-            chunkX: chunk.chunkX,
-            chunkY: chunk.chunkY
-          }));
+          // Propagate the save to everyone on the map. Bounds (incl. trimmed empty
+          // expansion) go to ALL players so the saver's view shrinks too; chunk
+          // refreshes go only to OTHER players.
+          const onMapPlayers = filterPlayersByMap(currentPlayer.location.map);
+          const updatedMapData = cachedMaps[mapIndex]?.data;
+          // Use the SERVER-computed shift (empty expansion is trimmed away, so the
+          // real shift may be 0 even if the client claimed a negative expansion) and
+          // the persisted dims (what a reload will show), so live matches reload.
+          const shiftTilesX = rebaseResult?.shiftX ?? 0;
+          const shiftTilesY = rebaseResult?.shiftY ?? 0;
+          const newMapWidth = updatedMapData?.width ?? rebaseResult?.width;
+          const newMapHeight = updatedMapData?.height ?? rebaseResult?.height;
+          const tw = updatedMapData?.tilewidth || 32;
+          const th = updatedMapData?.tileheight || 32;
+          const shiftPxX = shiftTilesX * tw;
+          const shiftPxY = shiftTilesY * th;
 
-          playersInMap.forEach((player) => {
-            sendPacket(player.ws, packetManager.updateChunks(chunkCoords));
-          });
+          if (shiftTilesX > 0 || shiftTilesY > 0) {
+            // Left/up expansion re-based the origin to (0,0). Shift every on-map
+            // player's authoritative position and fully re-sync each client.
+            for (const p of onMapPlayers) {
+              if (p.location?.position) {
+                p.location.position.x = (Number(p.location.position.x) || 0) + shiftPxX;
+                p.location.position.y = (Number(p.location.position.y) || 0) + shiftPxY;
+                playerCache.set(p.id, p);
+              }
+            }
+            const rebasePayload = { shiftX: shiftPxX, shiftY: shiftPxY, width: newMapWidth, height: newMapHeight };
+            onMapPlayers.forEach((player) => {
+              sendPacket(player.ws, packetManager.mapRebase(rebasePayload));
+            });
+          } else {
+            // No re-base (grew or trimmed): update EVERYONE's bounds (shiftX/Y = 0 is
+            // a bounds-only update that drops trimmed-away chunks without re-fetching),
+            // and refresh the saved chunks for OTHER players only.
+            const boundsPayload = { shiftX: 0, shiftY: 0, width: newMapWidth, height: newMapHeight };
+            onMapPlayers.forEach((player) => {
+              sendPacket(player.ws, packetManager.mapRebase(boundsPayload));
+            });
+            const chunkCoords = saveData.chunks.map((chunk: any) => ({
+              chunkX: chunk.chunkX,
+              chunkY: chunk.chunkY
+            }));
+            onMapPlayers
+              .filter((p) => p.id !== ws.data.id)
+              .forEach((player) => {
+                sendPacket(player.ws, packetManager.updateChunks({ chunks: chunkCoords }));
+              });
+          }
         } catch (error: any) {
           log.error(`Error saving map: ${error.message}`);
           sendPacket(ws, packetManager.notify({

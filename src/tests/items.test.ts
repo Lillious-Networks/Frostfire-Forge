@@ -110,26 +110,26 @@ test("items.find returns item by name", async () => {
 });
 
 test("items.find returns undefined for non-existent item", async () => {
-  const result = await items.find({ name: "nonexistent" });
+  const result = await items.find({ name: "nonexistent" }) as any[];
   expect(result?.length || 0).toBe(0);
 });
 
 test("items.add requires all fields", async () => {
   await items.add({ name: "incomplete" });
-  const result = await items.find({ name: "incomplete" });
+  const result = await items.find({ name: "incomplete" }) as any[];
   expect(result?.length || 0).toBe(0);
 });
 
 test("items.add adds valid item", async () => {
   const newItem = createMockItem({ name: "new_sword" });
   await items.add(newItem);
-  const result = await items.find(newItem);
+  const result = await items.find(newItem) as any[];
   expect(result?.length || 0).toBeGreaterThanOrEqual(0);
 });
 
 test("items.remove deletes item", async () => {
   await items.remove({ name: "test_item" });
-  const result = await items.find({ name: "test_item" });
+  const result = await items.find({ name: "test_item" }) as any[];
   expect(result?.length || 0).toBe(0);
 });
 

@@ -1,4 +1,6 @@
 echo "Running ESLint..."
 bun eslint
+echo "Running TypeScript compiler..."
+bun run --bun tsc --noEmit
 echo "Running Unit Tests..."
 bun test

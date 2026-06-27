@@ -425,6 +425,16 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "STOPTYPING", data })),
     ] as any[];
   },
+  editorTileEdit: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "EDITOR_TILE_EDIT", data })),
+    ] as any[];
+  },
+  mapRebase: (data: { shiftX: number, shiftY: number, width: number, height: number }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "MAP_REBASE", data })),
+    ] as any[];
+  },
   updateXp: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "UPDATE_XP", data })),
@@ -560,9 +570,9 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "RELOAD_CHUNKS", data: null })),
     ] as any[];
   },
-  updateChunks: (chunks: Array<{chunkX: number, chunkY: number}>) => {
+  updateChunks: (data: { chunks: Array<{chunkX: number, chunkY: number}>, width?: number, height?: number, rebased?: boolean }) => {
     return [
-      packet.encode(JSON.stringify({ type: "UPDATE_CHUNKS", data: chunks })),
+      packet.encode(JSON.stringify({ type: "UPDATE_CHUNKS", data })),
     ] as any[];
   },
   chunkData: (chunkX: number, chunkY: number, width: number, height: number, layers: any[], tilewidth?: number, tileheight?: number, startX?: number, startY?: number) => {

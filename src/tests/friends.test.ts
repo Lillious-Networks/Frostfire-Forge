@@ -98,7 +98,7 @@ test("friends.add adds new friend", async () => {
 
 test("friends.add prevents duplicate friends", async () => {
   const result = await friends.add("user1", "user2");
-  const count = result.filter((f) => f === "user2").length;
+  const count = result.filter((f: string) => f === "user2").length;
   expect(count).toBe(1);
 });
 

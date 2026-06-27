@@ -1,9 +1,8 @@
 import { expect, test } from "bun:test";
 
 const language = {
-  translate: async (text: string, lang: string) => {
+  translate: async (text: string, _lang: string) => {
     if (!text || text.trim() === "") return text;
-
     return text;
   },
 

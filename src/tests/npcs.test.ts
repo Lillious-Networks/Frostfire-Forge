@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { mockAssetCache } from "./setup";
 
 const npcsDatabase: Record<number, any> = {
   1: {

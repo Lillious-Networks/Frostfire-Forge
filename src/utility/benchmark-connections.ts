@@ -210,7 +210,7 @@ async function createConnection(index: number, config: BenchmarkConfig): Promise
             }
         });
 
-        ws.addEventListener('error', (error) => {
+        ws.addEventListener('error', (_error) => {
             stats.failed++;
         });
 
