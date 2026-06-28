@@ -17,6 +17,12 @@ const currentTargetMap = new Map<string, string | null>();
 // Track who is being dragged by whom (draggedPlayerId -> adminId)
 const draggedPlayersMap = new Map<number, number>();
 
+// Track active tile editors per map (mapName -> Set<playerId>)
+const activeEditorsByMap = new Map<string, Set<number>>();
+
+// Track unsaved tile edits per map for syncing to new editors
+const editorEditHistory = new Map<string, Array<{ senderId: number; mapName: string; edits: any[] }>>();
+
 import playerCache from "../services/playermanager.ts";
 import layerManager from "../services/layermanager";
 import mapIndex from "../services/mapindex";
@@ -2059,6 +2065,16 @@ export default async function packetReceiver(
         if (!currentPlayer || !currentPlayer.isAdmin) return;
         const editData = data as any;
         if (!editData || !Array.isArray(editData.edits)) return;
+
+        const mapName = editData.mapName;
+        if (mapName) {
+          // Store in history so new editors can sync unsaved work
+          if (!editorEditHistory.has(mapName)) {
+            editorEditHistory.set(mapName, []);
+          }
+          editorEditHistory.get(mapName)!.push({ senderId: ws.data.id, mapName, edits: editData.edits });
+        }
+
         const targets = filterPlayersByMap(currentPlayer.location.map).filter(
           (p) => p.isAdmin && p.id !== ws.data.id && p.ws?.readyState === 1
         );
@@ -2067,6 +2083,61 @@ export default async function packetReceiver(
         targets.forEach((player) => {
           sendPacket(player.ws, packetManager.editorTileEdit(relay));
         });
+        break;
+      }
+      case "EDITOR_LAYER_LOCK": {
+        // Relay layer lock/unlock changes to other admins on the same map.
+        if (!currentPlayer || !currentPlayer.isAdmin) return;
+        const lockData = data as any;
+        if (!lockData || lockData.mapName !== currentPlayer.location.map) return;
+        const targets = filterPlayersByMap(currentPlayer.location.map).filter(
+          (p) => p.isAdmin && p.id !== ws.data.id && p.ws?.readyState === 1
+        );
+        if (targets.length === 0) break;
+        const relay = { mapName: lockData.mapName, layerName: lockData.layerName, locked: lockData.locked };
+        targets.forEach((player) => {
+          sendPacket(player.ws, packetManager.editorLayerLock(relay));
+        });
+        break;
+      }
+      case "EDITOR_OPEN": {
+        if (!currentPlayer || !currentPlayer.isAdmin) return;
+        const mapName = currentPlayer.location.map;
+        if (!activeEditorsByMap.has(mapName)) {
+          activeEditorsByMap.set(mapName, new Set());
+        }
+        activeEditorsByMap.get(mapName)!.add(ws.data.id);
+
+        // Replay all unsaved edits as one batch.
+        const history = editorEditHistory.get(mapName);
+        if (history && history.length > 0) {
+          const allEdits: any[] = [];
+          for (const entry of history) {
+            if (!Array.isArray(entry.edits)) continue;
+            for (const edit of entry.edits) {
+              allEdits.push(edit);
+            }
+          }
+          if (allEdits.length > 0) {
+            sendPacket(ws, packetManager.editorTileEdit({ mapName, edits: allEdits }));
+          }
+        }
+
+        sendPacket(ws, packetManager.editorSyncReady({ mapName }));
+        break;
+      }
+      case "EDITOR_CLOSE": {
+        if (!currentPlayer || !currentPlayer.isAdmin) return;
+        const mapName = currentPlayer.location.map;
+        const editors = activeEditorsByMap.get(mapName);
+        if (editors) {
+          editors.delete(ws.data.id);
+          if (editors.size === 0) {
+            activeEditorsByMap.delete(mapName);
+            // No editors left on this map — clear unsaved edit history
+            editorEditHistory.delete(mapName);
+          }
+        }
         break;
       }
       case "CLIENTCONFIG": {
@@ -3616,6 +3687,12 @@ export default async function packetReceiver(
             message: 'Error saving map changes.'
           }));
         }
+
+        // Clear edit history for this map now that it's saved
+        if (saveData.mapName) {
+          editorEditHistory.delete(saveData.mapName);
+        }
+
         break;
       }
       case "SAVE_PARTICLE": {

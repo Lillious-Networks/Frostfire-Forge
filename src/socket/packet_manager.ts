@@ -430,6 +430,16 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "EDITOR_TILE_EDIT", data })),
     ] as any[];
   },
+  editorLayerLock: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "EDITOR_LAYER_LOCK", data })),
+    ] as any[];
+  },
+  editorSyncReady: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "EDITOR_SYNC_READY", data })),
+    ] as any[];
+  },
   mapRebase: (data: { shiftX: number, shiftY: number, width: number, height: number }) => {
     return [
       packet.encode(JSON.stringify({ type: "MAP_REBASE", data })),
