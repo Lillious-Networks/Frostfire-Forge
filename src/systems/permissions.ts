@@ -3,8 +3,7 @@ import log from "../modules/logger";
 
 const permissions = {
     clear: async (username: string) => {
-
-        await query("UPDATE permissions SET permissions = NULL WHERE username = ?", [username]);
+        await query("DELETE FROM permissions WHERE username = ?", [username]);
         log.info(`Permissions cleared for ${username}`);
     },
     set: async (username: string, permissions: string | string[]) => {
