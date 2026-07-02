@@ -4703,7 +4703,6 @@ export default async function packetReceiver(
                 (p) => p.username.toLowerCase() === identifier.toLowerCase()
               );
             } else {
-
               targetPlayer = playerCache.get(identifier);
             }
 
@@ -4723,7 +4722,7 @@ export default async function packetReceiver(
               break;
             }
 
-            if (targetPlayer.isAdmin) {
+            if (targetPlayer.isAdmin && !currentPlayer.permissions.some((p: string) => p === "admin.summonadmins" || p === "admin.*")) {
               const notifyData = {
                 message: "You cannot summon other admins",
               };
