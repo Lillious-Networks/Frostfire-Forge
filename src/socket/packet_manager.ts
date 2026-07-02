@@ -108,6 +108,66 @@ export const packetManager = {
       )
     ] as any[];
   },
+  learnSpell: (data: any) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "LEARN_SPELL",
+          data,
+        }),
+      )
+    ] as any[];
+  },
+  unlearnSpell: (data: any) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "UNLEARN_SPELL",
+          data,
+        }),
+      )
+    ] as any[];
+  },
+  addInventoryItem: (data: any) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "ADD_INVENTORY_ITEM",
+          data,
+        }),
+      )
+    ] as any[];
+  },
+  removeInventoryItem: (data: any) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "REMOVE_INVENTORY_ITEM",
+          data,
+        }),
+      )
+    ] as any[];
+  },
+  addCollectable: (data: any) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "ADD_COLLECTABLE",
+          data,
+        }),
+      )
+    ] as any[];
+  },
+  removeCollectable: (data: any) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "REMOVE_COLLECTABLE",
+          data,
+        }),
+      )
+    ] as any[];
+  },
   effects: (data: any) => {
     return [
       packet.encode(

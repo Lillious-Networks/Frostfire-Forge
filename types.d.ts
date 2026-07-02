@@ -3,7 +3,7 @@ type Nullable<T> = T | null;
 type DatabaseEngine = "mysql" | "postgres" | "sqlite";
 
 declare interface Packet {
-  type: PacketType;
+  type: string;
   data: PacketData;
   id: Nullable<string>;
   useragent: Nullable<string>;
@@ -13,7 +13,7 @@ declare interface Packet {
 }
 
 declare interface PacketType {
-  [key: any]: string;
+  [key: string]: string;
 }
 
 declare interface PacketData {

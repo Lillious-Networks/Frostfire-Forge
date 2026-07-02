@@ -3262,36 +3262,13 @@ export default async function packetReceiver(
 
           target.location.position = { x: Math.round(respawnX), y: Math.round(respawnY), direction: "down" };
 
-          const xp = 10;
-          const xpResult = await player.increaseXp(currentPlayer.username, xp);
-
           const syncedStats = await player.synchronizeStats(currentPlayer.username);
 
           if (syncedStats) {
             currentPlayer.stats = syncedStats;
           }
 
-          if (xpResult && typeof xpResult === 'object' && 'xp' in xpResult) {
-            const oldLevel = currentPlayer.stats.level;
-            currentPlayer.stats.xp = xpResult.xp;
-            currentPlayer.stats.level = xpResult.level;
-            currentPlayer.stats.max_xp = xpResult.max_xp;
-            if (xpResult.level > oldLevel) {
-              listener.emit(Events.PLAYER_LEVEL_UP, { player: currentPlayer, oldLevel, newLevel: xpResult.level });
-            }
-          }
-
           playerCache.set(currentPlayer.id, currentPlayer);
-
-          sendPacket(
-            ws,
-            packetManager.updateXp({
-              id: currentPlayer.id,
-              xp: currentPlayer.stats.xp,
-              level: currentPlayer.stats.level,
-              max_xp: currentPlayer.stats.max_xp,
-            })
-          );
 
           sendPacket(
             ws,
