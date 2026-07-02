@@ -356,7 +356,7 @@ bun setup-production
 ```bash
 /summon [username | id]
 ```
-- **Permission**: `admin.summon` | `admin.*`
+- **Permission**: `admin.summon` | `admin.*` | `admin.summonadmins`
 </details>
 
 <details>
