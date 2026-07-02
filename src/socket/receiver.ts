@@ -6026,6 +6026,16 @@ export default async function packetReceiver(
               break;
             }
 
+            // Check database if target player is an admin
+            // Do not rely on cache for this check
+            if(!player.isAdmin(targetPlayer.username)) {
+              const notifyData = {
+                message: "You can only modify permissions for admin players",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
             let access;
             let permissionsArray: string[] = [];
             if (mode !== "CLEAR" && mode !== "LIST") {
