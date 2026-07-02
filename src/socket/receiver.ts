@@ -3557,14 +3557,6 @@ export default async function packetReceiver(
 
             assetCache.add("maps", cachedMaps);
 
-            // Also save chunks to disk locally for persistence
-            try {
-              await saveMapChunks(saveData.mapName, saveData.chunks, (saveData as any).bounds);
-            } catch (diskError) {
-              log.warn(`Failed to save chunks to disk locally: ${diskError}`);
-              // Don't fail the request if local disk save fails, asset server has the data
-            }
-
             // Save graveyards and warps properties and reload the map
             if (saveData.graveyards !== undefined || saveData.warps !== undefined) {
               try {
@@ -3594,15 +3586,23 @@ export default async function packetReceiver(
               }
             }
 
-            // Refresh collision cache since collision layer may have been updated
-            try {
-              const { reloadMap } = await import("../modules/assetloader");
-              await reloadMap(saveData.mapName);
-              // Clear the player.ts local map cache so collision checks fetch fresh data
-              clearMapCache(saveData.mapName);
-            } catch (reloadError) {
-              log.warn(`Failed to reload map collision cache: ${reloadError}`);
-            }
+          }
+
+          // Save chunks to disk locally so reloadMap reads fresh file
+          try {
+            await saveMapChunks(saveData.mapName, saveData.chunks, (saveData as any).bounds);
+          } catch (diskError) {
+            log.warn(`Failed to save chunks to disk locally: ${diskError}`);
+          }
+
+          // Refresh collision cache since collision layer may have been updated
+          try {
+            const { reloadMap } = await import("../modules/assetloader");
+            await reloadMap(saveData.mapName);
+            log.info(`Collision cache refreshed for ${saveData.mapName}`);
+            clearMapCache(saveData.mapName);
+          } catch (reloadError) {
+            log.warn(`Failed to reload map collision cache: ${reloadError}`);
           }
 
           sendPacket(ws, packetManager.notify({
