@@ -1,4 +1,5 @@
 const PROCESS_STARTED_AT = Date.now() - performance.now();
+let lastSessionValidationTime = 0;
 const MAX_BUFFER_SIZE = 1024 * 1024 * 1024;
 const packetQueue = new Map<string, (() => void)[]>();
 import "../utility/validate_config.ts";
@@ -553,7 +554,7 @@ listener.on(Events.SERVER_TICK, async () => {
   const playersObj = playerCache.list() as any;
   const players = Object.values(playersObj) as any[];
 
-  const inactiveSet = new Set<string>();
+  const inactiveSet = new Map<string, string>();
   const nowEpoch = Date.now();
 
   for (const p of players) {
@@ -571,7 +572,43 @@ listener.on(Events.SERVER_TICK, async () => {
     const tooIdle = (nowEpoch - lastUpdatedEpoch) > 30000;
 
     if (wsClosed || tooIdle) {
-      inactiveSet.add(p.id);
+      inactiveSet.set(p.id, "inactive");
+    }
+  }
+
+  if (nowEpoch - lastSessionValidationTime > 60000) {
+    lastSessionValidationTime = nowEpoch;
+    const userIds = players
+      .filter((p: any) => p?.userid && !inactiveSet.has(p.id))
+      .map((p: any) => Number(p.userid));
+
+    if (userIds.length > 0) {
+      try {
+        const dbResults = await query(
+          "SELECT id, session_id FROM accounts WHERE id IN (?)",
+          [userIds]
+        ) as any[];
+
+        const dbSessionMap = new Map<string, string>();
+        for (const r of dbResults) {
+          dbSessionMap.set(String(r.id ?? ""), String(r.session_id ?? ""));
+        }
+
+        for (const p of players) {
+          if (!p?.userid || inactiveSet.has(p.id)) continue;
+          const dbSid = dbSessionMap.get(String(p.userid)) || "";
+          if (dbSid !== String(p.id)) {
+            log.info(
+              `[Session] Stale session detected for ${
+                p.username
+              } (local: ${p.id}, db: ${dbSid || "cleared"})`
+            );
+            inactiveSet.set(p.id, "session_stolen");
+          }
+        }
+      } catch (e) {
+        log.error(`[Session] Validation query failed: ${e}`);
+      }
     }
   }
 
@@ -636,7 +673,7 @@ listener.on(Events.SERVER_TICK, async () => {
     }
   }
   if (inactiveSet.size > 0) {
-    for (const id of inactiveSet) {
+    for (const [id, reason] of inactiveSet) {
 
       const stillInCache = playerCache.get(id);
       if (!stillInCache) continue;
@@ -650,7 +687,27 @@ listener.on(Events.SERVER_TICK, async () => {
       }
       if (!stillConnected) continue;
 
-      listener.emit("onDisconnect", { id, reason: "inactive" });
+      if (reason === "session_stolen" && stillInCache.ws?.readyState === WebSocket.OPEN) {
+        try {
+          stillInCache.ws.send(
+            packetManager.notify({
+              message: "You have been logged in from another location.",
+            })
+          );
+        } catch {
+          console.error(`Failed to send session stolen notification to player ${id}`);
+        }
+        packetQueue.delete(id);
+        ClientRateLimit.delete(id);
+        try {
+          stillInCache.ws.close(1000, "Logged in from another location");
+        } catch {
+          console.error(`Failed to close WebSocket for player ${id}`);
+        }
+        continue;
+      }
+
+      listener.emit("onDisconnect", { id, reason });
 
       packetQueue.delete(id);
       ClientRateLimit.delete(id);
@@ -672,6 +729,23 @@ listener.on("onDisconnect", async (data) => {
   try {
     const playerData = playerCache.get(data.id);
     if (!playerData) return;
+
+    if (data.reason === "session_stolen" && playerData.ws?.readyState === WebSocket.OPEN) {
+      try {
+        playerData.ws.send(
+          packetManager.notify({
+            message: "You have been logged in from another location.",
+          })
+        );
+      } catch (err) {
+        console.error(`Failed to send session stolen notification to player ${data.id}`);
+      }
+      try {
+        playerData.ws.close(1000, "Logged in from another location");
+      } catch (err) {
+        console.error(`Failed to close WebSocket for player ${data.id}`);
+      }
+    }
 
     gameLoop.unregisterMovingPlayer(playerData.id);
 
@@ -739,10 +813,46 @@ listener.on(Events.SAVE, async () => {
   log.info("Saving player data...");
   const startTime = Date.now();
 
+  const sessionInvalidSet = new Set<string>();
+  const nonGuestPlayers = Object.entries(cache).filter(
+    ([, row]: [string, any]) => row && !row.isGuest && row.userid
+  );
+
+  if (nonGuestPlayers.length > 0) {
+    try {
+      const userIds = nonGuestPlayers.map(([, row]: [string, any]) => Number(row.userid));
+      const dbResults = await query(
+        "SELECT id, session_id FROM accounts WHERE id IN (?)",
+        [userIds]
+      ) as any[];
+
+      const dbSessionMap = new Map<string, string>();
+      for (const r of dbResults) {
+        dbSessionMap.set(String(r.id ?? ""), String(r.session_id ?? ""));
+      }
+
+      for (const [playerId, row] of nonGuestPlayers) {
+        const dbSid = dbSessionMap.get(String(row.userid)) || "";
+        if (dbSid !== String(playerId)) {
+          sessionInvalidSet.add(playerId);
+          log.info(
+            `[Save] Skipping save for ${row.username} — session stolen (local: ${playerId}, db: ${dbSid || "cleared"})`
+          );
+        }
+      }
+    } catch (e) {
+      log.error(`[Save] Session validation failed: ${e}`);
+    }
+  }
+
   const savePromises = Object.entries(cache).map(async ([playerId, row]) => {
     if (!row) return { success: false, playerId, reason: "no_row" };
     if (row.isGuest) return { success: true, playerId, reason: "guest_skipped" };
     if (row.saveLocked) return { success: true, playerId, reason: "save_locked" };
+    if (sessionInvalidSet.has(playerId)) {
+      playerCache.remove(playerId);
+      return { success: false, playerId, reason: "session_stolen" };
+    }
 
     if (!row.stats || !row.location) {
       playerCache.remove(playerId);
