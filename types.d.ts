@@ -342,6 +342,7 @@ declare interface MapProperties {
   tileHeight: number;
   warps: Nullable<WarpObject[]>;
   graveyards: Nullable<GraveyardObject[]>;
+  shadowLayerNames?: Nullable<string[]>;
 }
 
 declare interface PlayerProperties {

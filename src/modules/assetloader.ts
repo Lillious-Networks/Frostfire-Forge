@@ -164,7 +164,8 @@ function loadAllMaps() {
           tileWidth: map.data.tilewidth,
           tileHeight: map.data.tileheight,
           warps: null,
-          graveyards: null
+          graveyards: null,
+          shadowLayerNames: null
         });
         extractAndCompressLayers(map);
       } catch (error) {
@@ -293,6 +294,7 @@ function processMapFile(file: string): MapData | null {
 function extractAndCompressLayers(map: MapData) {
   const collisions: number[][] = [];
   const noPvpZones: number[][] = [];
+  const shadowLayerNames: string[] = [];
   const warps: any[] = [];
   const graveyards: any[] = [];
 
@@ -312,6 +314,11 @@ function extractAndCompressLayers(map: MapData) {
     if ((layer.properties?.[0]?.name.toLowerCase() === "nopvp" && layer.properties[0].value === true) ||
         layerName.includes("nopvp") || layerName.includes("no-pvp")) {
       noPvpZones.push(layer.data);
+    }
+
+    if ((layer.properties?.some((p: any) => p.name.toLowerCase() === "shadows" && p.value === true)) ||
+        layerName.includes("shadow")) {
+      shadowLayerNames.push(layer.name);
     }
   });
 
@@ -407,6 +414,17 @@ function extractAndCompressLayers(map: MapData) {
           layer: graveyard.layer
         }));
         log.debug(`Extracted ${graveyards.length} graveyard(s) from map ${map.name}`);
+      }
+
+      if (shadowLayerNames.length > 0) {
+        log.debug(`Found ${shadowLayerNames.length} shadow layer(s) in map ${map.name}`);
+        const _map = mapProperties.find(m => m.name.replace(".json", "") === map.name.replace(".json", "")) as MapProperties | undefined;
+        if (!_map) {
+          log.error(`Map properties not found for ${map.name}`);
+          return;
+        }
+        _map.shadowLayerNames = shadowLayerNames;
+        log.debug(`Stored shadow layer names for map ${map.name}: ${shadowLayerNames.join(", ")}`);
       }
     }
   });
@@ -884,6 +902,7 @@ export async function reloadMap(mapName: string): Promise<MapData> {
     const existingProps = mapProps.find(m => m.name.replace(".json", "") === newMap.name.replace(".json", ""));
     const existingGraveyards = existingProps?.graveyards;
     const existingWarps = existingProps?.warps;
+    const existingShadowLayerNames = existingProps?.shadowLayerNames;
 
     const newProps: MapProperties = {
       name: newMap.name,
@@ -893,6 +912,7 @@ export async function reloadMap(mapName: string): Promise<MapData> {
       tileHeight: newMap.data.tileheight,
       warps: existingWarps || null,
       graveyards: existingGraveyards || null,
+      shadowLayerNames: existingShadowLayerNames || null,
     };
 
     if (index >= 0) {

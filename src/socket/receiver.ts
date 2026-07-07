@@ -467,6 +467,7 @@ function constructMapMetadata(
     chunks: null,
     warps: mapProps?.warps || null,
     graveyards: mapProps?.graveyards || null,
+    shadowLayerNames: mapProps?.shadowLayerNames || null,
     hasWeather: !!worldsArr.find((w) => w.name === normalizedName),
     objectLayers,
   };
