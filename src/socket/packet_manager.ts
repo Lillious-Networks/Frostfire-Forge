@@ -575,6 +575,16 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "WEATHER", data })),
     ] as any[];
   },
+  changeWeather: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CHANGE_WEATHER", data })),
+    ] as any[];
+  },
+  lightning: (data: { x: number; y: number; map: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "LIGHTNING", data })),
+    ] as any[];
+  },
   collisionDebug: (data: { tileX: number; tileY: number }) => {
     return [
       packet.encode(JSON.stringify({ type: "COLLISION_DEBUG", data })),

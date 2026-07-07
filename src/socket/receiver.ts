@@ -39,6 +39,7 @@ import spells from "../systems/spells";
 import equipment from "../systems/equipment.ts";
 import inventory from "../systems/inventory";
 import particles from "../systems/particles";
+import worlds from "../systems/worlds";
 import npcSystem from "../systems/npcs";
 import entitySystem from "../systems/entities";
 import entityAI from "../systems/entityAI";
@@ -46,6 +47,7 @@ import spellEffects from "../systems/spelleffects";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const mapPropertiesCache = await assetCache.get("mapProperties");
+const resolvedWeatherCache = new Map<string, { weather: string; weatherData: WeatherData | null }>();
 import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 
 import * as settings from "../config/settings.json";
@@ -57,6 +59,38 @@ import { realmWhitelist, isWhitelistEnabled } from "./server.ts";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
 const useSpriteSheets = (settings as any).animation_system?.use_sprite_sheets ?? true;
+
+async function resolveWorldWeather(worldName: string): Promise<{ weather: string; weatherData: WeatherData | null }> {
+  const normalized = worldName.replace(".json", "");
+  const worldsResult = await assetCache.get("worlds").catch(() => worldsCache) as WorldData[] | string;
+  const worlds: WorldData[] = Array.isArray(worldsResult) ? worldsResult : JSON.parse(worldsResult as string);
+  const world = worlds.find((w) => w.name === normalized);
+  if (!world) return { weather: "clear", weatherData: null };
+
+  const weatherName = world.weather || "clear";
+
+  if (weatherName === "random") {
+    const cached = resolvedWeatherCache.get(normalized);
+    if (cached) return cached;
+
+    const allWeathers = await assetCache.get("weather") as WeatherData[];
+    if (allWeathers?.length) {
+      const randomWeather = allWeathers[Math.floor(Math.random() * allWeathers.length)];
+      const resolved = { weather: randomWeather.name, weatherData: randomWeather };
+      resolvedWeatherCache.set(normalized, resolved);
+      return resolved;
+    }
+    return { weather: "clear", weatherData: null };
+  }
+
+  if (weatherName === "clear") {
+    return { weather: "clear", weatherData: null };
+  }
+
+  const allWeathers = await assetCache.get("weather") as WeatherData[];
+  const weatherData = allWeathers?.find((w: WeatherData) => w.name === weatherName) || null;
+  return { weather: weatherName, weatherData };
+}
 
 async function waitForSpritesReady() {
   if (!useSpriteSheets || !(await isSpriteSheetSystemAvailable())) {
@@ -499,21 +533,10 @@ async function transitionPlayerToMap(
 
   setImmediate(async () => {
     try {
-      const world = worldsCache.find((w) => w.name === newMapName);
-      if (world) {
-        const weatherName = world.weather || "clear";
-        let weatherData = null;
-        if (weatherName && weatherName !== "clear") {
-          try {
-            const allWeathers = await assetCache.get("weather") as WeatherData[];
-            weatherData = allWeathers?.find((w: WeatherData) => w.name === weatherName);
-          } catch (e) {
-            log.warn(`Failed to fetch weather data for ${weatherName}: ${e}`);
-          }
-        }
-        if (weatherName) {
-          sendPacket(ws, packetManager.weather({ weather: weatherName, weatherData }));
-        }
+      const normalizedMap = newMapName.replace(".json", "");
+      const resolved = await resolveWorldWeather(normalizedMap);
+      if (resolved.weather) {
+        sendPacket(ws, packetManager.weather({ weather: resolved.weather, weatherData: resolved.weatherData }));
       }
     } catch (e) {
       log.warn(`Failed to fetch weather data for ${newMapName}: ${e}`);
@@ -888,20 +911,9 @@ authWorker.on("message", async (result: any) => {
 
     // Only apply weather/ambience if the map has a defined world entry
     if (world) {
-      const weatherName = world.weather || "clear";
-      let weatherData = null;
-
-      if (weatherName && weatherName !== "clear") {
-        try {
-          const allWeathers = await assetCache.get("weather") as WeatherData[];
-          weatherData = allWeathers?.find((w: WeatherData) => w.name === weatherName);
-        } catch (err) {
-          log.warn(`Failed to fetch weather data for ${weatherName}: ${err}`);
-        }
-      }
-
-      if (weatherName) {
-        sendPacket(ws, packetManager.weather({ weather: weatherName, weatherData }));
+      const resolved = await resolveWorldWeather(spawnLocation.map.replace(".json", ""));
+      if (resolved.weather) {
+        sendPacket(ws, packetManager.weather({ weather: resolved.weather, weatherData: resolved.weatherData }));
       }
     }
 
@@ -6331,6 +6343,84 @@ export default async function packetReceiver(
 
         break;
           }
+          case "WEATHER": {
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "admin.weather" || p === "admin.*"
+              )
+            ) {
+              sendPacket(
+                ws,
+                packetManager.notify({ message: "You don't have permission to use this command" })
+              );
+              break;
+            }
+
+            const weatherName = args[0]?.toLowerCase() || null;
+            if (!weatherName) {
+              sendPacket(
+                ws,
+                packetManager.notify({ message: "Usage: /weather <weather_name|clear|random>" })
+              );
+              break;
+            }
+
+            if (weatherName !== "clear" && weatherName !== "random") {
+              const allWeathers = await assetCache.get("weather") as WeatherData[];
+              if (!allWeathers?.find((w: WeatherData) => w.name === weatherName)) {
+                sendPacket(
+                  ws,
+                  packetManager.notify({ message: `Weather '${weatherName}' not found` })
+                );
+                break;
+              }
+            }
+
+            const currentMapName = currentPlayer.location.map;
+
+            await worlds.update({ name: currentMapName, weather: weatherName });
+
+            const worldEntry = worldsCache.find((w) => w.name === currentMapName);
+            if (worldEntry) {
+              worldEntry.weather = weatherName;
+            }
+
+            resolvedWeatherCache.delete(currentMapName);
+
+            let weatherData = null;
+            let resolvedWeatherName = weatherName;
+            if (weatherName === "random") {
+              const allWeathers = await assetCache.get("weather") as WeatherData[];
+              if (allWeathers?.length) {
+                const randomWeather = allWeathers[Math.floor(Math.random() * allWeathers.length)];
+                weatherData = randomWeather;
+                resolvedWeatherName = randomWeather.name;
+                resolvedWeatherCache.set(currentMapName, { weather: resolvedWeatherName, weatherData: randomWeather });
+              } else {
+                resolvedWeatherName = "clear";
+              }
+            } else if (weatherName !== "clear") {
+              const allWeathers = await assetCache.get("weather") as WeatherData[];
+              weatherData = allWeathers?.find((w: WeatherData) => w.name === weatherName) || null;
+            }
+
+            const playerIds = mapIndex.getPlayersOnMap(currentMapName);
+            for (const playerId of playerIds) {
+              const player = playerCache.get(playerId);
+              if (player?.ws && player.ws.readyState === 1) {
+                sendPacket(
+                  player.ws,
+                  packetManager.changeWeather({ weather: resolvedWeatherName, weatherData })
+                );
+              }
+            }
+
+            sendPacket(
+              ws,
+              packetManager.notify({ message: `Weather changed to '${weatherName}' for world '${currentMapName}'` })
+            );
+            break;
+          }
           default: {
             const notifyData = {
               message: "Invalid command",
@@ -8023,3 +8113,69 @@ export async function sendAnimationTo(targetWs: any, name: string, playerId?: st
 
   sendPacket(targetWs, packetManager.spriteSheetAnimation(spriteSheetPacketData));
 }
+
+function scheduleLightning() {
+  const delay = 2000 + Math.random() * 3000;
+  setTimeout(async () => {
+    try {
+      for (const world of worldsCache) {
+        const resolved = resolvedWeatherCache.get(world.name);
+        const activeWeather = resolved ? resolved.weather : world.weather;
+        if (activeWeather !== "thunderstorm") continue;
+        const playersOnMap = mapIndex.getPlayersOnMap(world.name);
+        if (playersOnMap.size === 0) continue;
+
+        const playerIds = Array.from(playersOnMap);
+        const randomId = playerIds[Math.floor(Math.random() * playerIds.length)];
+        const player = playerCache.get(randomId);
+        if (!player?.location?.position) continue;
+
+        const strikeX = player.location.position.x + (Math.random() * 600 - 300);
+        const strikeY = player.location.position.y + (Math.random() * 400 - 200);
+
+        broadcastToAOI(
+          player,
+          packetManager.lightning({ x: Math.round(strikeX), y: Math.round(strikeY), map: world.name }),
+          true
+        );
+      }
+    } catch (e) {
+      // silently ignore
+    }
+    scheduleLightning();
+  }, delay);
+}
+
+scheduleLightning();
+
+function scheduleWeatherCycle() {
+  setTimeout(async () => {
+    try {
+      for (const world of worldsCache) {
+        if (world.weather !== "random") continue;
+
+        const allWeathers = await assetCache.get("weather") as WeatherData[];
+        if (!allWeathers?.length) continue;
+
+        const randomWeather = allWeathers[Math.floor(Math.random() * allWeathers.length)];
+        resolvedWeatherCache.set(world.name, { weather: randomWeather.name, weatherData: randomWeather });
+
+        const playerIds = mapIndex.getPlayersOnMap(world.name);
+        for (const playerId of playerIds) {
+          const player = playerCache.get(playerId);
+          if (player?.ws && player.ws.readyState === 1) {
+            sendPacket(
+              player.ws,
+              packetManager.changeWeather({ weather: randomWeather.name, weatherData: randomWeather })
+            );
+          }
+        }
+      }
+    } catch (e) {
+      // silently ignore
+    }
+    scheduleWeatherCycle();
+  }, 30 * 60 * 1000);
+}
+
+scheduleWeatherCycle();

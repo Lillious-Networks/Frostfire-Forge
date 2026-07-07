@@ -26,6 +26,8 @@ const worlds = {
   },
   async update(world: WorldData) {
     await query("UPDATE worlds SET name = ?, weather = ? WHERE name = ?", [world.name, world.weather, world.name]);
+    const updatedWorlds = await this.list();
+    assetCache.set("worlds", updatedWorlds);
   },
 };
 

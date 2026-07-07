@@ -346,14 +346,25 @@ const createWeatherTable = async () => {
 
 const createDefaultWeather = async () => {
   log.info("Creating default weather...");
-  const checkSql = `SELECT COUNT(*) as count FROM weather WHERE name = 'clear'`;
-  const result = await query(checkSql) as Array<{ count: number }>;
 
-  if (result[0]?.count === 0) {
+  const checkClear = `SELECT COUNT(*) as count FROM weather WHERE name = 'clear'`;
+  const clearResult = await query(checkClear) as Array<{ count: number }>;
+
+  if (clearResult[0]?.count === 0) {
     const sql = `INSERT INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('clear', 0, 'none', 0, 30, 68, 0)`;
     await query(sql);
   } else {
     log.debug("Default weather 'clear' already exists - skipping");
+  }
+
+  const checkThunderstorm = `SELECT COUNT(*) as count FROM weather WHERE name = 'thunderstorm'`;
+  const thunderstormResult = await query(checkThunderstorm) as Array<{ count: number }>;
+
+  if (thunderstormResult[0]?.count === 0) {
+    const sql = `INSERT INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('thunderstorm', 0.8, 'right', 25, 90, 55, 80)`;
+    await query(sql);
+  } else {
+    log.debug("Default weather 'thunderstorm' already exists - skipping");
   }
 }
 

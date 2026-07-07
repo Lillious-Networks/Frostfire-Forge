@@ -27,6 +27,11 @@ const weather = {
   },
   async list() {
     return await query("SELECT * FROM weather");
+  },
+  async random() {
+    const weathers = await assetCache.get("weather") as WeatherData[];
+    if (!weathers?.length) return null;
+    return weathers[Math.floor(Math.random() * weathers.length)];
   }
 };
 

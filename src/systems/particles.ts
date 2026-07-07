@@ -12,6 +12,13 @@ await assetCache.add("weather", await weather.list());
 const weathers = await assetCache.get("weather") as WeatherData[];
 log.success(`Loaded ${weathers.length} weather(s) from the database in ${(performance.now() - weatherNow).toFixed(2)}ms`);
 
+const resolveWeather = (weatherName: string) => {
+  if (weatherName === "random") {
+    return weathers.length ? weathers[Math.floor(Math.random() * weathers.length)] : 'none';
+  }
+  return weathers.find((w) => w.name === weatherName) || 'none';
+};
+
 const particlesNow = performance.now();
 
 const particles = {
@@ -38,7 +45,7 @@ const particles = {
     const particles: Particle[] = [];
 
     for (const particle of response) {
-      const weather = weathers.find((w) => w.name === world?.weather) || 'none';
+      const weather = resolveWeather(world?.weather);
       const p: Particle = {
         name: particle.name,
         size: particle.size,
@@ -83,7 +90,7 @@ const particles = {
 
   async find(particle: Particle) {
     const response = await query("SELECT * FROM particles WHERE name = ?", [particle.name]) as any[];
-    const weather = weathers.find((w) => w.name === world?.weather) || 'none';
+    const weather = resolveWeather(world?.weather);
     const p: Particle = {
       name: response[0]?.name,
       size: response[0]?.size,
