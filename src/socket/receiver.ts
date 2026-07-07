@@ -6378,11 +6378,11 @@ export default async function packetReceiver(
 
             const currentMapName = currentPlayer.location.map;
 
-            await worlds.update({ name: currentMapName, weather: weatherName });
+            const existingWorld = worldsCache.find((w) => w.name === currentMapName);
+            await worlds.update({ name: currentMapName, weather: weatherName, players: existingWorld?.players || 0 });
 
-            const worldEntry = worldsCache.find((w) => w.name === currentMapName);
-            if (worldEntry) {
-              worldEntry.weather = weatherName;
+            if (existingWorld) {
+              existingWorld.weather = weatherName;
             }
 
             resolvedWeatherCache.delete(currentMapName);
