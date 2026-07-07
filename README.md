@@ -276,6 +276,16 @@ bun setup-production
 </details>
 
 <details>
+<summary><strong>Change Weather</strong></summary>
+
+```bash
+/weather [weather_name | clear | random]
+```
+- **Permission**: `admin.weather` | `admin.*`
+- Changes the current world's weather. Valid values are any weather name from the `weather` database table, `clear` to disable weather, or `random` to cycle through all available weather types every 30 minutes.
+</details>
+
+<details>
 <summary><strong>Reload Map</strong></summary>
 
 ```bash
