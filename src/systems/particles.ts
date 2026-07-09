@@ -12,7 +12,7 @@ await assetCache.add("weather", await weather.list());
 const weathers = await assetCache.get("weather") as WeatherData[];
 log.success(`Loaded ${weathers.length} weather(s) from the database in ${(performance.now() - weatherNow).toFixed(2)}ms`);
 
-const resolveWeather = (weatherName: string) => {
+const resolveWeather = (weatherName: string | undefined) => {
   if (weatherName === "random") {
     return weathers.length ? weathers[Math.floor(Math.random() * weathers.length)] : 'none';
   }
@@ -23,7 +23,7 @@ const particlesNow = performance.now();
 
 const particles = {
   async add(particle: Particle) {
-    const response = await query("INSERT INTO particles (size, color, velocity, lifetime, opacity, visible, gravity, name, localposition, `interval`, amount, staggertime, spread, affected_by_weather, zIndex, glow_intensity, affected_by_time, time_on, time_off) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [particle.size, particle.color, particle.velocity, particle.lifetime, particle.opacity, particle.visible, particle.gravity, particle.name, particle.localposition, particle.interval, particle.amount, particle.staggertime, particle.spread, particle.affected_by_weather, particle.zIndex || 0, particle.glow_intensity || 0, particle.affected_by_time ? 1 : 0, particle.time_on || null, particle.time_off || null]);
+    const response = await query("INSERT INTO particles (size, color, velocity, lifetime, opacity, visible, gravity, name, localposition, `interval`, amount, staggertime, spread, affected_by_weather, zIndex, glow_intensity, affected_by_time, time_on, time_off) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [particle.size, particle.color, particle.velocity, particle.lifetime, particle.opacity, particle.visible ? 1 : 0, particle.gravity, particle.name, particle.localposition, particle.interval, particle.amount, particle.staggertime, particle.spread, particle.affected_by_weather ? 1 : 0, particle.zIndex || 0, particle.glow_intensity || 0, particle.affected_by_time ? 1 : 0, particle.time_on || null, particle.time_off || null]);
     await assetCache.set("particles", response);
     return response;
   },
@@ -35,7 +35,7 @@ const particles = {
   },
 
   async update(particle: Particle) {
-    const response = await query("UPDATE particles SET size = ?, color = ?, velocity = ?, lifetime = ?, opacity = ?, visible = ?, gravity = ?, name = ?, localposition = ?, `interval` = ?, amount = ?, staggertime = ?, spread = ?, affected_by_weather = ?, zIndex = ?, glow_intensity = ?, affected_by_time = ?, time_on = ?, time_off = ? WHERE name = ?", [particle.size, particle.color, particle.velocity, particle.lifetime, particle.opacity, particle.visible, particle.gravity, particle.name, particle.localposition, particle.interval, particle.amount, particle.staggertime, particle.spread, particle.affected_by_weather, particle.zIndex || 0, particle.glow_intensity || 0, particle.affected_by_time ? 1 : 0, particle.time_on || null, particle.time_off || null, particle.name]);
+    const response = await query("UPDATE particles SET size = ?, color = ?, velocity = ?, lifetime = ?, opacity = ?, visible = ?, gravity = ?, name = ?, localposition = ?, `interval` = ?, amount = ?, staggertime = ?, spread = ?, affected_by_weather = ?, zIndex = ?, glow_intensity = ?, affected_by_time = ?, time_on = ?, time_off = ? WHERE name = ?", [particle.size, particle.color, particle.velocity, particle.lifetime, particle.opacity, particle.visible ? 1 : 0, particle.gravity, particle.name, particle.localposition, particle.interval, particle.amount, particle.staggertime, particle.spread, particle.affected_by_weather ? 1 : 0, particle.zIndex || 0, particle.glow_intensity || 0, particle.affected_by_time ? 1 : 0, particle.time_on || null, particle.time_off || null, particle.name]);
     await assetCache.set("particles", response);
     return response;
   },
@@ -52,7 +52,7 @@ const particles = {
         color: particle.color,
         lifetime: particle.lifetime,
         opacity: particle.opacity,
-        visible: particle.visible,
+        visible: particle.visible === 1,
         gravity: {
           x: Number(particle.gravity?.split(",")[0]) || 0,
           y: Number(particle.gravity?.split(",")[1]) || 0,
@@ -97,7 +97,7 @@ const particles = {
       color: response[0]?.color,
       lifetime: response[0]?.lifetime,
       opacity: response[0]?.opacity,
-      visible: response[0]?.visible,
+      visible: response[0]?.visible === 1,
       gravity: {
         x: Number(response[0]?.gravity?.split(",")[0]) || 0,
         y: Number(response[0]?.gravity?.split(",")[1]) || 0,
