@@ -3,6 +3,18 @@ import path from "path";
 import crypto from "crypto";
 const mapDir = path.join('.', 'src', 'assets', 'maps');
 
+function getValidMapPath(mapName: string): string {
+  const file = path.basename(mapName.endsWith(".json") ? mapName : `${mapName}.json`);
+  const resolved = path.resolve(mapDir, file);
+  const resolvedDir = path.resolve(mapDir) + path.sep;
+
+  if (!resolved.startsWith(resolvedDir)) {
+    throw new Error(`Path traversal attempt detected: ${file}`);
+  }
+
+  return resolved;
+}
+
 export function calculateFileChecksum(filePath: string): string {
   try {
     const fileContent = fs.readFileSync(filePath, "utf-8");
@@ -36,7 +48,7 @@ export function calculateAllMapChecksums(): Record<string, string> {
 
 export function getMapContent(mapName: string): any | null {
   try {
-    const filePath = path.join(mapDir, mapName.endsWith(".json") ? mapName : `${mapName}.json`);
+    const filePath = getValidMapPath(mapName);
 
     if (!fs.existsSync(filePath)) {
       console.warn(`Map file not found: ${filePath}`);
@@ -52,7 +64,7 @@ export function getMapContent(mapName: string): any | null {
 
 export function writeMapContent(mapName: string, mapData: any): boolean {
   try {
-    const filePath = path.join(mapDir, mapName.endsWith(".json") ? mapName : `${mapName}.json`);
+    const filePath = getValidMapPath(mapName);
 
     // Write with normalized JSON format to ensure checksums match after writing
     const normalizedContent = JSON.stringify(mapData);

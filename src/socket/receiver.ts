@@ -18,6 +18,11 @@ const currentTargetMap = new Map<string, string | null>();
 const draggedPlayersMap = new Map<number, number>();
 
 // Track active tile editors per map (mapName -> Set<playerId>)
+const chatRateLimit = new Map<number, number[]>();
+
+const MAX_CHAT_LENGTH = 500;
+const CHAT_RATE_MAX = 5;
+const CHAT_RATE_WINDOW = 3000;
 const activeEditorsByMap = new Map<string, Set<number>>();
 
 // Track unsaved tile edits per map for syncing to new editors
@@ -850,6 +855,7 @@ authWorker.on("message", async (result: any) => {
         if (p.ws && p.ws.readyState === 1) {
           p.ws.close(1000, "Logged in from another location");
         }
+        playerCache.remove(p.id);
         break;
       }
     }
@@ -1943,8 +1949,10 @@ export default async function packetReceiver(
       }
       case "TELEPORTXY": {
         if (!currentPlayer?.isAdmin) return;
+        const prevDirection = currentPlayer.location.position?.direction;
         currentPlayer.location.position = data;
-        currentPlayer.location.position.direction = "down";
+        currentPlayer.location.position.direction =
+          (data as any).direction || prevDirection || "down";
 
         currentPlayer.location.position.x = Math.round(
           Number(currentPlayer.location.position.x)
@@ -1984,6 +1992,22 @@ export default async function packetReceiver(
         }
         const messageData = data as any;
         const message = messageData?.message;
+
+        if (typeof message === "string" && message.length > MAX_CHAT_LENGTH) {
+          sendPacket(ws, packetManager.notify({ message: `Message too long (max ${MAX_CHAT_LENGTH} characters).` }));
+          return;
+        }
+
+        const now = Date.now();
+        const timestamps = chatRateLimit.get(ws.data.id) || [];
+        const recent = timestamps.filter((t) => now - t < CHAT_RATE_WINDOW);
+        if (recent.length >= CHAT_RATE_MAX) {
+          sendPacket(ws, packetManager.notify({ message: "You are sending messages too fast." }));
+          return;
+        }
+        recent.push(now);
+        chatRateLimit.set(ws.data.id, recent);
+
         const mode = messageData?.mode;
 
         const sendMessageToPlayer = (playerWs: any, message: string) => {

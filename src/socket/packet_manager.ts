@@ -325,14 +325,14 @@ export const packetManager = {
     const direction = DIRECTION_MAP[data.d?.dr as string] ?? 1;
     const stealth = data.s === 1 ? 1 : 0;
 
-    const packetData = new Uint8Array(9);
+    const packetData = new Uint8Array(11);
     const view = new DataView(packetData.buffer);
 
     packetData[0] = HEADER_BYTE;
-    view.setUint16(1, playerId, true);
-    view.setInt16(3, x, true);
-    view.setInt16(5, y, true);
-    packetData[7] = direction | (stealth << 4);
+    view.setUint32(1, playerId, true);
+    view.setInt16(5, x, true);
+    view.setInt16(7, y, true);
+    packetData[9] = direction | (stealth << 4);
 
     return [packetData];
   },
@@ -355,9 +355,9 @@ export const packetManager = {
     for (const m of movements) {
       const playerId = typeof m.i === "number" ? m.i : parseInt(m.i, 10) || 0;
 
-      const idBytes = new Uint8Array(2);
+      const idBytes = new Uint8Array(4);
       const idView = new DataView(idBytes.buffer);
-      idView.setUint16(0, playerId, true);
+      idView.setUint32(0, playerId, true);
       chunks.push(Array.from(idBytes));
 
       const x = typeof m.d?.x === "number" ? Math.round(m.d.x) : 0;

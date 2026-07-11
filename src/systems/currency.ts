@@ -20,51 +20,49 @@ const currency = {
         );
     },
     async add(username: string, amount: Currency) : Promise<Currency> {
+        if (amount.copper < 0 || amount.silver < 0 || amount.gold < 0) return { copper: 0, silver: 0, gold: 0 };
+
         const currentCurrency = await this.get(username);
         if (!currentCurrency) return { copper: 0, silver: 0, gold: 0 };
 
-        if (currentCurrency.copper + amount.copper > max_copper) {
-            const overflowToSilver = Math.floor((currentCurrency.copper + amount.copper) / (max_copper + 1));
-            currentCurrency.silver += overflowToSilver;
-            currentCurrency.copper = (currentCurrency.copper + amount.copper) % (max_copper + 1);
-        }
+        const totalCopper = currentCurrency.copper + amount.copper;
+        const copperOverflow = Math.floor(totalCopper / (max_copper + 1));
+        currentCurrency.copper = totalCopper % (max_copper + 1);
 
-        if (currentCurrency.silver + amount.silver > max_silver) {
-            const overflowToGold = Math.floor((currentCurrency.silver + amount.silver) / (max_silver + 1));
-            currentCurrency.gold += overflowToGold;
-            currentCurrency.silver = currentCurrency.silver % (max_silver + 1);
-        }
+        const totalSilver = currentCurrency.silver + copperOverflow + amount.silver;
+        const silverOverflow = Math.floor(totalSilver / (max_silver + 1));
+        currentCurrency.silver = Math.min(max_silver, totalSilver % (max_silver + 1));
 
-        if (currentCurrency.gold + amount.gold > max_gold) {
-            currentCurrency.gold = max_gold;
-        } else {
-            currentCurrency.gold += amount.gold;
-        }
+        const totalGold = currentCurrency.gold + silverOverflow + amount.gold;
+        currentCurrency.gold = Math.min(max_gold, totalGold);
+
         await this.set(username, currentCurrency);
         return currentCurrency;
     },
     async remove(username: string, amount: Currency) : Promise<Currency> {
+        if (amount.copper < 0 || amount.silver < 0 || amount.gold < 0) return { copper: 0, silver: 0, gold: 0 };
+
         const currentCurrency = await this.get(username);
         if (!currentCurrency) return { copper: 0, silver: 0, gold: 0 };
 
-        if (currentCurrency.copper < amount.copper) {
-            currentCurrency.copper = 0;
-            currentCurrency.silver = Math.max(0, currentCurrency.silver - amount.silver);
-            currentCurrency.gold = Math.max(0, currentCurrency.gold - amount.gold);
-        } else {
-            currentCurrency.copper -= amount.copper;
-            if (currentCurrency.silver < amount.silver) {
-                currentCurrency.silver = 0;
-                currentCurrency.gold = Math.max(0, currentCurrency.gold - amount.gold);
-            } else {
-                currentCurrency.silver -= amount.silver;
-                if (currentCurrency.gold < amount.gold) {
-                    currentCurrency.gold = 0;
-                } else {
-                    currentCurrency.gold -= amount.gold;
-                }
-            }
+        let totalCopper = currentCurrency.copper - amount.copper;
+        if (totalCopper < 0) {
+            const borrowFromSilver = Math.ceil(-totalCopper / (max_copper + 1));
+            currentCurrency.silver -= borrowFromSilver;
+            totalCopper += borrowFromSilver * (max_copper + 1);
         }
+        currentCurrency.copper = Math.max(0, totalCopper);
+
+        let totalSilver = currentCurrency.silver - amount.silver;
+        if (totalSilver < 0) {
+            const borrowFromGold = Math.ceil(-totalSilver / (max_silver + 1));
+            currentCurrency.gold -= borrowFromGold;
+            totalSilver += borrowFromGold * (max_silver + 1);
+        }
+        currentCurrency.silver = Math.max(0, totalSilver);
+
+        currentCurrency.gold = Math.max(0, currentCurrency.gold - amount.gold);
+
         await this.set(username, currentCurrency);
         return currentCurrency;
     },

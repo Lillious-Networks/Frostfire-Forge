@@ -103,6 +103,8 @@ export async function initializePlayerAOI(player: any): Promise<void> {
     layerId = layerManager.assignPlayerToLayer(player.id, mapName);
   }
 
+  if (player.aoi) return;
+
   player.aoi = {
     playersInAOI: new Set<string>(),
     gridX: Math.floor(pos.x / AOI_CONFIG.GRID_CELL_SIZE),
@@ -411,7 +413,7 @@ export function broadcastToAOI(
   }
 }
 
-export function findPlayersWithTargetInAOI(targetId: string): any[] {
+export function findPlayersWithTargetInAOI(targetId: number | string): any[] {
   const allPlayers = Object.values(playerCache.list());
   return allPlayers.filter(
     (player) => player.aoi && player.aoi.playersInAOI.has(targetId)

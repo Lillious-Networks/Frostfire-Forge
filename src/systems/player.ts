@@ -3,6 +3,31 @@ import { verify, randomBytes } from "../modules/hash";
 import log from "../modules/logger";
 import assetCache from "../services/assetCache";
 import * as settings from "../config/settings.json";
+
+const TOKEN_EXPIRY_MS = 24 * 60 * 60 * 1000;
+
+const tokenExpiry = new Map<string, number>();
+
+function trackToken(token: string): void {
+  tokenExpiry.set(token, Date.now() + TOKEN_EXPIRY_MS);
+}
+
+function isTokenExpired(token: string): boolean {
+  const expiry = tokenExpiry.get(token);
+  if (!expiry) return false;
+  if (Date.now() > expiry) {
+    tokenExpiry.delete(token);
+    return true;
+  }
+  return false;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, expiry] of tokenExpiry) {
+    if (now > expiry) tokenExpiry.delete(token);
+  }
+}, 60 * 60 * 1000).unref();
 import playerCache from "../services/playermanager.ts";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 const mapCache: Map<
@@ -308,6 +333,10 @@ const player = {
     sessionId: string
   ): Promise<boolean | string> => {
     if (!token || !sessionId) return false;
+    if (isTokenExpired(token)) {
+      await query("UPDATE accounts SET token = NULL WHERE token = ?", [token]);
+      return false;
+    }
 
     // sessionId comes from ws.data.id which is a number via parseInt(),
     // but the DB column is VARCHAR. Normalize to string for comparisons.
@@ -381,7 +410,7 @@ const player = {
     return String(retryVerifyResult[0]?.session_id ?? "") === sid;
   },
   getSessionId: async (token: string) => {
-    if (!token) return;
+    if (!token || isTokenExpired(token)) return;
     const response = await query(
       "SELECT session_id FROM accounts WHERE token = ?",
       [token]
@@ -428,7 +457,8 @@ const player = {
       return;
     }
 
-    const token = response[0].token || (await player.setToken(username));
+    const existingToken = !response[0].token || isTokenExpired(response[0].token) ? null : response[0].token;
+    const token = existingToken || (await player.setToken(username));
 
     log.debug(`User ${username} logged in`);
 
@@ -466,6 +496,10 @@ const player = {
   },
   getUsernameByToken: async (token: string) => {
     if (!token) return;
+    if (isTokenExpired(token)) {
+      await query("UPDATE accounts SET token = NULL WHERE token = ?", [token]);
+      return;
+    }
     const response = await query(
       "SELECT username FROM accounts WHERE token = ?",
       [token]
@@ -499,6 +533,7 @@ const player = {
     );
     if (!response) return;
 
+    trackToken(token);
     return token;
   },
   isOnline: async (username: string) => {

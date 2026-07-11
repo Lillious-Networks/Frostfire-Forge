@@ -187,7 +187,8 @@ const Server = Bun.serve<Packet, any>({
       return httpHandler(req);
     }
 
-    const id = parseInt(crypto.randomBytes(2).toString("hex"), 16);
+
+    const id = parseInt(crypto.randomBytes(4).toString("hex"), 16);
     const useragent = req.headers.get("user-agent") || "unknown";
     const chatDecryptionKey = keyPair.publicKey;
 
@@ -219,6 +220,14 @@ const Server = Bun.serve<Packet, any>({
     if (now > parseInt(expiresAt)) {
       log.warn(`Connection attempt with expired token from: ${req.headers.get("x-forwarded-for") || "unknown"}`);
       return new Response("Unauthorized: Token expired", { status: 401 });
+    }
+
+    if (ALLOWED_ORIGINS.length > 0) {
+      const origin = req.headers.get("Origin");
+      if (origin && !ALLOWED_ORIGINS.some(o => o.trim() === origin)) {
+        log.warn(`Connection attempt with disallowed origin: ${origin} from: ${req.headers.get("x-forwarded-for") || "unknown"}`);
+        return new Response("Forbidden: Origin not allowed", { status: 403 });
+      }
     }
 
     const success = Server.upgrade(req, { data: { id, useragent, chatDecryptionKey } as any });
@@ -560,6 +569,8 @@ listener.on(Events.SERVER_TICK, async () => {
   for (const p of players) {
     if (!p || !p.id) continue;
 
+    if (typeof p.created === "number" && p.created > 0 && (nowEpoch - (PROCESS_STARTED_AT + p.created)) < 5000) continue;
+
     const rawLU = typeof p.lastUpdated === "number" ? p.lastUpdated : 0;
     const lastUpdatedEpoch =
       rawLU > 1e11
@@ -596,6 +607,10 @@ listener.on(Events.SERVER_TICK, async () => {
 
         for (const p of players) {
           if (!p?.userid || inactiveSet.has(p.id)) continue;
+
+          const createdEpoch = typeof p.created === "number" && p.created > 0 ? PROCESS_STARTED_AT + p.created : 0;
+          if (createdEpoch > 0 && (nowEpoch - createdEpoch) < 10000) continue;
+
           const dbSid = dbSessionMap.get(String(p.userid)) || "";
           if (dbSid !== String(p.id)) {
             log.info(
@@ -680,7 +695,7 @@ listener.on(Events.SERVER_TICK, async () => {
 
       let stillConnected = false;
       for (const client of connections) {
-        if (client.id === id) {
+        if (client.id == id) {
           stillConnected = true;
           break;
         }

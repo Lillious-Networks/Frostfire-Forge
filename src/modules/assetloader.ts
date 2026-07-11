@@ -695,10 +695,22 @@ export function applyChunksWithRebase(
   return { shiftX: netShiftX, shiftY: netShiftY, width: finalWidth, height: finalHeight };
 }
 
+function getValidMapPath(mapName: string): string {
+  const file = path.basename(mapName.endsWith(".json") ? mapName : `${mapName}.json`);
+  const resolved = path.resolve(mapDir, file);
+  const resolvedDir = path.resolve(mapDir) + path.sep;
+
+  if (!resolved.startsWith(resolvedDir)) {
+    throw new Error(`Path traversal attempt detected: ${file}`);
+  }
+
+  return resolved;
+}
+
 export async function saveMapChunks(mapName: string, chunks: any[], bounds?: { minTileX?: number; minTileY?: number; width?: number; height?: number } | null): Promise<void> {
   try {
-    const file = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
-    const fullPath = path.join(mapDir, file);
+    const fullPath = getValidMapPath(mapName);
+    const file = path.basename(fullPath);
 
     if (!fs.existsSync(fullPath)) {
       throw new Error(`Map ${file} not found`);
@@ -723,8 +735,8 @@ export async function saveMapChunks(mapName: string, chunks: any[], bounds?: { m
 
 export async function saveMapProperties(mapName: string, graveyards?: any, warps?: any): Promise<void> {
   try {
-    const file = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
-    const fullPath = path.join(mapDir, file);
+    const fullPath = getValidMapPath(mapName);
+    const file = path.basename(fullPath);
 
     if (!fs.existsSync(fullPath)) {
       throw new Error(`Map ${file} not found`);
@@ -876,8 +888,8 @@ export async function saveMapProperties(mapName: string, graveyards?: any, warps
 
 export async function reloadMap(mapName: string): Promise<MapData> {
   try {
-    const file = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
-    const fullPath = path.join(mapDir, file);
+    const fullPath = getValidMapPath(mapName);
+    const file = path.basename(fullPath);
 
     if (!fs.existsSync(fullPath)) {
       throw new Error(`Map ${file} not found`);
