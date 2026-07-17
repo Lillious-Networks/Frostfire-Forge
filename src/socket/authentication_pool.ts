@@ -24,7 +24,7 @@ async function createPersistentWorker(): Promise<Worker> {
 
     serializedAssets = await prepareAssets();
 
-    const worker = new Worker(new URL("authentication.ts", import.meta.url).href, {
+    const worker = new Worker(new URL("authentication.ts", import.meta.url), {
         workerData: { assets: serializedAssets }
     });
 
