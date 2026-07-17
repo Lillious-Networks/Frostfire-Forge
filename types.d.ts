@@ -274,6 +274,10 @@ declare interface SpellEffect {
   type: string;
   value: number;
   duration?: number;
+  interval?: number;
+  stackable?: boolean;
+  max_stacks?: number;
+  target_particles?: string;
 }
 
 declare interface SpellData {
@@ -289,6 +293,7 @@ declare interface SpellData {
   cooldown: number;
   icon: Nullable<string>;
   sprite: Nullable<string>;
+  particles: Nullable<string>;
   effects: SpellEffect[];
 }
 

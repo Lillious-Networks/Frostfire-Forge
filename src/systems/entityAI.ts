@@ -480,8 +480,8 @@ async function processCombat(entity: any, aiState: EntityAIState): Promise<void>
             let dmg = damageAmount;
             const absorbed = spellEffects.consumeBarrier(freshTarget, dmg);
             dmg -= absorbed;
-            if (absorbed > 0 && freshTarget.ws && freshTarget.ws.readyState === 1) {
-              freshTarget.ws.send(packetManager.effects(spellEffects.getEffectsPayload(freshTarget))[0]);
+            if (absorbed > 0) {
+              spellEffects.broadcastEffectsUpdate(freshTarget);
             }
             freshTarget.stats.health = Math.max(0, freshTarget.stats.health - dmg);
 
@@ -493,9 +493,7 @@ async function processCombat(entity: any, aiState: EntityAIState): Promise<void>
               freshTarget.stats.health = freshTarget.stats.total_max_health;
               freshTarget.stats.stamina = freshTarget.stats.total_max_stamina;
               spellEffects.clearBarriers(freshTarget);
-              if (freshTarget.ws && freshTarget.ws.readyState === 1) {
-                freshTarget.ws.send(packetManager.effects([])[0]);
-              }
+              spellEffects.broadcastEffectsUpdate(freshTarget);
 
               // Immediately untarget the player when killed
               const killedTargetId = aiState.target;

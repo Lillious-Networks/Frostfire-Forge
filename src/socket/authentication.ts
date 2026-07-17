@@ -108,7 +108,8 @@ const authentication = {
                 cast_time: number,
                 damage: number,
                 type: string | null,
-                effects: SpellEffect[]
+                effects: SpellEffect[],
+                particles: string | null,
             }> = Object.create(null);
 
             for (const row of learnedSpellsData) {
@@ -127,6 +128,7 @@ const authentication = {
                     damage: spellDetails.damage ?? 0,
                     type: spellDetails.type ?? null,
                     effects: Array.isArray(spellDetails.effects) ? spellDetails.effects : [],
+                    particles: spellDetails.particles ?? null,
                 };
             }
 

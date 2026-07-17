@@ -1060,6 +1060,11 @@ const player = {
 
     if (!isSelf) {
       if (!hasPath) {
+        // Distinguish "out of range" from "line of sight blocked"
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > maxPathfindingDistance) {
+          return { value: false, reason: "range" };
+        }
         return { value: false, reason: "path_blocked" };
       }
     }

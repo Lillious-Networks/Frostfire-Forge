@@ -678,9 +678,14 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "CAST_SPELL", data })),
     ] as any[];
   },
+  spellLockout: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "SPELL_LOCKOUT", data })),
+    ] as any[];
+  },
   projectile: (data: any) => {
-
-    if (!data?.icon) return [];
+    // Projectiles are only meaningful with an icon or particles to render
+    if (!data?.icon && !Array.isArray(data?.particles)) return [];
     return [
       packet.encode(JSON.stringify({ type: "PROJECTILE", data })),
     ] as any[];

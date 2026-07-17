@@ -30,6 +30,7 @@ const httpRouteHandlers = new Map<string, (req: Request) => Promise<Response>>()
 import * as settings from "../config/settings.json";
 import assetCache from "../services/assetCache.ts";
 import entityCache from "../services/entityCache.ts";
+import dots from "../systems/dots.ts";
 import { GatewayClient } from "../modules/gateway-client.ts";
 
 const _cert = process.env.WEB_SOCKET_CERT_PATH || path.join(import.meta.dir, "../certs/cert.pem");
@@ -763,6 +764,8 @@ listener.on("onDisconnect", async (data) => {
     }
 
     gameLoop.unregisterMovingPlayer(playerData.id);
+
+    dots.clearDots(playerData.id);
 
     playerCache.remove(playerData.id);
 

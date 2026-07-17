@@ -178,19 +178,38 @@ const createSpellsTable = async () => {
         can_move INTEGER NOT NULL DEFAULT 0,
         description TEXT DEFAULT NULL,
         icon TEXT DEFAULT NULL,
-        effects TEXT DEFAULT NULL
+        effects TEXT DEFAULT NULL,
+        particles TEXT DEFAULT NULL
     );
   `;
   await query(sql);
 };
 
 const insertDefaultSpell = async () => {
-  log.info("Inserting default spell...");
+  log.info("Inserting default spells...");
   const sql = `
     INSERT OR IGNORE INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move) VALUES
     ('frost_bolt', 10, 10, 1000, 'spell', 2, 1, 'A frosty projectile that deals damage to a single target.', 'frost_bolt', 0);
   `;
   await query(sql);
+
+  const poisonEffects = JSON.stringify([
+    { type: "damage_over_time", value: 4, duration: 12, interval: 3, stackable: true, max_stacks: 5 },
+  ]);
+  await query(
+    `INSERT OR IGNORE INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move, effects) VALUES
+    ('poison_bolt', 5, 8, 1000, 'spell', 1, 6, 'A venomous bolt that poisons the target, dealing damage over time. Stacks up to 5 times.', 'poison_bolt', 0, ?);`,
+    [poisonEffects]
+  );
+
+  const interruptEffects = JSON.stringify([
+    { type: "interrupt", value: 0, duration: 3 },
+  ]);
+  await query(
+    `INSERT OR IGNORE INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move, effects) VALUES
+    ('mind_freeze', 0, 5, 1000, 'spell', 0, 15, 'Freezes the target''s mind, interrupting their spell cast and locking their spells for 3 seconds.', 'mind_freeze', 1, ?);`,
+    [interruptEffects]
+  );
 };
 
 const createPermissionsTable = async () => {
@@ -578,9 +597,12 @@ const insertDemoQuestLog = async () => {
 }
 
 const insertDefaultLearnedSpell = async () => {
-  log.info("Inserting default learned spell for demo user...");
+  log.info("Inserting default learned spells for demo user...");
   const sql = `
-    INSERT OR IGNORE INTO learned_spells (spell, username) VALUES ('frost_bolt', 'demo_user');
+    INSERT OR IGNORE INTO learned_spells (spell, username) VALUES
+    ('frost_bolt', 'demo_user'),
+    ('poison_bolt', 'demo_user'),
+    ('mind_freeze', 'demo_user');
   `;
   await query(sql);
 };

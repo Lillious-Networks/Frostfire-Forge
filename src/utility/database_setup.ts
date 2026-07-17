@@ -142,7 +142,8 @@ const createSpellsTable = async () => {
       can_move INT NULL DEFAULT 0,
       description VARCHAR(255) NULL,
       icon VARCHAR(255) NULL DEFAULT NULL,
-      effects TEXT NULL DEFAULT NULL
+      effects TEXT NULL DEFAULT NULL,
+      particles VARCHAR(500) NULL DEFAULT NULL
     )
   `;
   await query(sql);
@@ -159,6 +160,30 @@ const insertDefaultSpell = async () => {
     await query(sql);
   } else {
     log.debug("Default spell 'frost_bolt' already exists - skipping");
+  }
+
+  const poisonCheck = await query(`SELECT COUNT(*) as count FROM spells WHERE name = 'poison_bolt'`) as Array<{ count: number }>;
+  if (poisonCheck[0]?.count === 0) {
+    const poisonEffects = JSON.stringify([
+      { type: "damage_over_time", value: 4, duration: 12, interval: 3, stackable: true, max_stacks: 5 },
+    ]);
+    const sql = `INSERT INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move, effects) VALUES
+      ('poison_bolt', 5, 8, 1000, 'spell', 1, 6, 'A venomous bolt that poisons the target, dealing damage over time. Stacks up to 5 times.', 'poison_bolt', 0, ?)`;
+    await query(sql, [poisonEffects]);
+  } else {
+    log.debug("Spell 'poison_bolt' already exists - skipping");
+  }
+
+  const interruptCheck = await query(`SELECT COUNT(*) as count FROM spells WHERE name = 'mind_freeze'`) as Array<{ count: number }>;
+  if (interruptCheck[0]?.count === 0) {
+    const interruptEffects = JSON.stringify([
+      { type: "interrupt", value: 0, duration: 3 },
+    ]);
+    const sql = `INSERT INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move, effects) VALUES
+      ('mind_freeze', 0, 5, 1000, 'spell', 0, 15, 'Freezes the target''s mind, interrupting their spell cast and locking their spells for 3 seconds.', 'mind_freeze', 1, ?)`;
+    await query(sql, [interruptEffects]);
+  } else {
+    log.debug("Spell 'mind_freeze' already exists - skipping");
   }
 };
 
@@ -663,15 +688,17 @@ const insertDemoQuestLog = async () => {
 }
 
 const insertDefaultLearnedSpell = async () => {
-  log.info("Inserting default learned spell for demo user...");
-  const checkSql = `SELECT COUNT(*) as count FROM learned_spells WHERE spell = 'frost_bolt' AND username = 'demo_user'`;
-  const result = await query(checkSql) as Array<{ count: number }>;
+  log.info("Inserting default learned spells for demo user...");
+  const defaultSpells = ["frost_bolt", "poison_bolt", "mind_freeze"];
+  for (const spellName of defaultSpells) {
+    const checkSql = `SELECT COUNT(*) as count FROM learned_spells WHERE spell = ? AND username = 'demo_user'`;
+    const result = await query(checkSql, [spellName]) as Array<{ count: number }>;
 
-  if (result[0]?.count === 0) {
-    const sql = `INSERT INTO learned_spells (spell, username) VALUES ('frost_bolt', 'demo_user')`;
-    await query(sql);
-  } else {
-    log.debug("Demo user 'demo_user' already has spell 'frost_bolt' - skipping");
+    if (result[0]?.count === 0) {
+      await query(`INSERT INTO learned_spells (spell, username) VALUES (?, 'demo_user')`, [spellName]);
+    } else {
+      log.debug(`Demo user 'demo_user' already has spell '${spellName}' - skipping`);
+    }
   }
 };
 
