@@ -133,6 +133,13 @@ export function getIconUrl(iconName: string | null): string | null {
   return `${assetServerUrl}/icon?name=${encodeURIComponent(iconName.replace(/\.(png|jpg|jpeg|gif)$/i, ''))}`;
 }
 
+// Generate sprite URLs (from the sprites/ folder) for spell effect icons.
+// Spell icons live in the sprites folder, not icons, unlike items/mounts.
+export function getSpriteUrl(spriteName: string | null): string | null {
+  if (!spriteName) return null;
+  return `${assetServerUrl}/sprite?name=${encodeURIComponent(spriteName.replace(/\.(png|jpg|jpeg|gif)$/i, ''))}`;
+}
+
 // Generate mount sprite URLs
 export function getMountSpriteUrl(mountType: string | null): SpriteUrl | null {
   if (!mountType) return null;

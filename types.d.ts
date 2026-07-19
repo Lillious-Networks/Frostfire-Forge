@@ -295,6 +295,7 @@ declare interface SpellData {
   sprite: Nullable<string>;
   particles: Nullable<string>;
   effects: SpellEffect[];
+  aoe_radius: Nullable<number>;
 }
 
 declare interface LearnedSpell {

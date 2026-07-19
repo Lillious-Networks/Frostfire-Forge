@@ -31,6 +31,7 @@ import * as settings from "../config/settings.json";
 import assetCache from "../services/assetCache.ts";
 import entityCache from "../services/entityCache.ts";
 import dots from "../systems/dots.ts";
+import spellEffects from "../systems/spelleffects.ts";
 import { GatewayClient } from "../modules/gateway-client.ts";
 
 const _cert = process.env.WEB_SOCKET_CERT_PATH || path.join(import.meta.dir, "../certs/cert.pem");
@@ -641,7 +642,7 @@ listener.on(Events.SERVER_TICK, async () => {
       rawLA > 0 ? (PROCESS_STARTED_AT + rawLA) :
       0;
 
-    if (lastAttackEpoch && (nowEpoch - lastAttackEpoch) > 5000) {
+    if (lastAttackEpoch && (nowEpoch - lastAttackEpoch) > 5000 && !playerData.isVanished) {
       playerData.pvp = false;
     }
 
@@ -766,6 +767,12 @@ listener.on("onDisconnect", async (data) => {
     gameLoop.unregisterMovingPlayer(playerData.id);
 
     dots.clearDots(playerData.id);
+
+    spellEffects.clearStuns(playerData.id);
+
+    spellEffects.clearSlows(playerData.id);
+
+    spellEffects.clearVanishes(playerData.id);
 
     playerCache.remove(playerData.id);
 

@@ -2,6 +2,7 @@ import playerCache from "../services/playermanager";
 import mapIndex from "../services/mapindex";
 import { packetManager } from "../socket/packet_manager";
 import assetCache from "../services/assetCache";
+import { getSpriteUrl } from "../modules/spriteSheetManager";
 import log from "../modules/logger";
 
 type BroadcastStatsFn = (player: any) => void;
@@ -26,6 +27,7 @@ interface BarrierInstance {
   expiresAt: number;
   token: number;
   particles: Particle[] | null;
+  icon: string | null;
 }
 
 // Lightweight visual-only effect (no gameplay impact, just particles)
@@ -36,6 +38,7 @@ interface VisualEffectInstance {
   expiresAt: number;
   token: number;
   particles: Particle[] | null;
+  icon: string | null;
 }
 
 const handlers: Record<string, SpellEffectHandler> = Object.create(null);
@@ -45,7 +48,7 @@ export function registerSpellEffect(type: string, handler: SpellEffectHandler) {
 }
 
 // Effect types that are harmful and may only be cast on hostile targets
-const hostileEffectTypes = new Set<string>(["damage_over_time", "interrupt"]);
+const hostileEffectTypes = new Set<string>(["damage_over_time", "interrupt", "stun", "slow"]);
 
 export function registerHostileEffectType(type: string) {
   hostileEffectTypes.add(type);
@@ -105,6 +108,7 @@ export function getEffectsPayload(player: any) {
       spell: b.spell,
       duration: b.duration,
       remaining: Math.max(0, Math.ceil((b.expiresAt - now) / 1000)),
+      icon: b.icon || null,
       particles: b.particles || null,
     })) as any[];
   for (const provider of effectsPayloadProviders) {
@@ -136,6 +140,9 @@ export function broadcastEffectsUpdate(player: any) {  if (!player?.id) return;
   const playerIds = mapIndex.getPlayersOnMap(map);
   for (const playerId of playerIds) {
     const p = playerCache.get(playerId);
+    if (!p || p.id === player.id) continue;
+    // Vanished players' effects are only visible to admins and party
+    if (player.isVanished && !p.isAdmin && !p.party?.includes(player.username)) continue;
     if (p?.ws?.readyState === 1) {
       try {
         packets.forEach((pk: any) => p.ws.send(pk));
@@ -143,6 +150,10 @@ export function broadcastEffectsUpdate(player: any) {  if (!player?.id) return;
         log.error(`Failed to send effects update: ${e}`);
       }
     }
+  }
+  // Always send to the player themselves
+  if (player.ws?.readyState === 1) {
+    try { packets.forEach((pk: any) => player.ws.send(pk)); } catch (e) { log.error(`Failed to send effects update: ${e}`); }
   }
 }
 
@@ -183,7 +194,8 @@ async function applyVisualEffect(
   spellName: string,
   durationSec: number,
   resolveParticles: SpellEffect | null,
-  broadcastEffects: BroadcastEffectsFn
+  broadcastEffects: BroadcastEffectsFn,
+  iconUrl: string | null = null
 ) {
   if (!player?.stats) return;
   const durationMs = durationSec > 0 ? durationSec * 1000 : 0;
@@ -202,6 +214,7 @@ async function applyVisualEffect(
     existing.expiresAt = expiresAt;
     existing.token = token;
     existing.particles = particles;
+    existing.icon = iconUrl;
   } else {
     list.push({
       id: `visual:${spellName}`,
@@ -210,6 +223,7 @@ async function applyVisualEffect(
       expiresAt,
       token,
       particles,
+      icon: iconUrl,
     });
   }
 
@@ -230,8 +244,314 @@ registerSpellEffect("visual", async ({ target, spell, effect, broadcastEffects }
   if (!target?.stats) return;
   const durationSec = effect.duration && effect.duration > 0 ? effect.duration : 0;
   if (durationSec <= 0) return;
-  await applyVisualEffect(target, spell?.name || "visual", durationSec, effect, broadcastEffects);
+  await applyVisualEffect(target, spell?.name || "visual", durationSec, effect, broadcastEffects, getSpriteUrl(spell.icon));
 });
+
+// Stun effect: target cannot move or cast for the effect's duration.
+// Multiple stuns from the same spell refresh the duration; different spells stack.
+const playerStuns = new Map<string, Array<{ id: string; spell: string; duration: number; expiresAt: number; token: number; particles: Particle[] | null; icon: string | null }>>();
+let stunToken = 0;
+
+function getStuns(player: any) {
+  const key = String(player.id);
+  if (!playerStuns.has(key)) playerStuns.set(key, []);
+  return playerStuns.get(key)!;
+}
+
+registerSpellEffect("stun", async ({ target, spell, effect, broadcastEffects }) => {
+  if (!target?.stats) return;
+  const durationSec = effect.duration && effect.duration > 0 ? effect.duration : 0;
+  if (durationSec <= 0) return;
+
+  const spellName = spell?.name || "stun";
+  const id = `stun:${spellName}`;
+  const token = ++stunToken;
+  const expiresAt = Date.now() + durationSec * 1000;
+  const particles = effect.target_particles ? await resolveParticleNames(effect.target_particles) : null;
+
+  const list = getStuns(target);
+  const existing = list.find((s) => s.id === id);
+  if (existing) {
+    existing.duration = durationSec;
+    existing.expiresAt = expiresAt;
+    existing.token = token;
+    if (particles) existing.particles = particles;
+    existing.icon = getSpriteUrl(spell.icon);
+  } else {
+    list.push({ id, spell: spellName, duration: durationSec, expiresAt, token, particles, icon: getSpriteUrl(spell.icon) });
+  }
+
+  // Update the hard-CC flag on the player; the longest stun wins
+  const maxExpiry = Math.max(...list.map((s) => s.expiresAt));
+  target.stunnedUntil = Math.max(target.stunnedUntil || 0, maxExpiry);
+
+  broadcastEffects(target);
+
+  // Grey out the hotbar while stunned (same visual as interrupt lockout)
+  if (target.ws?.readyState === 1) {
+    try {
+      packetManager.spellLockout({ duration: durationSec }).forEach((pk: any) => target.ws.send(pk));
+    } catch (e) { /* ignore */ }
+  }
+
+  setTimeout(() => {
+    const fresh = playerCache.get(target.id);
+    if (!fresh) return;
+    const arr = getStuns(fresh);
+    const idx = arr.findIndex((s) => s.id === id && s.token === token);
+    if (idx === -1) return;
+    arr.splice(idx, 1);
+    fresh.stunnedUntil = arr.length > 0 ? Math.max(...arr.map((s) => s.expiresAt)) : 0;
+    // Update lockout to match remaining stun time, or clear it
+    if (fresh.ws?.readyState === 1) {
+      try {
+        const remaining = fresh.stunnedUntil ? Math.max(0, Math.ceil((fresh.stunnedUntil - Date.now()) / 1000)) : 0;
+        packetManager.spellLockout({ duration: remaining }).forEach((pk: any) => fresh.ws.send(pk));
+      } catch (e) { /* ignore */ }
+    }
+    broadcastEffects(fresh);
+  }, durationSec * 1000);
+});
+
+// Stun payload provider: shows active stuns as debuffs in the EFFECTS packet
+registerEffectsPayloadProvider((player: any) => {
+  const now = Date.now();
+  return getStuns(player)
+    .filter((s) => s.expiresAt > 0 && s.expiresAt > now)
+    .map((s) => ({
+      id: s.id,
+      spell: s.spell,
+      duration: s.duration,
+      remaining: Math.max(0, Math.ceil((s.expiresAt - now) / 1000)),
+      icon: s.icon || null,
+      particles: s.particles || null,
+      isDebuff: true,
+    }));
+});
+
+// Export for clearing stuns on death/disconnect
+export function clearStuns(playerId: string | number) {
+  playerStuns.delete(String(playerId));
+}
+
+// Vanish effect: target becomes invisible to all players except admins
+// and party members. No name color change (unlike admin stealth).
+const playerVanishes = new Map<string, Array<{ id: string; spell: string; duration: number; expiresAt: number; token: number; particles: Particle[] | null; icon: string | null }>>();
+let vanishToken = 0;
+
+function getVanishes(player: any) {
+  const key = String(player.id);
+  if (!playerVanishes.has(key)) playerVanishes.set(key, []);
+  return playerVanishes.get(key)!;
+}
+
+registerSpellEffect("vanish", async ({ target, spell, effect, broadcastEffects }) => {
+  if (!target?.stats) return;
+  const durationSec = effect.duration ? Number(effect.duration) : 0;
+  const isPermanent = durationSec <= 0;
+
+  const spellName = spell?.name || "vanish";
+  const id = `vanish:${spellName}`;
+  const token = ++vanishToken;
+  const expiresAt = isPermanent ? Number.MAX_SAFE_INTEGER : Date.now() + durationSec * 1000;
+  const particles = effect.target_particles ? await resolveParticleNames(effect.target_particles) : null;
+
+  const list = getVanishes(target);
+  const existing = list.find((v) => v.id === id);
+  if (existing) {
+    existing.duration = durationSec;
+    existing.expiresAt = expiresAt;
+    existing.token = token;
+    if (particles) existing.particles = particles;
+    existing.icon = getSpriteUrl(spell.icon);
+  } else {
+    list.push({ id, spell: spellName, duration: durationSec, expiresAt, token, particles, icon: getSpriteUrl(spell.icon) });
+  }
+
+  target.isVanished = true;
+
+  broadcastEffects(target);
+
+  if (!isPermanent) {
+    setTimeout(() => {
+      const fresh = playerCache.get(target.id);
+      if (!fresh) return;
+      const arr = getVanishes(fresh);
+      const idx = arr.findIndex((v) => v.id === id && v.token === token);
+      if (idx === -1) return;
+      arr.splice(idx, 1);
+      fresh.isVanished = arr.length > 0;
+      if (!fresh.isVanished && onVanishRemoved) onVanishRemoved(fresh);
+      broadcastEffects(fresh);
+    }, durationSec * 1000);
+  }
+});
+
+registerEffectsPayloadProvider((player: any) => {
+  const now = Date.now();
+  return getVanishes(player)
+    .filter((v) => v.expiresAt > 0 && v.expiresAt > now)
+    .map((v) => ({
+      id: v.id,
+      spell: v.spell,
+      duration: v.duration,
+      remaining: Math.max(0, Math.ceil((v.expiresAt - now) / 1000)),
+      icon: v.icon || null,
+      particles: v.particles || null,
+      isDebuff: false,
+    }));
+});
+
+export function clearVanishes(playerId: string | number) {
+  playerVanishes.delete(String(playerId));
+}
+
+export function getVanishedEffectId(player: any): string | null {
+  const vanishes = getVanishes(player);
+  return vanishes.length > 0 ? vanishes[0].id : null;
+}
+
+// Callback invoked when vanish ends (timer or cancel). Receiver registers
+// a respawn handler.
+let onVanishRemoved: ((player: any) => void | Promise<void>) | null = null;
+export function setVanishRemovedHandler(fn: (player: any) => void | Promise<void>) {
+  onVanishRemoved = fn;
+}
+
+// Remove a buff from all effect stores by ID. Used for right-click buff removal.
+export function cancelEffect(player: any, effectId: string): boolean {
+  if (!player) return false;
+  let removed = false;
+
+  // Barriers
+  const barriers = getBarriers(player);
+  const bIdx = barriers.findIndex((b) => b.id === effectId);
+  if (bIdx !== -1) {
+    barriers.splice(bIdx, 1);
+    recomputeAbsorbtion(player);
+    removed = true;
+  }
+
+  // Visual effects
+  const visuals = getVisuals(player);
+  const vIdx = visuals.findIndex((v) => v.id === effectId);
+  if (vIdx !== -1) { visuals.splice(vIdx, 1); removed = true; }
+
+  // Stuns
+  const stuns = getStuns(player);
+  const sIdx = stuns.findIndex((s) => s.id === effectId);
+  if (sIdx !== -1) {
+    stuns.splice(sIdx, 1);
+    player.stunnedUntil = stuns.length > 0 ? Math.max(...stuns.map((s) => s.expiresAt)) : 0;
+    removed = true;
+  }
+
+  // Slows
+  const slows = getSlows(player);
+  const slIdx = slows.findIndex((s) => s.id === effectId);
+  if (slIdx !== -1) {
+    slows.splice(slIdx, 1);
+    if (slows.length === 0) { player.slowPercent = 0; player.slowMultiplier = 1; }
+    else { const strongest = Math.max(...slows.map((s) => s.slowPercent)); player.slowPercent = strongest; player.slowMultiplier = 1 - strongest / 100; }
+    removed = true;
+  }
+
+  // Vanishes
+  const vanishes = getVanishes(player);
+  const vaIdx = vanishes.findIndex((v) => v.id === effectId);
+  if (vaIdx !== -1) {
+    vanishes.splice(vaIdx, 1);
+    const wasVanished = player.isVanished;
+    player.isVanished = vanishes.length > 0;
+    if (wasVanished && !player.isVanished && onVanishRemoved) onVanishRemoved(player);
+    removed = true;
+  }
+
+  return removed;
+}
+
+// Slow effect: target's movement speed is reduced for the effect's duration.
+// value = slow percentage (e.g. 50 = 50% slower, so 50% of normal speed).
+// Multiple slows: the strongest (highest percentage) wins.
+const playerSlows = new Map<string, Array<{ id: string; spell: string; duration: number; slowPercent: number; expiresAt: number; token: number; particles: Particle[] | null; icon: string | null }>>();
+let slowToken = 0;
+
+function getSlows(player: any) {
+  const key = String(player.id);
+  if (!playerSlows.has(key)) playerSlows.set(key, []);
+  return playerSlows.get(key)!;
+}
+
+registerSpellEffect("slow", async ({ target, spell, effect, broadcastEffects }) => {
+  if (!target?.stats) return;
+  const durationSec = effect.duration && effect.duration > 0 ? effect.duration : 0;
+  const slowPercent = Math.min(99, Math.max(1, Math.floor(Number(effect.value) || 1)));
+  if (durationSec <= 0) return;
+
+  const spellName = spell?.name || "slow";
+  const id = `slow:${spellName}`;
+  const token = ++slowToken;
+  const expiresAt = Date.now() + durationSec * 1000;
+  const particles = effect.target_particles ? await resolveParticleNames(effect.target_particles) : null;
+
+  const list = getSlows(target);
+  const existing = list.find((s) => s.id === id);
+  if (existing) {
+    existing.duration = durationSec;
+    existing.slowPercent = slowPercent;
+    existing.expiresAt = expiresAt;
+    existing.token = token;
+    if (particles) existing.particles = particles;
+    existing.icon = getSpriteUrl(spell.icon);
+  } else {
+    list.push({ id, spell: spellName, duration: durationSec, slowPercent, expiresAt, token, particles, icon: getSpriteUrl(spell.icon) });
+  }
+
+  // Strongest slow wins for the movement multiplier
+  const strongest = Math.max(...list.map((s) => s.slowPercent));
+  target.slowPercent = strongest;
+  target.slowMultiplier = 1 - strongest / 100;
+
+  broadcastEffects(target);
+
+  setTimeout(() => {
+    const fresh = playerCache.get(target.id);
+    if (!fresh) return;
+    const arr = getSlows(fresh);
+    const idx = arr.findIndex((s) => s.id === id && s.token === token);
+    if (idx === -1) return;
+    arr.splice(idx, 1);
+    if (arr.length === 0) {
+      fresh.slowPercent = 0;
+      fresh.slowMultiplier = 1;
+    } else {
+      const strongest2 = Math.max(...arr.map((s) => s.slowPercent));
+      fresh.slowPercent = strongest2;
+      fresh.slowMultiplier = 1 - strongest2 / 100;
+    }
+    broadcastEffects(fresh);
+  }, durationSec * 1000);
+});
+
+registerEffectsPayloadProvider((player: any) => {
+  const now = Date.now();
+  return getSlows(player)
+    .filter((s) => s.expiresAt > 0 && s.expiresAt > now)
+    .map((s) => ({
+      id: s.id,
+      spell: s.spell,
+      duration: s.duration,
+      remaining: Math.max(0, Math.ceil((s.expiresAt - now) / 1000)),
+      value: s.slowPercent,
+      icon: s.icon || null,
+      particles: s.particles || null,
+      isDebuff: true,
+    }));
+});
+
+export function clearSlows(playerId: string | number) {
+  playerSlows.delete(String(playerId));
+}
 
 registerEffectsPayloadProvider((player: any) => {
   const now = Date.now();
@@ -242,6 +562,7 @@ registerEffectsPayloadProvider((player: any) => {
       spell: v.spell,
       duration: v.duration,
       remaining: Math.max(0, Math.ceil((v.expiresAt - now) / 1000)),
+      icon: v.icon || null,
       particles: v.particles || null,
       isVisual: true,
     }));
@@ -283,8 +604,9 @@ async function applyBarrier(
     existing.expiresAt = expiresAt;
     existing.token = token;
     existing.particles = resolvedParticles;
+    existing.icon = getSpriteUrl(spell.icon);
   } else {
-    list.push({ id: spellName, spell: spellName, amount: cappedAmount, duration: durationSec, expiresAt, token, particles: resolvedParticles });
+    list.push({ id: spellName, spell: spellName, amount: cappedAmount, duration: durationSec, expiresAt, token, particles: resolvedParticles, icon: getSpriteUrl(spell.icon) });
   }
 
   recomputeAbsorbtion(player);
@@ -342,4 +664,4 @@ registerSpellEffect("absorbtion", ({ target, spell, effect, broadcastStats, broa
   return { absorb: value };
 });
 
-export default { registerSpellEffect, applySpellEffects, consumeBarrier, clearBarriers, getEffectsPayload, registerEffectsPayloadProvider, registerHostileEffectType, spellHasHostileEffects, broadcastEffectsUpdate };
+export default { registerSpellEffect, applySpellEffects, consumeBarrier, clearBarriers, clearStuns, clearSlows, clearVanishes, cancelEffect, setVanishRemovedHandler, getVanishedEffectId, getEffectsPayload, registerEffectsPayloadProvider, registerHostileEffectType, spellHasHostileEffects, broadcastEffectsUpdate };

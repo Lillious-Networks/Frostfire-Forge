@@ -4,7 +4,7 @@ import mapIndex from "../services/mapindex";
 import entityAI from "./entityAI";
 import { registerSpellEffect, registerEffectsPayloadProvider, consumeBarrier, broadcastEffectsUpdate, resolveParticleNames } from "./spelleffects";
 import { packetManager } from "../socket/packet_manager";
-import { getIconUrl } from "../modules/spriteSheetManager";
+import { getSpriteUrl } from "../modules/spriteSheetManager";
 import { listener } from "../modules/event_bus";
 import { Events } from "./events";
 import log from "../modules/logger";
@@ -80,10 +80,10 @@ function isEntityTarget(target: any): boolean {
 }
 
 export async function applyDot(caster: any, target: any, spell: SpellData, effect: SpellEffect) {
-  const damagePerTick = Math.max(0, Math.floor(Number(effect.value) || 0));
+  const valuePerTick = Math.floor(Number(effect.value) || 0);
   const durationSec = Number(effect.duration) || 0;
   const intervalSec = Number(effect.interval) || 1;
-  if (damagePerTick <= 0 || durationSec <= 0 || intervalSec <= 0) return;
+  if (valuePerTick === 0 || durationSec <= 0 || intervalSec <= 0) return;
 
   const spellName = spell?.name || "damage_over_time";
   const stackable = effect.stackable === true;
@@ -107,7 +107,7 @@ export async function applyDot(caster: any, target: any, spell: SpellData, effec
     // DoTs also increment the stack count up to their cap.
     // The tick schedule is preserved so reapplying never delays the next tick.
     existing.stacks = stackable ? Math.min(existing.stacks + 1, maxStacks) : 1;
-    existing.damagePerTick = damagePerTick;
+    existing.damagePerTick = valuePerTick;
     existing.interval = intervalSec;
     existing.duration = durationSec;
     existing.expiresAt = now + durationSec * 1000;
@@ -118,10 +118,10 @@ export async function applyDot(caster: any, target: any, spell: SpellData, effec
     list.push({
       id: spellName,
       spell: spellName,
-      icon: getIconUrl(spell?.icon || null),
+      icon: getSpriteUrl(spell?.icon || null),
       casterId: String(caster?.id ?? ""),
       casterUsername: caster?.username || "",
-      damagePerTick,
+      damagePerTick: valuePerTick,
       interval: intervalSec,
       duration: durationSec,
       stackable,
@@ -137,8 +137,7 @@ export async function applyDot(caster: any, target: any, spell: SpellData, effec
   if (!entity) sendEffectsToTarget(target);
 }
 
-export function clearDots(targetId: string | number) {
-  const key = String(targetId);
+export function clearDots(targetId: string | number) {  const key = String(targetId);
   if (playerDots.delete(key)) {
     const target = playerCache.get(key);
     if (target) sendEffectsToTarget(target);
@@ -165,9 +164,9 @@ export function getDotsPayload(player: any) {
       remaining: Math.max(0, Math.ceil((d.expiresAt - now) / 1000)),
       interval: d.interval,
       stacks: d.stacks,
-      value: d.damagePerTick,
+      value: Math.abs(d.damagePerTick),
       particles: d.particles || null,
-      isDebuff: true,
+      isDebuff: d.damagePerTick > 0,
     }));
 }
 
@@ -176,7 +175,33 @@ async function tickPlayerDot(targetKey: string, dot: DotInstance): Promise<boole
   if (!target?.stats || target.stats.health <= 0) return false;
 
   const caster = playerCache.get(dot.casterId);
-  const damage = dot.damagePerTick * dot.stacks;
+  const isHeal = dot.damagePerTick < 0;
+  const amount = Math.abs(dot.damagePerTick) * dot.stacks;
+
+  if (isHeal) {
+    target.stats.health = Math.round(Math.min(target.stats.health + amount, target.stats.total_max_health));
+    broadcastToMap(target.location?.map, packetManager.updateStats({
+      id: dot.casterId,
+      target: target.id,
+      stats: target.stats,
+      isCrit: false,
+      damage: -amount,
+    }));
+    return true;
+  }
+
+  // Avoidance check — DoT ticks can be dodged like direct damage
+  let damage = amount;
+  const targetAvoidance = target.stats?.stat_avoidance || 0;
+  if (Math.random() * 100 < targetAvoidance) {
+    damage = 0;
+  }
+
+  // Armor mitigation
+  if (damage > 0) {
+    const targetArmor = target.stats?.stat_armor || 0;
+    damage = Math.floor(damage * (1 - Math.min(targetArmor, 75) / 100));
+  }
 
   const absorbed = consumeBarrier(target, damage);
   const damageToHealth = damage - absorbed;
@@ -186,7 +211,6 @@ async function tickPlayerDot(targetKey: string, dot: DotInstance): Promise<boole
 
   listener.emit(Events.PLAYER_DAMAGED, { attacker: caster || null, target, damage, isCrit: false });
 
-  // DoT damage keeps both parties in combat (blocks regen / map change via pvp flag)
   if (caster && caster.id !== target.id) {
     target.pvp = true;
     target.last_attack = performance.now();
@@ -312,6 +336,14 @@ registerEffectsPayloadProvider(getDotsPayload);
 registerSpellEffect("damage_over_time", ({ caster, target, spell, effect }) => {
   if (!target) return;
   applyDot(caster, target, spell, effect);
+});
+
+registerSpellEffect("heal_over_time", ({ caster, target, spell, effect }) => {
+  if (!target) return;
+  // Healing uses negative damage internally; force the value negative
+  // so the payload renders as a buff (isDebuff: false).
+  const healEffect = { ...effect, value: -Math.abs(Number(effect.value) || 0) };
+  applyDot(caster, target, spell, healEffect);
 });
 
 export default { applyDot, clearDots, clearEntityDots, getDotsPayload, setPlayerDeathHandler };

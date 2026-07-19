@@ -179,7 +179,8 @@ const createSpellsTable = async () => {
         description TEXT DEFAULT NULL,
         icon TEXT DEFAULT NULL,
         effects TEXT DEFAULT NULL,
-        particles TEXT DEFAULT NULL
+        particles TEXT DEFAULT NULL,
+        aoe_radius INT DEFAULT NULL
     );
   `;
   await query(sql);
@@ -209,6 +210,24 @@ const insertDefaultSpell = async () => {
     `INSERT OR IGNORE INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move, effects) VALUES
     ('mind_freeze', 0, 5, 1000, 'spell', 0, 15, 'Freezes the target''s mind, interrupting their spell cast and locking their spells for 3 seconds.', 'mind_freeze', 1, ?);`,
     [interruptEffects]
+  );
+
+  const stunEffects = JSON.stringify([
+    { type: "stun", value: 0, duration: 3 },
+  ]);
+  await query(
+    `INSERT OR IGNORE INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move, effects) VALUES
+    ('stun_strike', 5, 10, 200, 'spell', 0, 30, 'Stuns the target for 3 seconds, preventing movement and spell casting.', 'stun_strike', 1, ?);`,
+    [stunEffects]
+  );
+
+  const slowEffects = JSON.stringify([
+    { type: "slow", value: 50, duration: 5 },
+  ]);
+  await query(
+    `INSERT OR IGNORE INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move, effects) VALUES
+    ('frost_bolt_slow', 5, 10, 1000, 'spell', 1, 8, 'A chilling bolt that slows the target by 50% for 5 seconds.', 'frost_bolt_slow', 1, ?);`,
+    [slowEffects]
   );
 };
 
@@ -602,7 +621,9 @@ const insertDefaultLearnedSpell = async () => {
     INSERT OR IGNORE INTO learned_spells (spell, username) VALUES
     ('frost_bolt', 'demo_user'),
     ('poison_bolt', 'demo_user'),
-    ('mind_freeze', 'demo_user');
+    ('mind_freeze', 'demo_user'),
+    ('stun_strike', 'demo_user'),
+    ('frost_bolt_slow', 'demo_user');
   `;
   await query(sql);
 };

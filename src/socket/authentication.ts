@@ -110,6 +110,7 @@ const authentication = {
                 type: string | null,
                 effects: SpellEffect[],
                 particles: string | null,
+                aoe_radius: number | null,
             }> = Object.create(null);
 
             for (const row of learnedSpellsData) {
@@ -129,6 +130,7 @@ const authentication = {
                     type: spellDetails.type ?? null,
                     effects: Array.isArray(spellDetails.effects) ? spellDetails.effects : [],
                     particles: spellDetails.particles ?? null,
+                    aoe_radius: spellDetails.aoe_radius ?? null,
                 };
             }
 

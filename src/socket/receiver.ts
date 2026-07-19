@@ -48,7 +48,7 @@ import worlds from "../systems/worlds";
 import npcSystem from "../systems/npcs";
 import entitySystem from "../systems/entities";
 import entityAI from "../systems/entityAI";
-import spellEffects, { registerSpellEffect, spellHasHostileEffects } from "../systems/spelleffects";
+import spellEffects, { registerSpellEffect, spellHasHostileEffects, cancelEffect } from "../systems/spelleffects";
 import dots from "../systems/dots";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
@@ -237,9 +237,14 @@ function flushMovementBatches() {
       for (const [potentialReceiverId, receiversForPlayer] of receiverSets.entries()) {
         if (!receiversForPlayer.has(movingPlayerId)) continue;
 
-        if (movementData.isStealth) {
+        if (movementData.isStealth || movingPlayer.isStealth) {
           const receiver = allPlayers[potentialReceiverId];
           if (!receiver || !receiver.isAdmin) continue;
+        }
+
+        if (movingPlayer.isVanished) {
+          const receiver = allPlayers[potentialReceiverId];
+          if (!receiver || (!receiver.isAdmin && !receiver.party?.includes(movingPlayer.username))) continue;
         }
 
         if (!receiverMovements.has(potentialReceiverId)) {
@@ -986,6 +991,11 @@ authWorker.on("message", async (result: any) => {
       lastInterruptTime: 0,
       interruptableSpell: false,
       castId: 0,
+      stunnedUntil: 0,
+      spellLockoutUntil: 0,
+      slowPercent: 0,
+      slowMultiplier: 1,
+      isVanished: false,
       learnedSpells: limitedLearnedSpells,
       inventory: limitedInventory,
       equipment: playerData.equipment || {},
@@ -1133,7 +1143,8 @@ authWorker.on("message", async (result: any) => {
           username: p.username,
           isAdmin: p.isAdmin,
           isGuest: p.isGuest,
-          isStealth: p.isStealth,
+      isStealth: p.isStealth,
+      isVanished: p.isVanished,
           isNoclip: p.isNoclip,
           stats: p.stats,
           animation: null,
@@ -1358,6 +1369,7 @@ authWorker.on("message", async (result: any) => {
           type: (spellData as any).type ?? null,
           effects: (spellData as any).effects ?? [],
           particles: (spellData as any).particles ?? null,
+          aoe_radius: (spellData as any).aoe_radius ?? null,
         };
       }
     }
@@ -1588,6 +1600,11 @@ export default async function packetReceiver(
 
         if (!directions.includes(direction)) return;
 
+        // Stunned players cannot move
+        if (currentPlayer.stunnedUntil && currentPlayer.stunnedUntil > performance.now()) {
+          return;
+        }
+
         currentPlayer.location.position.direction = direction || "down";
         currentPlayer.moving = true;
 
@@ -1630,7 +1647,7 @@ export default async function packetReceiver(
           const playerHeight = 40;
           const playerWidth = 24;
 
-          const speed = currentPlayer.mounted ? baseSpeed * mountSpeedMultiplier : baseSpeed;
+          const speed = (currentPlayer.mounted ? baseSpeed * mountSpeedMultiplier : baseSpeed) * (currentPlayer.slowMultiplier || 1);
 
           const directionOffsets: Record<string, { dx: number; dy: number }> = {
             up: { dx: 0, dy: -speed },
@@ -2668,6 +2685,11 @@ export default async function packetReceiver(
           return;
         }
 
+        // Stunned players cannot cast
+        if (freshPlayerForDelay?.stunnedUntil && freshPlayerForDelay.stunnedUntil > performance.now()) {
+          return;
+        }
+
         const spell_identifier = (data as any).spell;
         const targetId = (data as any).target?.id;
         const isEntityRequest = (data as any).entity === true;
@@ -2725,7 +2747,10 @@ export default async function packetReceiver(
           log.debug(`[ATTACK] No target specified, defaulting to self`);
         }
 
-        if (!target?.id) {
+        // AoE spells don't need a valid target — they hit everything around the caster
+        const isAoeSpell = spell?.aoe_radius && spell.aoe_radius > 0;
+
+        if (!isAoeSpell && !target?.id) {
           log.debug(`[ATTACK] Player ${currentPlayer.username} attempted attack with invalid target: ${targetId}`);
           sendPacket(
             ws,
@@ -2743,6 +2768,10 @@ export default async function packetReceiver(
           return;
         }
 
+        // These are re-evaluated later if the target changes (auto-self-cast)
+        let isSelf = (target.id === currentPlayer.id) || (currentPlayer.username === target.username);
+        let isEntityTarget = target.aggro_type !== undefined && target.health !== undefined && !target.stats;
+
         const freshPlayerForCooldown = playerCache.get(currentPlayer.id);
         if (!freshPlayerForCooldown) return;
         freshPlayerForCooldown.spellCooldowns = freshPlayerForCooldown.spellCooldowns || {};
@@ -2756,6 +2785,7 @@ export default async function packetReceiver(
         const spell_mana = spell?.mana || 0;
         const hasEffects = Array.isArray(spell?.effects) && spell.effects.length > 0;
         const spellIsHostileEffect = spellHasHostileEffects(spell);
+        const playerLevel = currentPlayer.stats.level || 1;
 
         currentPlayer.interruptableSpell = !spell?.can_move || false;
 
@@ -2797,6 +2827,202 @@ export default async function packetReceiver(
         currentPlayer.lastCastTime = freshPlayerForMana.lastCastTime;
         currentPlayer.spellCooldowns = freshPlayerForMana.spellCooldowns;
 
+        // --- AoE branch: cast on self, hit everything around the caster ---
+        if (isAoeSpell) {
+          currentPlayer.casting = true;
+          currentPlayer.castId = (currentPlayer.castId || 0) + 1;
+          playerCache.set(currentPlayer.id, currentPlayer);
+          const thisAoeCastId = currentPlayer.castId;
+          const aoeSpellStartTime = performance.now();
+
+          if (currentPlayer.mounted) {
+            currentPlayer.mounted = false;
+            playerCache.set(currentPlayer.id, currentPlayer);
+          }
+
+          globalStateRevision++;
+          await sendPositionAnimation(ws, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, true);
+
+          const aoePlayersInMap = filterPlayersByMap(currentPlayer.location.map);
+          aoePlayersInMap.forEach((p) => {
+            sendPacket(p.ws, packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: spell.cast_time }));
+          });
+
+          await new Promise((resolve) => setTimeout(resolve, spell.cast_time * 1000));
+
+          const aoeCheckPlayer = playerCache.get(currentPlayer.id);
+          if (aoeCheckPlayer && aoeCheckPlayer.castId !== thisAoeCastId) return;
+
+          const aoeUpdatedPlayer = playerCache.get(currentPlayer.id);
+          if (aoeUpdatedPlayer && aoeUpdatedPlayer.manualSpellCancel && aoeUpdatedPlayer.manualSpellCancel >= aoeSpellStartTime) {
+            if (aoeUpdatedPlayer.spellCooldowns) delete aoeUpdatedPlayer.spellCooldowns[spell_id];
+            delete aoeUpdatedPlayer.manualSpellCancel;
+            aoeUpdatedPlayer.casting = false;
+            playerCache.set(aoeUpdatedPlayer.id, aoeUpdatedPlayer);
+            currentPlayer.spellCooldowns = aoeUpdatedPlayer.spellCooldowns;
+            currentPlayer.manualSpellCancel = undefined;
+            currentPlayer.casting = false;
+            return;
+          }
+
+          if (!spell.can_move && !playerCache.get(currentPlayer.id)?.casting) {
+            const resetPlayer = playerCache.get(currentPlayer.id);
+            if (resetPlayer && resetPlayer.spellCooldowns) {
+              delete resetPlayer.spellCooldowns[spell_id];
+              playerCache.set(resetPlayer.id, resetPlayer);
+            }
+            return;
+          }
+
+          currentPlayer.casting = false;
+          currentPlayer.mounted = false;
+          playerCache.set(currentPlayer.id, currentPlayer);
+
+          globalStateRevision++;
+          await sendPositionAnimation(ws, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, false);
+
+          // Mana deduction
+          const aoeManaCheck = playerCache.get(currentPlayer.id);
+          if (!aoeManaCheck || (aoeManaCheck.stats.stamina || 0) < actualManaCost) {
+            if (aoeManaCheck && aoeManaCheck.spellCooldowns) {
+              delete aoeManaCheck.spellCooldowns[spell_id];
+              playerCache.set(aoeManaCheck.id, aoeManaCheck);
+            }
+            return;
+          }
+          currentPlayer.stats.stamina = aoeManaCheck.stats.stamina;
+          currentPlayer.stats.stamina -= actualManaCost;
+          if (currentPlayer.stats.stamina < 0) currentPlayer.stats.stamina = 0;
+
+          // AoE splash from caster position
+          const aoeX = currentPlayer.location.position.x;
+          const aoeY = currentPlayer.location.position.y;
+          const aoeRadius = spell.aoe_radius!;
+
+          // Send a projectile packet from caster to self as a visual indicator
+          aoePlayersInMap.forEach((p) => {
+            sendPacket(p.ws, packetManager.projectile({
+              id: currentPlayer.id, time: 0.3, target_id: currentPlayer.id,
+              spell: spell.name, icon: getIconUrl(spell.icon), entity: false
+            }));
+          });
+
+          const splashTargets: Array<{ target: any; isEntity: boolean }> = [];
+          const aoeIsHeal = spell_damage < 0;
+          for (const p of aoePlayersInMap) {
+            if (p.id === currentPlayer.id && !aoeIsHeal) continue;
+            if (p.isGuest) continue;
+            const inParty = currentPlayer?.party?.includes(p?.username) || false;
+            if (aoeIsHeal) {
+              // Healing AoE: only hit self and party members
+              if (p.id !== currentPlayer.id && !inParty) continue;
+            } else {
+              // Damage AoE: skip self and party members
+              if (p.id === currentPlayer.id || inParty) continue;
+            }
+            const pPos = p.location?.position;
+            if (!pPos) continue;
+            const dist = Math.sqrt((pPos.x - aoeX) ** 2 + (pPos.y - aoeY) ** 2);
+            if (dist <= aoeRadius) splashTargets.push({ target: p, isEntity: false });
+          }
+
+          // Entities don't receive healing AoE
+          if (!aoeIsHeal) {
+          const aoeMapEntities = entityCache.getByMap(currentPlayer.location.map);
+          for (const e of aoeMapEntities) {
+            if (e.aggro_type === 'friendly') continue;
+            const ePos = e.position;
+            if (!ePos) continue;
+            const dist = Math.sqrt((ePos.x - aoeX) ** 2 + (ePos.y - aoeY) ** 2);
+            if (dist <= aoeRadius) {
+              const entityState = entityAI.getEntityAIState(String(e.id));
+              if (entityState?.combatState === 'returning') continue;
+              splashTargets.push({ target: e, isEntity: true });
+            }
+          }
+          }
+
+          const attackerDamageBonus = currentPlayer.stats.stat_damage || 0;
+          for (const splash of splashTargets) {
+            const st = splash.target;
+            const si = splash.isEntity;
+            const splashMin = spell_damage < 0 ? spell_damage - (playerLevel - 1) * 2 : spell_damage + (playerLevel - 1) * 2;
+            const splashMax = spell_damage < 0 ? spell_damage - (playerLevel - 1) * 5 : spell_damage + (playerLevel - 1) * 5;
+            let splashDmg = Math.floor(Math.random() * (Math.abs(splashMax - splashMin) + 1)) + Math.min(splashMin, splashMax);
+            splashDmg += attackerDamageBonus;
+            if (spell_damage === 0) splashDmg = 0;
+
+            if (splashDmg > 0 && !si) {
+              const av = st.stats?.stat_avoidance || 0;
+              if (Math.random() * 100 < av) splashDmg = 0;
+              if (splashDmg > 0) {
+                const ar = st.stats?.stat_armor || 0;
+                splashDmg = Math.floor(splashDmg * (1 - Math.min(ar, 75) / 100));
+              }
+            }
+
+            if (si) {
+              entityAI.applyDamageToEntity(st, splashDmg, currentPlayer);
+              if (st.health < 0) st.health = 0;
+              entityCache.updateHealth(st.id, st.health);
+              if (spell_damage !== 0) {
+              aoePlayersInMap.forEach((pp) => {
+                sendPacket(pp.ws, packetManager.updateStats({ id: ws.data.id, target: st.id, stats: { health: st.health, total_max_health: st.max_health }, isCrit: false, damage: splashDmg, entity: true }));
+              });
+              }
+              if (st.health <= 0) {
+                aoePlayersInMap.forEach((pp) => sendPacket(pp.ws, packetManager.despawnEntity(st.id, 30)));
+                entityCache.remove(st.id);
+                dots.clearEntityDots(st.id);
+              } else {
+                if (!(spell_damage > 0 && splashDmg === 0)) {
+                spellEffects.applySpellEffects(spell, currentPlayer, st, () => {}, () => {});
+                }
+              }
+            } else {
+              let toHealth = splashDmg;
+              if (splashDmg > 0) {
+                const ab = spellEffects.consumeBarrier(st, splashDmg);
+                toHealth = splashDmg - ab;
+                if (ab > 0) spellEffects.broadcastEffectsUpdate(st);
+              }
+              st.stats.health = Math.round(st.stats.health - toHealth);
+              if (st.stats.health > st.stats.total_max_health) {
+                st.stats.health = st.stats.total_max_health;
+              }
+              listener.emit(Events.PLAYER_DAMAGED, { attacker: currentPlayer, target: st, damage: splashDmg, isCrit: false });
+
+              if (st.stats.health <= 0) {
+                await handlePlayerDeath(st, currentPlayer, { damage: splashDmg, isCrit: false });
+              } else {
+                if (!(spell_damage > 0 && splashDmg === 0)) {
+                await spellEffects.applySpellEffects(spell, currentPlayer, st,
+                  (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.ws, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
+                  (pp: any) => spellEffects.broadcastEffectsUpdate(pp)
+                );
+                }
+                if (spell_damage !== 0) {
+                aoePlayersInMap.forEach((pp) => sendPacket(pp.ws, packetManager.updateStats({ id: ws.data.id, target: st.id, stats: st.stats, isCrit: false, damage: splashDmg })));
+                }
+              }
+
+              currentPlayer.pvp = true;
+              st.pvp = true;
+              st.last_attack = performance.now();
+            }
+          }
+
+          // Sync caster stats
+          const syncedStats = await player.synchronizeStats(currentPlayer.username);
+          if (syncedStats) currentPlayer.stats = syncedStats;
+          playerCache.set(currentPlayer.id, currentPlayer);
+          aoePlayersInMap.forEach((pp) => sendPacket(pp.ws, packetManager.updateStats({ id: currentPlayer.id, target: currentPlayer.id, stats: currentPlayer.stats })));
+
+          currentPlayer.last_attack = performance.now();
+          listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target: currentPlayer, isEntityTarget: false });
+          break;
+        }
+
         const isInParty = currentPlayer?.party?.includes(target?.username) || null;
 
         if (isInParty && (spell_damage > 0 || spellIsHostileEffect)) {
@@ -2809,7 +3035,11 @@ export default async function packetReceiver(
           return;
         }
 
-        if ((spell_damage < 0 || (spell_damage === 0 && hasEffects && !spellIsHostileEffect)) && target.id !== currentPlayer.id && !isInParty) return;
+        if ((spell_damage < 0 || (spell_damage === 0 && hasEffects && !spellIsHostileEffect)) && target.id !== currentPlayer.id && !isInParty) {
+          target = currentPlayer;
+          isSelf = true;
+          isEntityTarget = false;
+        }
 
         const playersInMap = filterPlayersByMap(currentPlayer.location.map);
 
@@ -2820,7 +3050,7 @@ export default async function packetReceiver(
         );
 
         // Determine if target is an entity or a player
-        const isEntityTarget = target.aggro_type !== undefined && target.health !== undefined && !target.stats;
+        isEntityTarget = target.aggro_type !== undefined && target.health !== undefined && !target.stats;
 
         if (isEntityTarget) {
           log.debug(`[ATTACK] Identified target as entity. aggro_type=${target.aggro_type}, health=${target.health}, has_stats=${!!target.stats}`);
@@ -2895,10 +3125,10 @@ export default async function packetReceiver(
           return;
         }
 
-        const isSelf = (target.id === currentPlayer.id) || (currentPlayer.username === target.username);
+        isSelf = (target.id === currentPlayer.id) || (currentPlayer.username === target.username);
         
-        // Prevent self-targeting for damaging/hostile spells, but allow self-targeting for healing/buff spells
-        if (isSelf && (spell_damage > 0 || spellIsHostileEffect)) return;
+        // Prevent self-targeting for damaging/hostile spells, but allow self-targeting for healing/buff spells and AoE
+        if (isSelf && (spell_damage > 0 || spellIsHostileEffect) && !isAoeSpell) return;
 
         if (!canAttack?.value) {
           if (canAttack?.reason == "nopvp") {
@@ -3168,8 +3398,6 @@ export default async function packetReceiver(
         }
         await new Promise((resolve) => setTimeout(resolve, delay));
 
-        const playerLevel = currentPlayer.stats.level || 1;
-
         const minDamage = spell_damage < 0 ?
           spell_damage - (playerLevel - 1) * 2 :
           spell_damage + (playerLevel - 1) * 2;
@@ -3303,7 +3531,11 @@ export default async function packetReceiver(
         } else {
 
           const broadcastStats = (p: any) => {
-            const pls = filterPlayersByMap(p.location.map);
+            const pls = filterPlayersByMap(p.location.map).filter((pl: any) => {
+              if (pl.id === p.id) return true;
+              if (p.isVanished && !pl.isAdmin && !pl.party?.includes(p.username)) return false;
+              return true;
+            });
             pls.forEach((pl: any) =>
               sendPacket(pl.ws, packetManager.updateStats({ id: p.id, target: p.id, stats: p.stats }))
             );
@@ -3312,8 +3544,24 @@ export default async function packetReceiver(
           const broadcastEffects = (p: any) => {
             spellEffects.broadcastEffectsUpdate(p);
           };
-          const effectResult = await spellEffects.applySpellEffects(spell, currentPlayer, target, broadcastStats, broadcastEffects);
+          // If the attack was dodged (spell deals damage but 0 got through), skip effects
+          let effectResult: any = {};
+          if (!(spell_damage > 0 && finalDamage === 0)) {
+            effectResult = await spellEffects.applySpellEffects(spell, currentPlayer, target, broadcastStats, broadcastEffects);
+          }
 
+          // Vanish despawn — must happen in receiver, same pattern as admin stealth
+          if (Array.isArray(spell.effects) && spell.effects.some((e: SpellEffect) => e.type === "vanish") && target.isVanished) {
+            playersInMap.forEach((player) => {
+              if (player.id === target.id) return;
+              if (player.isAdmin) return;
+              if (player.party?.includes(target.username)) return;
+              sendPacket(player.ws, packetManager.despawnPlayer(target.id));
+            });
+          }
+
+          // Utility spells (damage=0) don't show damage numbers
+          if (spell_damage !== 0) {
           playersInMap.forEach((player) => {
             sendPacket(
               player.ws,
@@ -3326,7 +3574,11 @@ export default async function packetReceiver(
                 absorb: effectResult.absorb || 0,
               })
             );
+          });
+          }
 
+          // Always send caster's stats (mana change)
+          playersInMap.forEach((player) => {
             sendPacket(
               player.ws,
               packetManager.updateStats({
@@ -3355,7 +3607,141 @@ export default async function packetReceiver(
         if (!isEntityTarget) {
           target.last_attack = performance.now();
         }
+
+        // Attacking breaks vanish (but not DoT ticks — this is a direct cast)
+        if (currentPlayer.isVanished && !isSelf && !isInParty) {
+          const vanishId = spellEffects.getVanishedEffectId(currentPlayer);
+          if (vanishId) {
+            cancelEffect(currentPlayer, vanishId);
+            spellEffects.broadcastEffectsUpdate(currentPlayer);
+          }
+        }
         listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target, isEntityTarget });
+
+        // AoE splash: apply damage and effects to all valid targets within aoe_radius
+        // of the primary target (excluding the primary target itself).
+        const aoeRadius = spell?.aoe_radius;
+        if (aoeRadius && aoeRadius > 0) {
+          const splashTargets: Array<{ target: any; isEntity: boolean; distance: number }> = [];
+
+          // Collect nearby players
+          const allMapPlayers = filterPlayersByMap(currentPlayer.location.map);
+          for (const p of allMapPlayers) {
+            if (p.id === target.id && !isEntityTarget) continue;
+            if (p.isGuest) continue;
+            if (isInParty && currentPlayer?.party?.includes(p?.username)) continue;
+            const pPos = p.location?.position;
+            if (!pPos) continue;
+            const dist = Math.sqrt((pPos.x - targetX) ** 2 + (pPos.y - targetY) ** 2);
+            if (dist <= aoeRadius) {
+              splashTargets.push({ target: p, isEntity: false, distance: dist });
+            }
+          }
+
+          // Collect nearby entities
+          const mapEntities = entityCache.getByMap(currentPlayer.location.map);
+          for (const e of mapEntities) {
+            if (e.id === target.id && isEntityTarget) continue;
+            if (e.aggro_type === 'friendly') continue;
+            const ePos = e.position;
+            if (!ePos) continue;
+            const dist = Math.sqrt((ePos.x - targetX) ** 2 + (ePos.y - targetY) ** 2);
+            if (dist <= aoeRadius) {
+              const entityState = entityAI.getEntityAIState(String(e.id));
+              if (entityState?.combatState === 'returning') continue;
+              splashTargets.push({ target: e, isEntity: true, distance: dist });
+            }
+          }
+
+          for (const splash of splashTargets) {
+            const splashTarget = splash.target;
+            const splashIsEntity = splash.isEntity;
+
+            // AoE damage: independent roll per target (same formula as primary)
+            const splashMin = spell_damage < 0
+              ? spell_damage - (playerLevel - 1) * 2
+              : spell_damage + (playerLevel - 1) * 2;
+            const splashMax = spell_damage < 0
+              ? spell_damage - (playerLevel - 1) * 5
+              : spell_damage + (playerLevel - 1) * 5;
+            let splashDmg = Math.floor(Math.random() * (Math.abs(splashMax - splashMin) + 1)) + Math.min(splashMin, splashMax);
+            splashDmg += attackerDamageBonus;
+            if (spell_damage === 0) splashDmg = 0;
+
+            if (splashDmg > 0 && !splashIsEntity) {
+              const splashAvoid = splashTarget.stats?.stat_avoidance || 0;
+              if (Math.random() * 100 < splashAvoid) splashDmg = 0;
+              if (splashDmg > 0) {
+                const splashArmor = splashTarget.stats?.stat_armor || 0;
+                splashDmg = Math.floor(splashDmg * (1 - Math.min(splashArmor, 75) / 100));
+              }
+            }
+
+            if (splashIsEntity) {
+              entityAI.applyDamageToEntity(splashTarget, splashDmg, currentPlayer);
+              if (splashTarget.health < 0) splashTarget.health = 0;
+              entityCache.updateHealth(splashTarget.id, splashTarget.health);
+
+              playersInMap.forEach((p) => {
+                sendPacket(p.ws, packetManager.updateStats({
+                  id: ws.data.id,
+                  target: splashTarget.id,
+                  stats: { health: splashTarget.health, total_max_health: splashTarget.max_health },
+                  isCrit: false,
+                  damage: splashDmg,
+                  entity: true,
+                }));
+              });
+
+              if (splashTarget.health <= 0) {
+                playersInMap.forEach((p) => {
+                  sendPacket(p.ws, packetManager.despawnEntity(splashTarget.id, 30));
+                });
+                entityCache.remove(splashTarget.id);
+                dots.clearEntityDots(splashTarget.id);
+              } else {
+                spellEffects.applySpellEffects(spell, currentPlayer, splashTarget, () => {}, () => {});
+              }
+            } else {
+              let splashToHealth = splashDmg;
+              if (splashDmg > 0) {
+                const absorbed = spellEffects.consumeBarrier(splashTarget, splashDmg);
+                splashToHealth = splashDmg - absorbed;
+                if (absorbed > 0) spellEffects.broadcastEffectsUpdate(splashTarget);
+              }
+              splashTarget.stats.health = Math.round(splashTarget.stats.health - splashToHealth);
+              listener.emit(Events.PLAYER_DAMAGED, { attacker: currentPlayer, target: splashTarget, damage: splashDmg, isCrit: false });
+
+              if (splashTarget.stats.health <= 0) {
+                await handlePlayerDeath(splashTarget, currentPlayer, { damage: splashDmg, isCrit: false });
+              } else {
+                await spellEffects.applySpellEffects(spell, currentPlayer, splashTarget,
+                  (p: any) => {
+                    const pls = filterPlayersByMap(p.location.map);
+                    pls.forEach((pl: any) => sendPacket(pl.ws, packetManager.updateStats({ id: p.id, target: p.id, stats: p.stats })));
+                  },
+                  (p: any) => spellEffects.broadcastEffectsUpdate(p)
+                );
+
+                playersInMap.forEach((p) => {
+                  sendPacket(p.ws, packetManager.updateStats({
+                    id: ws.data.id,
+                    target: splashTarget.id,
+                    stats: splashTarget.stats,
+                    isCrit: false,
+                    damage: splashDmg,
+                  }));
+                });
+              }
+
+              if (!isInParty) {
+                currentPlayer.pvp = true;
+                splashTarget.pvp = true;
+                splashTarget.last_attack = performance.now();
+              }
+            }
+          }
+        }
 
         break;
       }
@@ -3403,6 +3789,20 @@ export default async function packetReceiver(
 
         log.debug(`[SPELL] Player ${currentPlayer.username} cancelled spell via ESC`);
         listener.emit(Events.SPELL_INTERRUPTED, { player: currentPlayer });
+        break;
+      }
+      case "CANCEL_EFFECT": {
+        if (!currentPlayer) return;
+        const effectId = (data as any)?.id;
+        if (!effectId) return;
+        const removed = spellEffects.cancelEffect(currentPlayer, effectId);
+        if (removed) {
+          spellEffects.broadcastEffectsUpdate(currentPlayer);
+          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+          playersInMap.forEach((p) => {
+            sendPacket(p.ws, packetManager.updateStats({ id: currentPlayer.id, target: currentPlayer.id, stats: currentPlayer.stats }));
+          });
+        }
         break;
       }
       case "QUESTDETAILS": {
@@ -6590,6 +6990,13 @@ export default async function packetReceiver(
             }
           });
           listener.emit(Events.PARTY_CHANGED, { type: "disband", members });
+          if (currentPlayer.isVanished) {
+            for (const member of members) {
+              const session_id = await player.getSessionIdByUsername(member);
+              const pm = session_id && playerCache.get(session_id);
+              if (pm && pm.ws && pm.id !== currentPlayer.id) sendPacket(pm.ws, packetManager.despawnPlayer(currentPlayer.id));
+            }
+          }
           return;
         }
 
@@ -6628,6 +7035,14 @@ export default async function packetReceiver(
               if (partyLeader) {
                 await syncPartyLayers(partyLeader, result as string[], playerCache, sendAnimationTo);
               }
+            }
+          }
+          // Vanish: former party members can no longer see the vanished player
+          if (currentPlayer.isVanished) {
+            for (const member of (result as string[])) {
+              const session_id = await player.getSessionIdByUsername(member);
+              const pm = session_id && playerCache.get(session_id);
+              if (pm && pm.ws && pm.id !== currentPlayer.id) sendPacket(pm.ws, packetManager.despawnPlayer(currentPlayer.id));
             }
           }
         }
@@ -7247,26 +7662,44 @@ export default async function packetReceiver(
                   })
                 );
 
-                updatedPartyMembers.forEach(async (member: string) => {
-                  const session_id = await player.getSessionIdByUsername(
-                    member
-                  );
+                for (const member of (updatedPartyMembers as string[])) {
+                  const session_id = await player.getSessionIdByUsername(member);
                   const p = session_id && playerCache.get(session_id);
                   if (p) {
-                    sendPacket(
-                      p.ws,
-                      packetManager.updateParty({
-                        members: updatedPartyMembers,
-                      })
-                    );
+                    sendPacket(p.ws, packetManager.updateParty({ members: updatedPartyMembers }));
                     p.party = updatedPartyMembers;
                     playerCache.set(p.id, p);
                   }
-                });
+                }
 
                 const partyLeader = await parties.getPartyLeader(partyId);
                 if (partyLeader && updatedPartyMembers.length > 0) {
                   await syncPartyLayers(partyLeader, updatedPartyMembers as string[], playerCache, sendAnimationTo);
+                }
+
+                // Vanish: spawn all vanished party members to all other online party members
+                for (const memberUsername of (updatedPartyMembers as string[])) {
+                  const memberSessionId = await player.getSessionIdByUsername(memberUsername);
+                  const memberPlayer = memberSessionId && playerCache.get(memberSessionId);
+                  if (!memberPlayer || !memberPlayer.isVanished) continue;
+                  const sd = queueSpawnPlayerPacket(memberPlayer);
+                  if (!sd) continue;
+                  const an = getAnimationNameForDirection(memberPlayer.location.position?.direction || "down", !!memberPlayer.moving, !!memberPlayer.mounted, memberPlayer.mount_type, !!memberPlayer.casting);
+                  const ss = await getPlayerSpriteSheetData(an, memberPlayer.equipment || null);
+                  const ms = memberPlayer.mount_type ? getMountSpriteUrl(memberPlayer.mount_type) : null;
+                  if (ss?.bodySprite || ss?.headSprite || ms) {
+                    (sd as any).spriteData = { mountSprite: ms, bodySprite: ss.bodySprite || null, headSprite: ss.headSprite || null, armorHelmetSprite: ss.armorHelmetSprite || null, armorShoulderguardsSprite: ss.armorShoulderguardsSprite || null, armorNeckSprite: ss.armorNeckSprite || null, armorHandsSprite: ss.armorHandsSprite || null, armorChestSprite: ss.armorChestSprite || null, armorFeetSprite: ss.armorFeetSprite || null, armorLegsSprite: ss.armorLegsSprite || null, armorWeaponSprite: ss.armorWeaponSprite || null, animationState: ss.animationState };
+                  }
+                  const fx = spellEffects.getEffectsPayload(memberPlayer);
+                  if (fx.length > 0) (sd as any).effects = fx;
+                  for (const otherUsername of (updatedPartyMembers as string[])) {
+                    if (otherUsername.toLowerCase() === memberUsername.toLowerCase()) continue;
+                    const otherSessionId = await player.getSessionIdByUsername(otherUsername);
+                    const otherPlayer = otherSessionId && playerCache.get(otherSessionId);
+                    if (otherPlayer && otherPlayer.ws) {
+                      sendPacket(otherPlayer.ws, packetManager.spawnPlayer(sd));
+                    }
+                  }
                 }
               } else {
 
@@ -7305,28 +7738,45 @@ export default async function packetReceiver(
                   ws,
                   packetManager.updateParty({ members: updatedPartyMembers })
                 );
-                (updatedPartyMembers as string[]).forEach(
-                  async (member: string) => {
-                    const session_id = await player.getSessionIdByUsername(
-                      member
-                    );
-                    const p = session_id && playerCache.get(session_id);
-                    if (p) {
-                      sendPacket(
-                        p.ws,
-                        packetManager.updateParty({
-                          members: updatedPartyMembers,
-                        })
-                      );
-                      p.party = updatedPartyMembers;
-                      playerCache.set(p.id, p);
-                    }
+                for (const member of (updatedPartyMembers as string[])) {
+                  const session_id = await player.getSessionIdByUsername(member);
+                  const p = session_id && playerCache.get(session_id);
+                  if (p) {
+                    sendPacket(p.ws, packetManager.updateParty({ members: updatedPartyMembers }));
+                    p.party = updatedPartyMembers;
+                    playerCache.set(p.id, p);
                   }
-                );
+                }
 
                 if (Array.isArray(updatedPartyMembers) && updatedPartyMembers.length > 0) {
                   await syncPartyLayers(inviter.username.toLowerCase(), updatedPartyMembers as string[], playerCache, sendAnimationTo);
                 }
+
+                // Vanish: spawn all vanished party members to all other online party members
+                for (const memberUsername of (updatedPartyMembers as string[])) {
+                  const memberSessionId = await player.getSessionIdByUsername(memberUsername);
+                  const memberPlayer = memberSessionId && playerCache.get(memberSessionId);
+                  if (!memberPlayer || !memberPlayer.isVanished) continue;
+                  const sd = queueSpawnPlayerPacket(memberPlayer);
+                  if (!sd) continue;
+                  const an = getAnimationNameForDirection(memberPlayer.location.position?.direction || "down", !!memberPlayer.moving, !!memberPlayer.mounted, memberPlayer.mount_type, !!memberPlayer.casting);
+                  const ss = await getPlayerSpriteSheetData(an, memberPlayer.equipment || null);
+                  const ms = memberPlayer.mount_type ? getMountSpriteUrl(memberPlayer.mount_type) : null;
+                  if (ss?.bodySprite || ss?.headSprite || ms) {
+                    (sd as any).spriteData = { mountSprite: ms, bodySprite: ss.bodySprite || null, headSprite: ss.headSprite || null, armorHelmetSprite: ss.armorHelmetSprite || null, armorShoulderguardsSprite: ss.armorShoulderguardsSprite || null, armorNeckSprite: ss.armorNeckSprite || null, armorHandsSprite: ss.armorHandsSprite || null, armorChestSprite: ss.armorChestSprite || null, armorFeetSprite: ss.armorFeetSprite || null, armorLegsSprite: ss.armorLegsSprite || null, armorWeaponSprite: ss.armorWeaponSprite || null, animationState: ss.animationState };
+                  }
+                  const fx = spellEffects.getEffectsPayload(memberPlayer);
+                  if (fx.length > 0) (sd as any).effects = fx;
+                  for (const otherUsername of (updatedPartyMembers as string[])) {
+                    if (otherUsername.toLowerCase() === memberUsername.toLowerCase()) continue;
+                    const otherSessionId = await player.getSessionIdByUsername(otherUsername);
+                    const otherPlayer = otherSessionId && playerCache.get(otherSessionId);
+                    if (otherPlayer && otherPlayer.ws) {
+                      sendPacket(otherPlayer.ws, packetManager.spawnPlayer(sd));
+                    }
+                  }
+                }
+
               }
             }
             listener.emit(Events.PARTY_JOIN, { playerUsername: currentPlayer.username, partyMembers: updatedPartyMembers as string[] });
@@ -7469,8 +7919,8 @@ export default async function packetReceiver(
           return;
         }
 
-        // Prevent mounting when PvP flag is enabled
-        if (currentPlayer.pvp && !dismounting) {
+        // Prevent mounting when PvP flag is enabled or vanished
+        if ((currentPlayer.pvp || currentPlayer.isVanished) && !dismounting) {
           sendPacket(
             ws,
             packetManager.notify({ message: "Cannot mount while in PvP." })
@@ -7881,6 +8331,9 @@ export async function handlePlayerDeath(target: any, killer: any, info: { damage
   target.stats.stamina = target.stats.total_max_stamina;
   spellEffects.clearBarriers(target);
   dots.clearDots(target.id);
+  spellEffects.clearStuns(target.id);
+  spellEffects.clearSlows(target.id);
+  spellEffects.clearVanishes(target.id);
   spellEffects.broadcastEffectsUpdate(target);
 
   const currentMapName = target.location.map;
@@ -7988,6 +8441,48 @@ export async function handlePlayerDeath(target: any, killer: any, info: { damage
 }
 
 dots.setPlayerDeathHandler(handlePlayerDeath);
+
+spellEffects.setVanishRemovedHandler(async (player) => {
+  const map = player.location?.map;
+  if (!map) return;
+  const spawnData = queueSpawnPlayerPacket(player);
+  if (!spawnData) return;
+
+  // Fetch sprite data like the stealth handler does
+  const animationName = getAnimationNameForDirection(
+    player.location.position?.direction || "down",
+    !!player.moving,
+    !!player.mounted,
+    player.mount_type,
+    !!player.casting
+  );
+  const playerSpriteData = await getPlayerSpriteSheetData(animationName, player.equipment || null);
+  const mountSpriteForBatch = player.mount_type ? getMountSpriteUrl(player.mount_type) : null;
+  if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite || mountSpriteForBatch) {
+    (spawnData as any).spriteData = {
+      mountSprite: mountSpriteForBatch,
+      bodySprite: playerSpriteData.bodySprite || null,
+      headSprite: playerSpriteData.headSprite || null,
+      armorHelmetSprite: playerSpriteData.armorHelmetSprite || null,
+      armorShoulderguardsSprite: playerSpriteData.armorShoulderguardsSprite || null,
+      armorNeckSprite: playerSpriteData.armorNeckSprite || null,
+      armorHandsSprite: playerSpriteData.armorHandsSprite || null,
+      armorChestSprite: playerSpriteData.armorChestSprite || null,
+      armorFeetSprite: playerSpriteData.armorFeetSprite || null,
+      armorLegsSprite: playerSpriteData.armorLegsSprite || null,
+      armorWeaponSprite: playerSpriteData.armorWeaponSprite || null,
+      animationState: playerSpriteData.animationState,
+    };
+  }
+
+  const spawnPacket = packetManager.spawnPlayer(spawnData);
+  if (!Array.isArray(spawnPacket)) return;
+  const allOnMap = filterPlayersByMap(map);
+  allOnMap.forEach((p) => {
+    if (p.id === player.id) return;
+    sendPacket(p.ws, spawnPacket);
+  });
+});
 
 const DEFAULT_INTERRUPT_LOCKOUT_SECONDS = 3;
 

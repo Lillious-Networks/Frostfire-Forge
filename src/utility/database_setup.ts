@@ -143,7 +143,8 @@ const createSpellsTable = async () => {
       description VARCHAR(255) NULL,
       icon VARCHAR(255) NULL DEFAULT NULL,
       effects TEXT NULL DEFAULT NULL,
-      particles VARCHAR(500) NULL DEFAULT NULL
+      particles VARCHAR(500) NULL DEFAULT NULL,
+      aoe_radius INT NULL DEFAULT NULL
     )
   `;
   await query(sql);
@@ -184,6 +185,30 @@ const insertDefaultSpell = async () => {
     await query(sql, [interruptEffects]);
   } else {
     log.debug("Spell 'mind_freeze' already exists - skipping");
+  }
+
+  const stunCheck = await query(`SELECT COUNT(*) as count FROM spells WHERE name = 'stun_strike'`) as Array<{ count: number }>;
+  if (stunCheck[0]?.count === 0) {
+    const stunEffects = JSON.stringify([
+      { type: "stun", value: 0, duration: 3 },
+    ]);
+    const sql = `INSERT INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move, effects) VALUES
+      ('stun_strike', 5, 10, 200, 'spell', 0, 30, 'Stuns the target for 3 seconds, preventing movement and spell casting.', 'stun_strike', 1, ?)`;
+    await query(sql, [stunEffects]);
+  } else {
+    log.debug("Spell 'stun_strike' already exists - skipping");
+  }
+
+  const slowCheck = await query(`SELECT COUNT(*) as count FROM spells WHERE name = 'frost_bolt_slow'`) as Array<{ count: number }>;
+  if (slowCheck[0]?.count === 0) {
+    const slowEffects = JSON.stringify([
+      { type: "slow", value: 50, duration: 5 },
+    ]);
+    const sql = `INSERT INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move, effects) VALUES
+      ('frost_bolt_slow', 5, 10, 1000, 'spell', 1, 8, 'A chilling bolt that slows the target by 50% for 5 seconds.', 'frost_bolt_slow', 1, ?)`;
+    await query(sql, [slowEffects]);
+  } else {
+    log.debug("Spell 'frost_bolt_slow' already exists - skipping");
   }
 };
 
@@ -689,7 +714,7 @@ const insertDemoQuestLog = async () => {
 
 const insertDefaultLearnedSpell = async () => {
   log.info("Inserting default learned spells for demo user...");
-  const defaultSpells = ["frost_bolt", "poison_bolt", "mind_freeze"];
+  const defaultSpells = ["frost_bolt", "poison_bolt", "mind_freeze", "stun_strike", "frost_bolt_slow"];
   for (const spellName of defaultSpells) {
     const checkSql = `SELECT COUNT(*) as count FROM learned_spells WHERE spell = ? AND username = 'demo_user'`;
     const result = await query(checkSql, [spellName]) as Array<{ count: number }>;

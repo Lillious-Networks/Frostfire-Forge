@@ -218,6 +218,7 @@ export function queueSpawnPlayerPacket(
       isAdmin: spawnedPlayer.isAdmin,
       isGuest: spawnedPlayer.isGuest,
       isStealth: spawnedPlayer.isStealth,
+      isVanished: spawnedPlayer.isVanished,
       isNoclip: spawnedPlayer.isNoclip,
       stats: spawnedPlayer.stats,
       mounted: spawnedPlayer.mounted,
@@ -287,8 +288,8 @@ export async function updatePlayerAOI(
 
       const playerForceSeeEntered = player.forceVisibleTo?.has(enteredPlayer.id);
       const enteredPlayerForceSeePlayer = enteredPlayer.forceVisibleTo?.has(player.id);
-      const canSeeEntered = !enteredPlayer.isStealth || player.isAdmin || playerForceSeeEntered;
-      const canSeePlayer = !player.isStealth || enteredPlayer.isAdmin || enteredPlayerForceSeePlayer;
+      const canSeeEntered = !enteredPlayer.isStealth && !enteredPlayer.isVanished || player.isAdmin || playerForceSeeEntered || player.party?.includes(enteredPlayer.username);
+      const canSeePlayer = !player.isStealth && !player.isVanished || enteredPlayer.isAdmin || enteredPlayerForceSeePlayer || enteredPlayer.party?.includes(player.username);
 
       if (canSeeEntered && spawnBatchQueue) {
         const spawnData = queueSpawnPlayerPacket(enteredPlayer);
@@ -396,9 +397,9 @@ export function broadcastToAOI(
       .map((id) => playerCache.get(id as string))
       .filter((p) => p && p.ws);
 
-    if (sourcePlayer.isStealth) {
+    if (sourcePlayer.isStealth || sourcePlayer.isVanished) {
 
-      const visibleTo = playersInAOI.filter((p) => p.isAdmin);
+      const visibleTo = playersInAOI.filter((p) => p.isAdmin || p.party?.includes(sourcePlayer.username));
       visibleTo.forEach((player) => {
         sendPacket(player.ws, packetData);
       });
