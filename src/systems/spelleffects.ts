@@ -334,6 +334,18 @@ export function clearStuns(playerId: string | number) {
   playerStuns.delete(String(playerId));
 }
 
+export function getStunsForPlayer(playerId: string): Array<any> | undefined {
+  return playerStuns.get(playerId);
+}
+
+export function setStunsForPlayer(playerId: string, stuns: Array<any>) {
+  if (stuns.length === 0) {
+    playerStuns.delete(playerId);
+  } else {
+    playerStuns.set(playerId, stuns);
+  }
+}
+
 // Vanish effect: target becomes invisible to all players except admins
 // and party members. No name color change (unlike admin stealth).
 const playerVanishes = new Map<string, Array<{ id: string; spell: string; duration: number; expiresAt: number; token: number; particles: Particle[] | null; icon: string | null }>>();
@@ -551,6 +563,18 @@ registerEffectsPayloadProvider((player: any) => {
 
 export function clearSlows(playerId: string | number) {
   playerSlows.delete(String(playerId));
+}
+
+export function getSlowsForPlayer(playerId: string): Array<any> | undefined {
+  return playerSlows.get(playerId);
+}
+
+export function setSlowsForPlayer(playerId: string, slows: Array<any>) {
+  if (slows.length === 0) {
+    playerSlows.delete(playerId);
+  } else {
+    playerSlows.set(playerId, slows);
+  }
 }
 
 registerEffectsPayloadProvider((player: any) => {

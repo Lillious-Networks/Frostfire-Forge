@@ -9,7 +9,7 @@ import { listener } from "../modules/event_bus";
 import { Events } from "./events";
 import log from "../modules/logger";
 
-interface DotInstance {
+export interface DotInstance {
   id: string;
   spell: string;
   icon: string | null;
@@ -346,4 +346,20 @@ registerSpellEffect("heal_over_time", ({ caster, target, spell, effect }) => {
   applyDot(caster, target, spell, healEffect);
 });
 
-export default { applyDot, clearDots, clearEntityDots, getDotsPayload, setPlayerDeathHandler };
+export function getPlayerDots(playerId: string): DotInstance[] | undefined {
+  return playerDots.get(playerId);
+}
+
+export function setPlayerDots(playerId: string, dots: DotInstance[]) {
+  if (dots.length === 0) {
+    playerDots.delete(playerId);
+  } else {
+    playerDots.set(playerId, dots);
+    ensureScheduler();
+  }
+}
+
+// Re-export: dot system can be prodded back to life after login restoration
+export { ensureScheduler };
+
+export default { applyDot, clearDots, clearEntityDots, getDotsPayload, setPlayerDeathHandler, getPlayerDots, setPlayerDots };

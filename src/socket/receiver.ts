@@ -34,6 +34,8 @@ import mapIndex from "../services/mapindex";
 import gameLoop from "../services/gameloop";
 import assetCache from "../services/assetCache";
 import entityCache from "../services/entityCache.ts";
+import cooldownManager from "../services/cooldownmanager";
+import effectManager from "../services/effectmanager";
 import { reloadMap } from "../modules/assetloader";
 import language from "../systems/language";
 import quests from "../systems/quests";
@@ -48,7 +50,7 @@ import worlds from "../systems/worlds";
 import npcSystem from "../systems/npcs";
 import entitySystem from "../systems/entities";
 import entityAI from "../systems/entityAI";
-import spellEffects, { registerSpellEffect, spellHasHostileEffects, cancelEffect } from "../systems/spelleffects";
+import spellEffects, { registerSpellEffect, spellHasHostileEffects, cancelEffect, setStunsForPlayer, setSlowsForPlayer, getStunsForPlayer, getSlowsForPlayer, broadcastEffectsUpdate } from "../systems/spelleffects";
 import dots from "../systems/dots";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
@@ -986,13 +988,13 @@ authWorker.on("message", async (result: any) => {
       mounted: false,
       mount_type: null,
       collectables: limitedCollectables,
-      spellCooldowns: {},
+      spellCooldowns: cooldownManager.getActiveCooldowns(playerData.username),
       casting: false,
       lastInterruptTime: 0,
       interruptableSpell: false,
       castId: 0,
       stunnedUntil: 0,
-      spellLockoutUntil: 0,
+      spellLockoutUntil: cooldownManager.getLockout(playerData.username),
       slowPercent: 0,
       slowMultiplier: 1,
       isVanished: false,
@@ -1021,6 +1023,181 @@ authWorker.on("message", async (result: any) => {
     if (_pcache) {
       _pcache.stats = stats;
       playerCache.set(_pcache.id, _pcache);
+
+      // Restore persisted effects (DoTs / HoTs / barriers / stuns / slows) from effect manager.
+      // Simulate offline DoT ticks and handle potential death before AOI init and spawn.
+      const effectUsername = playerData.username?.toLowerCase();
+      if (effectUsername) {
+        const savedDots = effectManager.loadDots(effectUsername);
+        let effectDeath = false;
+
+        if (savedDots.length > 0) {
+          const now = Date.now();
+
+          for (const dot of savedDots) {
+            if (effectDeath) break;
+            if (dot.expiresAt <= now) continue;
+
+            let ticks = 0;
+            let nextTick = dot.nextTickAt;
+            while (nextTick <= now && nextTick <= dot.expiresAt) {
+              ticks++;
+              nextTick += dot.interval * 1000;
+            }
+
+            if (ticks > 0) {
+              if (dot.damagePerTick < 0) {
+                // HoT: apply healing
+                const healing = Math.abs(dot.damagePerTick) * dot.stacks * ticks;
+                _pcache.stats.health = Math.round(Math.min(_pcache.stats.health + healing, _pcache.stats.total_max_health));
+              } else {
+                // DoT: apply damage with avoidance and armor mitigation
+                const avoidance = _pcache.stats.stat_avoidance || 0;
+                const armor = _pcache.stats.stat_armor || 0;
+                let rawDamage = dot.damagePerTick * dot.stacks * ticks;
+                rawDamage = rawDamage * (1 - Math.min(avoidance, 100) / 100);
+                rawDamage = Math.floor(rawDamage * (1 - Math.min(armor, 75) / 100));
+
+                const absorbed = spellEffects.consumeBarrier(_pcache, rawDamage);
+                const damageToHealth = rawDamage - absorbed;
+                _pcache.stats.health = Math.round(_pcache.stats.health - damageToHealth);
+
+                if (_pcache.stats.health <= 0) {
+                  // Offline DoT ticks killed the player — respawn them
+                  effectDeath = true;
+                }
+              }
+            }
+
+            if (!effectDeath && nextTick > now) {
+              dot.nextTickAt = nextTick;
+            }
+          }
+
+          if (effectDeath) {
+            await handlePlayerDeath(_pcache, null, { damage: _pcache.stats.total_max_health, isCrit: false });
+            // Sync spawnLocation to the graveyard position set by handlePlayerDeath
+            spawnLocation.x = _pcache.location.position.x;
+            spawnLocation.y = _pcache.location.position.y;
+            spawnLocation.direction = _pcache.location.position.direction;
+            // Death cleared all effects — skip restoration below
+          } else {
+            // Re-add non-expired dots to the dot system so they continue ticking
+            const remainingDots = savedDots.filter((d: any) => d.expiresAt > now);
+            if (remainingDots.length > 0) {
+              dots.setPlayerDots(String(_pcache.id), remainingDots);
+            }
+          }
+        }
+
+        if (!effectDeath) {
+          const playerId = String(_pcache.id);
+          const now2 = Date.now();
+
+          // Restore barriers
+          const savedBarriers = effectManager.loadBarriers(effectUsername);
+          if (savedBarriers.length > 0) {
+            _pcache.barriers = savedBarriers;
+            _pcache.stats.absorbtion = savedBarriers.reduce((sum: number, b: any) => sum + Math.max(0, b.amount), 0);
+
+            // Re-schedule barrier expiry timeouts (originals can't find the player under the new ID)
+            for (const b of savedBarriers) {
+              const remainMs = b.expiresAt === 0 ? 0 : Math.max(0, b.expiresAt - now2);
+              if (remainMs <= 0) continue;
+              const bId = b.id;
+              const bToken = b.token;
+              setTimeout(() => {
+                const fresh = playerCache.get(playerId);
+                if (!fresh || !Array.isArray(fresh.barriers)) return;
+                const idx = fresh.barriers.findIndex((x: any) => x.id === bId && x.token === bToken);
+                if (idx === -1) return;
+                fresh.barriers.splice(idx, 1);
+                fresh.stats.absorbtion = fresh.barriers.reduce((s: number, x: any) => s + Math.max(0, x.amount), 0);
+                playerCache.set(fresh.id, fresh);
+                spellEffects.broadcastEffectsUpdate(fresh);
+                broadcastToAOI(fresh, packetManager.updateStats({ target: fresh.id, stats: fresh.stats }), true);
+              }, remainMs);
+            }
+          }
+
+          // Restore stuns
+          const savedStuns = effectManager.loadStuns(effectUsername);
+          if (savedStuns.length > 0) {
+            setStunsForPlayer(playerId, savedStuns);
+            _pcache.stunnedUntil = Math.max(...savedStuns.map((s: any) => s.expiresAt));
+
+            for (const s of savedStuns) {
+              const remainMs = Math.max(0, s.expiresAt - now2);
+              if (remainMs <= 0) continue;
+              const sId = s.id;
+              const sToken = s.token;
+              setTimeout(() => {
+                const fresh = playerCache.get(playerId);
+                if (!fresh) return;
+                const arr = getStunsForPlayer(playerId);
+                if (!arr) return;
+                const idx = arr.findIndex((x: any) => x.id === sId && x.token === sToken);
+                if (idx === -1) return;
+                arr.splice(idx, 1);
+                fresh.stunnedUntil = arr.length > 0 ? Math.max(...arr.map((x: any) => x.expiresAt)) : 0;
+                if (fresh.ws?.readyState === 1) {
+                  const remain = fresh.stunnedUntil ? Math.max(0, Math.ceil((fresh.stunnedUntil - Date.now()) / 1000)) : 0;
+                  sendPacket(fresh.ws, packetManager.spellLockout({ duration: remain }));
+                }
+                spellEffects.broadcastEffectsUpdate(fresh);
+              }, remainMs);
+            }
+          }
+
+          // Restore slows
+          const savedSlows = effectManager.loadSlows(effectUsername);
+          if (savedSlows.length > 0) {
+            setSlowsForPlayer(playerId, savedSlows);
+            const strongest = Math.max(...savedSlows.map((s: any) => s.slowPercent));
+            _pcache.slowPercent = strongest;
+            _pcache.slowMultiplier = 1 - strongest / 100;
+
+            for (const s of savedSlows) {
+              const remainMs = Math.max(0, s.expiresAt - now2);
+              if (remainMs <= 0) continue;
+              const sId = s.id;
+              const sToken = s.token;
+              setTimeout(() => {
+                const fresh = playerCache.get(playerId);
+                if (!fresh) return;
+                const arr = getSlowsForPlayer(playerId);
+                if (!arr) return;
+                const idx = arr.findIndex((x: any) => x.id === sId && x.token === sToken);
+                if (idx === -1) return;
+                arr.splice(idx, 1);
+                if (arr.length === 0) {
+                  fresh.slowPercent = 0;
+                  fresh.slowMultiplier = 1;
+                } else {
+                  const strong = Math.max(...arr.map((x: any) => x.slowPercent));
+                  fresh.slowPercent = strong;
+                  fresh.slowMultiplier = 1 - strong / 100;
+                }
+                spellEffects.broadcastEffectsUpdate(fresh);
+              }, remainMs);
+            }
+          }
+
+          // Set pvp flag if the player has active hostile effects (DoTs, stuns, slows)
+          const remainingDots = savedDots.filter((d: any) => d.expiresAt > Date.now());
+          const hasHostileDots = remainingDots.some((d: any) => d.damagePerTick > 0);
+          const hasStuns = savedStuns.length > 0;
+          const hasSlows = savedSlows.length > 0;
+          if (hasHostileDots || hasStuns || hasSlows) {
+            _pcache.pvp = true;
+            _pcache.last_attack = performance.now();
+          }
+
+          playerCache.set(_pcache.id, _pcache);
+        }
+
+        effectManager.clearAll(effectUsername);
+      }
 
       await initializePlayerAOI(_pcache);
       playerCache.set(_pcache.id, _pcache);
@@ -1093,6 +1270,7 @@ authWorker.on("message", async (result: any) => {
         guild: playerData.guild || [],
         guild_name: playerData.guild_name || null,
         currency: playerData.currency || { copper: 0, silver: 0, gold: 0 },
+        effects: spellEffects.getEffectsPayload(currentPlayer),
       };
       sendPacket(ws, packetManager.spawnPlayer(spawnDataForAll));
 
@@ -1206,6 +1384,10 @@ authWorker.on("message", async (result: any) => {
         });
         broadcastToAOI(currentPlayer, animationData, false);
       }
+
+      // Send restored effects to the client now that the player has spawned,
+      // so the overhead buff/debuff icons render above the player.
+      broadcastEffectsUpdate(currentPlayer);
 
     });
     setImmediate(() => {
@@ -1346,7 +1528,26 @@ authWorker.on("message", async (result: any) => {
       }
     });
 
-    sendPacket(ws, packetManager.clientConfig(playerData.config || []));
+    // Build cooldown data to include with CLIENTCONFIG so the client can display
+    // partially-expired cooldown overlays on reconnect.
+    const clientConfig: any[] = (playerData.config || []).slice();
+    if (clientConfig.length > 0) {
+      const spellCooldownsForClient: Record<string, number> = {};
+      const now = performance.now();
+      for (const [spellIdStr, endTime] of Object.entries(_pcache?.spellCooldowns || {})) {
+        const remaining = Math.max(0, (endTime as number) - now);
+        if (remaining > 0) {
+          const spell = await spells.find(Number(spellIdStr));
+          if (spell?.name) {
+            spellCooldownsForClient[spell.name] = Math.ceil(remaining);
+          }
+        }
+      }
+      clientConfig[0].spell_cooldowns = spellCooldownsForClient;
+      const lockoutRemaining = Math.max(0, (_pcache?.spellLockoutUntil || 0) - now);
+      clientConfig[0].spell_lockout = Math.ceil(lockoutRemaining);
+    }
+    sendPacket(ws, packetManager.clientConfig(clientConfig));
 
     // Convert icon names to Asset Server URLs for inventory items
     const inventoryWithIconUrls = playerData.inventory?.map((item: any) => ({
@@ -1508,6 +1709,11 @@ export default async function packetReceiver(
         );
         player.logout(currentPlayer.id);
         listener.emit(Events.PLAYER_LOGOUT, { player: currentPlayer });
+        // Close the WebSocket so the onDisconnect handler fires and does the
+        // full in-memory cleanup (despawn, remove from cache, update friends, etc.)
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.close(1000, "Player logout");
+        }
         break;
       }
       case "DISCONNECT": {
@@ -2819,6 +3025,7 @@ export default async function packetReceiver(
         freshPlayerForMana.spellCooldowns = freshPlayerForMana.spellCooldowns || {};
         const spellCooldownTime = spell.cooldown * 1000;
         freshPlayerForMana.spellCooldowns[spell_id] = performance.now() + spellCooldownTime;
+        cooldownManager.setCooldown(freshPlayerForMana.username, spell_id, performance.now() + spellCooldownTime);
         freshPlayerForMana.lastCastTime = performance.now();
 
         playerCache.set(freshPlayerForMana.id, freshPlayerForMana);
@@ -2855,7 +3062,10 @@ export default async function packetReceiver(
 
           const aoeUpdatedPlayer = playerCache.get(currentPlayer.id);
           if (aoeUpdatedPlayer && aoeUpdatedPlayer.manualSpellCancel && aoeUpdatedPlayer.manualSpellCancel >= aoeSpellStartTime) {
-            if (aoeUpdatedPlayer.spellCooldowns) delete aoeUpdatedPlayer.spellCooldowns[spell_id];
+            if (aoeUpdatedPlayer.spellCooldowns) {
+              delete aoeUpdatedPlayer.spellCooldowns[spell_id];
+              cooldownManager.deleteCooldown(aoeUpdatedPlayer.username, spell_id);
+            }
             delete aoeUpdatedPlayer.manualSpellCancel;
             aoeUpdatedPlayer.casting = false;
             playerCache.set(aoeUpdatedPlayer.id, aoeUpdatedPlayer);
@@ -2886,6 +3096,7 @@ export default async function packetReceiver(
           if (!aoeManaCheck || (aoeManaCheck.stats.stamina || 0) < actualManaCost) {
             if (aoeManaCheck && aoeManaCheck.spellCooldowns) {
               delete aoeManaCheck.spellCooldowns[spell_id];
+              cooldownManager.deleteCooldown(aoeManaCheck.username, spell_id);
               playerCache.set(aoeManaCheck.id, aoeManaCheck);
             }
             return;
@@ -3215,6 +3426,7 @@ export default async function packetReceiver(
           // Clear the manual cancel flag so next cast is allowed
           if (updatedPlayer.spellCooldowns) {
             delete updatedPlayer.spellCooldowns[spell_id];
+            cooldownManager.deleteCooldown(updatedPlayer.username, spell_id);
           }
           delete updatedPlayer.manualSpellCancel;
           updatedPlayer.casting = false;
@@ -3231,6 +3443,7 @@ export default async function packetReceiver(
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
             delete resetPlayer.spellCooldowns[spell_id];
+            cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
             playerCache.set(resetPlayer.id, resetPlayer);
           }
           return;
@@ -3299,6 +3512,7 @@ export default async function packetReceiver(
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
             delete resetPlayer.spellCooldowns[spell_id];
+            cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
             playerCache.set(resetPlayer.id, resetPlayer);
           }
           return;
@@ -3315,6 +3529,7 @@ export default async function packetReceiver(
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
             delete resetPlayer.spellCooldowns[spell_id];
+            cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
             playerCache.set(resetPlayer.id, resetPlayer);
           }
           return;
@@ -3331,6 +3546,7 @@ export default async function packetReceiver(
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
             delete resetPlayer.spellCooldowns[spell_id];
+            cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
             playerCache.set(resetPlayer.id, resetPlayer);
           }
           return;
@@ -3347,6 +3563,7 @@ export default async function packetReceiver(
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
             delete resetPlayer.spellCooldowns[spell_id];
+            cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
             playerCache.set(resetPlayer.id, resetPlayer);
           }
           return;
@@ -3363,6 +3580,7 @@ export default async function packetReceiver(
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
             delete resetPlayer.spellCooldowns[spell_id];
+            cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
             playerCache.set(resetPlayer.id, resetPlayer);
           }
           return;
@@ -3373,6 +3591,7 @@ export default async function packetReceiver(
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
             delete resetPlayer.spellCooldowns[spell_id];
+            cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
             playerCache.set(resetPlayer.id, resetPlayer);
           }
           return;
@@ -3443,6 +3662,7 @@ export default async function packetReceiver(
 
           if (finalManaCheck && finalManaCheck.spellCooldowns) {
             delete finalManaCheck.spellCooldowns[spell_id];
+            cooldownManager.deleteCooldown(finalManaCheck.username, spell_id);
             playerCache.set(finalManaCheck.id, finalManaCheck);
           }
           return;
@@ -8498,6 +8718,7 @@ registerSpellEffect("interrupt", ({ target, effect }) => {
 
   const lockoutSec = effect.duration && effect.duration > 0 ? effect.duration : DEFAULT_INTERRUPT_LOCKOUT_SECONDS;
   fresh.spellLockoutUntil = performance.now() + lockoutSec * 1000;
+  cooldownManager.setLockout(fresh.username, performance.now() + lockoutSec * 1000);
   playerCache.set(fresh.id, fresh);
 
   if (fresh.ws) {

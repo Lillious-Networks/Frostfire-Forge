@@ -31,7 +31,8 @@ import * as settings from "../config/settings.json";
 import assetCache from "../services/assetCache.ts";
 import entityCache from "../services/entityCache.ts";
 import dots from "../systems/dots.ts";
-import spellEffects from "../systems/spelleffects.ts";
+import spellEffects, { getStunsForPlayer, getSlowsForPlayer } from "../systems/spelleffects.ts";
+import effectManager from "../services/effectmanager";
 import { GatewayClient } from "../modules/gateway-client.ts";
 
 const _cert = process.env.WEB_SOCKET_CERT_PATH || path.join(import.meta.dir, "../certs/cert.pem");
@@ -766,6 +767,15 @@ listener.on("onDisconnect", async (data) => {
 
     gameLoop.unregisterMovingPlayer(playerData.id);
 
+    // Persist active effects so they survive disconnect/reconnect
+    const username = playerData.username?.toLowerCase();
+    if (username) {
+      effectManager.saveDots(username, dots.getPlayerDots(String(playerData.id)) || []);
+      effectManager.saveBarriers(username, playerData.barriers || []);
+      effectManager.saveStuns(username, getStunsForPlayer(String(playerData.id)) || []);
+      effectManager.saveSlows(username, getSlowsForPlayer(String(playerData.id)) || []);
+    }
+
     dots.clearDots(playerData.id);
 
     spellEffects.clearStuns(playerData.id);
@@ -822,6 +832,25 @@ listener.on("onDisconnect", async (data) => {
           playerData.location.map,
           playerData.location.position
         );
+      }
+    }
+
+    // Notify friends that this player is now offline
+    if (playerData.friends && Array.isArray(playerData.friends) && playerData.friends.length > 0) {
+      const allPlayers = playerCache.list();
+      const usernameIndex = new Map<string, any>();
+      for (const p of Object.values(allPlayers)) {
+        if (p.ws && p.username) {
+          usernameIndex.set(p.username.toLowerCase(), p);
+        }
+      }
+      for (const friendUsername of playerData.friends) {
+        const onlineFriend = usernameIndex.get(friendUsername.toLowerCase());
+        if (onlineFriend?.ws?.readyState === 1) {
+          try {
+            onlineFriend.ws.send(packetManager.updateOnlineStatus({ online: false, username: playerData.username })[0]);
+          } catch (e) { /* ignore */ }
+        }
       }
     }
 
