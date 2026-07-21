@@ -169,7 +169,7 @@ WHITELIST=true
 
 Run the whitelist command found in the [Admin Commands](#admin-commands) section to add or remove from the whitelist
 
-**5. Realm Status in Gateway:**
+**Realm Status in Gateway:**
 
 The realm will display a "whitelist" badge in the realm selection UI when `WHITELIST=true`, allowing players to see which realms have restricted access.
 
