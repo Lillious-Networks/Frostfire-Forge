@@ -165,42 +165,9 @@ Set the environment variable in your `.env` file:
 WHITELIST=true
 ```
 
-**2. Create/update the whitelist file:**
+**2. Run the whitelist command**
 
-Create a `whitelist.txt` file in the project root directory (same directory as the game server binary):
-
-```
-admin
-moderator
-testuser
-approved_player
-```
-
-**3. File Format:**
-
-- One username per line
-- Usernames are case-insensitive (converted to lowercase on matching)
-- Lines starting with `#` are treated as comments
-- Empty lines are ignored
-- Whitespace at the beginning and end of each line is trimmed
-
-Example `whitelist.txt`:
-```
-# Game Admins
-admin
-moderator
-
-# Test Players
-testuser
-lillious
-
-# Developer Accounts
-dev_account
-```
-
-**4. Restart the server:**
-
-The whitelist is loaded at server startup. After updating `whitelist.txt`, restart the game server for changes to take effect.
+Run the whitelist command found in the [Admin Commands](#admin-commands) section to add or remove from the whitelist
 
 **5. Realm Status in Gateway:**
 
