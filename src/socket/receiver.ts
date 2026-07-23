@@ -1,7 +1,7 @@
 import { packetTypes } from "./types";
 import { packetManager } from "./packet_manager";
 import log from "../modules/logger";
-import player, { clearMapCache } from "../systems/player.ts";
+import player, { clearMapCache, hasLineOfSight } from "../systems/player.ts";
 import permissions from "../systems/permissions";
 import { getAuthWorker } from "./authentication_pool.ts";
 import { listener } from "../modules/event_bus";
@@ -52,6 +52,7 @@ import entitySystem from "../systems/entities";
 import entityAI from "../systems/entityAI";
 import spellEffects, { registerSpellEffect, spellHasHostileEffects, cancelEffect, setStunsForPlayer, setSlowsForPlayer, getStunsForPlayer, getSlowsForPlayer, broadcastEffectsUpdate } from "../systems/spelleffects";
 import dots from "../systems/dots";
+import { spawnZone, setPlayerDeathHandler, getZonesOnMap } from "../systems/groundaoe";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const mapPropertiesCache = await assetCache.get("mapProperties");
@@ -1063,7 +1064,7 @@ authWorker.on("message", async (result: any) => {
                 _pcache.stats.health = Math.round(_pcache.stats.health - damageToHealth);
 
                 if (_pcache.stats.health <= 0) {
-                  // Offline DoT ticks killed the player — respawn them
+                  // Offline DoT ticks killed the player - respawn them
                   effectDeath = true;
                 }
               }
@@ -1080,7 +1081,7 @@ authWorker.on("message", async (result: any) => {
             spawnLocation.x = _pcache.location.position.x;
             spawnLocation.y = _pcache.location.position.y;
             spawnLocation.direction = _pcache.location.position.direction;
-            // Death cleared all effects — skip restoration below
+            // Death cleared all effects - skip restoration below
           } else {
             // Re-add non-expired dots to the dot system so they continue ticking
             const remainingDots = savedDots.filter((d: any) => d.expiresAt > now);
@@ -1330,6 +1331,7 @@ authWorker.on("message", async (result: any) => {
           mounted: p.mounted,
           guild: p.guild || [],
           guild_name: p.guild_name || null,
+          effects: spellEffects.getEffectsPayload(p),
         }
         playerDataForLoad.push(loadPlayerData);
       }
@@ -1388,6 +1390,23 @@ authWorker.on("message", async (result: any) => {
       // Send restored effects to the client now that the player has spawned,
       // so the overhead buff/debuff icons render above the player.
       broadcastEffectsUpdate(currentPlayer);
+
+      // Send active ground AoE zones on this map to the newly connected player
+      const activeZones = getZonesOnMap(currentPlayer.location.map);
+      for (const zone of activeZones) {
+        sendPacket(ws, packetManager.groundAoeSpawn({
+          id: zone.id,
+          spell: zone.spellName,
+          casterId: zone.casterId,
+          x: zone.position.x,
+          y: zone.position.y,
+          radius: zone.radius,
+          duration: Math.max(0, Math.ceil((zone.expiresAt - Date.now()) / 1000)),
+          damageType: zone.damageType,
+          particles: zone.particles,
+          casterUsername: zone.casterUsername,
+        }));
+      }
 
     });
     setImmediate(() => {
@@ -1571,6 +1590,12 @@ authWorker.on("message", async (result: any) => {
           effects: (spellData as any).effects ?? [],
           particles: (spellData as any).particles ?? null,
           aoe_radius: (spellData as any).aoe_radius ?? null,
+          range: (spellData as any).range ?? null,
+          ground_aoe: (spellData as any).ground_aoe ?? null,
+          ground_duration: (spellData as any).ground_duration ?? null,
+          is_thrown: (spellData as any).is_thrown ?? null,
+          charge_distance: (spellData as any).charge_distance ?? null,
+          teleport_behind: (spellData as any).teleport_behind ?? null,
         };
       }
     }
@@ -2399,7 +2424,7 @@ export default async function packetReceiver(
           editors.delete(ws.data.id);
           if (editors.size === 0) {
             activeEditorsByMap.delete(mapName);
-            // No editors left on this map — clear unsaved edit history
+            // No editors left on this map - clear unsaved edit history
             editorEditHistory.delete(mapName);
           }
         }
@@ -2953,10 +2978,11 @@ export default async function packetReceiver(
           log.debug(`[ATTACK] No target specified, defaulting to self`);
         }
 
-        // AoE spells don't need a valid target — they hit everything around the caster
+        // AoE spells don't need a valid target - they hit everything around the caster
         const isAoeSpell = spell?.aoe_radius && spell.aoe_radius > 0;
+        const isGroundAoe = spell?.ground_aoe === 1 && (data as any).groundX !== undefined && (data as any).groundY !== undefined;
 
-        if (!isAoeSpell && !target?.id) {
+        if (!isAoeSpell && !isGroundAoe && !target?.id) {
           log.debug(`[ATTACK] Player ${currentPlayer.username} attempted attack with invalid target: ${targetId}`);
           sendPacket(
             ws,
@@ -2993,6 +3019,14 @@ export default async function packetReceiver(
         const spellIsHostileEffect = spellHasHostileEffects(spell);
         const playerLevel = currentPlayer.stats.level || 1;
 
+        if (currentPlayer.isVanished && spell_damage <= 0 && !spellIsHostileEffect) {
+          const hasVanishEffect = Array.isArray(spell?.effects) && spell.effects.some((e: SpellEffect) => e.type === "vanish");
+          if (!hasVanishEffect) {
+            sendPacket(ws, packetManager.notify({ message: "You cannot cast beneficial spells while vanished." }));
+            return;
+          }
+        }
+
         currentPlayer.interruptableSpell = !spell?.can_move || false;
 
         if (!spell?.can_move && currentPlayer.moving) {
@@ -3027,6 +3061,7 @@ export default async function packetReceiver(
         freshPlayerForMana.spellCooldowns[spell_id] = performance.now() + spellCooldownTime;
         cooldownManager.setCooldown(freshPlayerForMana.username, spell_id, performance.now() + spellCooldownTime);
         freshPlayerForMana.lastCastTime = performance.now();
+        freshPlayerForMana.castingSpellId = spell_id;
 
         playerCache.set(freshPlayerForMana.id, freshPlayerForMana);
 
@@ -3034,8 +3069,18 @@ export default async function packetReceiver(
         currentPlayer.lastCastTime = freshPlayerForMana.lastCastTime;
         currentPlayer.spellCooldowns = freshPlayerForMana.spellCooldowns;
 
+        if (currentPlayer.isVanished && (spell_damage > 0 || spellIsHostileEffect)) {
+          const vanishId = spellEffects.getVanishedEffectId(currentPlayer);
+          if (vanishId) {
+            cancelEffect(currentPlayer, vanishId);
+            spellEffects.broadcastEffectsUpdate(currentPlayer);
+          }
+        }
+        currentPlayer.lastCastTime = freshPlayerForMana.lastCastTime;
+        currentPlayer.spellCooldowns = freshPlayerForMana.spellCooldowns;
+
         // --- AoE branch: cast on self, hit everything around the caster ---
-        if (isAoeSpell) {
+        if (isAoeSpell && !isGroundAoe) {
           currentPlayer.casting = true;
           currentPlayer.castId = (currentPlayer.castId || 0) + 1;
           playerCache.set(currentPlayer.id, currentPlayer);
@@ -3220,6 +3265,22 @@ export default async function packetReceiver(
               currentPlayer.pvp = true;
               st.pvp = true;
               st.last_attack = performance.now();
+
+              if (spell_damage > 0 && st.isVanished) {
+                const vId = spellEffects.getVanishedEffectId(st);
+                if (vId) {
+                  cancelEffect(st, vId);
+                  spellEffects.broadcastEffectsUpdate(st);
+                }
+              }
+            }
+          }
+
+          if (currentPlayer.isVanished) {
+            const cvId = spellEffects.getVanishedEffectId(currentPlayer);
+            if (cvId) {
+              cancelEffect(currentPlayer, cvId);
+              spellEffects.broadcastEffectsUpdate(currentPlayer);
             }
           }
 
@@ -3228,6 +3289,305 @@ export default async function packetReceiver(
           if (syncedStats) currentPlayer.stats = syncedStats;
           playerCache.set(currentPlayer.id, currentPlayer);
           aoePlayersInMap.forEach((pp) => sendPacket(pp.ws, packetManager.updateStats({ id: currentPlayer.id, target: currentPlayer.id, stats: currentPlayer.stats })));
+
+          currentPlayer.last_attack = performance.now();
+          listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target: currentPlayer, isEntityTarget: false });
+          break;
+        }
+
+        // --- Ground-targeted AoE branch: click-to-place, with optional lingering zone ---
+        if (isGroundAoe) {
+          const groundX = Number((data as any).groundX);
+          const groundY = Number((data as any).groundY);
+
+          // Validate range
+          const casterPos = currentPlayer.location.position;
+          const casterX = typeof casterPos === 'string' ? Number(casterPos.split(',')[0]) : casterPos.x;
+          const casterY = typeof casterPos === 'string' ? Number(casterPos.split(',')[1]) : casterPos.y;
+          const distToTarget = Math.sqrt((groundX - casterX) ** 2 + (groundY - casterY) ** 2);
+          const maxRange = spell.range || 100;
+          if (distToTarget > maxRange) {
+            if (freshPlayerForMana.spellCooldowns) {
+              delete freshPlayerForMana.spellCooldowns[spell_id];
+              cooldownManager.deleteCooldown(freshPlayerForMana.username, spell_id);
+            }
+            playerCache.set(freshPlayerForMana.id, freshPlayerForMana);
+            currentPlayer.spellCooldowns = freshPlayerForMana.spellCooldowns;
+            return;
+          }
+
+          currentPlayer.casting = true;
+          currentPlayer.castId = (currentPlayer.castId || 0) + 1;
+          playerCache.set(currentPlayer.id, currentPlayer);
+          const thisGroundCastId = currentPlayer.castId;
+          const groundCastStartTime = performance.now();
+
+          if (currentPlayer.mounted) {
+            currentPlayer.mounted = false;
+            playerCache.set(currentPlayer.id, currentPlayer);
+          }
+
+          const groundAoERadius = spell.aoe_radius || 0;
+          const groundDuration = spell.ground_duration || 0;
+
+          globalStateRevision++;
+          await sendPositionAnimation(ws, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, true);
+
+          const groundPlayersInMap = filterPlayersByMap(currentPlayer.location.map);
+          groundPlayersInMap.forEach((p) => {
+            sendPacket(p.ws, packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: spell.cast_time, groundX, groundY, groundRadius: groundAoERadius }));
+            sendPacket(p.ws, packetManager.groundAoeCasting({ id: currentPlayer.id, spell: spell.name, casterId: currentPlayer.id, x: groundX, y: groundY, radius: groundAoERadius, castTime: spell.cast_time }));
+          });
+
+          await new Promise((resolve) => setTimeout(resolve, spell.cast_time * 1000));
+
+          const groundCheckPlayer = playerCache.get(currentPlayer.id);
+          if (groundCheckPlayer && groundCheckPlayer.castId !== thisGroundCastId) return;
+
+          const groundUpdatedPlayer = playerCache.get(currentPlayer.id);
+          if (groundUpdatedPlayer && groundUpdatedPlayer.manualSpellCancel && groundUpdatedPlayer.manualSpellCancel >= groundCastStartTime) {
+            // Cancel: clear preview
+            groundPlayersInMap.forEach((p) => {
+              sendPacket(p.ws, packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" }));
+            });
+            if (groundUpdatedPlayer.spellCooldowns) {
+              delete groundUpdatedPlayer.spellCooldowns[spell_id];
+              cooldownManager.deleteCooldown(groundUpdatedPlayer.username, spell_id);
+            }
+            delete groundUpdatedPlayer.manualSpellCancel;
+            groundUpdatedPlayer.casting = false;
+            playerCache.set(groundUpdatedPlayer.id, groundUpdatedPlayer);
+            currentPlayer.spellCooldowns = groundUpdatedPlayer.spellCooldowns;
+            currentPlayer.manualSpellCancel = undefined;
+            currentPlayer.casting = false;
+            return;
+          }
+
+          if (!spell.can_move && !playerCache.get(currentPlayer.id)?.casting) {
+            groundPlayersInMap.forEach((p) => {
+              sendPacket(p.ws, packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" }));
+            });
+            const resetPlayer = playerCache.get(currentPlayer.id);
+            if (resetPlayer && resetPlayer.spellCooldowns) {
+              delete resetPlayer.spellCooldowns[spell_id];
+              playerCache.set(resetPlayer.id, resetPlayer);
+            }
+            return;
+          }
+
+          // Clear casting preview
+          groundPlayersInMap.forEach((p) => {
+            sendPacket(p.ws, packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" }));
+          });
+
+          currentPlayer.casting = false;
+          currentPlayer.mounted = false;
+          playerCache.set(currentPlayer.id, currentPlayer);
+
+          globalStateRevision++;
+          await sendPositionAnimation(ws, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, false);
+
+          // Mana deduction
+          const groundManaCheck = playerCache.get(currentPlayer.id);
+          if (!groundManaCheck || (groundManaCheck.stats.stamina || 0) < actualManaCost) {
+            if (groundManaCheck && groundManaCheck.spellCooldowns) {
+              delete groundManaCheck.spellCooldowns[spell_id];
+              cooldownManager.deleteCooldown(groundManaCheck.username, spell_id);
+              playerCache.set(groundManaCheck.id, groundManaCheck);
+            }
+            return;
+          }
+          currentPlayer.stats.stamina = groundManaCheck.stats.stamina;
+          currentPlayer.stats.stamina -= actualManaCost;
+          if (currentPlayer.stats.stamina < 0) currentPlayer.stats.stamina = 0;
+
+          const isHeal = spell_damage < 0;
+          const isThrown = spell?.is_thrown === 1;
+          const resolvedParticles = spell.particles
+            ? (typeof spell.particles === 'string'
+              ? spell.particles.split(',').map((s: string) => s.trim()).filter(Boolean)
+              : [])
+            : [];
+
+          if (isThrown) {
+            const casterPos = currentPlayer.location.position;
+            const cx = typeof casterPos === 'string' ? Number(casterPos.split(',')[0]) : casterPos.x;
+            const cy = typeof casterPos === 'string' ? Number(casterPos.split(',')[1]) : casterPos.y;
+            const throwDist = Math.sqrt((groundX - cx) ** 2 + (groundY - cy) ** 2);
+            const throwSpeed = 350;
+            const travelTime = Math.max(0.4, Math.min(throwDist / throwSpeed, 2.5));
+
+            groundPlayersInMap.forEach((p) => {
+              sendPacket(p.ws, packetManager.projectile({
+                id: currentPlayer.id,
+                time: travelTime,
+                target_id: currentPlayer.id,
+                spell: spell.name,
+                icon: getIconUrl(spell.icon),
+                entity: false,
+                isThrown: true,
+                targetX: groundX,
+                targetY: groundY,
+                particles: resolvedParticles.length > 0 ? resolvedParticles : undefined,
+              }));
+            });
+
+            await new Promise((resolve) => setTimeout(resolve, travelTime * 1000));
+
+            const thrownCheckPlayer = playerCache.get(currentPlayer.id);
+            if (thrownCheckPlayer && thrownCheckPlayer.castId !== thisGroundCastId) return;
+          }
+
+          if (groundDuration > 0) {
+            // Lingering zone
+            spawnZone({
+              spellId: spell_id,
+              spellName: spell.name,
+              casterId: currentPlayer.id,
+              casterUsername: currentPlayer.username,
+              mapName: currentPlayer.location.map,
+              position: { x: groundX, y: groundY },
+              radius: groundAoERadius,
+              duration: groundDuration,
+              tickInterval: 1,
+              damagePerTick: spell_damage,
+              damageType: isHeal ? "heal" : "damage",
+              particles: resolvedParticles.length > 0 ? resolvedParticles : null,
+              effects: Array.isArray(spell.effects) ? spell.effects : null,
+              spell,
+            });
+          } else {
+            // Instant burst at ground position (no lingering)
+            const splashTargets: Array<{ target: any; isEntity: boolean }> = [];
+            for (const p of groundPlayersInMap) {
+              if (p.isGuest) continue;
+              const inParty = currentPlayer?.party?.includes(p.username) || false;
+              if (isHeal) {
+                if (p.id !== currentPlayer.id && !inParty) continue;
+              } else {
+                if (p.id === currentPlayer.id || inParty) continue;
+              }
+              const pPos = p.location?.position;
+              if (!pPos) continue;
+              const dist = Math.sqrt((pPos.x - groundX) ** 2 + (pPos.y - groundY) ** 2);
+              if (dist <= groundAoERadius) splashTargets.push({ target: p, isEntity: false });
+            }
+
+            if (!isHeal) {
+              const groundMapEntities = entityCache.getByMap(currentPlayer.location.map);
+              for (const e of groundMapEntities) {
+                if (e.aggro_type === 'friendly') continue;
+                const ePos = e.position;
+                if (!ePos) continue;
+                const dist = Math.sqrt((ePos.x - groundX) ** 2 + (ePos.y - groundY) ** 2);
+                if (dist <= groundAoERadius) {
+                  const entityState = entityAI.getEntityAIState(String(e.id));
+                  if (entityState?.combatState === 'returning') continue;
+                  splashTargets.push({ target: e, isEntity: true });
+                }
+              }
+            }
+
+            const attackerDamageBonus = currentPlayer.stats.stat_damage || 0;
+            for (const splash of splashTargets) {
+              const st = splash.target;
+              const si = splash.isEntity;
+              const splashMin = spell_damage < 0 ? spell_damage - (playerLevel - 1) * 2 : spell_damage + (playerLevel - 1) * 2;
+              const splashMax = spell_damage < 0 ? spell_damage - (playerLevel - 1) * 5 : spell_damage + (playerLevel - 1) * 5;
+              let splashDmg = Math.floor(Math.random() * (Math.abs(splashMax - splashMin) + 1)) + Math.min(splashMin, splashMax);
+              splashDmg += attackerDamageBonus;
+              if (spell_damage === 0) splashDmg = 0;
+
+              if (splashDmg > 0 && !si) {
+                const av = st.stats?.stat_avoidance || 0;
+                if (Math.random() * 100 < av) splashDmg = 0;
+                if (splashDmg > 0) {
+                  const ar = st.stats?.stat_armor || 0;
+                  splashDmg = Math.floor(splashDmg * (1 - Math.min(ar, 75) / 100));
+                }
+              }
+
+              if (si) {
+                entityAI.applyDamageToEntity(st, splashDmg, currentPlayer);
+                if (st.health < 0) st.health = 0;
+                entityCache.updateHealth(st.id, st.health);
+                if (spell_damage !== 0) {
+                  groundPlayersInMap.forEach((pp) => {
+                    sendPacket(pp.ws, packetManager.updateStats({ id: ws.data.id, target: st.id, stats: { health: st.health, total_max_health: st.max_health }, isCrit: false, damage: splashDmg, entity: true }));
+                  });
+                }
+                if (st.health <= 0) {
+                  groundPlayersInMap.forEach((pp) => sendPacket(pp.ws, packetManager.despawnEntity(st.id, 30)));
+                  entityCache.remove(st.id);
+                  dots.clearEntityDots(st.id);
+                } else {
+                  if (!(spell_damage > 0 && splashDmg === 0)) {
+                    spellEffects.applySpellEffects(spell, currentPlayer, st, () => {}, () => {});
+                  }
+                }
+              } else {
+                let toHealth = splashDmg;
+                if (splashDmg > 0) {
+                  const ab = spellEffects.consumeBarrier(st, splashDmg);
+                  toHealth = splashDmg - ab;
+                  if (ab > 0) spellEffects.broadcastEffectsUpdate(st);
+                }
+                st.stats.health = Math.round(st.stats.health - toHealth);
+                if (st.stats.health > st.stats.total_max_health) {
+                  st.stats.health = st.stats.total_max_health;
+                }
+                listener.emit(Events.PLAYER_DAMAGED, { attacker: currentPlayer, target: st, damage: splashDmg, isCrit: false });
+
+                if (st.stats.health <= 0) {
+                  await handlePlayerDeath(st, currentPlayer, { damage: splashDmg, isCrit: false });
+                } else {
+                  if (!(spell_damage > 0 && splashDmg === 0)) {
+                    await spellEffects.applySpellEffects(spell, currentPlayer, st,
+                      (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.ws, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
+                      (pp: any) => spellEffects.broadcastEffectsUpdate(pp)
+                    );
+                  }
+                  if (spell_damage !== 0) {
+                    groundPlayersInMap.forEach((pp) => sendPacket(pp.ws, packetManager.updateStats({ id: ws.data.id, target: st.id, stats: st.stats, isCrit: false, damage: splashDmg })));
+                  }
+                }
+
+                currentPlayer.pvp = true;
+                st.pvp = true;
+                st.last_attack = performance.now();
+
+                if (splashDmg > 0 && st.isVanished) {
+                  const vId = spellEffects.getVanishedEffectId(st);
+                  if (vId) {
+                    cancelEffect(st, vId);
+                    spellEffects.broadcastEffectsUpdate(st);
+                  }
+                }
+              }
+            }
+
+            if (currentPlayer.isVanished) {
+              const cvId = spellEffects.getVanishedEffectId(currentPlayer);
+              if (cvId) {
+                cancelEffect(currentPlayer, cvId);
+                spellEffects.broadcastEffectsUpdate(currentPlayer);
+              }
+            }
+
+            // Visual projectile from caster to ground position
+            groundPlayersInMap.forEach((p) => {
+              sendPacket(p.ws, packetManager.projectile({
+                id: currentPlayer.id, time: 0.3, target_id: currentPlayer.id,
+                spell: spell.name, icon: getIconUrl(spell.icon), entity: false
+              }));
+            });
+          }
+
+          // Sync caster stats
+          const syncedStats = await player.synchronizeStats(currentPlayer.username);
+          if (syncedStats) currentPlayer.stats = syncedStats;
+          playerCache.set(currentPlayer.id, currentPlayer);
+          groundPlayersInMap.forEach((pp) => sendPacket(pp.ws, packetManager.updateStats({ id: currentPlayer.id, target: currentPlayer.id, stats: currentPlayer.stats })));
 
           currentPlayer.last_attack = performance.now();
           listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target: currentPlayer, isEntityTarget: false });
@@ -3369,6 +3729,166 @@ export default async function packetReceiver(
           return;
         } else if (!isEntityTarget && !playersInAttackRange.includes(target)) {
           return;
+        }
+
+        const isChargeSpell = spell?.charge_distance && spell.charge_distance > 0;
+        const isTeleportBehind = spell?.teleport_behind === 1;
+        if (isChargeSpell && !isSelf && !isEntityTarget) {
+          const cPos = currentPlayer.location.position;
+          const cx = typeof cPos === 'string' ? Number(cPos.split(',')[0]) : cPos.x;
+          const cy = typeof cPos === 'string' ? Number(cPos.split(',')[1]) : cPos.y;
+          const tPos = target.location.position;
+          const tx = typeof tPos === 'string' ? Number(tPos.split(',')[0]) : tPos.x;
+          const ty = typeof tPos === 'string' ? Number(tPos.split(',')[1]) : tPos.y;
+          const dist = Math.sqrt((tx - cx) ** 2 + (ty - cy) ** 2);
+          const chargeDist = Math.min(spell.charge_distance ?? 0, Math.max(0, dist - 40));
+          const ratio = dist > 0 ? chargeDist / dist : 0;
+          const landX = Math.round(cx + (tx - cx) * ratio);
+          const landY = Math.round(cy + (ty - cy) * ratio);
+
+          const losCharge = await hasLineOfSight(cx, cy, landX, landY, currentPlayer.location.map, (spell.charge_distance ?? 0) + 50);
+          if (!losCharge) {
+            sendPacket(ws, packetManager.notify({ message: "Cannot charge - path blocked." }));
+            if (currentPlayer.spellCooldowns) {
+              delete currentPlayer.spellCooldowns[spell_id];
+            }
+            return;
+          }
+
+          const dx2 = tx - landX;
+          const dy2 = ty - landY;
+          const ang = Math.atan2(dy2, dx2) * (180 / Math.PI);
+          let newDir = 'down';
+          if (ang >= -22.5 && ang < 22.5) newDir = 'right';
+          else if (ang >= 22.5 && ang < 67.5) newDir = 'downright';
+          else if (ang >= 67.5 && ang < 112.5) newDir = 'down';
+          else if (ang >= 112.5 && ang < 157.5) newDir = 'downleft';
+          else if (ang >= 157.5 || ang < -157.5) newDir = 'left';
+          else if (ang >= -157.5 && ang < -112.5) newDir = 'upleft';
+          else if (ang >= -112.5 && ang < -67.5) newDir = 'up';
+          else if (ang >= -67.5 && ang < -22.5) newDir = 'upright';
+
+          currentPlayer.location.position.x = landX;
+          currentPlayer.location.position.y = landY;
+          currentPlayer.location.position.direction = newDir;
+          currentPlayer.moving = false;
+          playerCache.set(currentPlayer.id, currentPlayer);
+
+          globalStateRevision++;
+          if (shouldUpdateAOI(currentPlayer)) {
+            await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
+          }
+          const chargeMoveData = {
+            i: ws.data.id,
+            d: { x: landX, y: landY, dr: newDir },
+            r: globalStateRevision,
+            s: currentPlayer.isStealth ? 1 : 0,
+          };
+          broadcastToAOI(currentPlayer, packetManager.moveXY(chargeMoveData), true);
+
+          await sendPositionAnimation(ws, newDir, false, false, "", undefined, globalStateRevision, false);
+
+          playersInMap.forEach((p) => {
+            sendPacket(p.ws, packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: 0 }));
+          });
+
+          currentPlayer.last_attack = performance.now();
+          if (currentPlayer.isVanished) {
+            const vId = spellEffects.getVanishedEffectId(currentPlayer);
+            if (vId) {
+              cancelEffect(currentPlayer, vId);
+              spellEffects.broadcastEffectsUpdate(currentPlayer);
+            }
+          }
+          listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target, isEntityTarget });
+
+          if (Array.isArray(spell.effects) && spell.effects.length > 0) {
+            await spellEffects.applySpellEffects(spell, currentPlayer, target,
+              (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.ws, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
+              (pp: any) => spellEffects.broadcastEffectsUpdate(pp)
+            );
+          }
+
+          currentPlayer.pvp = true;
+          target.pvp = true;
+          target.last_attack = performance.now();
+          break;
+        }
+
+        if (isTeleportBehind && !isSelf && !isEntityTarget) {
+          const tPos = target.location.position;
+          const tx = typeof tPos === 'string' ? Number(tPos.split(',')[0]) : tPos.x;
+          const ty = typeof tPos === 'string' ? Number(tPos.split(',')[1]) : tPos.y;
+          const tDir = typeof tPos === 'string' ? 'down' : (tPos.direction || 'down');
+
+          const dirOffsets: Record<string, { dx: number; dy: number; face: string }> = {
+            right:     { dx: -40, dy: 0,   face: 'right' },
+            downright: { dx: -28, dy: -28, face: 'downright' },
+            down:      { dx: 0,   dy: -40, face: 'down' },
+            downleft:  { dx: 28,  dy: -28, face: 'downleft' },
+            left:      { dx: 40,  dy: 0,   face: 'left' },
+            upleft:    { dx: 28,  dy: 28,  face: 'upleft' },
+            up:        { dx: 0,   dy: 40,  face: 'up' },
+            upright:   { dx: -28, dy: 28,  face: 'upright' },
+          };
+          const offset = dirOffsets[tDir] || dirOffsets['down'];
+          const landX = Math.round(tx + offset.dx);
+          const landY = Math.round(ty + offset.dy);
+
+          const losBehind = await hasLineOfSight(tx, ty, landX, landY, currentPlayer.location.map, 60);
+          if (!losBehind) {
+            sendPacket(ws, packetManager.notify({ message: "Cannot teleport behind target - path blocked." }));
+            if (currentPlayer.spellCooldowns) {
+              delete currentPlayer.spellCooldowns[spell_id];
+            }
+            return;
+          }
+
+          currentPlayer.location.position.x = landX;
+          currentPlayer.location.position.y = landY;
+          currentPlayer.location.position.direction = offset.face;
+          currentPlayer.moving = false;
+          playerCache.set(currentPlayer.id, currentPlayer);
+
+          globalStateRevision++;
+          if (shouldUpdateAOI(currentPlayer)) {
+            await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
+          }
+          const tpMoveData = {
+            i: ws.data.id,
+            d: { x: landX, y: landY, dr: offset.face },
+            r: globalStateRevision,
+            s: currentPlayer.isStealth ? 1 : 0,
+          };
+          broadcastToAOI(currentPlayer, packetManager.moveXY(tpMoveData), true);
+
+          await sendPositionAnimation(ws, offset.face, false, false, "", undefined, globalStateRevision, false);
+
+          playersInMap.forEach((p) => {
+            sendPacket(p.ws, packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: 0 }));
+          });
+
+          currentPlayer.last_attack = performance.now();
+          if (currentPlayer.isVanished) {
+            const vId = spellEffects.getVanishedEffectId(currentPlayer);
+            if (vId) {
+              cancelEffect(currentPlayer, vId);
+              spellEffects.broadcastEffectsUpdate(currentPlayer);
+            }
+          }
+          listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target, isEntityTarget });
+
+          if (Array.isArray(spell.effects) && spell.effects.length > 0) {
+            await spellEffects.applySpellEffects(spell, currentPlayer, target,
+              (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.ws, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
+              (pp: any) => spellEffects.broadcastEffectsUpdate(pp)
+            );
+          }
+
+          currentPlayer.pvp = true;
+          target.pvp = true;
+          target.last_attack = performance.now();
+          break;
         }
 
         let delay = 0;
@@ -3770,7 +4290,7 @@ export default async function packetReceiver(
             effectResult = await spellEffects.applySpellEffects(spell, currentPlayer, target, broadcastStats, broadcastEffects);
           }
 
-          // Vanish despawn — must happen in receiver, same pattern as admin stealth
+          // Vanish despawn - must happen in receiver, same pattern as admin stealth
           if (Array.isArray(spell.effects) && spell.effects.some((e: SpellEffect) => e.type === "vanish") && target.isVanished) {
             playersInMap.forEach((player) => {
               if (player.id === target.id) return;
@@ -3828,7 +4348,7 @@ export default async function packetReceiver(
           target.last_attack = performance.now();
         }
 
-        // Attacking breaks vanish (but not DoT ticks — this is a direct cast)
+        // Attacking breaks vanish (but not DoT ticks - this is a direct cast)
         if (currentPlayer.isVanished && !isSelf && !isInParty) {
           const vanishId = spellEffects.getVanishedEffectId(currentPlayer);
           if (vanishId) {
@@ -3978,6 +4498,10 @@ export default async function packetReceiver(
             player.ws,
             packetManager.castSpell({ id: currentPlayer.id, spell: 'interrupted', time: 1 })
           );
+          sendPacket(
+            player.ws,
+            packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" })
+          );
         });
 
         globalStateRevision++;
@@ -3998,12 +4522,22 @@ export default async function packetReceiver(
         currentPlayer.castId = (currentPlayer.castId || 0) + 1;
         currentPlayer.manualSpellCancel = performance.now();
 
+        if (currentPlayer.castingSpellId && currentPlayer.spellCooldowns) {
+          delete currentPlayer.spellCooldowns[currentPlayer.castingSpellId];
+          cooldownManager.deleteCooldown(currentPlayer.username, currentPlayer.castingSpellId);
+          currentPlayer.castingSpellId = undefined;
+        }
+
         // Also update in playerCache so spell execution can detect it
         const cachedPlayer = playerCache.get(currentPlayer.id);
         if (cachedPlayer) {
           cachedPlayer.casting = false;
           cachedPlayer.castId = currentPlayer.castId;
           cachedPlayer.manualSpellCancel = performance.now();
+          if (cachedPlayer.castingSpellId && cachedPlayer.spellCooldowns) {
+            delete cachedPlayer.spellCooldowns[cachedPlayer.castingSpellId];
+            cachedPlayer.castingSpellId = undefined;
+          }
           playerCache.set(cachedPlayer.id, cachedPlayer);
         }
 
@@ -8510,11 +9044,21 @@ async function interruptPlayerCast(target: any) {
   target.castId = (target.castId || 0) + 1;
   target.lastInterruptTime = performance.now();
 
+  if (target.castingSpellId && target.spellCooldowns) {
+    delete target.spellCooldowns[target.castingSpellId];
+    cooldownManager.deleteCooldown(target.username, target.castingSpellId);
+    target.castingSpellId = undefined;
+  }
+
   const cached = playerCache.get(target.id);
   if (cached && cached !== target) {
     cached.casting = false;
     cached.castId = target.castId;
     cached.lastInterruptTime = target.lastInterruptTime;
+    if (cached.castingSpellId && cached.spellCooldowns) {
+      delete cached.spellCooldowns[cached.castingSpellId];
+    }
+    cached.castingSpellId = undefined;
     playerCache.set(cached.id, cached);
   }
 
@@ -8523,6 +9067,10 @@ async function interruptPlayerCast(target: any) {
     sendPacket(
       p.ws,
       packetManager.castSpell({ id: target.id, spell: 'interrupted', time: 1 })
+    );
+    sendPacket(
+      p.ws,
+      packetManager.groundAoeDespawn({ id: target.id + "_casting" })
     );
   });
 
@@ -8661,6 +9209,7 @@ export async function handlePlayerDeath(target: any, killer: any, info: { damage
 }
 
 dots.setPlayerDeathHandler(handlePlayerDeath);
+setPlayerDeathHandler(handlePlayerDeath);
 
 spellEffects.setVanishRemovedHandler(async (player) => {
   const map = player.location?.map;
@@ -8725,6 +9274,11 @@ registerSpellEffect("interrupt", ({ target, effect }) => {
     sendPacket(fresh.ws, packetManager.spellLockout({ duration: lockoutSec }));
   }
   listener.emit(Events.SPELL_INTERRUPTED, { player: fresh });
+});
+
+listener.on(Events.SPELL_INTERRUPTED, async ({ player }) => {
+  if (!player?.casting || !player?.interruptableSpell) return;
+  await interruptPlayerCast(player);
 });
 
 function filterPlayersByMap(map: string) {

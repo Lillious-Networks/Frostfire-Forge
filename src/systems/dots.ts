@@ -2,7 +2,7 @@ import playerCache from "../services/playermanager";
 import entityCache from "../services/entityCache";
 import mapIndex from "../services/mapindex";
 import entityAI from "./entityAI";
-import { registerSpellEffect, registerEffectsPayloadProvider, consumeBarrier, broadcastEffectsUpdate, resolveParticleNames } from "./spelleffects";
+import { registerSpellEffect, registerEffectsPayloadProvider, consumeBarrier, broadcastEffectsUpdate, resolveParticleNames, cancelEffect, getVanishedEffectId } from "./spelleffects";
 import { packetManager } from "../socket/packet_manager";
 import { getSpriteUrl } from "../modules/spriteSheetManager";
 import { listener } from "../modules/event_bus";
@@ -190,7 +190,7 @@ async function tickPlayerDot(targetKey: string, dot: DotInstance): Promise<boole
     return true;
   }
 
-  // Avoidance check — DoT ticks can be dodged like direct damage
+  // Avoidance check - DoT ticks can be dodged like direct damage
   let damage = amount;
   const targetAvoidance = target.stats?.stat_avoidance || 0;
   if (Math.random() * 100 < targetAvoidance) {
@@ -216,6 +216,14 @@ async function tickPlayerDot(targetKey: string, dot: DotInstance): Promise<boole
     target.last_attack = performance.now();
     caster.pvp = true;
     caster.last_attack = performance.now();
+  }
+
+  if (damage > 0 && target.isVanished) {
+    const vanishId = getVanishedEffectId(target);
+    if (vanishId) {
+      cancelEffect(target, vanishId);
+      broadcastEffectsUpdate(target);
+    }
   }
 
   if (target.stats.health <= 0) {

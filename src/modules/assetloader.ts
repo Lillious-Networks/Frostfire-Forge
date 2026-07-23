@@ -102,8 +102,32 @@ async function syncMapsBeforeLoading(): Promise<void> {
     fs.mkdirSync(mapDir, { recursive: true });
   }
 
+  const localChecksums = calculateAllMapChecksums();
+  const cacheFile = path.join(mapDir, ".map-checksums-cache.json");
+
+  let cachedChecksums: Record<string, string> = {};
   try {
-    const localChecksums = calculateAllMapChecksums();
+    if (fs.existsSync(cacheFile)) {
+      cachedChecksums = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
+    }
+  } catch { /* ignore corrupt cache */ }
+
+  const hasChanges = (() => {
+    const localKeys = Object.keys(localChecksums);
+    const cachedKeys = Object.keys(cachedChecksums);
+    if (localKeys.length !== cachedKeys.length) return true;
+    for (const k of localKeys) {
+      if (localChecksums[k] !== cachedChecksums[k]) return true;
+    }
+    return false;
+  })();
+
+  if (!hasChanges) {
+    log.info("Maps are up to date (no local changes detected)");
+    return;
+  }
+
+  try {
     const response = await fetch(`${assetServerUrl}/map-checksums`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -141,6 +165,11 @@ async function syncMapsBeforeLoading(): Promise<void> {
   } catch (error) {
     log.warn(`Failed to sync maps from asset server: ${error}`);
   }
+
+  try {
+    const updated = calculateAllMapChecksums();
+    fs.writeFileSync(cacheFile, JSON.stringify(updated), "utf-8");
+  } catch { /* ignore */ }
 }
 
 function loadAllMaps() {
@@ -149,7 +178,7 @@ function loadAllMaps() {
 
   if (!fs.existsSync(mapDir)) throw new Error(`Maps directory not found at ${mapDir}`);
 
-  const mapFiles = fs.readdirSync(mapDir).filter(f => f.endsWith(".json"));
+  const mapFiles = fs.readdirSync(mapDir).filter(f => f.endsWith(".json") && !f.startsWith("."));
   if (mapFiles.length === 0) throw new Error("No maps found in the maps directory");
 
   for (const file of mapFiles) {

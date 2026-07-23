@@ -296,6 +296,11 @@ declare interface SpellData {
   particles: Nullable<string>;
   effects: SpellEffect[];
   aoe_radius: Nullable<number>;
+  ground_aoe: Nullable<number>;
+  ground_duration: Nullable<number>;
+  is_thrown: Nullable<number>;
+  charge_distance: Nullable<number>;
+  teleport_behind: Nullable<number>;
 }
 
 declare interface LearnedSpell {

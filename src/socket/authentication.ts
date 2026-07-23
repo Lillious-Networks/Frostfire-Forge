@@ -111,6 +111,11 @@ const authentication = {
                 effects: SpellEffect[],
                 particles: string | null,
                 aoe_radius: number | null,
+                ground_aoe: number | null,
+                ground_duration: number | null,
+                is_thrown: number | null,
+                charge_distance: number | null,
+                teleport_behind: number | null,
             }> = Object.create(null);
 
             for (const row of learnedSpellsData) {
@@ -131,6 +136,11 @@ const authentication = {
                     effects: Array.isArray(spellDetails.effects) ? spellDetails.effects : [],
                     particles: spellDetails.particles ?? null,
                     aoe_radius: spellDetails.aoe_radius ?? null,
+                    ground_aoe: spellDetails.ground_aoe ?? null,
+                    ground_duration: spellDetails.ground_duration ?? null,
+                    is_thrown: spellDetails.is_thrown ?? null,
+                    charge_distance: spellDetails.charge_distance ?? null,
+                    teleport_behind: spellDetails.teleport_behind ?? null,
                 };
             }
 

@@ -36,7 +36,7 @@ export function calculateAllMapChecksums(): Record<string, string> {
     return checksums;
   }
 
-  const mapFiles = fs.readdirSync(mapDir).filter((f) => f.endsWith(".json"));
+  const mapFiles = fs.readdirSync(mapDir).filter((f) => f.endsWith(".json") && !f.startsWith("."));
 
   mapFiles.forEach((file) => {
     const filePath = path.join(mapDir, file);

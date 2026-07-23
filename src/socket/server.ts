@@ -890,7 +890,7 @@ listener.on(Events.SAVE, async () => {
         if (dbSid !== String(playerId)) {
           sessionInvalidSet.add(playerId);
           log.info(
-            `[Save] Skipping save for ${row.username} — session stolen (local: ${playerId}, db: ${dbSid || "cleared"})`
+            `[Save] Skipping save for ${row.username} - session stolen (local: ${playerId}, db: ${dbSid || "cleared"})`
           );
         }
       }

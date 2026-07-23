@@ -1,6 +1,7 @@
 import AOI_CONFIG from "../config/aoi.json";
 import playerCache from "../services/playermanager";
 import layerManager from "../services/layermanager";
+import { getEffectsPayload } from "../systems/spelleffects";
 import mapIndex from "../services/mapindex";
 import parties from "../systems/parties";
 import { packetManager } from "./packet_manager";
@@ -226,6 +227,7 @@ export function queueSpawnPlayerPacket(
       spriteData: null,
       guild: spawnedPlayer.guild || [],
       guild_name: spawnedPlayer.guild_name || null,
+      effects: getEffectsPayload(spawnedPlayer),
     };
 
     return spawnData;

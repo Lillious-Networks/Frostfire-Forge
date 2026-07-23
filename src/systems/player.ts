@@ -62,7 +62,7 @@ function queryRLE(rleData: number[], targetIndex: number): number {
   return 0;
 }
 
-async function hasLineOfSight(
+export async function hasLineOfSight(
   startX: number,
   startY: number,
   endX: number,
@@ -375,7 +375,7 @@ const player = {
       return true;
     }
 
-    // Claim failed — another session is active. Resolve it.
+    // Claim failed - another session is active. Resolve it.
     const existingSessionResult = await query(
       "SELECT session_id FROM accounts WHERE username = ?",
       [username]

@@ -692,6 +692,21 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "PROJECTILE", data })),
     ] as any[];
   },
+  groundAoeCasting: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "GROUND_AOE_CASTING", data })),
+    ] as any[];
+  },
+  groundAoeSpawn: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "GROUND_AOE_SPAWN", data })),
+    ] as any[];
+  },
+  groundAoeDespawn: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "GROUND_AOE_DESPAWN", data })),
+    ] as any[];
+  },
   despawnPlayer: (playerId: string, reason?: string) => {
     return [
       packet.encode(

@@ -144,7 +144,12 @@ const createSpellsTable = async () => {
       icon VARCHAR(255) NULL DEFAULT NULL,
       effects TEXT NULL DEFAULT NULL,
       particles VARCHAR(500) NULL DEFAULT NULL,
-      aoe_radius INT NULL DEFAULT NULL
+      aoe_radius INT NULL DEFAULT NULL,
+      ground_aoe TINYINT(1) NULL DEFAULT 0,
+      ground_duration INT NULL DEFAULT 0,
+      is_thrown TINYINT(1) NULL DEFAULT 0,
+      charge_distance INT NULL DEFAULT 0,
+      teleport_behind TINYINT(1) NULL DEFAULT 0
     )
   `;
   await query(sql);
@@ -199,16 +204,55 @@ const insertDefaultSpell = async () => {
     log.debug("Spell 'stun_strike' already exists - skipping");
   }
 
-  const slowCheck = await query(`SELECT COUNT(*) as count FROM spells WHERE name = 'frost_bolt_slow'`) as Array<{ count: number }>;
-  if (slowCheck[0]?.count === 0) {
-    const slowEffects = JSON.stringify([
-      { type: "slow", value: 50, duration: 5 },
-    ]);
-    const sql = `INSERT INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move, effects) VALUES
-      ('frost_bolt_slow', 5, 10, 1000, 'spell', 1, 8, 'A chilling bolt that slows the target by 50% for 5 seconds.', 'frost_bolt_slow', 1, ?)`;
-    await query(sql, [slowEffects]);
+  const fireStormCheck = await query(`SELECT COUNT(*) as count FROM spells WHERE name = 'fire_storm'`) as Array<{ count: number }>;
+  if (fireStormCheck[0]?.count === 0) {
+    const sql = `INSERT INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move, aoe_radius, ground_aoe, ground_duration) VALUES
+      ('fire_storm', 8, 15, 800, 'spell', 2, 12, 'Summons a fiery storm at a target location, dealing damage to all enemies in the area for 6 seconds.', 'fire_storm', 0, 150, 1, 6)`;
+    await query(sql);
   } else {
-    log.debug("Spell 'frost_bolt_slow' already exists - skipping");
+    log.debug("Spell 'fire_storm' already exists - skipping");
+  }
+
+  const healingCircleCheck = await query(`SELECT COUNT(*) as count FROM spells WHERE name = 'healing_circle'`) as Array<{ count: number }>;
+  if (healingCircleCheck[0]?.count === 0) {
+    const sql = `INSERT INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move, aoe_radius, ground_aoe, ground_duration) VALUES
+      ('healing_circle', -5, 20, 800, 'spell', 2, 15, 'Creates a healing circle at a target location, restoring health to allies in the area for 8 seconds.', 'healing_circle', 0, 120, 1, 8)`;
+    await query(sql);
+  } else {
+    log.debug("Spell 'healing_circle' already exists - skipping");
+  }
+
+  const fireFlaskCheck = await query(`SELECT COUNT(*) as count FROM spells WHERE name = 'fire_flask'`) as Array<{ count: number }>;
+  if (fireFlaskCheck[0]?.count === 0) {
+    const sql = `INSERT INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move, aoe_radius, ground_aoe, ground_duration, is_thrown) VALUES
+      ('fire_flask', 6, 12, 600, 'spell', 1, 10, 'Throw a flaming flask that arcs through the air and explodes on impact, dealing damage and leaving a burning patch for 4 seconds.', 'fire_flask', 1, 100, 1, 4, 1)`;
+    await query(sql);
+  } else {
+    log.debug("Spell 'fire_flask' already exists - skipping");
+  }
+
+  const shadowStepCheck = await query(`SELECT COUNT(*) as count FROM spells WHERE name = 'shadow_step'`) as Array<{ count: number }>;
+  if (shadowStepCheck[0]?.count === 0) {
+    const shadowStepEffects = JSON.stringify([
+      { type: "stun", value: 0, duration: 1.5 },
+    ]);
+    const sql = `INSERT INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move, charge_distance, effects) VALUES
+      ('shadow_step', 0, 10, 400, 'spell', 0, 8, 'Dash through the shadows to close the distance to your target, briefly stunning them on arrival.', 'shadow_step', 1, 300, ?)`;
+    await query(sql, [shadowStepEffects]);
+  } else {
+    log.debug("Spell 'shadow_step' already exists - skipping");
+  }
+
+  const shadowStrikeCheck = await query(`SELECT COUNT(*) as count FROM spells WHERE name = 'shadow_strike'`) as Array<{ count: number }>;
+  if (shadowStrikeCheck[0]?.count === 0) {
+    const shadowStrikeEffects = JSON.stringify([
+      { type: "stun", value: 0, duration: 2 },
+    ]);
+    const sql = `INSERT INTO spells (name, damage, mana, \`range\`, type, cast_time, cooldown, description, icon, can_move, teleport_behind, effects) VALUES
+      ('shadow_strike', 0, 12, 350, 'spell', 0, 12, 'Vanish into darkness and reappear behind your target, stunning them for 2 seconds.', 'shadow_strike', 1, 1, ?)`;
+    await query(sql, [shadowStrikeEffects]);
+  } else {
+    log.debug("Spell 'shadow_strike' already exists - skipping");
   }
 };
 
@@ -714,7 +758,7 @@ const insertDemoQuestLog = async () => {
 
 const insertDefaultLearnedSpell = async () => {
   log.info("Inserting default learned spells for demo user...");
-  const defaultSpells = ["frost_bolt", "poison_bolt", "mind_freeze", "stun_strike", "frost_bolt_slow"];
+  const defaultSpells = ["frost_bolt", "poison_bolt", "mind_freeze", "stun_strike", "frost_bolt_slow", "fire_storm", "healing_circle", "fire_flask", "shadow_step", "shadow_strike"];
   for (const spellName of defaultSpells) {
     const checkSql = `SELECT COUNT(*) as count FROM learned_spells WHERE spell = ? AND username = 'demo_user'`;
     const result = await query(checkSql, [spellName]) as Array<{ count: number }>;

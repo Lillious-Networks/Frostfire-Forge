@@ -4,6 +4,8 @@ import { packetManager } from "../socket/packet_manager";
 import assetCache from "../services/assetCache";
 import { getSpriteUrl } from "../modules/spriteSheetManager";
 import log from "../modules/logger";
+import { listener } from "../modules/event_bus";
+import { Events } from "./events";
 
 type BroadcastStatsFn = (player: any) => void;
 type BroadcastEffectsFn = (player: any) => void;
@@ -286,6 +288,10 @@ registerSpellEffect("stun", async ({ target, spell, effect, broadcastEffects }) 
   target.stunnedUntil = Math.max(target.stunnedUntil || 0, maxExpiry);
 
   broadcastEffects(target);
+
+  if (target.casting && target.interruptableSpell) {
+    listener.emit(Events.SPELL_INTERRUPTED, { player: target });
+  }
 
   // Grey out the hotbar while stunned (same visual as interrupt lockout)
   if (target.ws?.readyState === 1) {
