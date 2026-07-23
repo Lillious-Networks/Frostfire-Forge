@@ -274,6 +274,8 @@ class GatewayClient {
             const success = writeMapContent(mapUpdate.name, mapUpdate.data);
             if (success) {
               log.success(`Updated map: ${mapUpdate.name}`);
+              const { refreshMapVersion } = await import("./assetloader.ts");
+              refreshMapVersion(mapUpdate.name);
             } else {
               log.error(`Failed to update map: ${mapUpdate.name}`);
             }

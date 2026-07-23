@@ -354,6 +354,7 @@ declare interface MapProperties {
   warps: Nullable<WarpObject[]>;
   graveyards: Nullable<GraveyardObject[]>;
   shadowLayerNames?: Nullable<string[]>;
+  version: string;
 }
 
 declare interface PlayerProperties {

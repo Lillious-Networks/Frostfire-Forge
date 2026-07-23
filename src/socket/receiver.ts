@@ -513,6 +513,8 @@ function constructMapMetadata(
     .filter((layer: any) => layer.type === "objectgroup")
     .map((layer: any) => ({ name: layer.name }));
 
+  const mapVersion = mapProps?.version || '';
+
   const metadata = {
     name: normalizedName,
     assetServerUrl,
@@ -531,6 +533,7 @@ function constructMapMetadata(
     shadowLayerNames: mapProps?.shadowLayerNames || null,
     hasWeather: !!worldsArr.find((w) => w.name === normalizedName),
     objectLayers,
+    mapVersion,
   };
 
   listener.emit(Events.WARP, { mapName, metadata });

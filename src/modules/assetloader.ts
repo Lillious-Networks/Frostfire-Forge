@@ -158,6 +158,7 @@ function loadAllMaps() {
     if (map) {
       try {
         maps.push(map);
+        const stat = fs.statSync(path.join(mapDir, file));
         mapProperties.push({
           name: map.name,
           width: map.data.layers[0].width,
@@ -166,7 +167,8 @@ function loadAllMaps() {
           tileHeight: map.data.tileheight,
           warps: null,
           graveyards: null,
-          shadowLayerNames: null
+          shadowLayerNames: null,
+          version: String(stat.mtimeMs),
         });
         extractAndCompressLayers(map);
       } catch (error) {
@@ -926,6 +928,7 @@ export async function reloadMap(mapName: string): Promise<MapData> {
       warps: existingWarps || null,
       graveyards: existingGraveyards || null,
       shadowLayerNames: existingShadowLayerNames || null,
+      version: String(fs.statSync(fullPath).mtimeMs),
     };
 
     if (index >= 0) {
@@ -944,6 +947,18 @@ export async function reloadMap(mapName: string): Promise<MapData> {
     log.error(`Failed to reload map: ${mapName}: ${error}`);
     throw error;
   }
+}
+
+export function refreshMapVersion(mapName: string): void {
+  try {
+    const fullPath = getValidMapPath(mapName);
+    if (!fs.existsSync(fullPath)) return;
+    const file = path.basename(fullPath);
+    const props = mapProperties.find(m => m.name === file || m.name === mapName);
+    if (props) {
+      props.version = String(fs.statSync(fullPath).mtimeMs);
+    }
+  } catch { /* ignore */ }
 }
 
 await syncMapsBeforeLoading();
