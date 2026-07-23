@@ -114,6 +114,7 @@ async function syncMapsBeforeLoading(): Promise<void> {
 
   const hasChanges = (() => {
     const localKeys = Object.keys(localChecksums);
+    if (localKeys.length === 0) return true;
     const cachedKeys = Object.keys(cachedChecksums);
     if (localKeys.length !== cachedKeys.length) return true;
     for (const k of localKeys) {
@@ -178,7 +179,7 @@ function loadAllMaps() {
 
   if (!fs.existsSync(mapDir)) throw new Error(`Maps directory not found at ${mapDir}`);
 
-  const mapFiles = fs.readdirSync(mapDir).filter(f => f.endsWith(".json") && !f.startsWith("."));
+  const mapFiles = fs.readdirSync(mapDir).filter(f => f.endsWith(".json"));
   if (mapFiles.length === 0) throw new Error("No maps found in the maps directory");
 
   for (const file of mapFiles) {
