@@ -154,7 +154,7 @@ const player = {
   clear: async () => {
     // Reset all accounts
     await query(
-      "UPDATE accounts SET session_id = NULL, online = 0, token = NULL, verified = 0, verification_code = NULL, party_id = NULL"
+      "UPDATE accounts SET verification_code = NULL, party_id = NULL, twofa_pending = 0"
     );
 
     // Get guest usernames for cleanup

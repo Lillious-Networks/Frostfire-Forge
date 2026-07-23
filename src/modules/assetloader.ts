@@ -906,7 +906,7 @@ export async function reloadMap(mapName: string): Promise<MapData> {
     assetCache.removeNested(mapName, "collision");
     assetCache.removeNested(mapName, "nopvp");
 
-    await extractAndCompressLayers(newMap);
+    extractAndCompressLayers(newMap);
 
     const maps = await assetCache.get("maps") as MapData[];
     const mapProps = await assetCache.get("mapProperties") as MapProperties[];
