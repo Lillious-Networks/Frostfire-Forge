@@ -110,7 +110,7 @@ async function syncMapsBeforeLoading(): Promise<void> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         checksums: localChecksums,
-        serverId: "game-server",
+        serverId: process.env.SERVER_ID || "game-server",
         authKey: process.env.ASSET_SERVER_AUTH_KEY || process.env.GATEWAY_AUTH_KEY
       })
     });
