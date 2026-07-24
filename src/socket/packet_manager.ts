@@ -66,13 +66,13 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "LOGIN_FAILED", data: null })),
     ] as any[];
   },
-  inventory: (data: InventoryItem[]) => {
+  inventory: (data: InventoryItem[], slots?: number) => {
     return [
       packet.encode(
         JSON.stringify({
           type: "INVENTORY",
           data,
-          slots: 30,
+          slots: slots ?? 30,
         }),
       )
     ] as any[];
@@ -705,6 +705,11 @@ export const packetManager = {
   groundAoeDespawn: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "GROUND_AOE_DESPAWN", data })),
+    ] as any[];
+  },
+  bags: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "BAGS", data })),
     ] as any[];
   },
   despawnPlayer: (playerId: string, reason?: string) => {

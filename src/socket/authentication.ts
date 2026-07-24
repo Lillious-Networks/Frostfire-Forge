@@ -45,7 +45,7 @@ const authentication = {
                 }
             }
 
-            const inventoryData = await query("SELECT item, quantity, equipped FROM inventory WHERE username = ?", [username]) as any[];
+            const inventoryData = await query("SELECT item, quantity, equipped, slot, bag_slot FROM inventory WHERE username = ?", [username]) as any[];
             const collectablesData = await collectables.list(username) as unknown as Collectable[];
             const learnedSpellsData = await query("SELECT spell FROM learned_spells WHERE username = ?", [username]) as any[];
 

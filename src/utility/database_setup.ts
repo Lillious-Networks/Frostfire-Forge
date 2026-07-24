@@ -54,7 +54,9 @@ const createInventoryTable = async () => {
         username VARCHAR(255) NOT NULL,
         item VARCHAR(255) NOT NULL,
         quantity INT NOT NULL,
-        equipped INT NOT NULL DEFAULT 0
+        equipped INT NOT NULL DEFAULT 0,
+        slot INT NULL DEFAULT NULL,
+        bag_slot INT NULL DEFAULT NULL
     )
   `;
   await query(sql);
@@ -79,7 +81,8 @@ const createItemsTable = async () => {
         stat_avoidance INT DEFAULT NULL,
         level_requirement INT DEFAULT NULL,
         equipment_slot VARCHAR(255) DEFAULT NULL,
-        equipable INT NOT NULL DEFAULT 0
+        equipable INT NOT NULL DEFAULT 0,
+        bag_slots INT NULL DEFAULT 0
     )
   `;
   await query(sql);
@@ -294,6 +297,7 @@ const createPermissionTypesTable = async () => {
         ('admin.summonadmins'),
         ('admin.whitelist'),
         ('admin.drag'),
+        ('admin.items'),
         ('permission.*'),
         ('permission.add'),
         ('permission.list'),
@@ -650,6 +654,21 @@ const createEquipmentTable = async () => {
   await query(sql);
 };
 
+const createBagsTable = async () => {
+  log.info("Creating bags table...");
+  const sql = `
+    CREATE TABLE IF NOT EXISTS bags (
+      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+      username VARCHAR(255) NOT NULL UNIQUE,
+      slot_1 VARCHAR(255) DEFAULT NULL,
+      slot_2 VARCHAR(255) DEFAULT NULL,
+      slot_3 VARCHAR(255) DEFAULT NULL,
+      slot_4 VARCHAR(255) DEFAULT NULL
+    )
+  `;
+  await query(sql);
+};
+
 const insertDemoAccount = async () => {
   log.info("Inserting demo account...");
   const checkSql = `SELECT COUNT(*) as count FROM accounts WHERE username = 'demo_user'`;
@@ -913,6 +932,7 @@ const setupDatabase = async () => {
   await createCollectablesTable();
   await createLearnedSpellsTable();
   await createEquipmentTable();
+  await createBagsTable();
   await insertDemoAccount();
   await insertDemoStats();
   await insertDemoClientConfig();

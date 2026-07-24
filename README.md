@@ -337,6 +337,16 @@ bun setup-production
 </details>
 
 <details>
+<summary><strong>Give Item</strong></summary>
+
+```bash
+/give [username] [item_name] [amount?]
+```
+- **Permission**: `admin.items` | `admin.*`
+- Grants an item to a player's inventory. The item name is not case-sensitive. Amount defaults to 1 if omitted. Works for both online and offline players.
+</details>
+
+<details>
 <summary><strong>Update Player Permissions</strong></summary>
 
 ```bash

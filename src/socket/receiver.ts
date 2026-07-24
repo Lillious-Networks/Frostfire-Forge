@@ -53,6 +53,8 @@ import entityAI from "../systems/entityAI";
 import spellEffects, { registerSpellEffect, spellHasHostileEffects, cancelEffect, setStunsForPlayer, setSlowsForPlayer, getStunsForPlayer, getSlowsForPlayer, broadcastEffectsUpdate } from "../systems/spelleffects";
 import dots from "../systems/dots";
 import { spawnZone, setPlayerDeathHandler, getZonesOnMap } from "../systems/groundaoe";
+import bags from "../systems/bags";
+import query from "../controllers/sqldatabase";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const mapPropertiesCache = await assetCache.get("mapProperties");
@@ -155,6 +157,62 @@ function getAverageFlushLatency(): number {
   if (recentFlushLatencies.length === 0) return 0;
   const sum = recentFlushLatencies.reduce((a, b) => a + b, 0);
   return sum / recentFlushLatencies.length;
+}
+
+const BASE_INVENTORY_SLOTS = 25;
+
+async function getBagBoundaries(username: string): Promise<number[]> {
+  const boundaries: number[] = [BASE_INVENTORY_SLOTS];
+  const bagRow = await bags.get(username);
+  if (bagRow) {
+    const items = await assetCache.get("items") as Item[];
+    for (const slot of bags.SLOTS) {
+      const itemName = bagRow[slot];
+      if (itemName) {
+        const item = Array.isArray(items) ? items.find((i: any) => i.name === itemName) : null;
+        const bonus = item?.bag_slots != null ? Number(item.bag_slots) : 10;
+        boundaries.push(boundaries[boundaries.length - 1] + bonus);
+      }
+    }
+  }
+  return boundaries;
+}
+
+function computeBagSlot(slot: number, boundaries?: number[]): number {
+  if (slot == null || slot < BASE_INVENTORY_SLOTS) return 0;
+  if (!boundaries || boundaries.length <= 1) return 0;
+  for (let i = 1; i < boundaries.length; i++) {
+    if (slot < boundaries[i]) return i;
+  }
+  return 0;
+}
+
+async function patchInventoryBagSlots(inv: any[], username: string): Promise<any[]> {
+  if (!Array.isArray(inv)) return inv;
+  const boundaries = await getBagBoundaries(username);
+  return inv.map((item: any) => ({
+    ...item,
+    bag_slot: computeBagSlot(item.slot, boundaries),
+  }));
+}
+
+async function getInventorySlots(player: any): Promise<number> {
+  let slots = BASE_INVENTORY_SLOTS;
+  const username = player?.username || player?.equipment?.username;
+  if (username) {
+    const bagRow = await bags.get(username);
+    if (bagRow) {
+      const items = await assetCache.get("items") as Item[];
+      for (const slot of bags.SLOTS) {
+        const itemName = bagRow[slot];
+        if (itemName) {
+          const item = Array.isArray(items) ? items.find((i: any) => i.name === itemName) : null;
+          slots += item?.bag_slots != null ? Number(item.bag_slots) : 10;
+        }
+      }
+    }
+  }
+  return slots;
 }
 
 /**
@@ -948,7 +1006,8 @@ authWorker.on("message", async (result: any) => {
       }
     }
 
-    const limitedInventory = Array.isArray(playerData.inventory) ? playerData.inventory.slice(0, 30) : [];
+    const inventorySlots = await getInventorySlots(playerData);
+    const limitedInventory = Array.isArray(playerData.inventory) ? playerData.inventory.slice(0, inventorySlots) : [];
     const limitedFriends = Array.isArray(playerData.friends) ? playerData.friends.slice(0, 100) : [];
     const limitedCollectables = Array.isArray(playerData.collectables) ? playerData.collectables.slice(0, 50) : [];
     const limitedLearnedSpells = Array.isArray(playerData.learnedSpells) ? playerData.learnedSpells.slice(0, 100) : (playerData.learnedSpells || []);
@@ -1572,10 +1631,12 @@ authWorker.on("message", async (result: any) => {
     sendPacket(ws, packetManager.clientConfig(clientConfig));
 
     // Convert icon names to Asset Server URLs for inventory items
+    const bagBoundaries = await getBagBoundaries(playerData.username);
     const inventoryWithIconUrls = playerData.inventory?.map((item: any) => ({
       ...item,
       iconUrl: getIconUrl(item.icon),
-      icon: undefined // Remove the old icon field
+      icon: undefined,
+      bag_slot: computeBagSlot(item.slot, bagBoundaries),
     })) || [];
 
     // Convert icon names to Asset Server sprite URLs for spells (icons and sprites share the same name)
@@ -1610,8 +1671,11 @@ authWorker.on("message", async (result: any) => {
       icon: undefined // Remove the old icon field
     })) || [];
 
-    sendPacket(ws, packetManager.inventory(inventoryWithIconUrls));
+    sendPacket(ws, packetManager.inventory(inventoryWithIconUrls, inventorySlots));
     sendPacket(ws, packetManager.equipment(playerData.equipment || {}));
+
+    const playerBags = await bags.ensure(playerData.username);
+    sendPacket(ws, packetManager.bags(playerBags));
     sendPacket(ws, packetManager.collectables(collectablesWithIconUrls));
     sendPacket(ws, packetManager.spells(spellsWithSpriteUrls));
     sendPacket(ws, packetManager.questlog(completedQuest, incompleteQuest));
@@ -1993,10 +2057,10 @@ export default async function packetReceiver(
                 const nowTs = performance.now();
                 if (!currentPlayer.lastCombatWarpNotify || nowTs - currentPlayer.lastCombatWarpNotify > 2000) {
                   currentPlayer.lastCombatWarpNotify = nowTs;
-                  sendPacket(
-                    ws,
-                    packetManager.notify({ message: "You cannot leave the map while in combat." })
-                  );
+            sendPacket(
+              ws,
+              packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer))
+            );
                 }
                 return;
               }
@@ -2753,10 +2817,6 @@ export default async function packetReceiver(
         );
 
         if (!hasPermission) {
-          sendPacket(
-            ws,
-            packetManager.notify({ message: "You don't have permission to drag players" })
-          );
           break;
         }
 
@@ -7545,6 +7605,98 @@ export default async function packetReceiver(
             );
             break;
           }
+          case "GIVE": {
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "admin.items" || p === "admin.*"
+              )
+            ) {
+              sendPacket(ws, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+
+            const targetIdentifier = args[0]?.toLowerCase() || null;
+            const itemName = args[1] || null;
+            const quantity = parseInt(args[2]) || 1;
+
+            if (!targetIdentifier || !itemName) {
+              sendPacket(ws, packetManager.notify({ message: "Usage: /give <user> <item> <amount>" }));
+              break;
+            }
+
+            let targetPlayer;
+            if (isNaN(Number(targetIdentifier))) {
+              const players = Object.values(playerCache.list());
+              targetPlayer = players.find((p: any) => p.username.toLowerCase() === targetIdentifier.toLowerCase());
+            } else {
+              targetPlayer = playerCache.get(targetIdentifier);
+            }
+
+            if (!targetPlayer) {
+              const dbPlayer = await player.findPlayerInDatabase(targetIdentifier, undefined) as { username: string }[];
+              targetPlayer = dbPlayer.length > 0 ? dbPlayer[0] : null;
+            }
+
+            if (!targetPlayer) {
+              sendPacket(ws, packetManager.notify({ message: "Player not found" }));
+              break;
+            }
+
+            const targetName = targetPlayer.username;
+
+            const items = await assetCache.get("items") as Item[];
+            const itemDef = Array.isArray(items) ? items.find((i: any) => i.name.toLowerCase() === itemName.toLowerCase()) : null;
+            if (!itemDef) {
+              sendPacket(ws, packetManager.notify({ message: `Item '${itemName}' does not exist` }));
+              break;
+            }
+
+            await inventory.add(targetName, { name: itemDef.name, quantity });
+
+            const cachedTarget = playerCache.get(targetPlayer.id);
+            if (cachedTarget) {
+              if (!Array.isArray(cachedTarget.inventory)) cachedTarget.inventory = [];
+              const existing = cachedTarget.inventory.find((i: any) => i.name.toLowerCase() === itemDef.name.toLowerCase());
+              if (existing) {
+                existing.quantity += quantity;
+                if (cachedTarget.ws) {
+                  sendPacket(cachedTarget.ws, packetManager.addInventoryItem(existing));
+                  sendPacket(cachedTarget.ws, packetManager.notify({ message: `You received ${quantity}x ${itemDef.name}` }));
+                }
+              } else {
+                const newItem = {
+                  name: itemDef.name,
+                  quantity,
+                  equipped: false,
+                  slot: null,
+                  bag_slot: null,
+                  type: itemDef?.type || '',
+                  quality: itemDef?.quality || 'common',
+                  iconUrl: getIconUrl(itemDef?.icon),
+                  equipment_slot: itemDef?.equipment_slot || null,
+                  bag_slots: itemDef?.bag_slots ?? null,
+                  stat_health: itemDef?.stat_health ?? null,
+                  stat_stamina: itemDef?.stat_stamina ?? null,
+                  stat_armor: itemDef?.stat_armor ?? null,
+                  stat_damage: itemDef?.stat_damage ?? null,
+                  stat_critical_chance: itemDef?.stat_critical_chance ?? null,
+                  stat_critical_damage: itemDef?.stat_critical_damage ?? null,
+                  stat_avoidance: itemDef?.stat_avoidance ?? null,
+                  level_requirement: itemDef?.level_requirement ?? null,
+                  description: itemDef?.description || '',
+                };
+                cachedTarget.inventory.push(newItem);
+                if (cachedTarget.ws) {
+                  sendPacket(cachedTarget.ws, packetManager.addInventoryItem(newItem));
+                  sendPacket(cachedTarget.ws, packetManager.notify({ message: `You received ${quantity}x ${itemDef.name}` }));
+                }
+              }
+              playerCache.set(cachedTarget.id, cachedTarget);
+            }
+
+            sendPacket(ws, packetManager.notify({ message: `Gave ${quantity}x ${itemDef.name} to ${targetName}` }));
+            break;
+          }
           default: {
             const notifyData = {
               message: "Invalid command",
@@ -8770,6 +8922,8 @@ export default async function packetReceiver(
         const result = await equipment.equipItem(currentPlayer.username, slot, item);
         if (result) {
 
+          const canonicalName = foundEquipment?.name || item;
+
           if (previouslyEquippedItem) {
             const previousItem = currentPlayer.inventory.find((invItem: any) => invItem.name.toLowerCase() === previouslyEquippedItem.toLowerCase());
             if (previousItem) {
@@ -8777,7 +8931,7 @@ export default async function packetReceiver(
             }
           }
 
-          currentPlayer.equipment[slot] = item;
+          currentPlayer.equipment[slot] = canonicalName;
 
           const inventoryItem = currentPlayer.inventory.find((invItem: any) => invItem.name.toLowerCase() === item.toLowerCase());
           if (inventoryItem) {
@@ -8864,17 +9018,13 @@ export default async function packetReceiver(
               );
             }
 
-            const freshInventory = await inventory.get(currentPlayer.username);
-            currentPlayer.inventory = freshInventory;
-            playerCache.set(currentPlayer.id, currentPlayer);
-
-            sendPacket(
-              ws,
-              packetManager.inventory(currentPlayer.inventory)
-            );
             sendPacket(
               ws,
               packetManager.equipment(currentPlayer.equipment)
+            );
+            sendPacket(
+              ws,
+              packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer))
             );
 
             const currentAnimationName = getAnimationNameForDirection(
@@ -8904,6 +9054,26 @@ export default async function packetReceiver(
 
           const inventoryItem = currentPlayer.inventory.find((invItem: any) => invItem.name.toLowerCase() === equippedItemName.toLowerCase());
           if (inventoryItem) {
+            const maxSlots = await getInventorySlots(currentPlayer);
+            const bagBoundaries = await getBagBoundaries(currentPlayer.username);
+            const occupied = new Set<number>();
+            for (const inv of currentPlayer.inventory) {
+              if (inv !== inventoryItem && !inv.equipped && inv.slot != null) occupied.add(inv.slot);
+            }
+
+            let chosen = inventoryItem.slot;
+            if (chosen == null || chosen < 0 || chosen >= maxSlots || occupied.has(chosen)) {
+              chosen = targetSlotIndex;
+            }
+            if (chosen == null || chosen < 0 || chosen >= maxSlots || occupied.has(chosen)) {
+              chosen = 0;
+              while (occupied.has(chosen) && chosen < maxSlots) chosen++;
+            }
+            if (chosen < maxSlots) {
+              inventoryItem.slot = chosen;
+              inventoryItem.bag_slot = computeBagSlot(chosen, bagBoundaries);
+              await inventory.setUnequippedSlot(currentPlayer.username, equippedItemName, chosen, inventoryItem.bag_slot);
+            }
             inventoryItem.equipped = false;
           }
 
@@ -8972,20 +9142,9 @@ export default async function packetReceiver(
               );
             });
 
-            if (targetSlotIndex !== undefined) {
-              sendPacket(
-                ws,
-                packetManager.clientConfig(currentPlayer.config || [])
-              );
-            }
-
-            const freshInventory = await inventory.get(currentPlayer.username);
-            currentPlayer.inventory = freshInventory;
-            playerCache.set(currentPlayer.id, currentPlayer);
-
             sendPacket(
               ws,
-              packetManager.inventory(currentPlayer.inventory)
+              packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer))
             );
             sendPacket(
               ws,
@@ -9003,6 +9162,174 @@ export default async function packetReceiver(
           }
         }
         listener.emit(Events.ITEM_UNEQUIP, { player: currentPlayer, slot });
+        break;
+      }
+      case "BAG_EQUIP": {
+        if (!currentPlayer) return;
+        const item = (data as any).item;
+        const bagSlot = (data as any).slot;
+        if (!item || !bagSlot) return;
+        if (!bags.SLOTS.includes(bagSlot)) return;
+
+        const inventoryItem = currentPlayer.inventory.find((invItem: any) =>
+          invItem.name.toLowerCase() === String(item).toLowerCase() &&
+          invItem.bag_slots != null &&
+          invItem.bag_slots > 0
+        );
+        if (!inventoryItem) return;
+
+        const existingBags = await bags.ensure(currentPlayer.username);
+        if (existingBags[bagSlot] && existingBags[bagSlot].toLowerCase() === String(item).toLowerCase()) return;
+
+        const alreadyEquippedCount = bags.SLOTS.filter((s: string) =>
+          existingBags[s] && existingBags[s].toLowerCase() === String(item).toLowerCase()
+        ).length;
+        if (alreadyEquippedCount >= inventoryItem.quantity) return;
+
+        const canonicalName = inventoryItem.name;
+
+        await bags.setBag(currentPlayer.username, bagSlot, canonicalName);
+        await inventory.setEquipped(currentPlayer.username, canonicalName, true);
+        if (alreadyEquippedCount + 1 >= inventoryItem.quantity) {
+          await query(
+            "UPDATE inventory SET slot = NULL, bag_slot = NULL WHERE item = ? AND username = ?",
+            [canonicalName, currentPlayer.username]
+          );
+        }
+        const freshInventory = await inventory.get(currentPlayer.username);
+        currentPlayer.inventory = await patchInventoryBagSlots(freshInventory, currentPlayer.username);
+        playerCache.set(currentPlayer.id, currentPlayer);
+        sendPacket(ws, packetManager.bags(await bags.ensure(currentPlayer.username)));
+        sendPacket(ws, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
+        break;
+      }
+      case "BAG_UNEQUIP": {
+        if (!currentPlayer) return;
+        const bagSlot = (data as any).slot;
+        if (!bagSlot) return;
+        if (!bags.SLOTS.includes(bagSlot)) return;
+
+        const bagRow = await bags.ensure(currentPlayer.username);
+        const itemName = bagRow[bagSlot];
+        if (!itemName) return;
+
+        // Temporarily remove to calculate new max
+        await bags.setBag(currentPlayer.username, bagSlot, null);
+        const newMax = await getInventorySlots(currentPlayer);
+        await bags.setBag(currentPlayer.username, bagSlot, itemName); // restore
+
+        const freshInv = await inventory.get(currentPlayer.username);
+        const itemsBeyond = (freshInv || []).filter((i: any) => !i.equipped && i.slot != null && i.slot >= newMax);
+        if (itemsBeyond.length > 0) {
+          sendPacket(ws, packetManager.notify({ message: `Cannot unequip bag - ${itemsBeyond.length} item(s) occupy the extra slots. Move them to free up space first.` }));
+          break;
+        }
+
+        await bags.setBag(currentPlayer.username, bagSlot, null);
+        const updatedBags = await bags.ensure(currentPlayer.username);
+        const stillEquipped = bags.SLOTS.some((s: string) =>
+          updatedBags[s] && updatedBags[s].toLowerCase() === itemName.toLowerCase()
+        );
+        if (itemName && !stillEquipped) {
+          const invItem = currentPlayer.inventory.find((i: any) => i.name.toLowerCase() === itemName.toLowerCase());
+          await inventory.setUnequippedSlot(currentPlayer.username, itemName, invItem?.slot ?? null, invItem?.bag_slot ?? null);
+        }
+        currentPlayer.inventory = await patchInventoryBagSlots(await inventory.get(currentPlayer.username), currentPlayer.username);
+        playerCache.set(currentPlayer.id, currentPlayer);
+        sendPacket(ws, packetManager.bags(await bags.ensure(currentPlayer.username)));
+        sendPacket(ws, packetManager.inventory(currentPlayer.inventory, newMax));
+        break;
+      }
+      case "SAVE_INVENTORY_SLOTS": {
+        if (!currentPlayer) return;
+        const slots = (data as any)?.slots;
+        if (!Array.isArray(slots)) return;
+
+        const maxSlots = await getInventorySlots(currentPlayer);
+        const boundaries = await getBagBoundaries(currentPlayer.username);
+        const seen = new Set<number>();
+        const validItems = new Map<string, string>();
+        if (Array.isArray(currentPlayer.inventory)) {
+          for (const inv of currentPlayer.inventory) {
+            validItems.set(inv.name.toLowerCase(), inv.name);
+          }
+        }
+        for (const s of slots) {
+          if (typeof s.slot !== "number" || s.slot < 0 || s.slot >= maxSlots) return;
+          if (seen.has(s.slot)) return;
+          seen.add(s.slot);
+          if (!s.item || typeof s.item !== "string") return;
+          const canonical = validItems.get(s.item.toLowerCase());
+          if (!canonical) return;
+        }
+
+        const patched = slots.map((s: any) => {
+          const canonical = validItems.get(s.item.toLowerCase()) || s.item;
+          return {
+            ...s,
+            item: canonical,
+            bag_slot: computeBagSlot(s.slot, boundaries),
+          };
+        });
+
+        await inventory.saveSlots(currentPlayer.username, patched);
+
+        const slotMap = new Map(patched.map((s: any) => [s.item.toLowerCase(), s]));
+        if (Array.isArray(currentPlayer.inventory)) {
+          for (const inv of currentPlayer.inventory) {
+            const s = slotMap.get(inv.name.toLowerCase());
+            if (s) {
+              inv.slot = s.slot;
+              inv.bag_slot = s.bag_slot;
+            }
+          }
+        }
+        playerCache.set(currentPlayer.id, currentPlayer);
+        break;
+      }
+      case "DELETE_ITEM": {
+        if (!currentPlayer) return;
+        const itemName = (data as any)?.item;
+        const from = (data as any)?.from;
+        const slot = (data as any)?.slot;
+        if (!itemName || !from) return;
+
+        if (from === "inventory") {
+          const invItem = currentPlayer.inventory.find((i: any) =>
+            i.name.toLowerCase() === String(itemName).toLowerCase()
+          );
+          if (!invItem) return;
+
+          await inventory.delete(currentPlayer.username, { name: invItem.name, quantity: 0 });
+          currentPlayer.inventory = currentPlayer.inventory.filter((i: any) => i !== invItem);
+          playerCache.set(currentPlayer.id, currentPlayer);
+
+          sendPacket(ws, packetManager.removeInventoryItem({ name: invItem.name }));
+          sendPacket(ws, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
+        } else if (from === "equipment" && slot) {
+          const equippedName = currentPlayer.equipment[slot];
+          if (!equippedName || equippedName.toLowerCase() !== String(itemName).toLowerCase()) return;
+
+          await equipment.unEquipItem(currentPlayer.username, slot, equippedName);
+          await inventory.delete(currentPlayer.username, { name: equippedName, quantity: 0 });
+          currentPlayer.equipment[slot] = null;
+
+          currentPlayer.inventory = currentPlayer.inventory.filter((i: any) =>
+            i.name.toLowerCase() !== equippedName.toLowerCase()
+          );
+          playerCache.set(currentPlayer.id, currentPlayer);
+
+          sendPacket(ws, packetManager.removeInventoryItem({ name: equippedName }));
+          sendPacket(ws, packetManager.equipment(currentPlayer.equipment));
+          sendPacket(ws, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
+
+          const stats = await player.synchronizeStats(currentPlayer.username);
+          if (stats) {
+            currentPlayer.stats = stats;
+            playerCache.set(currentPlayer.id, currentPlayer);
+            sendPacket(ws, packetManager.updateStats({ target: currentPlayer.id, stats: currentPlayer.stats }));
+          }
+        }
         break;
       }
       case "RESPAWN_ENTITY": {

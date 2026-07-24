@@ -137,7 +137,7 @@ declare interface InventoryItem {
 
 type ItemType = "consumable" | "equipment" | "material" | "quest" | "miscellaneous";
 type ItemQuality = "common" | "uncommon" | "rare" | "epic" | "legendary";
-type ItemSlot = "helmet" | "necklace" | "shoulderguards" | "cape" | "chestplate" | "wristguards" | "gloves" | "belt" | "pants" | "boots" | "ring_1" | "ring_2" | "trinket_1" | "trinket_2" | "weapon";
+type ItemSlot = "helmet" | "necklace" | "shoulderguards" | "cape" | "chestplate" | "wristguards" | "gloves" | "belt" | "pants" | "boots" | "ring_1" | "ring_2" | "trinket_1" | "trinket_2" | "weapon" | "bag";
 
 declare interface Item {
   name: string;
@@ -155,6 +155,7 @@ declare interface Item {
   level_requirement: Nullable<number>;
   equipable: boolean;
   equipment_slot: Nullable<ItemSlot>;
+  bag_slots: Nullable<number>;
 }
 
 declare interface Equipment {
