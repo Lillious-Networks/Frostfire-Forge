@@ -343,7 +343,17 @@ bun setup-production
 /give [username] [item_name] [amount?]
 ```
 - **Permission**: `admin.items` | `admin.*`
-- Grants an item to a player's inventory. The item name is not case-sensitive. Amount defaults to 1 if omitted. Works for both online and offline players.
+- Grants an item to a player. Amount defaults to 1.
+</details>
+
+<details>
+<summary><strong>Drop Item</strong></summary>
+
+```bash
+/drop [item_name] [amount?]
+```
+- **Permission**: `admin.items` | `admin.*`
+- Spawns a loot drop at your feet. Amount defaults to 1, capped at 9,999.
 </details>
 
 <details>
