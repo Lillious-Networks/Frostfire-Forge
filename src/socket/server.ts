@@ -34,6 +34,7 @@ import dots from "../systems/dots.ts";
 import spellEffects, { getStunsForPlayer, getSlowsForPlayer } from "../systems/spelleffects.ts";
 import effectManager from "../services/effectmanager";
 import { GatewayClient } from "../modules/gateway-client.ts";
+import loot from "../systems/loot";
 
 const _cert = process.env.WEB_SOCKET_CERT_PATH || path.join(import.meta.dir, "../certs/cert.pem");
 const _key = process.env.WEB_SOCKET_KEY_PATH || path.join(import.meta.dir, "../certs/key.pem");
@@ -787,6 +788,8 @@ listener.on("onDisconnect", async (data) => {
     playerCache.remove(playerData.id);
 
     mapIndex.removePlayer(playerData.id);
+
+    loot.scheduleCleanup(playerData.id);
 
     clearBatchQueuesForPlayer(playerData.id, playerData.location.map);
 

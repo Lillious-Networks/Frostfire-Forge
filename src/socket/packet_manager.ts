@@ -899,5 +899,15 @@ export const packetManager = {
     return [
       packet.encode(JSON.stringify({ type: "TOGGLE_ENTITY_EDITOR", data: null })),
     ] as any[];
-  }
+  },
+  lootSpawn: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "LOOT_SPAWN", data })),
+    ] as any[];
+  },
+  lootDespawn: (id: string) => {
+    return [
+      packet.encode(JSON.stringify({ type: "LOOT_DESPAWN", data: { id } })),
+    ] as any[];
+  },
 };

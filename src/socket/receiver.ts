@@ -55,6 +55,7 @@ import dots from "../systems/dots";
 import { spawnZone, setPlayerDeathHandler, getZonesOnMap } from "../systems/groundaoe";
 import bags from "../systems/bags";
 import query from "../controllers/sqldatabase";
+import loot from "../systems/loot";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const mapPropertiesCache = await assetCache.get("mapProperties");
@@ -606,6 +607,8 @@ async function transitionPlayerToMap(
   spawnBatchQueue: Map<string, Map<string, any>>,
   despawnBatchQueue: Map<string, Set<string>>
 ): Promise<void> {
+  loot.cancelCleanup(player.id);
+
   await handleMapChangeAOI(player, newMapName, { x: newPosition.x, y: newPosition.y }, spawnBatchQueue, despawnBatchQueue);
 
   clearTargetOnMapChange(player.id);
@@ -721,6 +724,28 @@ async function transitionPlayerToMap(
       }
     } catch (e) {
       log.warn(`Failed to fetch entity data for ${newMapName}: ${e}`);
+    }
+
+    try {
+      const lootOnMap = loot.getOnMap(newMapName);
+      if (lootOnMap.length > 0) {
+        const lootPackets = lootOnMap.map((l) =>
+          packetManager.lootSpawn({
+            id: l.id,
+            item: l.item,
+            quantity: l.quantity,
+            quality: l.quality,
+            iconUrl: l.iconUrl,
+            x: l.x,
+            y: l.y,
+            ownerId: l.ownerId,
+            ownerName: l.ownerName,
+          })
+        ).flat();
+        sendPacket(ws, lootPackets);
+      }
+    } catch (e) {
+      log.warn(`Failed to sync loot for ${newMapName}: ${e}`);
     }
 
     const p = playerCache.get(player.id);
@@ -1086,6 +1111,8 @@ authWorker.on("message", async (result: any) => {
     if (_pcache) {
       _pcache.stats = stats;
       playerCache.set(_pcache.id, _pcache);
+
+      loot.cancelCleanup(_pcache.id);
 
       // Restore persisted effects (DoTs / HoTs / barriers / stuns / slows) from effect manager.
       // Simulate offline DoT ticks and handle potential death before AOI init and spawn.
@@ -1606,6 +1633,28 @@ authWorker.on("message", async (result: any) => {
         }
       } catch (error: any) {
         log.warn(`Error loading entities: ${error.message}`);
+      }
+
+      try {
+        const lootOnMap = loot.getOnMap(spawnLocation.map.replace(".json", ""));
+        if (lootOnMap.length > 0) {
+          const lootPackets = lootOnMap.map((l) =>
+            packetManager.lootSpawn({
+              id: l.id,
+              item: l.item,
+              quantity: l.quantity,
+              quality: l.quality,
+              iconUrl: l.iconUrl,
+              x: l.x,
+              y: l.y,
+              ownerId: l.ownerId,
+              ownerName: l.ownerName,
+            })
+          ).flat();
+          sendPacket(ws, lootPackets);
+        }
+      } catch (e: any) {
+        log.warn(`Error syncing loot: ${e.message}`);
       }
     });
 
@@ -7697,6 +7746,57 @@ export default async function packetReceiver(
             sendPacket(ws, packetManager.notify({ message: `Gave ${quantity}x ${itemDef.name} to ${targetName}` }));
             break;
           }
+          case "DROP": {
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "admin.items" || p === "admin.*"
+              )
+            ) {
+              sendPacket(ws, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+
+            const dropItem = args[0] || null;
+            const dropQty = Math.min(parseInt(args[1]) || 1, 9999);
+
+            if (!dropItem) {
+              sendPacket(ws, packetManager.notify({ message: "Usage: /drop <item> [amount]" }));
+              break;
+            }
+
+            const dropItems = await assetCache.get("items") as Item[];
+            const dropDef = Array.isArray(dropItems) ? dropItems.find((i: any) => i.name.toLowerCase() === dropItem.toLowerCase()) : null;
+            if (!dropDef) {
+              sendPacket(ws, packetManager.notify({ message: `Item '${dropItem}' does not exist` }));
+              break;
+            }
+
+            const iconUrl = getIconUrl(dropDef.icon) || "";
+            const quality = dropDef.quality || "common";
+            const spawnedLoot = loot.create(currentPlayer, dropDef.name, dropQty, iconUrl, quality);
+
+            const spawnData = {
+              id: spawnedLoot.id,
+              item: spawnedLoot.item,
+              quantity: spawnedLoot.quantity,
+              quality: spawnedLoot.quality,
+              iconUrl: spawnedLoot.iconUrl,
+              x: spawnedLoot.x,
+              y: spawnedLoot.y,
+              ownerId: spawnedLoot.ownerId,
+              ownerName: spawnedLoot.ownerName,
+            };
+            const playerIds = mapIndex.getPlayersOnMap(spawnedLoot.map);
+            for (const playerId of playerIds) {
+              const p = playerCache.get(playerId);
+              if (p?.ws && p.ws.readyState === 1) {
+                sendPacket(p.ws, packetManager.lootSpawn(spawnData));
+              }
+            }
+
+            sendPacket(ws, packetManager.notify({ message: `Dropped ${dropQty}x ${dropDef.name}.` }));
+            break;
+          }
           default: {
             const notifyData = {
               message: "Invalid command",
@@ -9332,6 +9432,70 @@ export default async function packetReceiver(
         }
         break;
       }
+      case "PICKUP_LOOT": {
+        if (!currentPlayer) return;
+        const lootId = (data as any)?.id;
+        if (!lootId) return;
+
+        const result = loot.pickup(currentPlayer, lootId);
+        if (!result.success || !result.item) {
+          sendPacket(ws, packetManager.notify({ message: result.message || "Could not pick up loot." }));
+          break;
+        }
+
+        const lootItem = result.item;
+        const addResult = await inventory.add(currentPlayer.username, { name: lootItem.item, quantity: lootItem.quantity });
+        if (!addResult) break;
+
+        const invEntry = currentPlayer.inventory.find((i: any) =>
+          i.name.toLowerCase() === lootItem.item.toLowerCase()
+        );
+        if (invEntry) {
+          invEntry.quantity = (invEntry.quantity || 0) + lootItem.quantity;
+        } else {
+          currentPlayer.inventory.push({
+            name: lootItem.item,
+            quantity: lootItem.quantity,
+            equipped: false,
+            slot: null,
+            bag_slot: null,
+          });
+        }
+        playerCache.set(currentPlayer.id, currentPlayer);
+        sendPacket(ws, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
+        break;
+      }
+      case "BATCH_PICKUP_LOOT": {
+        if (!currentPlayer) return;
+
+        const items = loot.pickupAllNearby(currentPlayer);
+        if (items.length === 0) break;
+
+        for (const item of items) {
+          const addResult = await inventory.add(currentPlayer.username, { name: item.item, quantity: item.quantity });
+          if (!addResult) continue;
+
+          const invEntry = currentPlayer.inventory.find((i: any) =>
+            i.name.toLowerCase() === item.item.toLowerCase()
+          );
+          if (invEntry) {
+            invEntry.quantity = (invEntry.quantity || 0) + item.quantity;
+          } else {
+            currentPlayer.inventory.push({
+              name: item.item,
+              quantity: item.quantity,
+              equipped: false,
+              slot: null,
+              bag_slot: null,
+            });
+          }
+        }
+
+        playerCache.set(currentPlayer.id, currentPlayer);
+        sendPacket(ws, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
+        sendPacket(ws, packetManager.notify({ message: `Picked up ${items.length} item(s).` }));
+        break;
+      }
       case "RESPAWN_ENTITY": {
         // This is a client-side notification that entity respawn timer has expired
         // The actual respawn is handled server-side by the entityAI system
@@ -9662,6 +9826,16 @@ function sendPacket(ws: any, packets: any[]) {
     log.error(`Failed to send packet: ${error}`);
   }
 }
+
+loot.setOnDespawn((lootItem) => {
+  const playerIds = mapIndex.getPlayersOnMap(lootItem.map);
+  for (const playerId of playerIds) {
+    const p = playerCache.get(playerId);
+    if (p?.ws && p.ws.readyState === 1) {
+      sendPacket(p.ws, packetManager.lootDespawn(lootItem.id));
+    }
+  }
+});
 
 async function sendStatsToPartyMembers(playerUsername: string, playerId: string, stats: any) {
   const partyId = await parties.getPartyId(playerUsername);
