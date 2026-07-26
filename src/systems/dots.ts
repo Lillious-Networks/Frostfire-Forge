@@ -6,7 +6,7 @@ import { registerSpellEffect, registerEffectsPayloadProvider, consumeBarrier, br
 import { packetManager } from "../socket/packet_manager";
 import { getSpriteUrl } from "../modules/spriteSheetManager";
 import { listener } from "../modules/event_bus";
-import { Events } from "./events";
+import { Events, setPlayerPvp } from "./events";
 import log from "../modules/logger";
 
 export interface DotInstance {
@@ -180,6 +180,7 @@ async function tickPlayerDot(targetKey: string, dot: DotInstance): Promise<boole
 
   if (isHeal) {
     target.stats.health = Math.round(Math.min(target.stats.health + amount, target.stats.total_max_health));
+    listener.emit(Events.PLAYER_HEALED, { caster: caster || target, target, amount, source: dot.spell } as any);
     broadcastToMap(target.location?.map, packetManager.updateStats({
       id: dot.casterId,
       target: target.id,
@@ -212,9 +213,9 @@ async function tickPlayerDot(targetKey: string, dot: DotInstance): Promise<boole
   listener.emit(Events.PLAYER_DAMAGED, { attacker: caster || null, target, damage, isCrit: false });
 
   if (caster && caster.id !== target.id) {
-    target.pvp = true;
+    setPlayerPvp(target, true);
     target.last_attack = performance.now();
-    caster.pvp = true;
+    setPlayerPvp(caster, true);
     caster.last_attack = performance.now();
   }
 
@@ -307,6 +308,14 @@ async function processDotTicks() {
       if (dot.expiresAt <= now) {
         list.splice(i, 1);
         changed = true;
+        const dotTarget = playerCache.get(key);
+        if (dotTarget) {
+          const isHostile = dot.damagePerTick > 0;
+          listener.emit(
+            isHostile ? Events.PLAYER_DEBUFF_REMOVED : Events.PLAYER_BUFF_REMOVED,
+            { player: dotTarget, effectId: `dot:${dot.spell}`, effectType: isHostile ? "damage_over_time" : "heal_over_time", spellName: dot.spell } as any
+          );
+        }
       }
     }
     if (playerDots.has(key) && list.length === 0) {
@@ -371,3 +380,4 @@ export function setPlayerDots(playerId: string, dots: DotInstance[]) {
 export { ensureScheduler };
 
 export default { applyDot, clearDots, clearEntityDots, getDotsPayload, setPlayerDeathHandler, getPlayerDots, setPlayerDots };
+

@@ -3,8 +3,10 @@ import path from "node:path";
 import type EventEmitter from "node:events";
 import log from "./logger.ts";
 import { Events } from "../systems/events";
+import assetCache from "../services/assetCache";
 
 const loadedPlugins = new Map<string, LoadedPlugin>();
+const pendingPluginSpells: SpellData[] = [];
 const directory = path.join(import.meta.dir, "..", "plugins");
 
 export async function loadPlugins(emitter?: EventEmitter): Promise<Map<string, LoadedPlugin>> {
@@ -75,6 +77,23 @@ async function loadPluginFromDir(pluginDir: string, name: string, emitter?: Even
             dirPath: pluginDir,
         });
 
+        if (manifest.spells && Array.isArray(manifest.spells)) {
+            for (const spell of manifest.spells) {
+                if (!spell.effects || !Array.isArray(spell.effects)) {
+                    spell.effects = [];
+                }
+                if (typeof spell.damage !== "number") spell.damage = spell.damage ?? 0;
+                if (typeof spell.mana !== "number") spell.mana = spell.mana ?? 0;
+                if (typeof spell.range !== "number") spell.range = spell.range ?? 0;
+                if (typeof spell.cast_time !== "number") spell.cast_time = spell.cast_time ?? 0;
+                if (typeof spell.cooldown !== "number") spell.cooldown = spell.cooldown ?? 0;
+                if (typeof spell.can_move !== "number") spell.can_move = spell.can_move ?? 0;
+                if (!spell.type) spell.type = "spell";
+                pendingPluginSpells.push(spell);
+            }
+            log.info(`Collected ${manifest.spells.length} spell(s) from plugin: ${manifest.name}`);
+        }
+
         if (emitter) emitter.emit(Events.PLUGIN_LOAD, { name: manifest.name, version: manifest.version, dirPath: pluginDir });
         log.success(`Loaded plugin: ${manifest.name} v${manifest.version}`);
     } catch (err) {
@@ -127,4 +146,32 @@ export async function unregisterPlugin(pluginName: string, emitter?: EventEmitte
 
 export function getLoadedPlugins(): Map<string, LoadedPlugin> {
     return loadedPlugins;
+}
+
+export function getPendingPluginSpells(): SpellData[] {
+    return pendingPluginSpells;
+}
+
+export async function mergePluginSpellsIntoCache(): Promise<SpellData[]> {
+    if (pendingPluginSpells.length === 0) return [];
+
+    const existingSpells = await assetCache.get("spells") as SpellData[] || [];
+    const existingNames = new Set(existingSpells.map((s: SpellData) => s.name));
+
+    const merged: SpellData[] = [];
+    for (const spell of pendingPluginSpells) {
+        if (existingNames.has(spell.name)) {
+            log.warn(`Plugin spell "${spell.name}" already exists in cache -- skipping`);
+        } else {
+            merged.push(spell);
+        }
+    }
+
+    if (merged.length > 0) {
+        const updatedSpells = [...merged, ...existingSpells];
+        await assetCache.set("spells", updatedSpells);
+        log.success(`Merged ${merged.length} plugin spell(s) into asset cache`);
+    }
+
+    return merged;
 }

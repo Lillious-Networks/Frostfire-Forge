@@ -569,6 +569,7 @@ declare interface EngineAPI {
   onPacket(interceptor: (type: string, data: any, ws: any, player: any) => boolean): void;
   addHttpRoute(method: string, route: string, handler: (req: Request) => Promise<Response>): void;
   teleportPlayer(playerObj: any, mapName: string, x: number, y: number): Promise<void>;
+  registerSpell(spell: SpellData): Promise<void>;
 }
 
 declare interface GamePlugin {
@@ -585,6 +586,7 @@ declare interface PluginManifest {
         engine?: string;
     };
     provides: string[];
+    spells?: SpellData[];
 }
 
 declare interface LoadedPlugin {

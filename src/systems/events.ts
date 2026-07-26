@@ -46,9 +46,26 @@ export const Events = {
     FRIEND_ADDED: "onFriendAdded",
     FRIEND_REMOVED: "onFriendRemoved",
     PARTY_INVITE: "onPartyInvite",
-    PARTY_JOIN: "onPartyJoin",
     WHISPER: "onWhisper",
     PLAYER_STEALTH_CHANGE: "onPlayerStealthChange",
+    PLAYER_HEALED: "onPlayerHealed",
+    PLAYER_ABSORBTION: "onPlayerAbsorbtion",
+    PLAYER_STUNNED: "onPlayerStunned",
+    PLAYER_DEBUFF_ADDED: "onPlayerDebuffAdded",
+    PLAYER_BUFF_ADDED: "onPlayerBuffAdded",
+    PLAYER_DEBUFF_REMOVED: "onPlayerDebuffRemoved",
+    PLAYER_BUFF_REMOVED: "onPlayerBuffRemoved",
+    PLAYER_VANISH: "onPlayerVanish",
+    SPELL_FAILED: "onSpellFailed",
+    PLAYER_LOOT_DROPPED: "onPlayerLootDropped",
+    PLAYER_LOOT_DESPAWNED: "onPlayerLootDespawned",
+    PLAYER_LOOT_RETRIEVED: "onPlayerLootRetrieved",
+    PARTY_CHAT: "onPartyChat",
+    GUILD_CHAT: "onGuildChat",
+    PLAYER_ENTERED_PVP: "onPlayerEnteredPVP",
+    PLAYER_LEFT_PVP: "onPlayerLeftPVP",
+    PLAYER_ENTER_AOE: "onPlayerEnterAOE",
+    PLAYER_LEFT_AOE: "onPlayerLeftAOE",
 } as const;
 
 // ── Event payload types ──
@@ -91,7 +108,7 @@ export interface PlayerAuthCompleteEvent {
 }
 
 export interface PartyChangedEvent {
-    type: "kick" | "leave" | "disband";
+    type: "kick" | "leave" | "disband" | "join";
     username?: string;
     kickedUsername?: string;
     members: string[];
@@ -204,11 +221,6 @@ export interface PartyInviteEvent {
     invitedUsername: string;
 }
 
-export interface PartyJoinEvent {
-    playerUsername: string;
-    partyMembers: string[];
-}
-
 export interface WhisperEvent {
     fromUsername: string;
     toUsername: string;
@@ -218,6 +230,99 @@ export interface WhisperEvent {
 export interface PlayerStealthChangeEvent {
     player: any;
     isStealth: boolean;
+}
+
+export interface PlayerHealedEvent {
+    caster: any;
+    target: any;
+    amount: number;
+    source?: string;
+}
+
+export interface PlayerAbsorbtionEvent {
+    caster: any;
+    target: any;
+    spellName: string;
+    amount: number;
+    duration: number;
+}
+
+export interface PlayerStunnedEvent {
+    caster: any;
+    target: any;
+    spellName: string;
+    duration: number;
+}
+
+export interface PlayerEffectEvent {
+    caster: any;
+    target: any;
+    spellName: string;
+    effectType: string;
+    effect: SpellEffect;
+}
+
+export interface PlayerEffectRemovedEvent {
+    player: any;
+    effectId: string;
+    effectType: string;
+    spellName?: string;
+}
+
+export interface PlayerVanishEvent {
+    player: any;
+    vanished: boolean;
+    spellName?: string;
+}
+
+export interface SpellFailedEvent {
+    player: any;
+    target: any;
+    spellName: string;
+    reason: string;
+}
+
+export interface PlayerLootEvent {
+    player: any;
+    itemName: string;
+    quantity: number;
+    mapName: string;
+    x: number;
+    y: number;
+}
+
+export interface PartyChatEvent {
+    player: any;
+    message: string;
+    partyMembers: string[];
+}
+
+export interface GuildChatEvent {
+    player: any;
+    message: string;
+    guildMembers: string[];
+    guildId: number;
+}
+
+export interface PlayerPvpEvent {
+    player: any;
+}
+
+export interface PlayerAoeEvent {
+    player: any;
+    zoneId: string;
+    spellName: string;
+}
+
+export function setPlayerPvp(player: any, value: boolean): void {
+    if (!player) return;
+    if (player.pvp === value) return;
+    player.pvp = value;
+    if (value) {
+        listener.emit(Events.PLAYER_ENTERED_PVP, { player } as PlayerPvpEvent);
+    } else {
+        listener.emit(Events.PLAYER_LEFT_PVP, { player } as PlayerPvpEvent);
+    }
 }
 
 const now = performance.now();

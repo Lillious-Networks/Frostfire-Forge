@@ -9,7 +9,7 @@ import { packetTypes } from "./types.ts";
 import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady, teleportPlayerWrapper } from "./receiver.ts";
 import eventEmitter from "node:events";
 import { listener } from "../modules/event_bus.ts";
-import { Events } from "../systems/events";
+import { Events, setPlayerPvp } from "../systems/events";
 const event = new eventEmitter();
 import log from "../modules/logger.ts";
 import player from "../systems/player.ts";
@@ -22,7 +22,7 @@ import fs from "node:fs";
 import query from "../controllers/sqldatabase";
 import { generateKeyPair } from "../modules/cipher.ts";
 import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondensation, findPlayersWithTargetInAOI } from "./aoi.ts";
-import { loadPlugins, registerAllPlugins } from "../modules/plugin_loader.ts";
+import { loadPlugins, registerAllPlugins, mergePluginSpellsIntoCache } from "../modules/plugin_loader.ts";
 import { pluginHandlers, warpInterceptors, packetInterceptors } from "./receiver.ts";
 
 const httpRouteHandlers = new Map<string, (req: Request) => Promise<Response>>();
@@ -410,6 +410,7 @@ startAutoLayerCondensation(sendAnimationTo);
 
 try {
   await loadPlugins(listener);
+  await mergePluginSpellsIntoCache();
 
   const engineApi: EngineAPI = {
     addPacketTypes: (types: string[]) => {
@@ -442,6 +443,32 @@ try {
     },
     teleportPlayer: async (playerObj: any, mapName: string, x: number, y: number) => {
       await teleportPlayerWrapper(playerObj, mapName, x, y);
+    },
+    registerSpell: async (spell: SpellData) => {
+      if (!spell || !spell.name) {
+        log.warn("Plugin tried to register a spell without a name -- skipping");
+        return;
+      }
+      if (!spell.effects || !Array.isArray(spell.effects)) {
+        spell.effects = [];
+      }
+      if (typeof spell.damage !== "number") spell.damage = spell.damage ?? 0;
+      if (typeof spell.mana !== "number") spell.mana = spell.mana ?? 0;
+      if (typeof spell.range !== "number") spell.range = spell.range ?? 0;
+      if (typeof spell.cast_time !== "number") spell.cast_time = spell.cast_time ?? 0;
+      if (typeof spell.cooldown !== "number") spell.cooldown = spell.cooldown ?? 0;
+      if (typeof spell.can_move !== "number") spell.can_move = spell.can_move ?? 0;
+      if (!spell.type) spell.type = "spell";
+
+      const existingSpells = await assetCache.get("spells") as SpellData[] || [];
+      if (existingSpells.some((s: SpellData) => s.name === spell.name)) {
+        log.warn(`Plugin tried to register duplicate spell "${spell.name}" -- skipping`);
+        return;
+      }
+
+      existingSpells.unshift(spell);
+      await assetCache.set("spells", existingSpells);
+      log.success(`Plugin registered spell: ${spell.name}`);
     },
   };
 
@@ -645,7 +672,7 @@ listener.on(Events.SERVER_TICK, async () => {
       0;
 
     if (lastAttackEpoch && (nowEpoch - lastAttackEpoch) > 5000 && !playerData.isVanished) {
-      playerData.pvp = false;
+      setPlayerPvp(playerData, false);
     }
 
     const { stats } = playerData;
@@ -1013,3 +1040,4 @@ process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
 export { gatewayClient };
+

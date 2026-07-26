@@ -5,6 +5,7 @@ import entityAI from "./entityAI";
 import { consumeBarrier, broadcastEffectsUpdate, applySpellEffects, cancelEffect, getVanishedEffectId } from "./spelleffects";
 import { packetManager } from "../socket/packet_manager";
 import log from "../modules/logger";
+import { setPlayerPvp, listener, Events } from "./events";
 
 export interface GroundAoeZone {
   id: string;
@@ -31,6 +32,7 @@ const SCHEDULER_INTERVAL_MS = 250;
 let schedulerInterval: ReturnType<typeof setInterval> | null = null;
 
 const zonesByMap = new Map<string, GroundAoeZone[]>();
+const zoneOccupants = new Map<string, Set<string>>();
 let zoneIdCounter = 0;
 
 let playerDeathHandler: ((player: any, attacker: any, damageInfo: { damage: number; isCrit: boolean }) => Promise<void>) | null = null;
@@ -109,6 +111,20 @@ export function spawnZone(zoneData: {
   }
   zonesByMap.get(zone.mapName)!.push(zone);
 
+  const initialOccupants = new Set<string>();
+  const playerIds = mapIndex.getPlayersOnMap(zone.mapName);
+  for (const playerId of playerIds) {
+    const player = playerCache.get(playerId);
+    if (!player) continue;
+    const pPos = player.location?.position;
+    if (!pPos) continue;
+    const dist = Math.sqrt((pPos.x - zone.position.x) ** 2 + (pPos.y - zone.position.y) ** 2);
+    if (dist <= zone.radius) {
+      initialOccupants.add(playerId);
+    }
+  }
+  zoneOccupants.set(zone.id, initialOccupants);
+
   broadcastToMap(zone.mapName, packetManager.groundAoeSpawn({
     id: zone.id,
     spell: zone.spellName,
@@ -141,6 +157,19 @@ export function removeZone(zoneId: string): boolean {
       break;
     }
   }
+
+  const occupants = zoneOccupants.get(zoneId);
+  if (occupants) {
+    const zone = findZoneById(zoneId);
+    for (const playerId of occupants) {
+      const player = playerCache.get(playerId);
+      if (player) {
+        listener.emit(Events.PLAYER_LEFT_AOE, { player, zoneId, spellName: zone?.spellName || "" } as any);
+      }
+    }
+    zoneOccupants.delete(zoneId);
+  }
+
   if (found && getTotalZoneCount() === 0) {
     stopScheduler();
   }
@@ -152,6 +181,16 @@ export function clearZonesForMap(mapName: string): void {
   if (zones && zones.length > 0) {
     for (const zone of zones) {
       broadcastToMap(mapName, packetManager.groundAoeDespawn({ id: zone.id }));
+      const occupants = zoneOccupants.get(zone.id);
+      if (occupants) {
+        for (const playerId of occupants) {
+          const player = playerCache.get(playerId);
+          if (player) {
+            listener.emit(Events.PLAYER_LEFT_AOE, { player, zoneId: zone.id, spellName: zone.spellName } as any);
+          }
+        }
+        zoneOccupants.delete(zone.id);
+      }
     }
   }
   zonesByMap.delete(mapName);
@@ -178,6 +217,14 @@ function getTotalZoneCount(): number {
     count += zones.length;
   }
   return count;
+}
+
+function findZoneById(zoneId: string): GroundAoeZone | undefined {
+  for (const zones of zonesByMap.values()) {
+    const found = zones.find((z) => z.id === zoneId);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 function startScheduler(): void {
@@ -217,6 +264,7 @@ async function processZoneTicks(): Promise<void> {
 
         const playerIds = mapIndex.getPlayersOnMap(mapName);
         const affectedPlayers: any[] = [];
+        const currentOccupants = new Set<string>();
         for (const playerId of playerIds) {
           const player = playerCache.get(playerId);
           if (!player || player.isGuest) continue;
@@ -224,6 +272,8 @@ async function processZoneTicks(): Promise<void> {
           if (!pPos) continue;
           const dist = Math.sqrt((pPos.x - zone.position.x) ** 2 + (pPos.y - zone.position.y) ** 2);
           if (dist > zone.radius) continue;
+
+          currentOccupants.add(playerId);
 
           const inParty = caster?.party?.includes(player.username) || false;
 
@@ -234,6 +284,25 @@ async function processZoneTicks(): Promise<void> {
           }
           affectedPlayers.push(player);
         }
+
+        const prevOccupants = zoneOccupants.get(zone.id) || new Set<string>();
+        for (const playerId of currentOccupants) {
+          if (!prevOccupants.has(playerId)) {
+            const entered = playerCache.get(playerId);
+            if (entered) {
+              listener.emit(Events.PLAYER_ENTER_AOE, { player: entered, zoneId: zone.id, spellName: zone.spellName } as any);
+            }
+          }
+        }
+        for (const playerId of prevOccupants) {
+          if (!currentOccupants.has(playerId)) {
+            const left = playerCache.get(playerId);
+            if (left) {
+              listener.emit(Events.PLAYER_LEFT_AOE, { player: left, zoneId: zone.id, spellName: zone.spellName } as any);
+            }
+          }
+        }
+        zoneOccupants.set(zone.id, currentOccupants);
 
         const mapEntities = entityCache.getByMap(mapName);
         for (const entity of mapEntities) {
@@ -302,10 +371,10 @@ async function processZoneTicks(): Promise<void> {
           }
 
           if (!isHeal && tickDamage !== 0) {
-            player.pvp = true;
+            setPlayerPvp(player, true);
             player.last_attack = performance.now();
             if (caster) {
-              caster.pvp = true;
+              setPlayerPvp(caster, true);
               caster.last_attack = performance.now();
             }
           }
@@ -352,3 +421,4 @@ async function processZoneTicks(): Promise<void> {
     removeZone(zoneId);
   }
 }
+

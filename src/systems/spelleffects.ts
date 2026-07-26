@@ -5,7 +5,7 @@ import assetCache from "../services/assetCache";
 import { getSpriteUrl } from "../modules/spriteSheetManager";
 import log from "../modules/logger";
 import { listener } from "../modules/event_bus";
-import { Events } from "./events";
+import { Events, PlayerEffectRemovedEvent, PlayerVanishEvent, PlayerAbsorbtionEvent, PlayerEffectEvent } from "./events";
 
 type BroadcastStatsFn = (player: any) => void;
 type BroadcastEffectsFn = (player: any) => void;
@@ -260,7 +260,7 @@ function getStuns(player: any) {
   return playerStuns.get(key)!;
 }
 
-registerSpellEffect("stun", async ({ target, spell, effect, broadcastEffects }) => {
+registerSpellEffect("stun", async ({ caster, target, spell, effect, broadcastEffects }) => {
   if (!target?.stats) return;
   const durationSec = effect.duration && effect.duration > 0 ? effect.duration : 0;
   if (durationSec <= 0) return;
@@ -289,6 +289,8 @@ registerSpellEffect("stun", async ({ target, spell, effect, broadcastEffects }) 
 
   broadcastEffects(target);
 
+  listener.emit(Events.PLAYER_STUNNED, { caster: caster || target, target, spellName, duration: durationSec });
+
   if (target.casting && target.interruptableSpell) {
     listener.emit(Events.SPELL_INTERRUPTED, { player: target });
   }
@@ -308,6 +310,7 @@ registerSpellEffect("stun", async ({ target, spell, effect, broadcastEffects }) 
     if (idx === -1) return;
     arr.splice(idx, 1);
     fresh.stunnedUntil = arr.length > 0 ? Math.max(...arr.map((s) => s.expiresAt)) : 0;
+    listener.emit(Events.PLAYER_DEBUFF_REMOVED, { player: fresh, effectId: id, effectType: "stun", spellName } as PlayerEffectRemovedEvent);
     // Update lockout to match remaining stun time, or clear it
     if (fresh.ws?.readyState === 1) {
       try {
@@ -390,6 +393,8 @@ registerSpellEffect("vanish", async ({ target, spell, effect, broadcastEffects }
 
   broadcastEffects(target);
 
+  listener.emit(Events.PLAYER_VANISH, { player: target, vanished: true, spellName } as PlayerVanishEvent);
+
   if (!isPermanent) {
     setTimeout(() => {
       const fresh = playerCache.get(target.id);
@@ -399,7 +404,10 @@ registerSpellEffect("vanish", async ({ target, spell, effect, broadcastEffects }
       if (idx === -1) return;
       arr.splice(idx, 1);
       fresh.isVanished = arr.length > 0;
-      if (!fresh.isVanished && onVanishRemoved) onVanishRemoved(fresh);
+      if (!fresh.isVanished) {
+        listener.emit(Events.PLAYER_VANISH, { player: fresh, vanished: false, spellName } as PlayerVanishEvent);
+        if (onVanishRemoved) onVanishRemoved(fresh);
+      }
       broadcastEffects(fresh);
     }, durationSec * 1000);
   }
@@ -481,7 +489,10 @@ export function cancelEffect(player: any, effectId: string): boolean {
     vanishes.splice(vaIdx, 1);
     const wasVanished = player.isVanished;
     player.isVanished = vanishes.length > 0;
-    if (wasVanished && !player.isVanished && onVanishRemoved) onVanishRemoved(player);
+    if (wasVanished && !player.isVanished) {
+      listener.emit(Events.PLAYER_VANISH, { player, vanished: false, spellName: effectId } as PlayerVanishEvent);
+      if (onVanishRemoved) onVanishRemoved(player);
+    }
     removed = true;
   }
 
@@ -547,6 +558,7 @@ registerSpellEffect("slow", async ({ target, spell, effect, broadcastEffects }) 
       fresh.slowPercent = strongest2;
       fresh.slowMultiplier = 1 - strongest2 / 100;
     }
+    listener.emit(Events.PLAYER_DEBUFF_REMOVED, { player: fresh, effectId: id, effectType: "slow", spellName } as PlayerEffectRemovedEvent);
     broadcastEffects(fresh);
   }, durationSec * 1000);
 });
@@ -608,7 +620,8 @@ async function applyBarrier(
   amount: number,
   durationSec: number,
   broadcastStats: BroadcastStatsFn,
-  broadcastEffects: BroadcastEffectsFn
+  broadcastEffects: BroadcastEffectsFn,
+  caster: any,
 ) {
   if (!player?.stats) return;
   const cap = player.stats.total_max_health || player.stats.max_health || amount;
@@ -642,6 +655,8 @@ async function applyBarrier(
   recomputeAbsorbtion(player);
   broadcastEffects(player);
 
+  listener.emit(Events.PLAYER_ABSORBTION, { caster: caster || player, target: player, spellName, amount: cappedAmount, duration: durationSec } as PlayerAbsorbtionEvent);
+
   if (durationMs > 0) {
     setTimeout(() => {
       const fresh = playerCache.get(player.id);
@@ -654,6 +669,7 @@ async function applyBarrier(
       recomputeAbsorbtion(fresh);
       broadcastEffects(fresh);
       broadcastStats(fresh);
+      listener.emit(Events.PLAYER_BUFF_REMOVED, { player: fresh, effectId: spellName, effectType: "absorbtion", spellName } as PlayerEffectRemovedEvent);
     }, durationMs);
   }
 }
@@ -676,6 +692,11 @@ export async function applySpellEffects(
       if (r && typeof r.absorb === "number") {
         result.absorb = (result.absorb || 0) + r.absorb;
       }
+      if (hostileEffectTypes.has(effect.type)) {
+        listener.emit(Events.PLAYER_DEBUFF_ADDED, { caster: caster || target, target, spellName: spell?.name || "", effectType: effect.type, effect } as PlayerEffectEvent);
+      } else {
+        listener.emit(Events.PLAYER_BUFF_ADDED, { caster: caster || target, target, spellName: spell?.name || "", effectType: effect.type, effect } as PlayerEffectEvent);
+      }
     } catch (e) {
       log.error(`Spell effect handler '${effect.type}' failed: ${e}`);
     }
@@ -683,13 +704,13 @@ export async function applySpellEffects(
   return result;
 }
 
-registerSpellEffect("absorbtion", ({ target, spell, effect, broadcastStats, broadcastEffects }) => {
+registerSpellEffect("absorbtion", ({ caster, target, spell, effect, broadcastStats, broadcastEffects }) => {
   if (!target?.stats) return;
   const value = Number(effect.value) || 0;
   if (value <= 0) return;
 
   const durationSec = effect.duration && effect.duration > 0 ? effect.duration : 0;
-  applyBarrier(target, spell, value, durationSec, broadcastStats, broadcastEffects);
+  applyBarrier(target, spell, value, durationSec, broadcastStats, broadcastEffects, caster);
 
   return { absorb: value };
 });

@@ -1,4 +1,6 @@
 import log from "../modules/logger";
+import { listener } from "../modules/event_bus";
+import { Events } from "./events";
 
 const PICKUP_RADIUS = 100;
 const DESPAWN_MINUTES = 30;
@@ -63,6 +65,7 @@ const loot = {
     despawnTimers.set(id, timer);
 
     log.debug(`Loot spawned: ${itemName} x${quantity} for player ${player.id}`);
+    listener.emit(Events.PLAYER_LOOT_DROPPED, { player, itemName, quantity, mapName: lootItem.map, x: lootItem.x, y: lootItem.y } as any);
     return lootItem;
   },
 
@@ -76,6 +79,7 @@ const loot = {
     lootItems.delete(id);
 
     if (onDespawn) onDespawn(lootItem);
+    listener.emit(Events.PLAYER_LOOT_DESPAWNED, { player: { username: lootItem.ownerName, id: lootItem.ownerId }, itemName: lootItem.item, quantity: lootItem.quantity, mapName: lootItem.map, x: lootItem.x, y: lootItem.y } as any);
     return lootItem;
   },
 
@@ -100,6 +104,7 @@ const loot = {
     lootItems.delete(lootId);
 
     if (onDespawn) onDespawn(lootItem);
+    listener.emit(Events.PLAYER_LOOT_RETRIEVED, { player, itemName: lootItem.item, quantity: lootItem.quantity, mapName: lootItem.map, x: lootItem.x, y: lootItem.y } as any);
     return { success: true, item: lootItem };
   },
 
@@ -120,6 +125,7 @@ const loot = {
     for (const item of result) {
       lootItems.delete(item.id);
       if (onDespawn) onDespawn(item);
+      listener.emit(Events.PLAYER_LOOT_RETRIEVED, { player, itemName: item.item, quantity: item.quantity, mapName: item.map, x: item.x, y: item.y } as any);
     }
     return result;
   },

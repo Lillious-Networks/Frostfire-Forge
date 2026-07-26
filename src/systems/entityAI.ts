@@ -5,6 +5,7 @@ import playerCache from "../services/playermanager";
 import log from "../modules/logger";
 import { packetManager } from "../socket/packet_manager";
 import spellEffects from "./spelleffects";
+import { setPlayerPvp } from "./events";
 import { getEntitySpriteLayers, getIconUrl } from "../modules/spriteSheetManager";
 import assetCache from "../services/assetCache";
 import * as settings from "../config/settings.json";
@@ -172,7 +173,7 @@ function handleStealthReturn(entity: any, aiState: EntityAIState, targetPlayerId
     if (targetPlayer) {
       aggroMap.get(targetPlayerId)?.delete(String(entity.id));
       if (!aggroMap.get(targetPlayerId) || aggroMap.get(targetPlayerId)!.size === 0) {
-        targetPlayer.pvp = false;
+        setPlayerPvp(targetPlayer, false);
         aggroMap.delete(targetPlayerId);
       }
     }
@@ -217,7 +218,7 @@ function checkLeashRange(entity: any, aiState: EntityAIState): void {
       if (targetPlayer) {
         aggroMap.get(oldTargetId)?.delete(String(entity.id));
         if (!aggroMap.get(oldTargetId) || aggroMap.get(oldTargetId)!.size === 0) {
-          targetPlayer.pvp = false;
+          setPlayerPvp(targetPlayer, false);
           aggroMap.delete(oldTargetId);
         }
       }
@@ -279,7 +280,7 @@ async function updateAggroState(entity: any, aiState: EntityAIState): Promise<vo
           aggroMap.set(playerId, new Set());
         }
         aggroMap.get(playerId)!.add(String(entity.id));
-        nearest.player.pvp = true;
+        setPlayerPvp(nearest.player, true);
       }
     } else if (aiState.combatState === 'aggro') {
       // Check if current target went stealth as an admin
@@ -313,7 +314,7 @@ async function updateAggroState(entity: any, aiState: EntityAIState): Promise<vo
         if (targetPlayer) {
           aggroMap.get(oldTargetId)?.delete(String(entity.id));
           if (!aggroMap.get(oldTargetId) || aggroMap.get(oldTargetId)!.size === 0) {
-            targetPlayer.pvp = false;
+            setPlayerPvp(targetPlayer, false);
             aggroMap.delete(oldTargetId);
           }
         }
@@ -356,7 +357,7 @@ async function updateAggroState(entity: any, aiState: EntityAIState): Promise<vo
             aggroMap.set(aiState.target, new Set());
           }
           aggroMap.get(aiState.target)!.add(String(entity.id));
-          targetPlayer.pvp = true;
+          setPlayerPvp(targetPlayer, true);
         }
       } else if (aiState.combatState === 'aggro') {
         // Drop aggro if target goes out of range
@@ -368,7 +369,7 @@ async function updateAggroState(entity: any, aiState: EntityAIState): Promise<vo
         if (oldTargetId) {
           aggroMap.get(oldTargetId)?.delete(String(entity.id));
           if (!aggroMap.get(oldTargetId) || aggroMap.get(oldTargetId)!.size === 0) {
-            targetPlayer.pvp = false;
+            setPlayerPvp(targetPlayer, false);
             aggroMap.delete(oldTargetId);
           }
         }
@@ -391,7 +392,7 @@ async function updateAggroState(entity: any, aiState: EntityAIState): Promise<vo
         if (!aggroMap.get(oldTargetId) || aggroMap.get(oldTargetId)!.size === 0) {
           const targetPlayerRef = playerCache.get(oldTargetId);
           if (targetPlayerRef) {
-            targetPlayerRef.pvp = false;
+            setPlayerPvp(targetPlayerRef, false);
           }
           aggroMap.delete(oldTargetId);
         }
@@ -505,7 +506,7 @@ async function processCombat(entity: any, aiState: EntityAIState): Promise<void>
               if (killedTargetId) {
                 aggroMap.get(killedTargetId)?.delete(String(entity.id));
                 if (!aggroMap.get(killedTargetId) || aggroMap.get(killedTargetId)!.size === 0) {
-                  freshTarget.pvp = false;
+                  setPlayerPvp(freshTarget, false);
                   aggroMap.delete(killedTargetId);
                 }
               }
@@ -942,7 +943,7 @@ async function moveTowardsTarget(entity: any, aiState: EntityAIState): Promise<v
       if (targetPlayerRef) {
         aggroMap.get(oldTargetId)?.delete(String(entity.id));
         if (!aggroMap.get(oldTargetId) || aggroMap.get(oldTargetId)!.size === 0) {
-          targetPlayerRef.pvp = false;
+          setPlayerPvp(targetPlayerRef, false);
           aggroMap.delete(oldTargetId);
         }
       }
@@ -1064,7 +1065,7 @@ export function applyDamageToEntity(entity: any, damage: number, attacker: any):
       aggroMap.set(playerId, new Set());
     }
     aggroMap.get(playerId)!.add(String(entity.id));
-    attacker.pvp = true;
+    setPlayerPvp(attacker, true);
   }
 
   if (entity.health <= 0) {
@@ -1136,7 +1137,7 @@ async function handleEntityDeath(entity: any): Promise<void> {
       if (targetPlayer) {
         aggroMap.get(aiState.target)?.delete(entityKey);
         if (!aggroMap.get(aiState.target) || aggroMap.get(aiState.target)!.size === 0) {
-          targetPlayer.pvp = false;
+          setPlayerPvp(targetPlayer, false);
           aggroMap.delete(aiState.target);
         }
       }
@@ -1194,7 +1195,7 @@ export function resetEntityAI(entityId: string | number): void {
       if (!aggroMap.get(oldTargetId) || aggroMap.get(oldTargetId)!.size === 0) {
         const targetPlayer = playerCache.get(oldTargetId);
         if (targetPlayer) {
-          targetPlayer.pvp = false;
+          setPlayerPvp(targetPlayer, false);
         }
         aggroMap.delete(oldTargetId);
       }

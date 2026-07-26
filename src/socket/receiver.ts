@@ -5,7 +5,7 @@ import player, { clearMapCache, hasLineOfSight } from "../systems/player.ts";
 import permissions from "../systems/permissions";
 import { getAuthWorker } from "./authentication_pool.ts";
 import { listener } from "../modules/event_bus";
-import { Events } from "../systems/events";
+import { Events, setPlayerPvp } from "../systems/events";
 const authentication_queue = new Set<string>();
 const authentication_session_queue = new Set<string>();
 
@@ -1279,7 +1279,7 @@ authWorker.on("message", async (result: any) => {
           const hasStuns = savedStuns.length > 0;
           const hasSlows = savedSlows.length > 0;
           if (hasHostileDots || hasStuns || hasSlows) {
-            _pcache.pvp = true;
+            setPlayerPvp(_pcache, true);
             _pcache.last_attack = performance.now();
           }
 
@@ -3121,6 +3121,7 @@ export default async function packetReceiver(
         freshPlayerForCooldown.spellCooldowns = freshPlayerForCooldown.spellCooldowns || {};
         const spellCooldownEnd = freshPlayerForCooldown.spellCooldowns[spell_id] || 0;
         if (spellCooldownEnd > performance?.now()) {
+          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "cooldown" } as any);
           return;
         }
 
@@ -3135,6 +3136,7 @@ export default async function packetReceiver(
           const hasVanishEffect = Array.isArray(spell?.effects) && spell.effects.some((e: SpellEffect) => e.type === "vanish");
           if (!hasVanishEffect) {
             sendPacket(ws, packetManager.notify({ message: "You cannot cast beneficial spells while vanished." }));
+            listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "vanished" } as any);
             return;
           }
         }
@@ -3152,6 +3154,7 @@ export default async function packetReceiver(
           });
           currentPlayer.lastInterruptTime = performance.now();
 
+          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "moving" } as any);
           return;
         }
 
@@ -3160,10 +3163,14 @@ export default async function packetReceiver(
 
         const actualManaCost = Math.floor(freshPlayerForMana.stats.total_max_stamina * (spell_mana / 100));
         if ((freshPlayerForMana.stats.stamina || 0) < actualManaCost) {
+          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "mana" } as any);
           return;
         }
 
-        if (!spell_damage && !hasEffects) return;
+        if (!spell_damage && !hasEffects) {
+          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "no_effects" } as any);
+          return;
+        }
 
         // ATOMIC: Set cooldown immediately to prevent race condition with mana deduction
         // This must happen before any other async operations
@@ -3374,8 +3381,8 @@ export default async function packetReceiver(
                 }
               }
 
-              currentPlayer.pvp = true;
-              st.pvp = true;
+              setPlayerPvp(currentPlayer, true);
+              setPlayerPvp(st, true);
               st.last_attack = performance.now();
 
               if (spell_damage > 0 && st.isVanished) {
@@ -3664,8 +3671,8 @@ export default async function packetReceiver(
                   }
                 }
 
-                currentPlayer.pvp = true;
-                st.pvp = true;
+                setPlayerPvp(currentPlayer, true);
+                setPlayerPvp(st, true);
                 st.last_attack = performance.now();
 
                 if (splashDmg > 0 && st.isVanished) {
@@ -3838,6 +3845,7 @@ export default async function packetReceiver(
               packetManager.notify({ message: "The entity is returning to its home" })
             );
           }
+          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: canAttack?.reason || "unknown" } as any);
           return;
         } else if (!isEntityTarget && !playersInAttackRange.includes(target)) {
           return;
@@ -3921,8 +3929,8 @@ export default async function packetReceiver(
             );
           }
 
-          currentPlayer.pvp = true;
-          target.pvp = true;
+          setPlayerPvp(currentPlayer, true);
+          setPlayerPvp(target, true);
           target.last_attack = performance.now();
           break;
         }
@@ -3997,8 +4005,8 @@ export default async function packetReceiver(
             );
           }
 
-          currentPlayer.pvp = true;
-          target.pvp = true;
+          setPlayerPvp(currentPlayer, true);
+          setPlayerPvp(target, true);
           target.last_attack = performance.now();
           break;
         }
@@ -4147,6 +4155,7 @@ export default async function packetReceiver(
             cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
             playerCache.set(resetPlayer.id, resetPlayer);
           }
+          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "nopvp" } as any);
           return;
         }
 
@@ -4164,6 +4173,7 @@ export default async function packetReceiver(
             cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
             playerCache.set(resetPlayer.id, resetPlayer);
           }
+          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "path_blocked" } as any);
           return;
         }
 
@@ -4181,6 +4191,7 @@ export default async function packetReceiver(
             cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
             playerCache.set(resetPlayer.id, resetPlayer);
           }
+          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "range" } as any);
           return;
         }
 
@@ -4198,6 +4209,7 @@ export default async function packetReceiver(
             cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
             playerCache.set(resetPlayer.id, resetPlayer);
           }
+          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "direction" } as any);
           return;
         }
 
@@ -4215,6 +4227,7 @@ export default async function packetReceiver(
             cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
             playerCache.set(resetPlayer.id, resetPlayer);
           }
+          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "entity_returning" } as any);
           return;
         }
 
@@ -4226,6 +4239,7 @@ export default async function packetReceiver(
             cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
             playerCache.set(resetPlayer.id, resetPlayer);
           }
+          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "unknown" } as any);
           return;
         }
 
@@ -4369,6 +4383,9 @@ export default async function packetReceiver(
             }
           }
           target.stats.health = Math.round(target.stats.health - damageToHealth);
+          if (finalDamage < 0) {
+            listener.emit(Events.PLAYER_HEALED, { caster: currentPlayer, target, amount: Math.abs(finalDamage), source: spell.name } as any);
+          }
           listener.emit(Events.PLAYER_DAMAGED, { attacker: currentPlayer, target, damage: finalDamage, isCrit });
 
           playerCache.set(currentPlayer.id, currentPlayer);
@@ -4451,8 +4468,8 @@ export default async function packetReceiver(
 
         // Is not in the targets party and is not an entity (entities don't have PvP flag), and is not self, then set PvP flag on both
         if (!isInParty && !isEntityTarget && !isSelf) {
-          currentPlayer.pvp = true;
-          target.pvp = true;
+          setPlayerPvp(currentPlayer, true);
+          setPlayerPvp(target, true);
         }
 
         currentPlayer.last_attack = performance.now();
@@ -4587,8 +4604,8 @@ export default async function packetReceiver(
               }
 
               if (!isInParty) {
-                currentPlayer.pvp = true;
-                splashTarget.pvp = true;
+                setPlayerPvp(currentPlayer, true);
+                setPlayerPvp(splashTarget, true);
                 splashTarget.last_attack = performance.now();
               }
             }
@@ -5605,6 +5622,7 @@ export default async function packetReceiver(
               }
             });
 
+            listener.emit(Events.PARTY_CHAT, { player: currentPlayer, message, partyMembers } as any);
             break;
           }
 
@@ -5794,6 +5812,7 @@ export default async function packetReceiver(
               }
             });
 
+            listener.emit(Events.GUILD_CHAT, { player: currentPlayer, message, guildMembers, guildId } as any);
             break;
           }
 
@@ -8371,6 +8390,7 @@ export default async function packetReceiver(
           }
         }
 
+        listener.emit(Events.GUILD_CHAT, { player: currentPlayer, message, guildMembers, guildId } as any);
         break;
       }
       case "INVITE_PARTY": {
@@ -8788,7 +8808,7 @@ export default async function packetReceiver(
 
               }
             }
-            listener.emit(Events.PARTY_JOIN, { playerUsername: currentPlayer.username, partyMembers: updatedPartyMembers as string[] });
+            listener.emit(Events.PARTY_CHANGED, { type: "join", username: currentPlayer.username, members: updatedPartyMembers as string[] } as any);
             break;
           }
           case "INVITE_GUILD": {
@@ -10097,3 +10117,4 @@ function scheduleWeatherCycle() {
 }
 
 scheduleWeatherCycle();
+
