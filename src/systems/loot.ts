@@ -53,7 +53,7 @@ const loot = {
       map: player.location.map,
       x: player.location.position.x,
       y: player.location.position.y,
-      ownerId: player.id,
+      ownerId: player.username,
       ownerName: player.username || "Unknown",
       expiresAt: Date.now() + DESPAWN_MINUTES * 60 * 1000,
     };
@@ -90,7 +90,7 @@ const loot = {
   pickup(player: any, lootId: string): { success: boolean; message?: string; item?: LootItem } {
     const lootItem = lootItems.get(lootId);
     if (!lootItem) return { success: false, message: "Loot no longer exists." };
-    if (String(lootItem.ownerId) !== String(player.id)) return { success: false, message: "This loot belongs to someone else." };
+    if (String(lootItem.ownerId) !== String(player.username)) return { success: false, message: "This loot belongs to someone else." };
     if (lootItem.map !== player.location.map) return { success: false, message: "Loot is on a different map." };
 
     const dx = player.location.position.x - lootItem.x;
@@ -111,7 +111,7 @@ const loot = {
   pickupAllNearby(player: any): LootItem[] {
     const result: LootItem[] = [];
     for (const [id, lootItem] of lootItems) {
-      if (String(lootItem.ownerId) !== String(player.id)) continue;
+      if (String(lootItem.ownerId) !== String(player.username)) continue;
       if (lootItem.map !== player.location.map) continue;
       const dx = player.location.position.x - lootItem.x;
       const dy = player.location.position.y - lootItem.y;

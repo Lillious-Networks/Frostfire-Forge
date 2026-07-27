@@ -607,7 +607,7 @@ async function transitionPlayerToMap(
   spawnBatchQueue: Map<string, Map<string, any>>,
   despawnBatchQueue: Map<string, Set<string>>
 ): Promise<void> {
-  loot.cancelCleanup(player.id);
+  loot.cancelCleanup(player.username);
 
   await handleMapChangeAOI(player, newMapName, { x: newPosition.x, y: newPosition.y }, spawnBatchQueue, despawnBatchQueue);
 
@@ -1112,7 +1112,7 @@ authWorker.on("message", async (result: any) => {
       _pcache.stats = stats;
       playerCache.set(_pcache.id, _pcache);
 
-      loot.cancelCleanup(_pcache.id);
+      loot.cancelCleanup(_pcache.username);
 
       // Restore persisted effects (DoTs / HoTs / barriers / stuns / slows) from effect manager.
       // Simulate offline DoT ticks and handle potential death before AOI init and spawn.

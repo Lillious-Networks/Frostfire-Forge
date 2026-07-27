@@ -816,7 +816,7 @@ listener.on("onDisconnect", async (data) => {
 
     mapIndex.removePlayer(playerData.id);
 
-    loot.scheduleCleanup(playerData.id);
+    loot.scheduleCleanup(playerData.username);
 
     clearBatchQueuesForPlayer(playerData.id, playerData.location.map);
 
