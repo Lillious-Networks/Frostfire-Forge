@@ -81,6 +81,9 @@ Frostfire Forge requires the [Frostfire Forge Gateway](https://github.com/Lillio
 
 #### Setup
 
+> [!IMPORTANT]
+> The gateway's `bun setup` must run **before** the engine's `bun setup`.
+
 Game servers automatically register with the gateway on startup using the `GATEWAY_URL`, `GATEWAY_AUTH_KEY`, and `GATEWAY_GAME_SERVER_SECRET` environment variables. The server will continuously poll until the gateway is available.
 
 ---
@@ -97,6 +100,9 @@ Frostfire Forge requires the [Frostfire Forge Assets](https://github.com/Lilliou
 The asset server provides a centralized repository for all game assets, enabling the game engine to fetch required data on-demand and persist editor changes back to permanent storage.
 
 #### Setup
+
+> [!IMPORTANT]
+> The asset server must be running **before** starting the engine in order to syncronize maps.
 
 The game server connects to the asset server using the `ASSET_SERVER_URL` and `ASSET_SERVER_AUTH_KEY` environment variables.
 
