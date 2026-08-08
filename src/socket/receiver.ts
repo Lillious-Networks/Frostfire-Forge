@@ -50,12 +50,14 @@ import worlds from "../systems/worlds";
 import npcSystem from "../systems/npcs";
 import entitySystem from "../systems/entities";
 import entityAI from "../systems/entityAI";
-import spellEffects, { registerSpellEffect, spellHasHostileEffects, cancelEffect, setStunsForPlayer, setSlowsForPlayer, getStunsForPlayer, getSlowsForPlayer, broadcastEffectsUpdate } from "../systems/spelleffects";
+import spellEffects, { registerSpellEffect, spellHasHostileEffects, cancelEffect, setStunsForPlayer, setSlowsForPlayer } from "../systems/spelleffects";
 import dots from "../systems/dots";
 import { spawnZone, setPlayerDeathHandler, getZonesOnMap } from "../systems/groundaoe";
 import bags from "../systems/bags";
 import query from "../controllers/sqldatabase";
 import loot from "../systems/loot";
+import lootChest from "../systems/lootChest";
+import lootTable from "../systems/lootTable";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const mapPropertiesCache = await assetCache.get("mapProperties");
@@ -386,6 +388,17 @@ function flushMovementBatches() {
 
 export const spawnBatchQueue = new Map<string, Map<string, any>>();
 
+function queueSpawnForReceivers(spawnedPlayer: any, receivers: any[], spriteData: any = null) {
+  for (const receiver of receivers) {
+    if (!receiver || !receiver.ws || receiver.id === spawnedPlayer.id) continue;
+    if (!spawnBatchQueue.has(receiver.id)) spawnBatchQueue.set(receiver.id, new Map());
+    const spawnData = queueSpawnPlayerPacket(spawnedPlayer);
+    if (!spawnData) continue;
+    if (spriteData) spawnData.spriteData = spriteData;
+    spawnBatchQueue.get(receiver.id)!.set(spawnedPlayer.id, spawnData);
+  }
+}
+
 async function flushSpawnBatches() {
   if (spawnBatchQueue.size === 0) return;
 
@@ -415,9 +428,12 @@ async function flushSpawnBatches() {
     const spawnsForThisPlayer = Array.from(spawnedPlayers.values());
 
     if (spawnsForThisPlayer.length > 0) {
+      const MAX_SPAWNS_PER_FLUSH = 20;
+      const batchToSend = spawnsForThisPlayer.slice(0, MAX_SPAWNS_PER_FLUSH);
+      const remaining = spawnsForThisPlayer.slice(MAX_SPAWNS_PER_FLUSH);
 
       const playersWithSprites = await Promise.all(
-        spawnsForThisPlayer.map(async (queuedPlayer) => {
+        batchToSend.map(async (queuedPlayer) => {
 
           const fullPlayer = allPlayers[queuedPlayer.id];
           if (!fullPlayer) {
@@ -492,10 +508,18 @@ async function flushSpawnBatches() {
       if (animationDataArray.length > 0) {
         sendPacket(receivingPlayer.ws, packetManager.batchSpriteSheetAnimation(animationDataArray));
       }
+
+      // Re-queue remaining spawns for the next flush
+      if (remaining.length > 0) {
+        spawnedPlayers.clear();
+        for (const r of remaining) {
+          spawnedPlayers.set(r.id, r);
+        }
+      } else {
+        spawnBatchQueue.delete(receivingPlayerId);
+      }
     }
   }
-
-  spawnBatchQueue.clear();
 }
 
 export const despawnBatchQueue = new Map<string, Set<string>>();
@@ -748,6 +772,18 @@ async function transitionPlayerToMap(
       log.warn(`Failed to sync loot for ${newMapName}: ${e}`);
     }
 
+    try {
+      const chestsOnMap = lootChest.getOnMap(newMapName);
+      if (chestsOnMap.length > 0) {
+        const chestPackets = chestsOnMap.map((c: any) =>
+          packetManager.lootChestSpawn({ id: c.id, x: c.x, y: c.y, iconUrl: c.iconUrl, map: c.map })
+        ).flat();
+        sendPacket(ws, chestPackets);
+      }
+    } catch (e) {
+      log.warn(`Failed to sync loot chests for ${newMapName}: ${e}`);
+    }
+
     const p = playerCache.get(player.id);
     if (!p) return;
 
@@ -969,17 +1005,24 @@ authWorker.on("message", async (result: any) => {
     }
 
     const default_map_properties = mapPropertiesCache.find((m: any) => m.name === `${defaultMap}.json`);
-    const default_map_spawnpoint_x = default_map_properties ? (default_map_properties.width * default_map_properties.tileWidth) / 2 : 0;
-    const default_map_spawnpoint_y = default_map_properties ? (default_map_properties.height * default_map_properties.tileHeight) / 2 : 0;
+    const spawnX = (settings as any).spawn_x;
+    const spawnY = (settings as any).spawn_y;
+    const default_map_spawnpoint_x = spawnX != null
+      ? spawnX
+      : default_map_properties ? (default_map_properties.width * default_map_properties.tileWidth) / 2 : 0;
+    const default_map_spawnpoint_y = spawnY != null
+      ? spawnY
+      : default_map_properties ? (default_map_properties.height * default_map_properties.tileHeight) / 2 : 0;
     const default_map_spawnpoint = { map: `${defaultMap}.json`, x: default_map_spawnpoint_x, y: default_map_spawnpoint_y, direction: "down" };
-    const player_map_properties = mapPropertiesCache.find((m: any) => m.name === `${playerData.location?.map}.json`) || default_map_properties;
+    const dbMap = playerData.location?.map;
+    const player_map_properties = dbMap ? mapPropertiesCache.find((m: any) => m.name === `${dbMap}.json`) : default_map_properties;
 
     const position = playerData.location?.position as PositionData;
     let spawnLocation = default_map_spawnpoint;
 
-    if (playerData.location && position) {
+    if (playerData.location && position && dbMap) {
       spawnLocation = {
-        map: `${playerData.location.map}.json`,
+        map: `${dbMap}.json`,
         x: position.x || (player_map_properties ? (player_map_properties.width * player_map_properties.tileWidth) / 2 : 0),
         y: position.y || (player_map_properties ? (player_map_properties.height * player_map_properties.tileHeight) / 2 : 0),
         direction: position.direction || "down",
@@ -1091,212 +1134,15 @@ authWorker.on("message", async (result: any) => {
       equipment: playerData.equipment || {},
     });
 
-    const stats = await player.synchronizeStats(playerData.username);
-
-    if (!stats) {
-      sendPacket(ws, packetManager.loginFailed());
-      ws.close(1008, "Failed to load player stats");
-      return;
-    }
-
-    if (stats.stamina > stats.total_max_stamina) {
-      stats.stamina = stats.total_max_stamina;
-    }
-
-    if (stats.health > stats.total_max_health) {
-      stats.health = stats.total_max_health;
-    }
-
     const _pcache = playerCache.get(ws.data.id);
-    if (_pcache) {
-      _pcache.stats = stats;
-      playerCache.set(_pcache.id, _pcache);
+    if (!_pcache) return;
 
-      loot.cancelCleanup(_pcache.username);
+    // Send initial packets immediately — stats sync and effect restoration follow asynchronously
+    await initializePlayerAOI(_pcache);
+    playerCache.set(_pcache.id, _pcache);
+    mapIndex.addPlayer(_pcache.id, _pcache.location.map);
+    loot.cancelCleanup(_pcache.username);
 
-      // Restore persisted effects (DoTs / HoTs / barriers / stuns / slows) from effect manager.
-      // Simulate offline DoT ticks and handle potential death before AOI init and spawn.
-      const effectUsername = playerData.username?.toLowerCase();
-      if (effectUsername) {
-        const savedDots = effectManager.loadDots(effectUsername);
-        let effectDeath = false;
-
-        if (savedDots.length > 0) {
-          const now = Date.now();
-
-          for (const dot of savedDots) {
-            if (effectDeath) break;
-            if (dot.expiresAt <= now) continue;
-
-            let ticks = 0;
-            let nextTick = dot.nextTickAt;
-            while (nextTick <= now && nextTick <= dot.expiresAt) {
-              ticks++;
-              nextTick += dot.interval * 1000;
-            }
-
-            if (ticks > 0) {
-              if (dot.damagePerTick < 0) {
-                // HoT: apply healing
-                const healing = Math.abs(dot.damagePerTick) * dot.stacks * ticks;
-                _pcache.stats.health = Math.round(Math.min(_pcache.stats.health + healing, _pcache.stats.total_max_health));
-              } else {
-                // DoT: apply damage with avoidance and armor mitigation
-                const avoidance = _pcache.stats.stat_avoidance || 0;
-                const armor = _pcache.stats.stat_armor || 0;
-                let rawDamage = dot.damagePerTick * dot.stacks * ticks;
-                rawDamage = rawDamage * (1 - Math.min(avoidance, 100) / 100);
-                rawDamage = Math.floor(rawDamage * (1 - Math.min(armor, 75) / 100));
-
-                const absorbed = spellEffects.consumeBarrier(_pcache, rawDamage);
-                const damageToHealth = rawDamage - absorbed;
-                _pcache.stats.health = Math.round(_pcache.stats.health - damageToHealth);
-
-                if (_pcache.stats.health <= 0) {
-                  // Offline DoT ticks killed the player - respawn them
-                  effectDeath = true;
-                }
-              }
-            }
-
-            if (!effectDeath && nextTick > now) {
-              dot.nextTickAt = nextTick;
-            }
-          }
-
-          if (effectDeath) {
-            await handlePlayerDeath(_pcache, null, { damage: _pcache.stats.total_max_health, isCrit: false });
-            // Sync spawnLocation to the graveyard position set by handlePlayerDeath
-            spawnLocation.x = _pcache.location.position.x;
-            spawnLocation.y = _pcache.location.position.y;
-            spawnLocation.direction = _pcache.location.position.direction;
-            // Death cleared all effects - skip restoration below
-          } else {
-            // Re-add non-expired dots to the dot system so they continue ticking
-            const remainingDots = savedDots.filter((d: any) => d.expiresAt > now);
-            if (remainingDots.length > 0) {
-              dots.setPlayerDots(String(_pcache.id), remainingDots);
-            }
-          }
-        }
-
-        if (!effectDeath) {
-          const playerId = String(_pcache.id);
-          const now2 = Date.now();
-
-          // Restore barriers
-          const savedBarriers = effectManager.loadBarriers(effectUsername);
-          if (savedBarriers.length > 0) {
-            _pcache.barriers = savedBarriers;
-            _pcache.stats.absorbtion = savedBarriers.reduce((sum: number, b: any) => sum + Math.max(0, b.amount), 0);
-
-            // Re-schedule barrier expiry timeouts (originals can't find the player under the new ID)
-            for (const b of savedBarriers) {
-              const remainMs = b.expiresAt === 0 ? 0 : Math.max(0, b.expiresAt - now2);
-              if (remainMs <= 0) continue;
-              const bId = b.id;
-              const bToken = b.token;
-              setTimeout(() => {
-                const fresh = playerCache.get(playerId);
-                if (!fresh || !Array.isArray(fresh.barriers)) return;
-                const idx = fresh.barriers.findIndex((x: any) => x.id === bId && x.token === bToken);
-                if (idx === -1) return;
-                fresh.barriers.splice(idx, 1);
-                fresh.stats.absorbtion = fresh.barriers.reduce((s: number, x: any) => s + Math.max(0, x.amount), 0);
-                playerCache.set(fresh.id, fresh);
-                spellEffects.broadcastEffectsUpdate(fresh);
-                broadcastToAOI(fresh, packetManager.updateStats({ target: fresh.id, stats: fresh.stats }), true);
-              }, remainMs);
-            }
-          }
-
-          // Restore stuns
-          const savedStuns = effectManager.loadStuns(effectUsername);
-          if (savedStuns.length > 0) {
-            setStunsForPlayer(playerId, savedStuns);
-            _pcache.stunnedUntil = Math.max(...savedStuns.map((s: any) => s.expiresAt));
-
-            for (const s of savedStuns) {
-              const remainMs = Math.max(0, s.expiresAt - now2);
-              if (remainMs <= 0) continue;
-              const sId = s.id;
-              const sToken = s.token;
-              setTimeout(() => {
-                const fresh = playerCache.get(playerId);
-                if (!fresh) return;
-                const arr = getStunsForPlayer(playerId);
-                if (!arr) return;
-                const idx = arr.findIndex((x: any) => x.id === sId && x.token === sToken);
-                if (idx === -1) return;
-                arr.splice(idx, 1);
-                fresh.stunnedUntil = arr.length > 0 ? Math.max(...arr.map((x: any) => x.expiresAt)) : 0;
-                if (fresh.ws?.readyState === 1) {
-                  const remain = fresh.stunnedUntil ? Math.max(0, Math.ceil((fresh.stunnedUntil - Date.now()) / 1000)) : 0;
-                  sendPacket(fresh.ws, packetManager.spellLockout({ duration: remain }));
-                }
-                spellEffects.broadcastEffectsUpdate(fresh);
-              }, remainMs);
-            }
-          }
-
-          // Restore slows
-          const savedSlows = effectManager.loadSlows(effectUsername);
-          if (savedSlows.length > 0) {
-            setSlowsForPlayer(playerId, savedSlows);
-            const strongest = Math.max(...savedSlows.map((s: any) => s.slowPercent));
-            _pcache.slowPercent = strongest;
-            _pcache.slowMultiplier = 1 - strongest / 100;
-
-            for (const s of savedSlows) {
-              const remainMs = Math.max(0, s.expiresAt - now2);
-              if (remainMs <= 0) continue;
-              const sId = s.id;
-              const sToken = s.token;
-              setTimeout(() => {
-                const fresh = playerCache.get(playerId);
-                if (!fresh) return;
-                const arr = getSlowsForPlayer(playerId);
-                if (!arr) return;
-                const idx = arr.findIndex((x: any) => x.id === sId && x.token === sToken);
-                if (idx === -1) return;
-                arr.splice(idx, 1);
-                if (arr.length === 0) {
-                  fresh.slowPercent = 0;
-                  fresh.slowMultiplier = 1;
-                } else {
-                  const strong = Math.max(...arr.map((x: any) => x.slowPercent));
-                  fresh.slowPercent = strong;
-                  fresh.slowMultiplier = 1 - strong / 100;
-                }
-                spellEffects.broadcastEffectsUpdate(fresh);
-              }, remainMs);
-            }
-          }
-
-          // Set pvp flag if the player has active hostile effects (DoTs, stuns, slows)
-          const remainingDots = savedDots.filter((d: any) => d.expiresAt > Date.now());
-          const hasHostileDots = remainingDots.some((d: any) => d.damagePerTick > 0);
-          const hasStuns = savedStuns.length > 0;
-          const hasSlows = savedSlows.length > 0;
-          if (hasHostileDots || hasStuns || hasSlows) {
-            setPlayerPvp(_pcache, true);
-            _pcache.last_attack = performance.now();
-          }
-
-          playerCache.set(_pcache.id, _pcache);
-        }
-
-        effectManager.clearAll(effectUsername);
-      }
-
-      await initializePlayerAOI(_pcache);
-      playerCache.set(_pcache.id, _pcache);
-
-      mapIndex.addPlayer(_pcache.id, _pcache.location.map);
-    }
-
-    // Extract object layers from map data
-    // Send map chunk metadata instead of full map
     const mapMetadata = constructMapMetadata(
       spawnLocation?.map,
       position?.x || 0,
@@ -1307,10 +1153,19 @@ authWorker.on("message", async (result: any) => {
     );
     sendPacket(ws, packetManager.loadMap(mapMetadata));
 
-    setImmediate(async () => {
+    setTimeout(async () => {
 
       const currentPlayer = playerCache.get(ws.data.id);
       if (!currentPlayer) return;
+
+      // Sync stats with equipment bonuses before spawning
+      const syncedStats = await player.synchronizeStats(playerData.username);
+      if (syncedStats) {
+        if (syncedStats.stamina > syncedStats.total_max_stamina) syncedStats.stamina = syncedStats.total_max_stamina;
+        if (syncedStats.health > syncedStats.total_max_health) syncedStats.health = syncedStats.total_max_health;
+        currentPlayer.stats = syncedStats;
+        playerCache.set(currentPlayer.id, currentPlayer);
+      }
 
       await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
 
@@ -1350,7 +1205,7 @@ authWorker.on("message", async (result: any) => {
         isGuest: playerData.isGuest,
         isStealth: playerData.isStealth,
         isNoclip: playerData.isNoclip,
-        stats: stats || {},
+        stats: currentPlayer.stats || {},
         animation: null,
         spriteData: spriteDataForSelf,
         friends: playerData.friends || [],
@@ -1432,17 +1287,23 @@ authWorker.on("message", async (result: any) => {
 
       sendPacket(ws, packetManager.loadPlayers(loadPlayersData));
 
+      // Batch animation data for all existing players into one packet for the new player
       if (playerDataForLoad.length > 0) {
-        playerDataForLoad.forEach(async (pl) => {
+        const animationDataArray: any[] = [];
+        for (const pl of playerDataForLoad) {
           if (pl.id !== ws.data.id && pl.location.direction) {
             const pcache = playerCache.get(pl.id);
-            await sendAnimationTo(
-              ws,
-              getAnimationNameForDirection(pl.location.direction, !!pcache?.moving, !!pcache?.mounted, pcache?.mount_type, !!pcache?.casting),
-              pl.id
-            );
+            const animName = getAnimationNameForDirection(pl.location.direction, !!pcache?.moving, !!pcache?.mounted, pcache?.mount_type, !!pcache?.casting);
+            animationDataArray.push({
+              id: pl.id,
+              name: animName,
+              revision: globalStateRevision,
+            });
           }
-        });
+        }
+        if (animationDataArray.length > 0) {
+          sendPacket(ws, packetManager.batchSpriteSheetAnimation(animationDataArray));
+        }
       }
 
       const mapName = currentPlayer.location.map;
@@ -1468,17 +1329,9 @@ authWorker.on("message", async (result: any) => {
           getAnimationNameForDirection(position.direction, false, false, undefined, false),
           ws.data.id
         );
-
-        const animationData = packetManager.animation({
-          id: ws.data.id,
-          name: getAnimationNameForDirection(position.direction, false, false, undefined, false)
-        });
-        broadcastToAOI(currentPlayer, animationData, false);
       }
 
-      // Send restored effects to the client now that the player has spawned,
-      // so the overhead buff/debuff icons render above the player.
-      broadcastEffectsUpdate(currentPlayer);
+      // Effects and other-player animations are handled by flushSpawnBatches
 
       // Send active ground AoE zones on this map to the newly connected player
       const activeZones = getZonesOnMap(currentPlayer.location.map);
@@ -1497,166 +1350,107 @@ authWorker.on("message", async (result: any) => {
         }));
       }
 
+      // Restore persisted effects from previous session
+      const effectUsername = playerData.username?.toLowerCase();
+      if (effectUsername) {
+        const savedDots = effectManager.loadDots(effectUsername);
+        if (savedDots.length > 0) {
+          dots.setPlayerDots(String(currentPlayer.id), savedDots.filter((d: any) => d.expiresAt > Date.now()));
+        }
+
+        const savedBarriers = effectManager.loadBarriers(effectUsername);
+        if (savedBarriers.length > 0) {
+          currentPlayer.barriers = savedBarriers;
+          currentPlayer.stats.absorbtion = savedBarriers.reduce((sum: number, b: any) => sum + Math.max(0, b.amount), 0);
+        }
+
+        const savedStuns = effectManager.loadStuns(effectUsername);
+        if (savedStuns.length > 0) {
+          setStunsForPlayer(String(currentPlayer.id), savedStuns);
+          currentPlayer.stunnedUntil = Math.max(...savedStuns.map((s: any) => s.expiresAt));
+        }
+
+        const savedSlows = effectManager.loadSlows(effectUsername);
+        if (savedSlows.length > 0) {
+          setSlowsForPlayer(String(currentPlayer.id), savedSlows);
+          currentPlayer.slowPercent = Math.max(...savedSlows.map((s: any) => s.slowPercent));
+          currentPlayer.slowMultiplier = 1 - currentPlayer.slowPercent / 100;
+        }
+
+        effectManager.clearAll(effectUsername);
+      }
+
     });
-    setImmediate(() => {
+    // Defer secondary loads with a delay so the game loop can process between player spawns
+    setTimeout(async () => {
 
       const currentPlayerData = playerCache.get(ws.data.id);
-      if (!currentPlayerData) return;
-
-      const allPlayers = playerCache.list();
-      const usernameIndex = new Map<string, any>();
-
-      for (const player of Object.values(allPlayers)) {
-        if (player.ws && player.username) {
-          usernameIndex.set(player.username.toLowerCase(), player);
+      if (currentPlayerData) {
+        const allPlayers = playerCache.list();
+        const usernameIndex = new Map<string, any>();
+        for (const player of Object.values(allPlayers)) {
+          if (player.ws && player.username) {
+            usernameIndex.set(player.username.toLowerCase(), player);
+          }
+        }
+        const newPlayerFriends = currentPlayerData.friends || [];
+        for (const friendUsername of newPlayerFriends) {
+          const onlineFriend = usernameIndex.get(friendUsername.toLowerCase());
+          if (onlineFriend) {
+            sendPacket(onlineFriend.ws, packetManager.updateOnlineStatus({ online: true, username: currentPlayerData.username }));
+            sendPacket(currentPlayerData.ws, packetManager.updateOnlineStatus({ online: true, username: onlineFriend.username }));
+          }
         }
       }
 
-      const newPlayerFriends = currentPlayerData.friends || [];
-
-      for (const friendUsername of newPlayerFriends) {
-
-        const onlineFriend = usernameIndex.get(friendUsername.toLowerCase());
-
-        if (onlineFriend) {
-
-          sendPacket(
-            onlineFriend.ws,
-            packetManager.updateOnlineStatus({
-              online: true,
-              username: currentPlayerData.username,
-            })
-          );
-
-          sendPacket(
-            currentPlayerData.ws,
-            packetManager.updateOnlineStatus({
-              online: true,
-              username: onlineFriend.username,
-            })
-          );
-        }
-      }
-    });
-
-    setImmediate(async () => {
+      // NPCs
       const npcsData = await assetCache.get("npcs") as Npc[];
-      const npcsInMap = npcsData.filter(
-        (npc: Npc) => npc.map === spawnLocation.map.replace(".json", "")
-      );
-      const particlesCache = await assetCache.get("particles") as Particle[] | null;
-      const npcPackets = await npcsInMap.reduce(
-        async (packetsPromise: Promise<any[]>, npc: Npc) => {
-          const packets = await packetsPromise;
-          const particleArray =
-            typeof npc.particles === "string" && particlesCache
-              ? (
-                (npc.particles as string)
-                  .split(",")
-                  .map((name) =>
-                    particlesCache.find((p: Particle) => p.name === name.trim())
-                  )
-              ).filter(Boolean)
-              : [];
-          const npcData = {
-            id: npc.id,
-            last_updated: npc.last_updated,
-            name: npc.name || null,
-            location: {
-              x: npc.position.x,
-              y: npc.position.y,
-              direction: npc.position.direction || "down",
-            },
-            script: npc.script,
-            hidden: npc.hidden,
-            dialog: npc.dialog,
-            particles: particleArray,
-            quest: npc.quest,
-            map: npc.map,
-            position: npc.position,
-            sprite_type: npc.sprite_type,
-            spriteLayers: getNpcSpriteLayers(npc),
-          };
-          return [...packets, ...packetManager.createNpc(npcData)];
-        },
-        Promise.resolve([] as any[])
-      );
-      if (npcPackets.length) {
-        sendPacket(ws, npcPackets);
-      }
-    });
-
-    // Send entities on map spawn (from in-memory cache, no database calls)
-    setImmediate(async () => {
-      try {
-        const mapName = spawnLocation.map.replace(".json", "");
-        const entitiesInMap = entityCache.getByMap(mapName);
+      const npcsInMap = npcsData.filter((npc: Npc) => npc.map === spawnLocation.map.replace(".json", ""));
+      if (npcsInMap.length) {
         const particlesCache = await assetCache.get("particles") as Particle[] | null;
-        const entityPackets = await entitiesInMap.reduce(
-          async (packetsPromise: Promise<any[]>, entity: any) => {
-            const packets = await packetsPromise;
-            const particleArray =
-              typeof entity.particles === "string" && particlesCache
-                ? (
-                  (entity.particles as string)
-                    .split(",")
-                    .map((name) =>
-                      particlesCache.find((p: Particle) => p.name === name.trim())
-                    )
-                ).filter(Boolean)
-                : [];
-            const entityData = {
-              id: entity.id,
-              last_updated: entity.last_updated,
-              name: entity.name || null,
-              location: {
-                x: entity.position.x,
-                y: entity.position.y,
-                direction: entity.position.direction || "down",
-              },
-              health: entity.health,
-              max_health: entity.max_health,
-              level: entity.level,
-              aggro_type: entity.aggro_type,
-              particles: particleArray,
-              map: entity.map,
-              position: entity.position,
-              sprite_type: entity.sprite_type || 'animated',
-              spriteLayers: getEntitySpriteLayers(entity),
-            };
-            return [...packets, ...packetManager.createEntity(entityData as any)];
-          },
-          Promise.resolve([] as any[])
-        );
-        if (entityPackets.length) {
-          sendPacket(ws, entityPackets);
+        const npcDataArray: any[] = [];
+        for (const npc of npcsInMap) {
+          const particleArray = typeof npc.particles === "string" && particlesCache
+            ? (npc.particles as string).split(",").map((name) => particlesCache.find((p: Particle) => p.name === name.trim())).filter(Boolean)
+            : [];
+          npcDataArray.push({
+            id: npc.id, last_updated: npc.last_updated, name: npc.name || null,
+            location: { x: npc.position.x, y: npc.position.y, direction: npc.position.direction || "down" },
+            script: npc.script, hidden: npc.hidden, dialog: npc.dialog,
+            particles: particleArray, quest: npc.quest, map: npc.map, position: npc.position,
+            sprite_type: npc.sprite_type, spriteLayers: getNpcSpriteLayers(npc),
+          });
         }
-      } catch (error: any) {
-        log.warn(`Error loading entities: ${error.message}`);
+        sendPacket(ws, packetManager.loadNpcs(npcDataArray));
       }
 
-      try {
-        const lootOnMap = loot.getOnMap(spawnLocation.map.replace(".json", ""));
-        if (lootOnMap.length > 0) {
-          const lootPackets = lootOnMap.map((l) =>
-            packetManager.lootSpawn({
-              id: l.id,
-              item: l.item,
-              quantity: l.quantity,
-              quality: l.quality,
-              iconUrl: l.iconUrl,
-              x: l.x,
-              y: l.y,
-              ownerId: l.ownerId,
-              ownerName: l.ownerName,
-            })
-          ).flat();
-          sendPacket(ws, lootPackets);
+      // Entities
+      const mapName = spawnLocation.map.replace(".json", "");
+      const entitiesInMap = entityCache.getByMap(mapName);
+      if (entitiesInMap.length) {
+        const particlesCache = await assetCache.get("particles") as Particle[] | null;
+        const entityDataArray: any[] = [];
+        for (const entity of entitiesInMap) {
+          const particleArray = typeof entity.particles === "string" && particlesCache
+            ? (entity.particles as string).split(",").map((name) => particlesCache.find((p: Particle) => p.name === name.trim())).filter(Boolean)
+            : [];
+          entityDataArray.push({
+            id: entity.id, last_updated: entity.last_updated, name: entity.name || null,
+            location: { x: entity.position.x, y: entity.position.y, direction: entity.position.direction || "down" },
+            health: entity.health, max_health: entity.max_health, level: entity.level,
+            aggro_type: entity.aggro_type, particles: particleArray, map: entity.map, position: entity.position,
+            sprite_type: entity.sprite_type || 'animated', spriteLayers: getEntitySpriteLayers(entity as any),
+          });
         }
-      } catch (e: any) {
-        log.warn(`Error syncing loot: ${e.message}`);
+        sendPacket(ws, packetManager.loadEntities(entityDataArray));
       }
-    });
+
+      // Loot
+      const lootOnMap = loot.getOnMap(mapName);
+      if (lootOnMap.length) {
+        sendPacket(ws, packetManager.loadLoot(lootOnMap));
+      }
+    }, 200);
 
     // Build cooldown data to include with CLIENTCONFIG so the client can display
     // partially-expired cooldown overlays on reconnect.
@@ -2809,22 +2603,15 @@ export default async function packetReceiver(
             };
           }
 
-          playersInMap.forEach((player) => {
-            // Skip sending to self
-            if (player.id === currentPlayer.id) return;
-            // Admins never lost sight of the stealthed player, so skip to avoid duplicate entities
-            if (player.isAdmin) return;
-
-            const spawnData = queueSpawnPlayerPacket(currentPlayer);
-            if (spawnData) {
-              spawnData.spriteData = spriteData;
-              // Only spawn if player doesn't already exist on the receiving client
-              // (don't want to create duplicates on re-unstealth)
-              sendPacket(player.ws, packetManager.spawnPlayer(spawnData));
-            }
+          const nonAdminPlayers = playersInMap.filter((player) => {
+            if (player.id === currentPlayer.id) return false;
+            if (player.isAdmin) return false;
+            return true;
           });
 
-          playersInMap.forEach(async (player) => {
+          queueSpawnForReceivers(currentPlayer, nonAdminPlayers, spriteData);
+
+          for (const player of nonAdminPlayers) {
             const moveXYData = {
               i: ws.data.id,
               d: {
@@ -2837,19 +2624,9 @@ export default async function packetReceiver(
             };
 
             if (currentPlayer.location.position?.direction) {
-              await sendPositionAnimation(
-                ws,
-                currentPlayer.location.position?.direction,
-                false,
-                currentPlayer.mounted,
-                currentPlayer.mount_type || "unicorn",
-                undefined,
-                globalStateRevision,
-                currentPlayer.casting || false
-              );
               sendPacket(player.ws, packetManager.moveXY(moveXYData));
             }
-          });
+          }
         }
         listener.emit(Events.PLAYER_STEALTH_CHANGE, { player: currentPlayer, isStealth: currentPlayer.isStealth });
         break;
@@ -7816,6 +7593,103 @@ export default async function packetReceiver(
             sendPacket(ws, packetManager.notify({ message: `Dropped ${dropQty}x ${dropDef.name}.` }));
             break;
           }
+          case "SPAWNCHEST": {
+            if (!currentPlayer.permissions.some((p: string) => p === "admin.items" || p === "admin.*")) {
+              sendPacket(ws, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            const mode = args[0]?.toLowerCase() || null;
+            if (!mode || (mode !== "table" && mode !== "inline")) {
+              sendPacket(ws, packetManager.notify({ message: "Usage: /spawnchest table <loot_table_id> or /spawnchest inline <item> <min> <max> <chance> ..." }));
+              break;
+            }
+            const playerPos = typeof currentPlayer.location.position === 'string'
+              ? { x: Number(currentPlayer.location.position.split(',')[0]), y: Number(currentPlayer.location.position.split(',')[1]) }
+              : (currentPlayer.location.position as any);
+            if (mode === "table") {
+              const tableId = parseInt(args[1]);
+              if (!tableId || isNaN(tableId)) { sendPacket(ws, packetManager.notify({ message: "Usage: /spawnchest table <loot_table_id>" })); break; }
+              const table = await lootTable.get(tableId);
+              if (!table) { sendPacket(ws, packetManager.notify({ message: `Loot table ${tableId} not found.` })); break; }
+              const chestId = lootChest.spawn(currentPlayer.location.map, playerPos.x, playerPos.y, tableId, undefined, currentPlayer.username);
+              const chestData = { id: chestId, x: playerPos.x, y: playerPos.y, iconUrl: getIconUrl("loot_chest"), map: currentPlayer.location.map };
+              const playerIds = mapIndex.getPlayersOnMap(currentPlayer.location.map);
+              for (const pid of playerIds) { const p = playerCache.get(pid); if (p?.ws && p.ws.readyState === 1) { sendPacket(p.ws, packetManager.lootChestSpawn(chestData)); } }
+              sendPacket(ws, packetManager.notify({ message: `Loot chest spawned using table "${table.name}".` }));
+            } else {
+              const itemArgs = args.slice(1);
+              if (itemArgs.length < 4 || itemArgs.length % 4 !== 0) {
+                sendPacket(ws, packetManager.notify({ message: "Usage: /spawnchest inline <item> <min> <max> <chance> ..." }));
+                break;
+              }
+              const inlineEntries: any[] = [];
+              for (let i = 0; i < itemArgs.length; i += 4) {
+                const itemName = itemArgs[i]; const minQty = parseInt(itemArgs[i + 1]); const maxQty = parseInt(itemArgs[i + 2]); const chance = parseFloat(itemArgs[i + 3]);
+                if (!itemName || isNaN(minQty) || isNaN(maxQty) || isNaN(chance)) { sendPacket(ws, packetManager.notify({ message: `Invalid entry at position ${i}` })); break; }
+                inlineEntries.push({ itemName, minQuantity: minQty, maxQuantity: maxQty, dropChance: chance, quality: "common" });
+              }
+              if (inlineEntries.length === 0) break;
+              const chestId = lootChest.spawn(currentPlayer.location.map, playerPos.x, playerPos.y, undefined, inlineEntries, currentPlayer.username);
+              const chestData = { id: chestId, x: playerPos.x, y: playerPos.y, iconUrl: getIconUrl("loot_chest"), map: currentPlayer.location.map };
+              const playerIds = mapIndex.getPlayersOnMap(currentPlayer.location.map);
+              for (const pid of playerIds) { const p = playerCache.get(pid); if (p?.ws && p.ws.readyState === 1) { sendPacket(p.ws, packetManager.lootChestSpawn(chestData)); } }
+              sendPacket(ws, packetManager.notify({ message: `Loot chest spawned with ${inlineEntries.length} inline entries.` }));
+            }
+            break;
+          }
+          case "LOOTTABLE": {
+            if (!currentPlayer.permissions.some((p: string) => p === "admin.loot" || p === "admin.*")) {
+              sendPacket(ws, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            const sub = args[0]?.toLowerCase() || null;
+            if (!sub) { sendPacket(ws, packetManager.notify({ message: "Usage: /loottable list|create|delete|info|additem|removeitem ..." })); break; }
+            if (sub === "list") {
+              const tables = await lootTable.list();
+              const names = tables.length ? tables.map((t: any) => `#${t.id} ${t.name} (${t.items.length} items)`).join(", ") : "No loot tables found.";
+              sendPacket(ws, packetManager.notify({ message: `Loot tables: ${names}` }));
+            } else if (sub === "create") {
+              const name = args[1]; if (!name) { sendPacket(ws, packetManager.notify({ message: "Usage: /loottable create <name>" })); break; }
+              const r = await lootTable.create(name);
+              sendPacket(ws, packetManager.notify({ message: r ? `Loot table "${name}" created.` : `Table "${name}" already exists.` }));
+            } else if (sub === "delete") {
+              const id = parseInt(args[1]); if (!id || isNaN(id)) { sendPacket(ws, packetManager.notify({ message: "Usage: /loottable delete <id>" })); break; }
+              await lootTable.delete(id); sendPacket(ws, packetManager.notify({ message: `Loot table ${id} deleted.` }));
+            } else if (sub === "info") {
+              const id = parseInt(args[1]); if (!id || isNaN(id)) { sendPacket(ws, packetManager.notify({ message: "Usage: /loottable info <id>" })); break; }
+              const table = await lootTable.get(id);
+              if (!table) { sendPacket(ws, packetManager.notify({ message: `Loot table ${id} not found.` })); break; }
+              const lines = table.items.map((it: any) => `  #${it.id} ${it.item_name} (${it.min_quantity}-${it.max_quantity}, ${it.drop_chance}%, ${it.quality})`).join("\n");
+              sendPacket(ws, packetManager.notify({ message: `Table #${table.id} "${table.name}":\n${lines || "  (no items)"}` }));
+            } else if (sub === "additem") {
+              const tableId = parseInt(args[1]); const itemName = args[2];
+              const minQty = parseInt(args[3]) || 1; const maxQty = parseInt(args[4]) || 1;
+              const chance = parseFloat(args[5]) || 100; const quality = args[6] || "common";
+              if (!tableId || isNaN(tableId) || !itemName) { sendPacket(ws, packetManager.notify({ message: "Usage: /loottable additem <tableId> <item> <min> <max> <chance> [quality]" })); break; }
+              const r = await lootTable.addItem(tableId, itemName, minQty, maxQty, chance, quality);
+              if (r && (r as any).error) { sendPacket(ws, packetManager.notify({ message: (r as any).error })); break; }
+              sendPacket(ws, packetManager.notify({ message: `Added "${itemName}" to loot table ${tableId}.` }));
+            } else if (sub === "removeitem") {
+              const itemId = parseInt(args[1]); if (!itemId || isNaN(itemId)) { sendPacket(ws, packetManager.notify({ message: "Usage: /loottable removeitem <itemId>" })); break; }
+              await lootTable.removeItem(itemId); sendPacket(ws, packetManager.notify({ message: `Item ${itemId} removed from loot table.` }));
+            } else if (sub === "updateitem") {
+              const itemId = parseInt(args[1]); const minQty = parseInt(args[2]) || 1; const maxQty = parseInt(args[3]) || 1;
+              const chance = parseFloat(args[4]) || 100; const quality = args[5] || "common";
+              if (!itemId || isNaN(itemId)) { sendPacket(ws, packetManager.notify({ message: "Usage: /loottable updateitem <itemId> <min> <max> <chance> [quality]" })); break; }
+              await lootTable.updateItem(itemId, minQty, maxQty, chance, quality);
+              sendPacket(ws, packetManager.notify({ message: `Item ${itemId} updated.` }));
+            } else { sendPacket(ws, packetManager.notify({ message: "Unknown sub-command. Use: list|create|delete|info|additem|removeitem|updateitem" })); }
+            break;
+          }
+          case "LE":
+          case "LOOTEDITOR": {
+            if (!currentPlayer.permissions.some((p: string) => p === "admin.loot" || p === "admin.*")) {
+              sendPacket(ws, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(ws, packetManager.toggleLootEditor());
+            break;
+          }
           default: {
             const notifyData = {
               message: "Invalid command",
@@ -8721,14 +8595,14 @@ export default async function packetReceiver(
                   }
                   const fx = spellEffects.getEffectsPayload(memberPlayer);
                   if (fx.length > 0) (sd as any).effects = fx;
+                  const receivers: any[] = [];
                   for (const otherUsername of (updatedPartyMembers as string[])) {
                     if (otherUsername.toLowerCase() === memberUsername.toLowerCase()) continue;
                     const otherSessionId = await player.getSessionIdByUsername(otherUsername);
                     const otherPlayer = otherSessionId && playerCache.get(otherSessionId);
-                    if (otherPlayer && otherPlayer.ws) {
-                      sendPacket(otherPlayer.ws, packetManager.spawnPlayer(sd));
-                    }
+                    if (otherPlayer && otherPlayer.ws) receivers.push(otherPlayer);
                   }
+                  queueSpawnForReceivers(memberPlayer, receivers, (sd as any).spriteData);
                 }
               } else {
 
@@ -8796,14 +8670,14 @@ export default async function packetReceiver(
                   }
                   const fx = spellEffects.getEffectsPayload(memberPlayer);
                   if (fx.length > 0) (sd as any).effects = fx;
+                  const receivers: any[] = [];
                   for (const otherUsername of (updatedPartyMembers as string[])) {
                     if (otherUsername.toLowerCase() === memberUsername.toLowerCase()) continue;
                     const otherSessionId = await player.getSessionIdByUsername(otherUsername);
                     const otherPlayer = otherSessionId && playerCache.get(otherSessionId);
-                    if (otherPlayer && otherPlayer.ws) {
-                      sendPacket(otherPlayer.ws, packetManager.spawnPlayer(sd));
-                    }
+                    if (otherPlayer && otherPlayer.ws) receivers.push(otherPlayer);
                   }
+                  queueSpawnForReceivers(memberPlayer, receivers, (sd as any).spriteData);
                 }
 
               }
@@ -9514,6 +9388,62 @@ export default async function packetReceiver(
         playerCache.set(currentPlayer.id, currentPlayer);
         sendPacket(ws, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
         sendPacket(ws, packetManager.notify({ message: `Picked up ${items.length} item(s).` }));
+        break;
+      }
+      case "OPEN_LOOT_CHEST": {
+        if (!currentPlayer) return;
+        const chestId = (data as any)?.chestId;
+        if (!chestId) return;
+        const chest = lootChest.getChest(chestId);
+        if (!chest) { sendPacket(ws, packetManager.notify({ message: "Chest not found." })); break; }
+        if (chest.map !== currentPlayer.location.map) { sendPacket(ws, packetManager.notify({ message: "Chest is on a different map." })); break; }
+        const playerPos = currentPlayer.location.position;
+        const playerX = typeof playerPos === 'string' ? Number(playerPos.split(',')[0]) : (playerPos as any).x;
+        const playerY = typeof playerPos === 'string' ? Number(playerPos.split(',')[1]) : (playerPos as any).y;
+        if (!lootChest.isWithinRange(chestId, playerX, playerY)) { sendPacket(ws, packetManager.notify({ message: "You are too far from the chest." })); break; }
+        const result = await lootChest.open(chestId, String(currentPlayer.id));
+        if (!result) { sendPacket(ws, packetManager.notify({ message: "Could not open chest." })); break; }
+        if (result.items.length === 0) { sendPacket(ws, packetManager.notify({ message: "This chest is empty for you." })); break; }
+        sendPacket(ws, packetManager.lootChestContents({ chestId, items: result.items }));
+        break;
+      }
+      case "TAKE_CHEST_ITEMS": {
+        if (!currentPlayer) return;
+        const chestId = (data as any)?.chestId;
+        const indices = (data as any)?.indices;
+        if (!chestId || !Array.isArray(indices) || indices.length === 0) return;
+        const result = await lootChest.takeItems(chestId, String(currentPlayer.id), currentPlayer.username, indices);
+        if (!result) { sendPacket(ws, packetManager.notify({ message: "Could not take items." })); break; }
+        currentPlayer.inventory = await inventory.get(currentPlayer.username);
+        playerCache.set(currentPlayer.id, currentPlayer);
+        const invSlots = await getInventorySlots(currentPlayer);
+        sendPacket(ws, packetManager.inventory(currentPlayer.inventory, invSlots));
+        if (result.allTaken) {
+          sendPacket(ws, packetManager.lootChestDespawn(chestId));
+          sendPacket(ws, packetManager.notify({ message: `Took ${result.taken.length} item(s). Chest emptied.` }));
+        } else {
+          sendPacket(ws, packetManager.notify({ message: `Took ${result.taken.length} item(s). ${result.remaining.length} item(s) remain.` }));
+        }
+        break;
+      }
+      case "TAKE_ALL_CHEST_ITEMS": {
+        if (!currentPlayer) return;
+        const chestId = (data as any)?.chestId;
+        if (!chestId) return;
+        const result = await lootChest.takeAllItems(chestId, String(currentPlayer.id), currentPlayer.username);
+        if (!result) { sendPacket(ws, packetManager.notify({ message: "Could not take items." })); break; }
+        currentPlayer.inventory = await inventory.get(currentPlayer.username);
+        playerCache.set(currentPlayer.id, currentPlayer);
+        const invSlots = await getInventorySlots(currentPlayer);
+        sendPacket(ws, packetManager.inventory(currentPlayer.inventory, invSlots));
+        sendPacket(ws, packetManager.lootChestDespawn(chestId));
+        sendPacket(ws, packetManager.notify({ message: `Took all ${result.taken.length} item(s).` }));
+        break;
+      }
+      case "LIST_LOOT_TABLES": {
+        if (!currentPlayer) return;
+        const tables = await lootTable.list();
+        sendPacket(ws, packetManager.lootTableList(tables));
         break;
       }
       case "RESPAWN_ENTITY": {

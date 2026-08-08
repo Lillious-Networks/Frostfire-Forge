@@ -82,7 +82,9 @@ const settings = {
     "heartbeatInterval": 5000
   },
   "world": "overworld",
-  "default_map": "overworld.json"
+  "default_map": "overworld.json",
+  "spawn_x": null,
+  "spawn_y": null
 };
 
 if (!fs.existsSync(path.join(".env.development")) && environment === "development") {
@@ -109,7 +111,7 @@ const AOI_CONFIG = {
   DEFAULT_RADIUS: 1000,
   UPDATE_THRESHOLD: 100,
   GRID_CELL_SIZE: 512,
-  USE_SPATIAL_GRID: false,
+  USE_SPATIAL_GRID: true,
   SPATIAL_GRID_THRESHOLD: 50,
   MAX_PLAYERS_PER_LAYER: 50,
   DEBUG: false

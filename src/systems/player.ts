@@ -3,6 +3,8 @@ import { verify, randomBytes } from "../modules/hash";
 import log from "../modules/logger";
 import assetCache from "../services/assetCache";
 import * as settings from "../config/settings.json";
+import playerCache from "../services/playermanager.ts";
+const defaultMap = settings.default_map?.replace(".json", "") || "main";
 
 const TOKEN_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
@@ -28,8 +30,7 @@ setInterval(() => {
     if (now > expiry) tokenExpiry.delete(token);
   }
 }, 60 * 60 * 1000).unref();
-import playerCache from "../services/playermanager.ts";
-const defaultMap = settings.default_map?.replace(".json", "") || "main";
+
 const mapCache: Map<
   string,
   {
@@ -1345,79 +1346,45 @@ const player = {
     if (!username) return null;
     username = username.toLowerCase();
 
-    const mainQuery = `
-      SELECT
-        a.id,
-        a.username,
-        a.map,
-        a.position,
-        a.direction,
-        a.role,
-        a.guest_mode,
-        a.stealth,
-        a.noclip,
-        a.party_id,
-        a.guild_id,
-        g.name AS guild_name,
-        p.permissions,
-        s.max_health,
-        s.health,
-        s.max_stamina,
-        s.stamina,
-        s.xp,
-        s.max_xp,
-        s.level,
-        s.stat_critical_damage,
-        s.stat_critical_chance,
-        s.stat_armor,
-        s.stat_damage,
-        s.stat_health,
-        s.stat_stamina,
-        s.stat_avoidance,
-        c.copper,
-        c.silver,
-        c.gold,
-        f.friends,
-        cc.fps,
-        cc.music_volume,
-        cc.effects_volume,
-        cc.muted,
-        cc.hotbar_config,
-        cc.inventory_config,
-        ql.completed_quests,
-        ql.incomplete_quests,
-        eq.head AS eq_head,
-        eq.body AS eq_body,
-        eq.helmet AS eq_helmet,
-        eq.necklace AS eq_necklace,
-        eq.shoulderguards AS eq_shoulderguards,
-        eq.chestplate AS eq_chestplate,
-        eq.wristguards AS eq_wristguards,
-        eq.gloves AS eq_gloves,
-        eq.belt AS eq_belt,
-        eq.pants AS eq_pants,
-        eq.boots AS eq_boots,
-        eq.ring_1 AS eq_ring_1,
-        eq.ring_2 AS eq_ring_2,
-        eq.trinket_1 AS eq_trinket_1,
-        eq.trinket_2 AS eq_trinket_2,
-        weapon
-      FROM accounts a
-      LEFT JOIN permissions p ON a.username = p.username
-      LEFT JOIN stats s ON a.username = s.username
-      LEFT JOIN currency c ON a.username = c.username
-      LEFT JOIN friendslist f ON a.username = f.username
-      LEFT JOIN clientconfig cc ON a.username = cc.username
-      LEFT JOIN quest_log ql ON a.username = ql.username
-      LEFT JOIN equipment eq ON a.username = eq.username
-      LEFT JOIN guilds g ON a.guild_id = g.id
-      WHERE a.username = ?
+    const accountQuery = `
+      SELECT a.id, a.username, a.map, a.position, a.direction, a.role,
+             a.guest_mode, a.stealth, a.noclip, a.party_id, a.guild_id
+      FROM accounts a WHERE a.username = ?
     `;
 
-    const result = await query(mainQuery, [username]) as any[];
+    const result = await query(accountQuery, [username]) as any[];
     if (!result || result.length === 0) return null;
 
     const data = result[0];
+
+    const [
+      statsResult,
+      permsResult,
+      currencyResult,
+      friendsResult,
+      configResult,
+      questResult,
+      equipResult,
+      guildResult,
+    ] = await Promise.all([
+      query("SELECT max_health, health, max_stamina, stamina, xp, max_xp, level, stat_critical_damage, stat_critical_chance, stat_armor, stat_damage, stat_health, stat_stamina, stat_avoidance FROM stats WHERE username = ?", [username]) as Promise<any[]>,
+      query("SELECT permissions FROM permissions WHERE username = ?", [username]) as Promise<any[]>,
+      query("SELECT copper, silver, gold FROM currency WHERE username = ?", [username]) as Promise<any[]>,
+      query("SELECT friends FROM friendslist WHERE username = ?", [username]) as Promise<any[]>,
+      query("SELECT fps, music_volume, effects_volume, muted, hotbar_config, inventory_config FROM clientconfig WHERE username = ?", [username]) as Promise<any[]>,
+      query("SELECT completed_quests, incomplete_quests FROM quest_log WHERE username = ?", [username]) as Promise<any[]>,
+      query("SELECT head, body, helmet, necklace, shoulderguards, chestplate, wristguards, gloves, belt, pants, boots, ring_1, ring_2, trinket_1, trinket_2, weapon FROM equipment WHERE username = ?", [username]) as Promise<any[]>,
+      data.guild_id ? query("SELECT name AS guild_name FROM guilds WHERE id = ?", [data.guild_id]) as Promise<any[]> : Promise.resolve([]),
+    ]);
+
+    const stats = statsResult?.[0] || {};
+    const perms = permsResult?.[0]?.permissions || [];
+    const currency = currencyResult?.[0] || {};
+    const friends = friendsResult?.[0]?.friends || "";
+    const config = configResult?.[0] || {};
+    const quests = questResult?.[0] || {};
+    const equip = equipResult?.[0] || {};
+    const guild = guildResult?.[0] || {};
 
     return {
       id: data.id,
@@ -1430,68 +1397,68 @@ const player = {
           direction: data.direction || "down"
         }
       },
-      permissions: data.permissions || [],
+      permissions: perms,
       stats: {
-        max_health: data.max_health,
-        total_max_health: data.max_health,
-        health: data.health,
-        max_stamina: data.max_stamina,
-        total_max_stamina: data.max_stamina,
-        stamina: data.stamina,
-        xp: data.xp,
-        max_xp: data.max_xp,
-        level: data.level,
-        stat_critical_chance: data.stat_critical_chance || 0,
-        stat_critical_damage: data.stat_critical_damage || 0,
-        stat_armor: data.stat_armor || 0,
-        stat_damage: data.stat_damage || 0,
-        stat_health: data.stat_health || 0,
-        stat_stamina: data.stat_stamina || 0,
-        stat_avoidance: data.stat_avoidance || 0,
+        max_health: stats.max_health,
+        total_max_health: stats.max_health,
+        health: stats.health,
+        max_stamina: stats.max_stamina,
+        total_max_stamina: stats.max_stamina,
+        stamina: stats.stamina,
+        xp: stats.xp,
+        max_xp: stats.max_xp,
+        level: stats.level,
+        stat_critical_chance: stats.stat_critical_chance || 0,
+        stat_critical_damage: stats.stat_critical_damage || 0,
+        stat_armor: stats.stat_armor || 0,
+        stat_damage: stats.stat_damage || 0,
+        stat_health: stats.stat_health || 0,
+        stat_stamina: stats.stat_stamina || 0,
+        stat_avoidance: stats.stat_avoidance || 0,
         absorbtion: 0
       },
       currency: {
-        copper: data.copper || 0,
-        silver: data.silver || 0,
-        gold: data.gold || 0
+        copper: currency.copper || 0,
+        silver: currency.silver || 0,
+        gold: currency.gold || 0
       },
-      friends: data.friends ? data.friends.split(",").map((f: string) => f.trim()).filter((f: string) => f !== "") : [],
+      friends: friends ? friends.split(",").map((f: string) => f.trim()).filter((f: string) => f !== "") : [],
       party_id: data.party_id,
       guild_id: data.guild_id,
-      guild_name: data.guild_name || null,
-      config: data.fps ? [{
-        fps: data.fps,
-        music_volume: data.music_volume,
-        effects_volume: data.effects_volume,
-        muted: data.muted,
-        hotbar_config: data.hotbar_config || null,
-        inventory_config: data.inventory_config || null
+      guild_name: guild.guild_name || null,
+      config: config.fps ? [{
+        fps: config.fps,
+        music_volume: config.music_volume,
+        effects_volume: config.effects_volume,
+        muted: config.muted,
+        hotbar_config: config.hotbar_config || null,
+        inventory_config: config.inventory_config || null
       }] : [],
       questlog: {
-        completed: data.completed_quests ? data.completed_quests.split(",") : [],
-        incomplete: data.incomplete_quests ? data.incomplete_quests.split(",") : []
+        completed: quests.completed_quests ? quests.completed_quests.split(",") : [],
+        incomplete: quests.incomplete_quests ? quests.incomplete_quests.split(",") : []
       },
       isAdmin: data.role === 1,
       isGuest: data.guest_mode === 1,
       isStealth: data.stealth === 1,
       isNoclip: data.noclip === 1,
       equipment: {
-        head: data.eq_head,
-        body: data.eq_body,
-        helmet: data.eq_helmet,
-        necklace: data.eq_necklace,
-        shoulderguards: data.eq_shoulderguards,
-        chestplate: data.eq_chestplate,
-        wristguards: data.eq_wristguards,
-        gloves: data.eq_gloves,
-        belt: data.eq_belt,
-        pants: data.eq_pants,
-        boots: data.eq_boots,
-        ring_1: data.eq_ring_1,
-        ring_2: data.eq_ring_2,
-        trinket_1: data.eq_trinket_1,
-        trinket_2: data.eq_trinket_2,
-        weapon: data.weapon
+        head: equip.head,
+        body: equip.body,
+        helmet: equip.helmet,
+        necklace: equip.necklace,
+        shoulderguards: equip.shoulderguards,
+        chestplate: equip.chestplate,
+        wristguards: equip.wristguards,
+        gloves: equip.gloves,
+        belt: equip.belt,
+        pants: equip.pants,
+        boots: equip.boots,
+        ring_1: equip.ring_1,
+        ring_2: equip.ring_2,
+        trinket_1: equip.trinket_1,
+        trinket_2: equip.trinket_2,
+        weapon: equip.weapon
       }
     };
   },

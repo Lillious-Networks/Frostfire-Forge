@@ -554,7 +554,16 @@ declare interface Entity {
   sprite_feet: Nullable<string>;
   sprite_legs: Nullable<string>;
   sprite_weapon: Nullable<string>;
+  entity_type?: 'normal' | 'boss';
+  loot_table_id?: number | null;
   initialize: Nullable<() => Promise<void>>;
+}
+
+declare interface LootTableEntry {
+  itemName: string; minQuantity: number; maxQuantity: number; dropChance: number; quality?: string;
+}
+declare interface LootRollResult {
+  index: number; itemName: string; quantity: number; quality: string; iconUrl: string;
 }
 
 declare interface PluginHandlerFn {

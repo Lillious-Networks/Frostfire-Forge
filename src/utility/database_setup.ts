@@ -311,7 +311,8 @@ const createPermissionTypesTable = async () => {
         ('tools.tile_editor'),
         ('tools.npc_editor'),
         ('tools.entity_editor'),
-        ('tools.particle_editor')
+        ('tools.particle_editor'),
+        ('admin.loot')
     `;
     await query(insertPermissionsSql);
   } else {
@@ -376,7 +377,9 @@ const createEntitiesTable = async () => {
       max_health INT DEFAULT 100,
       aggro_range INT DEFAULT 300,
       speed DECIMAL(5,2) DEFAULT 2.0,
-      aggro_leash INT DEFAULT 600
+      aggro_leash INT DEFAULT 600,
+      entity_type VARCHAR(50) DEFAULT 'normal',
+      loot_table_id INT DEFAULT NULL
     )
   `;
   await query(sql);
@@ -669,6 +672,28 @@ const createBagsTable = async () => {
   await query(sql);
 };
 
+const createLootTablesTable = async () => {
+  log.info("Creating loot_tables table...");
+  await query(`CREATE TABLE IF NOT EXISTS loot_tables (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+    name VARCHAR(255) NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+};
+
+const createLootTableItemsTable = async () => {
+  log.info("Creating loot_table_items table...");
+  await query(`CREATE TABLE IF NOT EXISTS loot_table_items (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+    loot_table_id INT NOT NULL,
+    item_name VARCHAR(255) NOT NULL,
+    min_quantity INT DEFAULT 1,
+    max_quantity INT DEFAULT 1,
+    drop_chance DECIMAL(5,2) DEFAULT 100.00,
+    quality VARCHAR(50) DEFAULT 'common'
+  )`);
+};
+
 const insertDemoAccount = async () => {
   log.info("Inserting demo account...");
   const checkSql = `SELECT COUNT(*) as count FROM accounts WHERE username = 'demo_user'`;
@@ -871,6 +896,7 @@ const createIndexes = async () => {
     ,{ name: "idx_entity_spawn_points_map", sql: "CREATE INDEX idx_entity_spawn_points_map ON entity_spawn_points(map)" }
 
     ,{ name: "idx_entity_spawn_points_template", sql: "CREATE INDEX idx_entity_spawn_points_template ON entity_spawn_points(entity_template_id)" }
+    ,{ name: "idx_loot_tables_name", sql: "CREATE INDEX idx_loot_tables_name ON loot_tables(name)" }
   ];
 
   for (const index of indexes) {
@@ -933,6 +959,8 @@ const setupDatabase = async () => {
   await createLearnedSpellsTable();
   await createEquipmentTable();
   await createBagsTable();
+  await createLootTablesTable();
+  await createLootTableItemsTable();
   await insertDemoAccount();
   await insertDemoStats();
   await insertDemoClientConfig();

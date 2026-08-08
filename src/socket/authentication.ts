@@ -45,9 +45,11 @@ const authentication = {
                 }
             }
 
-            const inventoryData = await query("SELECT item, quantity, equipped, slot, bag_slot FROM inventory WHERE username = ?", [username]) as any[];
-            const collectablesData = await collectables.list(username) as unknown as Collectable[];
-            const learnedSpellsData = await query("SELECT spell FROM learned_spells WHERE username = ?", [username]) as any[];
+            const [inventoryData, collectablesData, learnedSpellsData] = await Promise.all([
+                query("SELECT item, quantity, equipped, slot, bag_slot FROM inventory WHERE username = ?", [username]) as Promise<any[]>,
+                collectables.list(username) as Promise<Collectable[]>,
+                query("SELECT spell FROM learned_spells WHERE username = ?", [username]) as Promise<any[]>,
+            ]);
 
             collectablesData.filter((c) => c.type === "mount" && !mounts.some((m: Mount) => m.name === c.item)).forEach((invalidMount) => {
                 collectablesData.splice(collectablesData.indexOf(invalidMount), 1);
@@ -86,9 +88,10 @@ const authentication = {
                 })
             );
 
-            const partyMembers = playerData.party_id ? await parties.getPartyMembers(Number(playerData.party_id)) : null;
-
-            const guildMembers = playerData.guild_id ? await guilds.getGuildMembers(Number(playerData.guild_id)) : null;
+            const [partyMembers, guildMembers] = await Promise.all([
+                playerData.party_id ? parties.getPartyMembers(Number(playerData.party_id)) : null,
+                playerData.guild_id ? guilds.getGuildMembers(Number(playerData.guild_id)) : null,
+            ]);
 
             playerData.inventory = playerInventoryData;
             playerData.party = partyMembers || [];

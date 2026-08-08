@@ -249,6 +249,16 @@ export const packetManager = {
       )
     ] as any[];
   },
+  loadNpcs: (npcs: any[]) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "LOAD_NPCS",
+          data: { npcs },
+        })
+      )
+    ] as any[];
+  },
   loadMap: (data: any) => {
     return [
       packet.encode(
@@ -834,6 +844,16 @@ export const packetManager = {
       )
     ] as any[];
   },
+  loadEntities: (entities: any[]) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "LOAD_ENTITIES",
+          data: { entities },
+        })
+      )
+    ] as any[];
+  },
   entityList: (entities: any[]) => {
     return [
       packet.encode(
@@ -905,9 +925,39 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "LOOT_SPAWN", data })),
     ] as any[];
   },
+  loadLoot: (lootItems: any[]) => {
+    return [
+      packet.encode(JSON.stringify({ type: "LOAD_LOOT", data: { loot: lootItems } })),
+    ] as any[];
+  },
   lootDespawn: (id: string) => {
     return [
       packet.encode(JSON.stringify({ type: "LOOT_DESPAWN", data: { id } })),
+    ] as any[];
+  },
+  lootChestSpawn: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "LOOT_CHEST_SPAWN", data })),
+    ] as any[];
+  },
+  lootChestDespawn: (chestId: string) => {
+    return [
+      packet.encode(JSON.stringify({ type: "LOOT_CHEST_DESPAWN", data: { id: chestId } })),
+    ] as any[];
+  },
+  lootChestContents: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "LOOT_CHEST_CONTENTS", data })),
+    ] as any[];
+  },
+  toggleLootEditor: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "TOGGLE_LOOT_EDITOR", data: null })),
+    ] as any[];
+  },
+  lootTableList: (tables: any[]) => {
+    return [
+      packet.encode(JSON.stringify({ type: "LOOT_TABLE_LIST", data: { tables } })),
     ] as any[];
   },
 };

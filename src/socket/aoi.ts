@@ -272,6 +272,10 @@ export async function updatePlayerAOI(
       currentMap
     );
 
+    if (AOI_CONFIG.USE_SPATIAL_GRID) {
+      spatialGrid.updatePlayer(player.id, currentPos.x, currentPos.y, currentMap);
+    }
+
     if (player.aoi.mapChangeSequence !== currentSequence) {
       return;
     }

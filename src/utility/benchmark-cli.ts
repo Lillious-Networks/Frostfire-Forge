@@ -27,16 +27,25 @@ function parseArgs() {
     const config = {
         clients: 50,
         duration: 60,
+        rate: 0,
         websocketUrl: defaultWebsocketUrl,
         host: effectiveHost,
         gatewayEnabled: gatewayEnabled,
         gatewayUrl: defaultGatewayUrl,
         realmId: undefined as string | undefined,
+        ssl: useSSL,
         help: false
     };
 
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
+
+        // Positional: first numeric arg is client count
+        if (i === 0 && /^\d+$/.test(arg)) {
+            config.clients = Math.max(1, parseInt(arg) || 50);
+            continue;
+        }
+
         switch (arg) {
             case '--clients':
                 config.clients = Math.max(1, parseInt(args[++i]) || 50);
@@ -57,6 +66,12 @@ function parseArgs() {
                 config.gatewayUrl = args[++i] || defaultGatewayUrl;
                 config.gatewayEnabled = true;
                 break;
+            case '--ssl':
+                config.ssl = true;
+                break;
+            case '--rate':
+                config.rate = Math.max(1, parseInt(args[++i]) || 5);
+                break;
             case '--realm':
                 config.realmId = args[++i];
                 break;
@@ -64,6 +79,13 @@ function parseArgs() {
                 config.help = true;
                 break;
         }
+    }
+
+    // Rebuild URLs based on final SSL setting
+    if (config.ssl) {
+        config.websocketUrl = `wss://localhost:${wsPort}`;
+        const sslHost = process.env.PUBLIC_HOST || process.env.SERVER_HOST || 'localhost';
+        config.host = `https://${sslHost}`;
     }
 
     return config;
@@ -74,36 +96,32 @@ function showHelp() {
 Frostfire Forge - CLI Benchmark Tool
 
 Usage:
-  bun --env-file=<env-file> src/utility/benchmark-cli.ts [options]
+  bun benchmark [player count] [options]
+  bun benchmark:development <player count> [options]
+  bun benchmark:production <player count> [options]
+
+Positional Args:
+  <player count>       Number of concurrent players (default: 50)
 
 Options:
-  --clients <number>     Number of concurrent clients (min: 1, default: 50, no limit)
-  --duration <number>    Test duration in seconds (min: 10, default: 60, no limit)
-  --host <url>          HTTP host URL for API calls (guest-login, etc.)
-  --ws <url>            WebSocket URL (default: ws://localhost:3000 or wss:// if SSL enabled)
-  --gateway             Enable gateway load balancer routing
-  --gateway-url <url>   Gateway HTTP URL (default from GATEWAY_URL env or http://localhost:9999)
-  --realm <id>          Specific realm/server ID to benchmark (optional)
-  --help                Show this help message
-
-Environment Variables:
-  WEB_SOCKET_PORT       WebSocket port (default: 3000)
-  WEB_SOCKET_USE_SSL    Use SSL for WebSocket (true/false)
-  GATEWAY_ENABLED       Enable gateway routing (true/false)
-  GATEWAY_URL           Gateway HTTP URL (e.g., http://localhost:9999)
+  --ssl               Use HTTPS/WSS (force secure connections)
+  --rate <conns/sec>  Connection rate per second (default: 3/sec, higher = faster ramp-up)
+  --clients <number>  Number of concurrent clients (overrides positional, min: 1, default: 50)
+  --duration <number> Test duration in seconds (min: 10, default: 60)
+  --host <url>        HTTP host URL for API calls (guest-login, etc.)
+  --ws <url>          WebSocket URL (default: ws://localhost:3000 or wss:// if SSL enabled)
+  --gateway           Enable gateway load balancer routing
+  --gateway-url <url> Gateway HTTP URL (default from GATEWAY_URL env or http://localhost:9999)
+  --realm <id>        Specific realm/server ID to benchmark (optional)
+  --help              Show this help message
 
 Examples:
-  # Direct connection with automatic realm selection (distributes clients across all realms)
-  bun --env-file=.env.production src/utility/benchmark-cli.ts --clients 100 --duration 120
-
-  # Benchmark a specific realm
-  bun --env-file=.env.production src/utility/benchmark-cli.ts --clients 50 --realm server-1
-
-  # Connect through gateway
-  bun --env-file=.env.local src/utility/benchmark-cli.ts --clients 50 --gateway
-
-  # Connect through gateway with custom URL
-  bun --env-file=.env.local src/utility/benchmark-cli.ts --clients 100 --gateway-url ws://gateway.example.com:9000
+  bun benchmark 100
+  bun benchmark 100 --ssl
+  bun benchmark 100 --ssl --rate 20
+  bun benchmark 50 --duration 120
+  bun benchmark:development 200 --ssl --gateway
+  bun benchmark:production 500 --realm server-1 --duration 300
 `);
 }
 
@@ -386,7 +404,7 @@ async function createClients(amount: number, host: string, websocketUrl: string,
 
         const clientPromises = [];
         const batchSize = 1;
-        const batchDelay = 300;
+        const batchDelay = config.rate > 0 ? Math.round(1000 / config.rate) : 300;
 
         for (let i = 0; i < amount; i++) {
             const clientPromise = (async () => {
@@ -576,6 +594,8 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
 
     console.log(`  ${chalk.bold('Clients:')}  ${chalk.white(config.clients)}`);
     console.log(`  ${chalk.bold('Duration:')} ${chalk.white(config.duration + 's')}`);
+    console.log(`  ${chalk.bold('SSL:')}      ${config.ssl ? chalk.green('Enabled (wss/https)') : chalk.gray('Disabled (ws/http)')}`);
+    console.log(`  ${chalk.bold('Rate:')}     ${config.rate > 0 ? chalk.white(config.rate + '/sec') : chalk.gray('default (3/sec)')}`);
     console.log(`  ${chalk.bold('Host:')}     ${chalk.blue(config.host)}`);
 
     if (config.gatewayEnabled) {

@@ -19,8 +19,8 @@ const entities = {
     const response = await query(
       `INSERT INTO entities (last_updated, map, name, position, aggro_type, level, max_health,
         particles, sprite_type, sprite_body, sprite_head, sprite_helmet, sprite_shoulderguards, sprite_neck,
-        sprite_hands, sprite_chest, sprite_feet, sprite_legs, sprite_weapon, aggro_range, speed, aggro_leash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        sprite_hands, sprite_chest, sprite_feet, sprite_legs, sprite_weapon, aggro_range, speed, aggro_leash, entity_type, loot_table_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         last_updated,
         entity.map,
@@ -44,6 +44,8 @@ const entities = {
         (entity as any).aggro_range || 300,
         (entity as any).speed || 2.0,
         (entity as any).aggro_leash || 600,
+        (entity as any).entity_type || 'normal',
+        (entity as any).loot_table_id || null,
       ]
     );
 
@@ -98,6 +100,8 @@ const entities = {
         aggro_range: entity?.aggro_range || 300,
         speed: entity?.speed || 6.0,
         aggro_leash: entity?.aggro_leash || 600,
+        entity_type: (entity as any)?.entity_type || 'normal',
+        loot_table_id: (entity as any)?.loot_table_id || null,
       } as any);
     }
 
@@ -130,7 +134,7 @@ const entities = {
         level = ?, max_health = ?, particles = ?, sprite_type = ?, sprite_body = ?, sprite_head = ?,
         sprite_helmet = ?, sprite_shoulderguards = ?, sprite_neck = ?, sprite_hands = ?,
         sprite_chest = ?, sprite_feet = ?, sprite_legs = ?, sprite_weapon = ?,
-        aggro_range = ?, speed = ?, aggro_leash = ? WHERE id = ?`,
+        aggro_range = ?, speed = ?, aggro_leash = ?, entity_type = ?, loot_table_id = ? WHERE id = ?`,
       [
         last_updated,
         entity.map,
@@ -155,6 +159,8 @@ const entities = {
         (entity as any).aggro_range || 300,
         (entity as any).speed || 2.0,
         (entity as any).aggro_leash || 600,
+        (entity as any).entity_type || 'normal',
+        (entity as any).loot_table_id || null,
         entity.id,
       ]
     );

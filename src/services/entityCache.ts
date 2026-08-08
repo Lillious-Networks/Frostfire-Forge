@@ -18,9 +18,9 @@ const entityCache = {
       // Set all entities to max health (health is only stored in cache, not database)
       // Set isMoving to false (entities start idle)
       cachedEntities = entities.map((entity: any) => ({
-        ...entity,
-        health: entity.max_health,
-        isMoving: false,
+        ...entity, health: entity.max_health, isMoving: false,
+        entity_type: entity.entity_type || 'normal',
+        loot_table_id: entity.loot_table_id || null,
       })) || [];
       isLoaded = true;
       log.success(`Loaded ${cachedEntities.length} entities`);

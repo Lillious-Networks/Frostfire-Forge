@@ -114,9 +114,9 @@ export async function spawnEntityAtPoint(spawnPoint: SpawnPoint): Promise<any> {
       sprite_feet: (templateEntity as any).sprite_feet,
       sprite_legs: (templateEntity as any).sprite_legs,
       sprite_weapon: (templateEntity as any).sprite_weapon,
-      isMoving: null,
-      hasMoved: null,
-      tileSize: null,
+      isMoving: null, hasMoved: null, tileSize: null,
+      entity_type: (templateEntity as any).entity_type || 'normal',
+      loot_table_id: (templateEntity as any).loot_table_id || null,
       initialize: null,
     };
 

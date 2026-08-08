@@ -9,6 +9,7 @@ import { setPlayerPvp } from "./events";
 import { getEntitySpriteLayers, getIconUrl } from "../modules/spriteSheetManager";
 import assetCache from "../services/assetCache";
 import * as settings from "../config/settings.json";
+import lootChest from "./lootChest";
 import {
   hasLineOfSight,
   getDistance,
@@ -1148,6 +1149,19 @@ async function handleEntityDeath(entity: any): Promise<void> {
     const existingTimer = entityRespawnTimers.get(entity.id);
     if (existingTimer) {
       clearTimeout(existingTimer);
+    }
+
+    if (entity.entity_type === 'boss' && entity.loot_table_id) {
+      const chestId = lootChest.spawn(entity.map, entity.position.x, entity.position.y, entity.loot_table_id, undefined, "entity_death");
+      const allPlayers = Object.values(playerCache.list()) as any[];
+      const playersOnMap = allPlayers.filter((p: any) => p && p.location && p.location.map === entity.map && p.ws);
+      if (playersOnMap.length > 0) {
+        broadcastToAOI(playersOnMap[0], packetManager.lootChestSpawn({
+          id: chestId, x: entity.position.x, y: entity.position.y,
+          iconUrl: getIconUrl("loot_chest"), map: entity.map,
+        }), true);
+      }
+      log.info(`Boss ${entity.id} (${entity.name}) died - chest ${chestId} spawned`);
     }
 
     const respawnTimer = setTimeout(async () => {

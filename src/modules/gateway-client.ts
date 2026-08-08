@@ -2,6 +2,12 @@
 
 import log from "./logger.ts";
 import os from "os";
+import path from "node:path";
+import fs from "node:fs";
+
+const _cert = process.env.WEB_SOCKET_CERT_PATH || path.join(import.meta.dir, "../certs/cert.pem");
+const _key = process.env.WEB_SOCKET_KEY_PATH || path.join(import.meta.dir, "../certs/key.pem");
+const useSSL = process.env.WEB_SOCKET_USE_SSL === "true" && fs.existsSync(_cert) && fs.existsSync(_key);
 
 class GatewayClient {
   private config: ServerRegistrationConfig;
@@ -40,7 +46,7 @@ class GatewayClient {
           publicHost: this.config.publicHost || this.config.host,
           port: this.config.port,
           wsPort: this.config.wsPort,
-          useSSL: process.env.WEB_SOCKET_USE_SSL === 'true',
+          useSSL: useSSL,
           maxConnections: this.config.maxConnections,
           authKey: process.env.GATEWAY_AUTH_KEY,
           whitelisted: process.env.WHITELIST === 'true'
