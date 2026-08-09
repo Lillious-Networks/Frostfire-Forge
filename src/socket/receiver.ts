@@ -913,6 +913,32 @@ export function clearTargetOnMapChange(playerId: string) {
   }
 }
 
+export function removePlayerFromCleanupMaps(playerId: string | number) {
+    const id = Number(playerId);
+    chatRateLimit.delete(id);
+    draggedPlayersMap.delete(id);
+
+    for (const [mapName, editors] of activeEditorsByMap.entries()) {
+        editors.delete(id);
+        if (editors.size === 0) activeEditorsByMap.delete(mapName);
+    }
+
+    for (const [mapName, history] of editorEditHistory.entries()) {
+        const filtered = history.filter(e => e.senderId !== id);
+        if (filtered.length === 0) {
+            editorEditHistory.delete(mapName);
+        } else {
+            editorEditHistory.set(mapName, filtered);
+        }
+    }
+}
+
+export function removeFromAuthenticationQueues(sessionId: string, token: string) {
+    pendingAuthentications.delete(sessionId);
+    authentication_queue.delete(token);
+    authentication_session_queue.delete(sessionId);
+}
+
 export async function teleportPlayerWrapper(playerObj: any, mapName: string, x: number, y: number): Promise<void> {
   const ws = playerObj.ws;
   if (!ws) return;

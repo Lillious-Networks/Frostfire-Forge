@@ -6,7 +6,7 @@ import "../utility/validate_config.ts";
 import crypto from "crypto";
 import { packetManager } from "./packet_manager.ts";
 import { packetTypes } from "./types.ts";
-import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady, teleportPlayerWrapper } from "./receiver.ts";
+import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady, teleportPlayerWrapper, removePlayerFromCleanupMaps, removeFromAuthenticationQueues } from "./receiver.ts";
 import eventEmitter from "node:events";
 import { listener } from "../modules/event_bus.ts";
 import { Events, setPlayerPvp } from "../systems/events";
@@ -35,6 +35,7 @@ import spellEffects, { getStunsForPlayer, getSlowsForPlayer } from "../systems/s
 import effectManager from "../services/effectmanager";
 import { GatewayClient } from "../modules/gateway-client.ts";
 import loot from "../systems/loot";
+import cooldownManager from "../services/cooldownmanager";
 
 const _cert = process.env.WEB_SOCKET_CERT_PATH || path.join(import.meta.dir, "../certs/cert.pem");
 const _key = process.env.WEB_SOCKET_KEY_PATH || path.join(import.meta.dir, "../certs/key.pem");
@@ -769,6 +770,25 @@ listener.on("onConnection", (data) => {
   if (!data) return;
 });
 
+function cleanupPlayerState(playerData: any) {
+    const id = playerData.id;
+    const username = playerData.username?.toLowerCase();
+    const map = playerData.location?.map;
+
+    gameLoop.unregisterMovingPlayer(id);
+    dots.clearDots(id);
+    spellEffects.clearStuns(id);
+    spellEffects.clearSlows(id);
+    spellEffects.clearVanishes(id);
+    playerCache.remove(id);
+    mapIndex.removePlayer(id);
+    if (map) clearBatchQueuesForPlayer(id, map);
+    clearPlayerTarget(id);
+    removePlayerFromCleanupMaps(id);
+    if (username) cooldownManager.removePlayer(username);
+    despawnPlayerFromAllAOI(playerData, "disconnect", despawnBatchQueue);
+}
+
 listener.on("onDisconnect", async (data) => {
   if (!data) return;
 
@@ -793,9 +813,6 @@ listener.on("onDisconnect", async (data) => {
       }
     }
 
-    gameLoop.unregisterMovingPlayer(playerData.id);
-
-    // Persist active effects so they survive disconnect/reconnect
     const username = playerData.username?.toLowerCase();
     if (username) {
       effectManager.saveDots(username, dots.getPlayerDots(String(playerData.id)) || []);
@@ -804,25 +821,16 @@ listener.on("onDisconnect", async (data) => {
       effectManager.saveSlows(username, getSlowsForPlayer(String(playerData.id)) || []);
     }
 
-    dots.clearDots(playerData.id);
-
-    spellEffects.clearStuns(playerData.id);
-
-    spellEffects.clearSlows(playerData.id);
-
-    spellEffects.clearVanishes(playerData.id);
-
-    playerCache.remove(playerData.id);
-
-    mapIndex.removePlayer(playerData.id);
-
     loot.scheduleCleanup(playerData.username);
 
-    clearBatchQueuesForPlayer(playerData.id, playerData.location.map);
+    cleanupPlayerState(playerData);
 
-    clearPlayerTarget(playerData.id);
-
-    despawnPlayerFromAllAOI(playerData, "disconnect", despawnBatchQueue);
+    if (playerData.ws?.data?.connectionToken) {
+        removeFromAuthenticationQueues(
+            String(playerData.ws.data.id || playerData.id),
+            playerData.ws.data.connectionToken
+        );
+    }
 
     let _worlds: WorldData[] = [];
     try {
@@ -865,7 +873,6 @@ listener.on("onDisconnect", async (data) => {
       }
     }
 
-    // Notify friends that this player is now offline
     if (playerData.friends && Array.isArray(playerData.friends) && playerData.friends.length > 0) {
       const allPlayers = playerCache.list();
       const usernameIndex = new Map<string, any>();
@@ -934,12 +941,12 @@ listener.on(Events.SAVE, async () => {
     if (row.isGuest) return { success: true, playerId, reason: "guest_skipped" };
     if (row.saveLocked) return { success: true, playerId, reason: "save_locked" };
     if (sessionInvalidSet.has(playerId)) {
-      playerCache.remove(playerId);
+      cleanupPlayerState(row);
       return { success: false, playerId, reason: "session_stolen" };
     }
 
     if (!row.stats || !row.location) {
-      playerCache.remove(playerId);
+      cleanupPlayerState(row);
       return { success: false, playerId, reason: "invalid_data" };
     }
 

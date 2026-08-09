@@ -65,6 +65,10 @@ function parseArgs() {
             case '--gateway-url':
                 config.gatewayUrl = args[++i] || defaultGatewayUrl;
                 config.gatewayEnabled = true;
+                try {
+                    const gwUrl = new URL(config.gatewayUrl);
+                    config.host = `${gwUrl.protocol}//${gwUrl.hostname}`;
+                } catch { /* keep existing host if URL is invalid */ }
                 break;
             case '--ssl':
                 config.ssl = true;
@@ -84,8 +88,15 @@ function parseArgs() {
     // Rebuild URLs based on final SSL setting
     if (config.ssl) {
         config.websocketUrl = `wss://localhost:${wsPort}`;
-        const sslHost = process.env.PUBLIC_HOST || process.env.SERVER_HOST || 'localhost';
-        config.host = `https://${sslHost}`;
+        if (config.gatewayEnabled) {
+            try {
+                const gwUrl = new URL(config.gatewayUrl);
+                config.host = `https://${gwUrl.hostname}`;
+            } catch { /* keep existing */ }
+        } else {
+            const sslHost = process.env.PUBLIC_HOST || process.env.SERVER_HOST || 'localhost';
+            config.host = `https://${sslHost}`;
+        }
     }
 
     return config;
@@ -163,11 +174,12 @@ function log(message: string, level: 'info' | 'error' | 'success' | 'warn' = 'in
     console.log(`${timestamp} ${prefix} ${message}`);
 }
 
-async function fetchAvailableServers(host: string, isGateway: boolean): Promise<any[]> {
+async function fetchAvailableServers(host: string): Promise<any[]> {
     try {
 
-        const endpoint = isGateway ? '/status' : '/api/gateway/servers';
-        const response = await fetch(`${host}${endpoint}`, {
+        const endpoint = '/api/gateway/servers';
+        const url = `${host}${endpoint}`;
+        const response = await fetch(url, {
             method: 'GET',
             headers: {
                 'Content-Type': 'application/json',
@@ -177,13 +189,25 @@ async function fetchAvailableServers(host: string, isGateway: boolean): Promise<
         });
 
         if (!response.ok) {
-            throw new Error(`Server list fetch failed: ${response.status}`);
+            const text = await response.text();
+            log(`Server list HTTP ${response.status}: ${text.substring(0, 200)}`, 'warn');
+            return [];
         }
 
-        const data = await response.json();
-        return data.servers || [];
+        const text = await response.text();
+        let data: any;
+        try {
+            data = JSON.parse(text);
+        } catch {
+            log(`Server list response not JSON (${response.status}): ${text.substring(0, 200)}`, 'warn');
+            return [];
+        }
+        log(`Gateway servers response: ${JSON.stringify(data).substring(0, 300)}`, 'info');
+        if (Array.isArray(data)) return data;
+        if (Array.isArray(data.servers)) return data.servers;
+        return [];
     } catch (error: any) {
-        log(`Failed to fetch server list: ${error.message}`, 'warn');
+        log(`Failed to fetch server list from ${host}: ${error.message}`, 'warn');
         return [];
     }
 }
@@ -317,7 +341,7 @@ async function createClients(amount: number, host: string, websocketUrl: string,
     let availableServers: any[] = [];
     if (config.gatewayEnabled) {
 
-        availableServers = await fetchAvailableServers(config.gatewayUrl, true);
+        availableServers = await fetchAvailableServers(config.gatewayUrl);
         if (availableServers.length > 0) {
             log(`Found ${availableServers.length} server(s) from gateway`, 'info');
 
@@ -338,7 +362,7 @@ async function createClients(amount: number, host: string, websocketUrl: string,
         }
     } else {
 
-        availableServers = await fetchAvailableServers(host, false);
+        availableServers = await fetchAvailableServers(host);
         if (availableServers.length > 0) {
             log(`Found ${availableServers.length} available realm(s)`, 'info');
 
@@ -460,6 +484,13 @@ async function createClients(amount: number, host: string, websocketUrl: string,
                     const protocol = selectedServer.useSSL ? 'wss' : 'ws';
                     const hostName = selectedServer.publicHost?.replace(/^https?:\/\//, '') || selectedServer.host;
                     finalWebsocketUrl = `${protocol}://${hostName}:${selectedServer.wsPort}`;
+                } else if (config.gatewayEnabled) {
+                    try {
+                        const gwUrl = new URL(config.gatewayUrl);
+                        const protocol = gwUrl.protocol === 'https:' ? 'wss' : 'ws';
+                        finalWebsocketUrl = `${protocol}://${gwUrl.hostname}`;
+                        if (gwUrl.port) finalWebsocketUrl += `:${gwUrl.port}`;
+                    } catch { /* keep default websocketUrl */ }
                 }
 
                 const wsUrlWithAuth = new URL(finalWebsocketUrl);
@@ -611,13 +642,6 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
         }
     }
 
-    if (process.env.WEB_SOCKET_PORT || process.env.WEB_SOCKET_USE_SSL || process.env.GATEWAY_ENABLED) {
-        console.log('\n  ' + chalk.dim('Environment:'));
-        if (process.env.WEB_SOCKET_PORT) console.log(`  ${chalk.dim('WEB_SOCKET_PORT:')} ${chalk.dim(process.env.WEB_SOCKET_PORT)}`);
-        if (process.env.WEB_SOCKET_USE_SSL) console.log(`  ${chalk.dim('WEB_SOCKET_USE_SSL:')} ${chalk.dim(process.env.WEB_SOCKET_USE_SSL)}`);
-        if (process.env.GATEWAY_ENABLED) console.log(`  ${chalk.dim('GATEWAY_ENABLED:')} ${chalk.dim(process.env.GATEWAY_ENABLED)}`);
-        if (process.env.GATEWAY_URL) console.log(`  ${chalk.dim('GATEWAY_URL:')} ${chalk.dim(process.env.GATEWAY_URL)}`);
-    }
     console.log('\n' + chalk.gray('─'.repeat(60)) + '\n');
 
     log('Starting benchmark...', 'info');

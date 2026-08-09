@@ -49,6 +49,11 @@ const cooldownManager = {
     setLockout(username: string, endTime: number): void {
         this._spellLockouts.set(username, endTime);
     },
+
+    removePlayer(username: string): void {
+        this._spellCooldowns.delete(username);
+        this._spellLockouts.delete(username);
+    },
 };
 
 export default cooldownManager;
