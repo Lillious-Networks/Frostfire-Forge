@@ -276,11 +276,16 @@ function flushMovementBatches() {
     if (playerMovements.size === 0) continue;
 
     const allPlayers = playerCache.list();
+    const mapPlayerIds = mapIndex.getPlayersOnMap(_mapName);
+    const mapPlayers: Record<string, any> = {};
+    for (const id of mapPlayerIds) {
+      if (allPlayers[id]) mapPlayers[id] = allPlayers[id];
+    }
 
     const receiverSets = new Map<string, Set<string>>();
 
-    for (const playerId in allPlayers) {
-      const player = allPlayers[playerId];
+    for (const playerId in mapPlayers) {
+      const player = mapPlayers[playerId];
       if (!player || !player.aoi) continue;
 
       const receivers = new Set<string>([playerId]);
