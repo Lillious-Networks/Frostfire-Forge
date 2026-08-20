@@ -150,7 +150,7 @@ let lastFlushTime = Date.now();
 let flushCount = 0;
 
 // Track recent flush latencies for adaptive batch scheduling
-const LATENCY_HISTORY_SIZE = 20; // Keep last 20 flushes
+const LATENCY_HISTORY_SIZE = 5; // Keep last 5 flushes for fast recovery
 const recentFlushLatencies: number[] = [];
 
 /**
@@ -240,9 +240,9 @@ function getAdaptiveBatchInterval(): number {
   } else if (avgLatency < 40) {
     return 100; // 30-40ms: 10 Hz - aggressive throttling
   } else if (avgLatency < 50) {
-    return 130; // 40-50ms: 7 Hz - very aggressive
+    return 80; // 40-50ms: 12 Hz - aggressive throttling
   } else {
-    return 170; // 50+ms: 5 Hz - maximum stability
+    return 100; // 50+ms: 10 Hz - maximum stability
   }
 }
 
@@ -1725,6 +1725,8 @@ export default async function packetReceiver(
       case "MOVEXY": {
         if (!currentPlayer) return;
 
+        await player.preloadMapCollision(currentPlayer.location.map);
+
         const baseSpeed = 6;
         const mountSpeedMultiplier = 1.35;
         const lastDirection =
@@ -1804,9 +1806,7 @@ export default async function packetReceiver(
           currentPlayer.casting || false
         );
 
-        if (gameLoop.isPlayerMoving(currentPlayer.id)) {
-          gameLoop.unregisterMovingPlayer(currentPlayer.id);
-        }
+        const wasAlreadyMoving = gameLoop.isPlayerMoving(currentPlayer.id);
 
         const movePlayer = async () => {
 
@@ -1875,7 +1875,7 @@ export default async function packetReceiver(
           }
 
           // Round for collision detection only
-          const collision = await player.checkIfWouldCollide(
+          const collision = player.checkCollisionSync(
             currentPlayer.location.map,
             {
               x: Math.round(tempPosition.x),
@@ -1885,8 +1885,7 @@ export default async function packetReceiver(
             {
               width: playerWidth,
               height: playerHeight,
-            },
-            mapPropertiesCache
+            }
           );
 
           const isColliding = collision?.value === true;
@@ -2136,9 +2135,11 @@ export default async function packetReceiver(
           }
         };
 
-        await movePlayer();
-
         gameLoop.registerMovingPlayer(currentPlayer.id, movePlayer);
+
+        if (!wasAlreadyMoving) {
+          await movePlayer();
+        }
         break;
       }
       case "TELEPORTXY": {

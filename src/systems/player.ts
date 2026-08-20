@@ -853,6 +853,89 @@ const player = {
 
     return true;
   },
+  checkCollisionSync: function (
+    map: string,
+    position: PositionData,
+    playerProperties: PlayerProperties
+  ) {
+    const mapKey = map.replace(".json", "");
+    const mapDataCached = mapCache.get(mapKey);
+    if (!mapDataCached) return { value: true, reason: "no_map_data" as const };
+
+    const playerWidth = playerProperties.width || 32;
+    const playerHeight = playerProperties.height || 32;
+    const { warps, collisionRLE, width, height, tileWidth, tileHeight } = mapDataCached;
+
+    for (const key in warps) {
+      const warp = warps[key];
+      if (
+        position.x + playerWidth > warp.position.x &&
+        position.x < warp.position.x + warp.size.width &&
+        position.y + playerHeight > warp.position.y &&
+        position.y < warp.position.y + warp.size.height
+      ) {
+        return {
+          value: true,
+          reason: "warp_collision" as const,
+          warp: { map: warp.map, x: warp.x, y: warp.y },
+        };
+      }
+    }
+
+    const margin = 0.1;
+
+    const left = Math.floor((position.x - playerWidth / 2 + margin) / tileWidth);
+    const right = Math.floor((position.x + playerWidth / 2 - margin) / tileWidth);
+
+    const top = Math.floor((position.y - playerHeight / 2 + playerHeight / 2 + margin) / tileHeight);
+    const bottom = Math.floor((position.y + playerHeight / 2 - margin) / tileHeight);
+
+    for (let tileY = top; tileY <= bottom; tileY++) {
+      for (let tileX = left; tileX <= right; tileX++) {
+
+        if (tileX < 0 || tileY < 0 || tileX >= width || tileY >= height) continue;
+
+        const tileIndex = tileY * width + tileX;
+        const tileValue = collisionRLE ? queryRLE(collisionRLE, tileIndex) : 0;
+
+        if (tileValue !== 0) return { value: true, reason: "tile_collision" as const, tile: { x: tileX, y: tileY } };
+      }
+    }
+
+    return { value: false, reason: "no_collision" as const };
+  },
+
+  preloadMapCollision: async function (mapName: string): Promise<void> {
+    const mapKey = mapName.replace(".json", "");
+    if (mapCache.has(mapKey)) return;
+
+    const mapProperties = await assetCache.get("mapProperties") as MapProperties[];
+    const mapData = mapProperties.find((m: any) => m.name.replace(".json", "") === mapKey);
+    if (!mapData) return;
+
+    let collisionData: any;
+    try {
+      const fetched = await assetCache.getNested(mapKey, "collision");
+      collisionData = fetched !== undefined ? fetched : (await assetCache.get(mapKey))?.collision;
+      if (!collisionData || !Array.isArray(collisionData)) return;
+    } catch {
+      return;
+    }
+
+    mapCache.set(mapKey, {
+      warps: Array.isArray(mapData.warps)
+        ? Object.fromEntries(
+            (mapData.warps as WarpObject[]).map((warp, idx) => [warp.name ?? String(idx), warp])
+          )
+        : (mapData.warps || {}),
+      collisionRLE: collisionData,
+      width: collisionData[0],
+      height: collisionData[1],
+      tileWidth: mapData.tileWidth,
+      tileHeight: mapData.tileHeight,
+    });
+  },
+
   checkIfWouldCollide: async function (
     map: string,
     position: PositionData,

@@ -482,10 +482,6 @@ try {
 }
 
 setInterval(() => {
-  listener.emit(Events.UPDATE);
-}, 1000 / 60);
-
-setInterval(() => {
   listener.emit(Events.FIXED_UPDATE);
 }, 100);
 
@@ -571,8 +567,6 @@ if (settings?.websocketRatelimit?.enabled) {
     }
   }, 1000);
 }
-
-listener.on(Events.UPDATE, async () => {});
 
 listener.on(Events.FIXED_UPDATE, async () => {
   if (settings?.websocketRatelimit?.enabled) {
@@ -813,15 +807,17 @@ listener.on("onDisconnect", async (data) => {
       }
     }
 
-    const username = playerData.username?.toLowerCase();
-    if (username) {
-      effectManager.saveDots(username, dots.getPlayerDots(String(playerData.id)) || []);
-      effectManager.saveBarriers(username, playerData.barriers || []);
-      effectManager.saveStuns(username, getStunsForPlayer(String(playerData.id)) || []);
-      effectManager.saveSlows(username, getSlowsForPlayer(String(playerData.id)) || []);
-    }
+    if (!playerData.isGuest) {
+      const username = playerData.username?.toLowerCase();
+      if (username) {
+        effectManager.saveDots(username, dots.getPlayerDots(String(playerData.id)) || []);
+        effectManager.saveBarriers(username, playerData.barriers || []);
+        effectManager.saveStuns(username, getStunsForPlayer(String(playerData.id)) || []);
+        effectManager.saveSlows(username, getSlowsForPlayer(String(playerData.id)) || []);
+      }
 
-    loot.scheduleCleanup(playerData.username);
+      loot.scheduleCleanup(playerData.username);
+    }
 
     cleanupPlayerState(playerData);
 

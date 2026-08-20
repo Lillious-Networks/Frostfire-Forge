@@ -27,7 +27,7 @@ async function createWorker(): Promise<Worker> {
         workerData: { assets: serializedAssets }
     });
 
-    worker.on("error", (error) => {
+    worker.on("error", (error: Error) => {
         log.error(`[AUTH POOL] Worker error: ${error.message}`);
         const idx = authWorkers.indexOf(worker);
         if (idx >= 0) {

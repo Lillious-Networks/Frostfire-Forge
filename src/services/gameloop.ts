@@ -79,7 +79,6 @@ class GameLoop {
       const existing = this.movingPlayers.get(playerId)!;
       existing.moveCallback = moveCallback;
       existing.lastTime = performance.now();
-      existing.aoiUpdateCounter = 0;
       existing.running = false;
       return;
     }
@@ -88,7 +87,7 @@ class GameLoop {
       playerId,
       moveCallback,
       lastTime: performance.now(),
-      aoiUpdateCounter: 0,
+      aoiUpdateCounter: Math.floor(Math.random() * 10),
       running: false,
     });
   }

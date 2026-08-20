@@ -19,6 +19,7 @@ class GatewayClient {
   private maxReconnectDelay: number = 30000;
   private mapSyncPromise: Promise<void> | null = null;
   private mapSyncResolver: (() => void) | null = null;
+  private previousRtt: number | null = null;
 
   constructor(config: ServerRegistrationConfig) {
     this.config = config;
@@ -71,6 +72,7 @@ class GatewayClient {
           this.reconnectTimer = undefined;
         }
         log.success(`Successfully registered with gateway as ${this.config.serverId}`);
+        await this.sendHeartbeat();
         this.startHeartbeat();
 
         // Create a promise that resolves when map sync completes
@@ -181,51 +183,34 @@ class GatewayClient {
   private getProcessRamUsage(): number {
     const memUsage = process.memoryUsage();
 
-    return Math.round(memUsage.rss / (1024 * 1024) * 10) / 10;
+    return Math.round((memUsage.heapUsed + memUsage.external) / (1024 * 1024) * 10) / 10;
   }
+  private async sendHeartbeat(): Promise<void> {
+    try {
+      const cpuUsage = this.getCpuUsage();
+      const ramUsage = this.getProcessRamUsage();
+      const sendTime = Date.now();
+      const gatewayUrl = await this.getGatewayUrl();
 
-  private startHeartbeat() {
-    let previousRtt: number | null = null;
+      const response = await fetch(`${gatewayUrl}/heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: this.config.serverId,
+          activeConnections: this.activeConnections,
+          cpuUsage: cpuUsage,
+          ramUsage: ramUsage,
+          authKey: process.env.GATEWAY_AUTH_KEY,
+          timestamp: sendTime,
+          rtt: this.previousRtt ?? Date.now() - sendTime
+        })
+      });
 
-    this.heartbeatTimer = setInterval(async () => {
-      try {
-        const cpuUsage = this.getCpuUsage();
-        const ramUsage = this.getProcessRamUsage();
-        const sendTime = Date.now();
-        const gatewayUrl = await this.getGatewayUrl();
+      this.previousRtt = Date.now() - sendTime;
 
-        const response = await fetch(`${gatewayUrl}/heartbeat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            id: this.config.serverId,
-            activeConnections: this.activeConnections,
-            cpuUsage: cpuUsage,
-            ramUsage: ramUsage,
-            authKey: process.env.GATEWAY_AUTH_KEY,
-            timestamp: sendTime,
-            rtt: previousRtt
-          })
-        });
-
-        const receiveTime = Date.now();
-        const currentRtt = receiveTime - sendTime;
-
-        const result = await response.json();
-        if (!result.success) {
-          log.warn("Gateway heartbeat failed, reconnecting...");
-          this.registered = false;
-          if (this.heartbeatTimer) {
-            clearInterval(this.heartbeatTimer);
-            this.heartbeatTimer = undefined;
-          }
-          this.startReconnect();
-        } else {
-
-          previousRtt = currentRtt;
-        }
-      } catch (error) {
-        log.error(`Gateway heartbeat error: ${error}`);
+      const result = await response.json();
+      if (!result.success) {
+        log.warn("Gateway heartbeat failed, reconnecting...");
         this.registered = false;
         if (this.heartbeatTimer) {
           clearInterval(this.heartbeatTimer);
@@ -233,7 +218,19 @@ class GatewayClient {
         }
         this.startReconnect();
       }
-    }, this.config.heartbeatInterval);
+    } catch (error) {
+      log.error(`Gateway heartbeat error: ${error}`);
+      this.registered = false;
+      if (this.heartbeatTimer) {
+        clearInterval(this.heartbeatTimer);
+        this.heartbeatTimer = undefined;
+      }
+      this.startReconnect();
+    }
+  }
+
+  private startHeartbeat() {
+    this.heartbeatTimer = setInterval(() => this.sendHeartbeat(), this.config.heartbeatInterval);
   }
 
   setActiveConnections(count: number) {
