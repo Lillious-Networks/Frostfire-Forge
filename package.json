@@ -7,9 +7,9 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
-    "@types/bun": "latest",
+    "@types/bun": "npm:bun-types@latest",
     "@types/eslint__js": "^9.14.0",
-    "@types/node": "latest",
+    "@types/node": "npm:@types/node@latest",
     "chalk": "^5.6.2",
     "eslint": "^9.39.5",
     "husky": "^9.1.7",
