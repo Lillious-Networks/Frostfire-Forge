@@ -56,11 +56,11 @@ export default (async () => {
     );
   }
 
-  if (!process.env.WEB_SOCKET_PORT) {
+  if (!process.env.GAME_PORT) {
     startUpWarnings.push(
-      "No websocket port is set, defaulting to 3000. Please set the WEB_SOCKET_PORT environment variable to suppress this message."
+      "No game port is set, defaulting to 3000. Please set the GAME_PORT environment variable to suppress this message."
     );
-    process.env.WEB_SOCKET_PORT = "3000";
+    process.env.GAME_PORT = "3000";
   }
 
   if (process.env.SESSION_KEY) {

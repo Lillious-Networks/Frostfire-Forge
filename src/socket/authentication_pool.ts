@@ -2,7 +2,7 @@ import { Worker } from "worker_threads";
 import assetCache from "../services/assetCache";
 import log from "../modules/logger";
 
-const AUTH_POOL_SIZE = 4;
+const AUTH_POOL_SIZE = parseInt(process.env.AUTH_POOL_SIZE || "") || 8;
 
 const prepareAssets = async () => {
     const items = await assetCache.get("items");

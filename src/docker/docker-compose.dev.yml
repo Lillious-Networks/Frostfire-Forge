@@ -7,12 +7,13 @@ services:
     restart: always
     ports:
       - "3000:3000"
+      - "3000:3000/udp"
     env_file:
       - ../../.env.development
     volumes:
-      - ../../src/certs:/app/certs:ro
-      - ../../src/logs:/app/logs
-      - ../../config:/app/config
+      - ../../src/certs:/app/src/certs
+      - ../../src/logs:/app/src/logs
+      - ../../src/config:/app/src/config
     networks:
       - frostfire-network-dev
 

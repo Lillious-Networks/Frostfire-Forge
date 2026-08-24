@@ -2,12 +2,11 @@
 
 import log from "./logger.ts";
 import os from "os";
-import path from "node:path";
 import fs from "node:fs";
 
-const _cert = process.env.WEB_SOCKET_CERT_PATH || path.join(import.meta.dir, "../certs/cert.pem");
-const _key = process.env.WEB_SOCKET_KEY_PATH || path.join(import.meta.dir, "../certs/key.pem");
-const useSSL = process.env.WEB_SOCKET_USE_SSL === "true" && fs.existsSync(_cert) && fs.existsSync(_key);
+const _cert = process.env.TLS_CERT_PATH;
+const _key = process.env.TLS_KEY_PATH;
+const useSSL = process.env.HTTP_USE_SSL === "true" && !!_cert && !!_key && fs.existsSync(_cert) && fs.existsSync(_key);
 
 class GatewayClient {
   private config: ServerRegistrationConfig;
@@ -46,7 +45,10 @@ class GatewayClient {
           host: this.config.host,
           publicHost: this.config.publicHost || this.config.host,
           port: this.config.port,
-          wsPort: this.config.wsPort,
+          wtPort: this.config.wtPort,
+          wtEnabled: this.config.wtEnabled !== false,
+          // Legacy field: older gateway versions require wsPort during registration
+          wsPort: this.config.wtPort,
           useSSL: useSSL,
           maxConnections: this.config.maxConnections,
           authKey: process.env.GATEWAY_AUTH_KEY,

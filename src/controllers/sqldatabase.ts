@@ -1,7 +1,7 @@
 import log from "../modules/logger";
 import path from "node:path";
 
-const WORKER_POOL_SIZE = 4;
+const WORKER_POOL_SIZE = parseInt(process.env.DB_WORKER_POOL_SIZE || "") || 8;
 const workerPool: Worker[] = [];
 const pendingQueries = new Map<string, { resolve: (value: any) => void; reject: (error: any) => void }>();
 let nextWorkerId = 0;

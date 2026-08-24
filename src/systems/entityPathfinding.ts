@@ -184,7 +184,7 @@ export async function hasLineOfSight(
 }
 
 /**
- * Cached walkability check – reduces redundant collision queries during a single A* call.
+ * Cached walkability check - reduces redundant collision queries during a single A* call.
  */
 async function isTileWalkableCached(
   entity: any,
@@ -408,7 +408,7 @@ export async function getNextPathStep(
 }
 
 /**
- * Path smoothing – removes redundant intermediate waypoints where direct line‑of‑sight exists.
+ * Path smoothing - removes redundant intermediate waypoints where direct line-of-sight exists.
  */
 export async function smoothPath(
   entity: any,

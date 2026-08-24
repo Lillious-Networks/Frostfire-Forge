@@ -9,6 +9,6 @@ services:
     env_file:
       - ../../.env.production
     volumes:
-      - ../../src/certs:/app/certs:ro
-      - ../../src/logs:/app/logs
-      - ../../config:/app/config
+      - ../../src/certs:/app/src/certs
+      - ../../src/logs:/app/src/logs
+      - ../../src/config:/app/src/config

@@ -342,14 +342,14 @@ const player = {
     // sessionId comes from ws.data.id which is a number via parseInt(),
     // but the DB column is VARCHAR. Normalize to string for comparisons.
     const sid = String(sessionId);
-    const getUsername = (await player.getUsernameByToken(token)) as any[];
-    const username = getUsername[0]?.username as string;
+    const accountResult = await query(
+      "SELECT username, banned FROM accounts WHERE token = ?",
+      [token]
+    ) as any[];
+    const username = accountResult[0]?.username as string;
     if (!username) return false;
 
-    const isBanned = (await player.isBanned(username)) as any[] | undefined;
-    if (!isBanned) return false;
-
-    if (isBanned[0]?.banned === 1) {
+    if (accountResult[0]?.banned === 1) {
       log.debug(`User ${username} is banned`);
       await player.logout(sid);
       return false;
@@ -373,7 +373,7 @@ const player = {
     ) as any[];
 
     if (String(verifyResult[0]?.session_id ?? "") === sid) {
-      return true;
+      return username;
     }
 
     // Claim failed - another session is active. Resolve it.
@@ -408,7 +408,7 @@ const player = {
       [token]
     ) as any[];
 
-    return String(retryVerifyResult[0]?.session_id ?? "") === sid;
+    return String(retryVerifyResult[0]?.session_id ?? "") === sid ? username : false;
   },
   getSessionId: async (token: string) => {
     if (!token || isTokenExpired(token)) return;
@@ -1018,7 +1018,7 @@ const player = {
 
     return { value: false, reason: "no_collision" };
   },
-  kick: async (username: string, ws: WebSocket) => {
+  kick: async (username: string, ws: any) => {
     const response = (await query(
       "SELECT session_id FROM accounts WHERE username = ?",
       [username]
@@ -1028,7 +1028,7 @@ const player = {
     }
     if (ws) ws.close();
   },
-  ban: async (username: string, ws: WebSocket) => {
+  ban: async (username: string, ws: any) => {
     if (!username) return;
     username = username.toLowerCase();
     const response = await query(

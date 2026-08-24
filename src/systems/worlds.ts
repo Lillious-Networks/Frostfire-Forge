@@ -1,6 +1,21 @@
 import query from "../controllers/sqldatabase";
 import assetCache from "../services/assetCache";
 
+let worldsCountMutex: Promise<void> = Promise.resolve();
+
+async function readWorldsCache(): Promise<WorldData[]> {
+  const cached = await assetCache.get("worlds");
+  if (Array.isArray(cached)) return cached;
+  if (typeof cached === "string" && cached.length > 0) return JSON.parse(cached);
+  return [];
+}
+
+function withWorldsLock<T>(action: () => Promise<T>): Promise<T> {
+  const result = worldsCountMutex.then(action);
+  worldsCountMutex = result.then(() => undefined, () => undefined);
+  return result;
+}
+
 const worlds = {
   async list() {
     const results = await query("SELECT * FROM worlds") as WorldData[];
@@ -26,8 +41,27 @@ const worlds = {
   },
   async update(world: WorldData) {
     await query("UPDATE worlds SET name = ?, weather = ? WHERE name = ?", [world.name, world.weather, world.name]);
-    const updatedWorlds = await this.list();
-    assetCache.set("worlds", updatedWorlds);
+
+    // Preserve existing player counts instead of resetting them to zero
+    await withWorldsLock(async () => {
+      const worldsList = await readWorldsCache();
+      const updatedWorlds = worldsList.map((w) =>
+        w.name === world.name
+          ? { ...w, name: world.name, weather: world.weather, players: w.players || 0 }
+          : w
+      );
+      await assetCache.set("worlds", JSON.stringify(updatedWorlds));
+    });
+  },
+  async adjustPlayerCount(mapName: string, delta: number): Promise<number | null> {
+    return withWorldsLock(async () => {
+      const worldsList = await readWorldsCache();
+      const world = worldsList.find((w) => w.name === mapName.replace(".json", ""));
+      if (!world) return null;
+      world.players = Math.max(0, (world.players || 0) + delta);
+      await assetCache.set("worlds", JSON.stringify(worldsList));
+      return world.players;
+    });
   },
 };
 

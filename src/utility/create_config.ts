@@ -18,8 +18,11 @@ DATABASE_PASSWORD=""
 DATABASE_PORT="3306"
 DATABASE_USER="root"
 SQL_SSL_MODE=""
-WEB_SOCKET_PORT=3000
-WEB_SOCKET_USE_SSL=false
+GAME_PORT=3000
+HTTP_USE_SSL=false
+TLS_CERT_PATH="./src/certs/cert.pem"
+TLS_KEY_PATH="./src/certs/key.pem"
+TLS_CA_PATH="./src/certs/cert.ca-bundle"
 GAME_NAME="Frostfire Forge - Development Environment"
 LOG_LEVEL="info"
 CACHE="memory"
@@ -44,8 +47,11 @@ OPENAI_API_KEY=""
 TRANSLATION_SERVICE=""
 OPENAI_MODEL=""
 
-WEB_SOCKET_PORT=""
-WEB_SOCKET_USE_SSL=""
+GAME_PORT=""
+HTTP_USE_SSL=""
+TLS_CERT_PATH=""
+TLS_KEY_PATH=""
+TLS_CA_PATH=""
 GAME_NAME=""
 LOG_LEVEL="info"
 
@@ -66,17 +72,26 @@ const settings = {
     "windowMs": 5,
     "max": 500
   },
-  "websocketRatelimit": {
+  "packetRatelimit": {
     "enabled": true,
     "maxRequests": 2000,
     "time": 2000,
     "maxWindowTime": 1000
   },
-  "websocket": {
+  "webtransport": {
+    "enabled": true,
     "maxPayloadMB": 50,
     "benchmarkenabled": false,
     "idleTimeout": 120,
-    "maxConnections": 50000
+    "maxSessions": 50000,
+    "maxDatagramSize": 1200,
+    "authTimeoutMs": 10000,
+    "rateLimits": {
+      "streamsPerSec": 2000,
+      "streamsBurst": 4000,
+      "datagramsPerSec": 20000,
+      "datagramsBurst": 50000
+    }
   },
   "gateway": {
     "heartbeatInterval": 5000

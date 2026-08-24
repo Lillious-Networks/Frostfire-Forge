@@ -115,6 +115,7 @@ export async function initializePlayerAOI(player: any): Promise<void> {
     updateThreshold: AOI_CONFIG.UPDATE_THRESHOLD,
     mapChangeSequence: 0,
     layerId: layerId,
+    revision: 0,
   };
 
   if (AOI_CONFIG.USE_SPATIAL_GRID) {
@@ -321,6 +322,7 @@ export async function updatePlayerAOI(
         await initializePlayerAOI(enteredPlayer);
       }
       enteredPlayer.aoi.playersInAOI.add(player.id);
+      enteredPlayer.aoi.revision = (enteredPlayer.aoi.revision || 0) + 1;
       playerCache.set(enteredPlayer.id, enteredPlayer);
 
     }
@@ -354,12 +356,14 @@ export async function updatePlayerAOI(
 
         if (exitedPlayer.aoi) {
           exitedPlayer.aoi.playersInAOI.delete(player.id);
+          exitedPlayer.aoi.revision = (exitedPlayer.aoi.revision || 0) + 1;
           playerCache.set(exitedPlayer.id, exitedPlayer);
         }
       }
     }
 
     player.aoi.playersInAOI = newAOISet;
+    player.aoi.revision = (player.aoi.revision || 0) + 1;
     player.aoi.lastAOIUpdatePosition = { x: currentPos.x, y: currentPos.y };
     player.aoi.gridX = Math.floor(currentPos.x / AOI_CONFIG.GRID_CELL_SIZE);
     player.aoi.gridY = Math.floor(currentPos.y / AOI_CONFIG.GRID_CELL_SIZE);
@@ -455,12 +459,14 @@ export function despawnPlayerFromAllAOI(
 
       if (player.aoi) {
         player.aoi.playersInAOI.delete(departingPlayer.id);
+        player.aoi.revision = (player.aoi.revision || 0) + 1;
         playerCache.set(player.id, player);
       }
     });
 
     if (reason === "disconnect") {
       departingPlayer.aoi.playersInAOI.clear();
+      departingPlayer.aoi.revision = (departingPlayer.aoi.revision || 0) + 1;
       layerManager.removePlayerFromLayer(departingPlayer.id);
 
       if (AOI_CONFIG.USE_SPATIAL_GRID) {

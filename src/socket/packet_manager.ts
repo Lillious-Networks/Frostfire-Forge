@@ -49,7 +49,7 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "BENCHMARK", data: data })),
     ] as any[];
   },
-  login: (ws: WebSocket) => {
+  login: (ws: any) => {
     return [
       packet.encode(
         JSON.stringify({
