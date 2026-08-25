@@ -140,6 +140,7 @@ LOG_LEVEL="info"                          # Logging level: trace, debug, info, w
 
 # Local certificate handling (Optional)
 SKIP_CERT_TRUST="false"                      # Set to "true" to skip Windows certificate trust
+TLS_INSECURE_SKIP_VERIFY="true"              # Set to "false" to require verification against the configured certificate
 
 # CORS Configuration (Security)
 CORS_ALLOWED_ORIGINS="https://game.example.com,https://client.example.com" # Comma-separated list of allowed origins

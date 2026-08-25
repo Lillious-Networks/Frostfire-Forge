@@ -450,9 +450,18 @@ const webTransportServer = startWebTransportServer({
 
 const webTransportPort = gamePort;
 
+// Startup probe TLS handling. Defaults to skipping verification (the probe
+// targets the server's own listener, whose certificate may be self-signed).
+// Set TLS_INSECURE_SKIP_VERIFY=false to verify the probe against the server's
+// own certificate instead.
+const probeInsecureSkipVerify = process.env.TLS_INSECURE_SKIP_VERIFY !== "false";
+
 async function verifyWebTransportListener(port: number): Promise<void> {
   try {
-    const probe = await connect(`https://127.0.0.1:${port}`, { tls: { insecureSkipVerify: true } });
+    const tlsOptions = probeInsecureSkipVerify
+      ? { insecureSkipVerify: true }
+      : { caPem: webTransportTls!.certPem };
+    const probe = await connect(`https://127.0.0.1:${port}`, { tls: tlsOptions });
     try {
       probe.close({ code: 0, reason: "startup-probe" });
     } catch (error: any) {

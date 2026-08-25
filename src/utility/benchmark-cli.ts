@@ -1093,15 +1093,28 @@ function disconnectRandomClients(count: number): void {
 }
 
 async function runSimulation(config: ReturnType<typeof parseArgs>) {
-    const duration = config.durationSet ? config.duration : 300;
     const peakClients = config.clients;
+
+    // Fixed connection rate: bigger populations take longer to connect, the
+    // rate itself never scales with the total required.
+    const connectionRate = config.rate > 0 ? config.rate : 25;
+
+    // The steepest curve segment (peak buildup: 30% of the peak over 10% of
+    // the span) dictates the required connection rate. When the configured
+    // rate can't sustain the peak, stretch the duration instead of raising
+    // the rate.
+    const MAX_SEGMENT_SLOPE = 3.0;
+    const minDurationForRate = Math.ceil((peakClients * MAX_SEGMENT_SLOPE) / connectionRate);
+    const requestedDuration = config.durationSet ? config.duration : 300;
+    const duration = Math.max(requestedDuration, minDurationForRate);
+    const durationStretched = duration > requestedDuration;
 
     console.log('\n' + chalk.bold.cyan('-'.repeat(60)));
     console.log(chalk.bold.cyan('  Frostfire Forge CLI Benchmark - Simulation Mode'));
     console.log(chalk.bold.cyan('-'.repeat(60)) + '\n');
 
     console.log(`  ${chalk.bold('Peak clients:')} ${chalk.white(peakClients)}`);
-    console.log(`  ${chalk.bold('Duration:')}     ${chalk.white(duration + 's')} ${chalk.gray('(5-minute daily curve)')}`);
+    console.log(`  ${chalk.bold('Duration:')}     ${chalk.white(duration + 's')} ${chalk.gray(durationStretched ? `(stretched to ${connectionRate}/sec)` : '(5-minute daily curve)')}`);
     console.log(`  ${chalk.bold('Curve:')}       ${chalk.white('early-morning → lunch ramp → peak → evening decline')}`);
     console.log(`  ${chalk.bold('Host:')}         ${chalk.blue(config.host)}`);
     console.log(`  ${chalk.bold('Rate:')}         ${config.rate > 0 ? chalk.white(config.rate + '/sec') : chalk.gray('default (25/sec)')}`);
@@ -1119,10 +1132,6 @@ async function runSimulation(config: ReturnType<typeof parseArgs>) {
 
     const startTime = Date.now();
     latencyWarmupUntil = startTime + LATENCY_WARMUP_MS;
-
-    // Fixed connection rate: bigger populations take longer to connect, the
-    // rate itself never scales with the total required.
-    const connectionRate = config.rate > 0 ? config.rate : 25;
 
     const initialWave = Math.min(Math.round(peakClients * 0.05), connectionRate);
     log(`Initial population: ${Math.round(peakClients * 0.05)} clients (5% of peak) at ${connectionRate}/sec`, 'info');

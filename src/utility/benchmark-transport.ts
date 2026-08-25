@@ -142,11 +142,16 @@ export class BenchmarkConnection {
 
   static async connect(url: string, serverSecret: string, useragent: string = "Frostfire-Forge-Benchmark/1.0", origin: string = "http://localhost"): Promise<BenchmarkConnection> {
     const caPem = resolveLocalCertPem();
+    const skipVerifySetting = process.env.TLS_INSECURE_SKIP_VERIFY;
     const session = caPem
       ? await connect(url, { tls: { caPem } })
-      : isLocalHost(url)
+      : skipVerifySetting === "true"
         ? await connect(url, { tls: { insecureSkipVerify: true } })
-        : await connect(url);
+        : skipVerifySetting === "false"
+          ? await connect(url)
+          : isLocalHost(url)
+            ? await connect(url, { tls: { insecureSkipVerify: true } })
+            : await connect(url);
     if (session.ready) {
       await session.ready;
     }
