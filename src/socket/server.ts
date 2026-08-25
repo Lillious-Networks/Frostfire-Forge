@@ -406,10 +406,23 @@ function onTransportMessage(connection: TransportConnection, message: string) {
   }
 }
 
+const NO_RATE_LIMIT = Number.MAX_SAFE_INTEGER;
+
+// Handshake rate limits default to safe production values, but benchmarking
+// needs them disabled. Set WT_HANDSHAKE_RATE_LIMIT_DISABLED=true to remove
+// the handshake caps.
+const handshakeLimitsDisabled = process.env.WT_HANDSHAKE_RATE_LIMIT_DISABLED === "true";
+
 const webTransportRateLimits = {
-  handshakesPerSec: (settings as any)?.webtransport?.rateLimits?.handshakesPerSec ?? 100,
-  handshakesBurst: (settings as any)?.webtransport?.rateLimits?.handshakesBurst ?? 200,
-  handshakesBurstPerPrefix: (settings as any)?.webtransport?.rateLimits?.handshakesBurstPerPrefix ?? 50,
+  handshakesPerSec: handshakeLimitsDisabled
+    ? NO_RATE_LIMIT
+    : (settings as any)?.webtransport?.rateLimits?.handshakesPerSec ?? 100,
+  handshakesBurst: handshakeLimitsDisabled
+    ? NO_RATE_LIMIT
+    : (settings as any)?.webtransport?.rateLimits?.handshakesBurst ?? 200,
+  handshakesBurstPerPrefix: handshakeLimitsDisabled
+    ? NO_RATE_LIMIT
+    : (settings as any)?.webtransport?.rateLimits?.handshakesBurstPerPrefix ?? 50,
   streamsPerSec: (settings as any)?.webtransport?.rateLimits?.streamsPerSec ?? 2000,
   streamsBurst: (settings as any)?.webtransport?.rateLimits?.streamsBurst ?? 4000,
   datagramsPerSec: (settings as any)?.webtransport?.rateLimits?.datagramsPerSec ?? 500000,

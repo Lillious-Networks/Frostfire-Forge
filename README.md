@@ -165,6 +165,9 @@ REDIS_URL="redis://localhost:6379"
 DB_WORKER_POOL_SIZE="8"                      # SQL worker threads (default: 8)
 AUTH_POOL_SIZE="8"                           # Authentication worker threads (default: 8)
 
+# Benchmarking (Optional)
+WT_HANDSHAKE_RATE_LIMIT_DISABLED="true" | "false"  # Disable WebTransport handshake rate limits
+
 # Realm Configuration
 WHITELIST="true" | "false"                       # Enable/disable username whitelist for this realm
 ```

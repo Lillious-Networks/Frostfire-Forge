@@ -7,6 +7,9 @@ import log from "../modules/logger.ts";
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
+let lastNativeLogMsg = "";
+let lastNativeLogAt = 0;
+
 const activeConnectionIds = new Set<string>();
 
 function isSessionClosedError(error: any): boolean {
@@ -320,9 +323,20 @@ export function startWebTransportServer(options: TransportServerOptions): any {
     },
     rateLimits: options.rateLimits,
     log: (event: any) => {
-      if (event.level === "warn" || event.level === "error") {
-        log.warn(`[WebTransport] ${event.msg}`);
-      }
+      if (event.level !== "warn" && event.level !== "error") return;
+
+      const msg = String(event?.msg || "");
+      // The library redacts some internal messages ("native warning (redacted)")
+      // which spam the console during benchmarks without any actionable info.
+      if (!msg || msg.includes("(redacted)")) return;
+
+      // Throttle repeated identical warnings to once per 10 seconds.
+      const now = Date.now();
+      if (msg === lastNativeLogMsg && now - lastNativeLogAt < 10000) return;
+      lastNativeLogMsg = msg;
+      lastNativeLogAt = now;
+
+      log.warn(`[WebTransport] ${msg}`);
     },
     onSession: (session: any) => {
       handleSession(session, options).catch((error: any) => {
