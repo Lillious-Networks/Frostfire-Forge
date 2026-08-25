@@ -696,11 +696,30 @@ async function createClients(amount: number, host: string, clientUrl: string, co
     const allClients: any[] = [];
     const loggedInClients: any[] = [];
 
+    // The wave settles only when every client attempt reaches a terminal
+    // state: LOAD_MAP received, closed before login, failed, or the login
+    // timeout fires. Resolving on connect alone would let the simulation
+    // overshoot its target while LOAD_MAP responses are still in flight.
+    let resolveLoggedIn!: (clients: any[]) => void;
+    const loginCompletion = new Promise<any[]>((resolve) => { resolveLoggedIn = resolve; });
+
     const availableServers = await getAvailableServers(host, config.gatewayEnabled, config.gatewayUrl, config.realmId, config.quiet);
         let openedCount = 0;
         let loggedInCount = 0;
+        let settledCount = 0;
+        const settledIndexes = new Set<number>();
         let loginTimeout: any = null;
         let lastUpdateTime = 0;
+
+        const settleClient = (index: number) => {
+            if (settledIndexes.has(index)) return;
+            settledIndexes.add(index);
+            settledCount++;
+            if (settledCount === amount) {
+                if (loginTimeout) clearTimeout(loginTimeout);
+                resolveLoggedIn(loggedInClients);
+            }
+        };
 
         const updateConnectionStatus = () => {
             if (config.quiet) return;
@@ -740,6 +759,7 @@ async function createClients(amount: number, host: string, clientUrl: string, co
 
                     log(`${loggedInCount}/${amount} clients logged in - proceeding`, 'info');
                 }
+                resolveLoggedIn(loggedInClients);
             }, 30000);
         };
 
@@ -838,19 +858,17 @@ async function createClients(amount: number, host: string, clientUrl: string, co
                                 config.onClientLoggedIn(client);
                             }
 
+                            settleClient(i);
+
                             startKeepAlive(client);
 
                             const randomDelay = Math.floor(Math.random() * 10000);
                             startMovementSimulation(client, randomDelay);
 
-                            if (loggedInCount === amount) {
-                                clearTimeout(loginTimeout);
-
-                                if (!config.quiet) {
-                                    const finalBar = chalk.green('█'.repeat(50));
-                                    process.stdout.write(`\r  ${chalk.bold.green('Logging in:')} [${finalBar}] ${chalk.bold('100%')} ${chalk.white(amount)}${chalk.gray('/')}${chalk.white(amount)} clients\n`);
-                                    log(`All ${amount} clients logged in and moving`, 'success');
-                                }
+                            if (loggedInCount === amount && !config.quiet) {
+                                const finalBar = chalk.green('█'.repeat(50));
+                                process.stdout.write(`\r  ${chalk.bold.green('Logging in:')} [${finalBar}] ${chalk.bold('100%')} ${chalk.white(amount)}${chalk.gray('/')}${chalk.white(amount)} clients\n`);
+                                log(`All ${amount} clients logged in and moving`, 'success');
                             }
                         }
                     } catch (e: any) {
@@ -865,6 +883,7 @@ async function createClients(amount: number, host: string, clientUrl: string, co
                     if (loggedInCount < amount && !config.quiet) {
                         log(`Client disconnected during login (Code: ${code})`, 'error');
                     }
+                    settleClient(i);
                 });
 
                 client.send(packet.encode(JSON.stringify({
@@ -885,6 +904,7 @@ async function createClients(amount: number, host: string, clientUrl: string, co
                     } else {
                         log(`Error creating guest account: ${error.message}`, 'error');
                     }
+                    settleClient(i);
                 }
             })();
 
@@ -893,7 +913,7 @@ async function createClients(amount: number, host: string, clientUrl: string, co
 
         await Promise.allSettled(clientPromises);
 
-        return loggedInClients;
+        return await loginCompletion;
 }
 
 function getLatencyStats() {

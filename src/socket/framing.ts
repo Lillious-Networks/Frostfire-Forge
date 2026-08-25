@@ -53,14 +53,10 @@ export class FrameDecoder {
     const neededCapacity = unreadBytes + chunk.length;
 
     if (neededCapacity > this.buffer.length) {
-      if (neededCapacity > this.maxFrameSize + HEADER_BYTES) {
-        this.overflowed = true;
-        this.buffer = new Uint8Array(0);
-        this.readOffset = 0;
-        this.writeOffset = 0;
-        return [];
-      }
-
+      // Overflow detection happens on the declared frame length below (line
+      // 87), not on the buffered capacity: pipelined data can legally hold the
+      // tail of one max-size frame plus the start of the next, so a capacity
+      // check here would reject valid streams.
       if (this.readOffset > 0) {
         this.buffer.copyWithin(0, this.readOffset, this.writeOffset);
         this.writeOffset = unreadBytes;

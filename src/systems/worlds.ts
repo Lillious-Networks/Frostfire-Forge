@@ -16,6 +16,15 @@ function withWorldsLock<T>(action: () => Promise<T>): Promise<T> {
   return result;
 }
 
+async function getRedisClient(): Promise<any | null> {
+  try {
+    const mod = await import("bun");
+    return (mod as any).redis;
+  } catch {
+    return null;
+  }
+}
+
 const worlds = {
   async list() {
     const results = await query("SELECT * FROM worlds") as WorldData[];
@@ -60,23 +69,25 @@ const worlds = {
       const world = worldsList.find((w) => w.name === worldName);
       if (!world) return null;
 
-      // Use Redis HINCRBY for atomic cross-process counter updates
-      try {
-        const redisKey = "world:player_counts";
-        const redisClient = (assetCache as any).client;
-        if (redisClient && typeof redisClient.hincrby === 'function') {
-          let newCount = await redisClient.hincrby(redisKey, worldName, delta);
+      // Use Redis HINCRBY for atomic cross-process counter updates. The Redis
+      // client is shared via the `bun.redis` singleton, so the async client
+      // assignment in RedisCacheService is not a problem here.
+      const redisClient = await getRedisClient();
+      if (redisClient) {
+        try {
+          const redisKey = "world:player_counts";
+          let newCount = Number(await redisClient.send("HINCRBY", [redisKey, worldName, String(delta)]));
           // Ensure non-negative
           if (newCount < 0) {
-            await redisClient.hset(redisKey, worldName, 0);
+            await redisClient.send("HSET", [redisKey, worldName, "0"]);
             newCount = 0;
           }
           world.players = newCount;
           await assetCache.set("worlds", JSON.stringify(worldsList));
           return newCount;
+        } catch (e) {
+          // Fallback to the in-process update if the Redis operation fails
         }
-      } catch (e) {
-        // Fallback to existing logic if Redis atomic operation fails
       }
 
       // Fallback: non-atomic update

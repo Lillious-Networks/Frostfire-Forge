@@ -55,6 +55,9 @@ function getPooledWorker(layerId: string): PooledWorker {
   });
   worker.on("error", (error: Error) => {
     log.error(`[MOVEMENT WORKER] ${error.message}`);
+    // The worker is dead: drop the pending request before finalizing so the
+    // flush can't be re-queued onto a terminated worker.
+    pooled.pendingFlushRequest = null;
     finishFlush(pooled, []);
     pool.delete(layerId);
     if (onWorkerRetiredCallback) {

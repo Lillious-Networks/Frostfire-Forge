@@ -384,6 +384,7 @@ async function writeGeneratedCertificate(
   }
 
   fs.mkdirSync(path.dirname(certPath), { recursive: true });
+  fs.mkdirSync(path.dirname(keyPath), { recursive: true });
   fs.writeFileSync(certPath, generated.certPem);
 
   if (fs.existsSync(keyPath)) {
@@ -399,6 +400,7 @@ async function writeGeneratedCertificate(
   }
 
   if (caPath) {
+    fs.mkdirSync(path.dirname(caPath), { recursive: true });
     fs.writeFileSync(caPath, "");
   }
 
