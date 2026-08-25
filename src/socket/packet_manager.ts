@@ -39,9 +39,14 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "PONG", data: data })),
     ] as any[];
   },
-  timeSync: (data: any) => {
+  timeSync: (data: any, serverTiming?: { serverRecvTime: number; serverSendTime: number }) => {
     return [
-      packet.encode(JSON.stringify({ type: "TIME_SYNC", data: data })),
+      packet.encode(JSON.stringify({
+        type: "TIME_SYNC",
+        data: data,
+        serverRecvTime: serverTiming?.serverRecvTime,
+        serverSendTime: serverTiming?.serverSendTime,
+      })),
     ] as any[];
   },
   benchmark: (data: any) => {
@@ -337,7 +342,7 @@ export const packetManager = {
     const direction = DIRECTION_MAP[data.d?.dr as string] ?? 1;
     const stealth = data.s === 1 ? 1 : 0;
 
-    const packetData = new Uint8Array(11);
+    const packetData = new Uint8Array(17);
     const view = new DataView(packetData.buffer);
 
     packetData[0] = HEADER_BYTE;
@@ -345,6 +350,12 @@ export const packetManager = {
     view.setInt16(5, x, true);
     view.setInt16(7, y, true);
     packetData[9] = direction | (stealth << 4);
+
+    // Trailing one-way latency probe: [u32 seconds][u16 ms] (ignored by clients
+    // that parse exactly 11 bytes). Date.now() overflows a single u32.
+    const serverSendTime = Date.now();
+    view.setUint32(11, Math.floor(serverSendTime / 1000), true);
+    view.setUint16(15, serverSendTime % 1000, true);
 
     return [packetData];
   },

@@ -6,8 +6,8 @@ import permissions from "../systems/permissions";
 import { getAuthWorker } from "./authentication_pool.ts";
 import { listener } from "../modules/event_bus";
 import { Events, setPlayerPvp } from "../systems/events";
-import { Worker } from "worker_threads";
 import { collectReceiverEntries, encodeBatch, MoverSnapshot, ReceiverInfo } from "./movement_batch.ts";
+import { queueLayerWorkerFlush, postToAllWorkers } from "./movement_worker_pool.ts";
 const authentication_queue = new Set<string>();
 const authentication_session_queue = new Set<string>();
 
@@ -149,111 +149,19 @@ const receiverSetCache = new Map<string, { revision: number; receivers: Set<stri
 let flushOffset = 0;
 let flushTick = 0;
 
-const movementWorker: Worker = new Worker(new URL("./movement_worker.ts", import.meta.url));
-let movementWorkerReady = false;
-let movementWorkerNeedsFullSync = false;
-let flushInFlight = false;
-let pendingFlushRequest: {
-  tick: number;
-  movers: MoverSnapshot[];
-  receiverIds: string[];
-  receiverInfo: Record<string, ReceiverInfo>;
-  onBatches: (batches: any[]) => void;
-} | null = null;
-let pendingAoiDiffs: Array<{ playerId: string; add: string[]; remove: string[] }> = [];
+// Per-receiver probe sequence numbers: loss accounting on the client requires
+// a monotonic sequence for each receiver's own frame stream. A global counter
+// would make every client count the other players' frames as "lost".
+const movementProbeSeqs = new Map<string, number>();
 
-movementWorker.on("message", (message: any) => {
-  if (message.type === "ready") {
-    movementWorkerReady = true;
-    movementWorkerNeedsFullSync = true;
-    return;
-  }
-  if (message.type === "flushResult") {
-    finishWorkerFlush(message.batches);
-    return;
-  }
-  if (message.type === "flushError") {
-    log.warn(`[MOVEMENT WORKER] ${message.error}`);
-    finishWorkerFlush([]);
-  }
-});
-
-movementWorker.on("error", (error: Error) => {
-  log.error(`[MOVEMENT WORKER] ${error.message}`);
-});
-
-function finishWorkerFlush(batches: any[]): void {
-  const request = currentFlushRequest;
-  currentFlushRequest = null;
-  flushInFlight = false;
-
-  if (request) {
-    request.onBatches(batches);
-  }
-
-  workerResultTimes.push(Date.now());
-  if (workerResultTimes.length >= 100) {
-    const span = workerResultTimes[workerResultTimes.length - 1] - workerResultTimes[0];
-    const rate = span > 0 ? Math.round((workerResultTimes.length / (span / 1000)) * 10) / 10 : 0;
-    log.warn(`[MOVEMENT WORKER] Effective flush rate: ${rate}Hz (${workerResultTimes.length} flushes in ${span}ms)`);
-    workerResultTimes = [];
-  }
-
-  const next = pendingFlushRequest;
-  pendingFlushRequest = null;
-  if (next) {
-    queueWorkerFlush(next);
-  }
-}
-
-let workerResultTimes: number[] = [];
-
-let currentFlushRequest: {
-  tick: number;
-  movers: MoverSnapshot[];
-  receiverIds: string[];
-  receiverInfo: Record<string, ReceiverInfo>;
-  onBatches: (batches: any[]) => void;
-} | null = null;
-
-function queueWorkerFlush(request: {
-  tick: number;
-  movers: MoverSnapshot[];
-  receiverIds: string[];
-  receiverInfo: Record<string, ReceiverInfo>;
-  onBatches: (batches: any[]) => void;
-}): void {
-  if (flushInFlight) {
-    pendingFlushRequest = request;
-    return;
-  }
-
-  flushInFlight = true;
-  currentFlushRequest = request;
-
-  const diffs = pendingAoiDiffs.splice(0);
-  movementWorker.postMessage({
-    type: "flush",
-    tick: request.tick,
-    movers: request.movers,
-    receiverIds: request.receiverIds,
-    receiverInfo: request.receiverInfo,
-    diffs,
-  });
-
-  setTimeout(() => {
-    if (currentFlushRequest === request) {
-      log.warn("[MOVEMENT WORKER] Flush timed out");
-      finishWorkerFlush([]);
-    }
-  }, 5000);
-}
-
-let BATCH_INTERVAL = 8; // Will be set dynamically based on flush latency
+// Per-layer worker pool: keeps the movement batch encoding off the main event
+// loop (which the [LAG] diagnostics showed was saturated at high player counts).
+const workerLayerSynced = new Set<string>();
 
 const MAX_BUFFER_BACKPRESSURE = 1024 * 32; // 32KB - aggressive at high loads
-
-let flushCount = 0;
+// Spawn payloads are much larger than movement frames; gate them with a
+// higher threshold so churn bursts don't pile past the transport queue limit.
+const SPAWN_BACKPRESSURE_THRESHOLD = 1024 * 512; // 512KB
 
 // Track recent flush latencies for adaptive batch scheduling
 const LATENCY_HISTORY_SIZE = 5; // Keep last 5 flushes for fast recovery
@@ -393,7 +301,6 @@ async function flushMovementBatches() {
     for (let i = 0; i < toDrop; i++) {
       movementBatchQueue.delete(keys[i]);
     }
-    log.debug(`[MOVEMENT] Dropped ${toDrop} movement batches due to queue overflow (latency: ${Math.round(avgLatency)}ms)`);
   }
 
   for (const [groupKey, playerMovements] of movementBatchQueue.entries()) {
@@ -466,14 +373,23 @@ async function flushMovementBatches() {
     const receiverArray = Array.from(receiverSets.entries());
     const startIndex = flushOffset % Math.max(receiverArray.length, 1);
 
-    if (movementWorkerReady && receiverArray.length > 150) {
-      if (movementWorkerNeedsFullSync) {
+    // Layers above this size offload batch encoding to a per-layer worker
+    // thread (keeps the main event loop free at high player counts).
+    const useWorker = receiverArray.length > 20;
+
+    let workerDiffs: Array<{ playerId: string; add: string[]; remove: string[] }> = [];
+    if (useWorker) {
+      if (!workerLayerSynced.has(groupKey)) {
+        // First flush for this layer's worker: send a full snapshot of the
+        // layer's receiver sets so the worker mirror starts correct.
         for (const [playerId, cachedEntry] of receiverSetCache.entries()) {
-          pendingAoiDiffs.push({ playerId, add: [...cachedEntry.receivers], remove: [] });
+          if (mapPlayers[playerId]) {
+            workerDiffs.push({ playerId, add: [...cachedEntry.receivers], remove: [] });
+          }
         }
-        movementWorkerNeedsFullSync = false;
+        workerLayerSynced.add(groupKey);
       } else {
-        pendingAoiDiffs.push(...changedSets);
+        workerDiffs = changedSets;
       }
     }
 
@@ -519,15 +435,14 @@ async function flushMovementBatches() {
     if (selectedReceiverIds.length > 0) {
       const movementTick = flushTick++;
 
-      const useWorker = movementWorkerReady && receiverArray.length > 150;
-
       if (useWorker) {
         const allPlayersRef = allPlayers;
-        queueWorkerFlush({
+        queueLayerWorkerFlush(groupKey, {
           tick: movementTick,
           movers,
           receiverIds: selectedReceiverIds,
           receiverInfo,
+          diffs: workerDiffs,
           onBatches: (batches) => {
             for (const batch of batches) {
               const receiver = allPlayersRef[batch.receiverId];
@@ -544,14 +459,9 @@ async function flushMovementBatches() {
           },
         });
       } else {
-        if (pendingAoiDiffs.length > 0) {
-          const before = pendingAoiDiffs.length;
-          const groupIds = new Set(Object.keys(mapPlayers));
-          pendingAoiDiffs = pendingAoiDiffs.filter((diff) => !groupIds.has(diff.playerId));
-          if (pendingAoiDiffs.length < before) {
-            movementWorkerNeedsFullSync = true;
-          }
-        }
+        // Layer served inline: its worker mirror (if any) goes stale. Forget
+        // the sync flag so the next worker engagement starts with a full sync.
+        workerLayerSynced.delete(groupKey);
 
         for (const receiverId of selectedReceiverIds) {
           const receiver = allPlayers[receiverId];
@@ -560,7 +470,9 @@ async function flushMovementBatches() {
           const entries = collectReceiverEntries(selectedSets.get(receiverId)!, movers, receiverInfo[receiverId], movementTick);
           if (entries.length === 0) continue;
 
-          const { data, offsets } = encodeBatch(entries);
+          const receiverProbeSeq = movementProbeSeqs.get(receiverId) ?? 0;
+          const { data, offsets } = encodeBatch(entries, { seq: receiverProbeSeq, serverSendTime: Date.now() });
+          movementProbeSeqs.set(receiverId, receiverProbeSeq + (offsets.length - 1));
           for (let i = 0; i < offsets.length - 1; i++) {
             const start = offsets[i];
             const end = offsets[i + 1];
@@ -582,25 +494,15 @@ async function flushMovementBatches() {
   if (recentFlushLatencies.length > LATENCY_HISTORY_SIZE) {
     recentFlushLatencies.shift();
   }
-
-  flushCount++;
-  if (flushCount % 100 === 0) {
-    const playerCount = Object.keys(playerCache.list()).length;
-
-    const allPlayersForStats = playerCache.list();
-    const allPlayersList = Object.values(allPlayersForStats);
-    const connectedPlayers = allPlayersList.filter(p => p?.ws && p.ws.readyState === 1);
-    const avgBuffered = connectedPlayers.length > 0
-      ? Math.round(connectedPlayers.reduce((sum, p) => sum + (p.ws?.bufferedAmount || 0), 0) / connectedPlayers.length / 1024)
-      : 0;
-
-    if (skippedDueToLoad > 0 || avgBuffered > 24) {
-      log.warn(`[MOVEMENT] ${playerCount} players | Skipped ${skippedDueToLoad} updates | Avg buffer: ${avgBuffered}KB | Flush latency: ${Math.round(avgLatency)}ms | Rate: ${Math.round(1000/BATCH_INTERVAL)}Hz`);
-    }
-  }
 }
 
 export const spawnBatchQueue = new Map<string, Map<string, any>>();
+
+// Sprite/animation payload caches live at module scope: spawn data for a given
+// player+animation is identical across receivers and flushes, so rebuilding it
+// per flush was pure repeated work during churn.
+const spriteDataCache = new Map<string, any>();
+const animationDataCache = new Map<string, any>();
 
 function queueSpawnForReceivers(spawnedPlayer: any, receivers: any[], spriteData: any = null) {
   for (const receiver of receivers) {
@@ -617,8 +519,6 @@ async function flushSpawnBatches() {
   if (spawnBatchQueue.size === 0) return;
 
   const allPlayers = playerCache.list();
-  const spriteDataCache = new Map<string, any>();
-  const animationDataCache = new Map<string, any>();
 
   for (const [receivingPlayerId, spawnedPlayers] of spawnBatchQueue.entries()) {
     if (spawnedPlayers.size === 0) {
@@ -637,7 +537,10 @@ async function flushSpawnBatches() {
       continue;
     }
 
-    if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
+    // Spawn batches are the largest stream payloads. Use a FRESH queue reading
+    // (not the 250ms cache) so a burst can't pile past the transport limit
+    // before the gate notices. Skipped spawns stay queued for a later flush.
+    if (receivingPlayer.ws.getFreshQueuedBytes() > SPAWN_BACKPRESSURE_THRESHOLD) {
       continue;
     }
 
@@ -794,14 +697,12 @@ async function scheduleBatchFlush() {
     if (batchTimer) clearTimeout(batchTimer);
     // Use adaptive interval based on current player count
     const adaptiveInterval = getAdaptiveBatchInterval();
-    BATCH_INTERVAL = adaptiveInterval;
     batchTimer = setTimeout(scheduleBatchFlush, adaptiveInterval);
   }
 }
 
 // Initialize with adaptive interval
 const initialInterval = getAdaptiveBatchInterval();
-BATCH_INTERVAL = initialInterval;
 batchTimer = setTimeout(scheduleBatchFlush, initialInterval);
 
 function constructMapMetadata(
@@ -1077,9 +978,8 @@ async function transitionPlayerToMap(
 export function clearBatchQueuesForPlayer(playerId: string) {
 
   receiverSetCache.delete(playerId);
-  if (movementWorkerReady) {
-    movementWorker.postMessage({ type: "removePlayers", ids: [playerId] });
-  }
+  movementProbeSeqs.delete(playerId);
+  postToAllWorkers({ type: "removePlayers", ids: [playerId] });
 
   for (const [groupKey, groupMovements] of movementBatchQueue.entries()) {
     if (!groupMovements.has(playerId)) continue;
@@ -1089,10 +989,6 @@ export function clearBatchQueuesForPlayer(playerId: string) {
     }
   }
 
-  const spawnsToPlayer = spawnBatchQueue.get(playerId);
-  if (spawnsToPlayer && spawnsToPlayer.size > 0) {
-    log.debug(`[CLEAR] Removing ${spawnsToPlayer.size} queued spawns TO ${playerId}`);
-  }
   spawnBatchQueue.delete(playerId);
 
   let clearedSpawnsFrom = 0;
@@ -1104,9 +1000,6 @@ export function clearBatchQueuesForPlayer(playerId: string) {
     if (spawnedPlayers.size === 0) {
       spawnBatchQueue.delete(receivingPlayerId);
     }
-  }
-  if (clearedSpawnsFrom > 0) {
-    log.debug(`[CLEAR] Removed spawn of ${playerId} FROM ${clearedSpawnsFrom} player queues`);
   }
 
   despawnBatchQueue.delete(playerId);
@@ -1316,9 +1209,9 @@ authWorker.on("message", async (result: any) => {
     if (world) {
       const worldPlayerCount = await worlds.adjustPlayerCount(spawnLocation.map, 1);
       if (worldPlayerCount !== null) {
-        log.info(
-          `World: ${world.name} now has ${worldPlayerCount} players. (player_join)`
-        );
+        // log.info(
+        //   `World: ${world.name} now has ${worldPlayerCount} players. (player_join)`
+        // );
       }
     }
 
@@ -1858,7 +1751,15 @@ export default async function packetReceiver(
 
         currentPlayer.lastUpdated = performance.now();
 
-        sendPacket(ws, packetManager.timeSync(data));
+        // Use the frame's actual read time (stamped by the stream loop) rather
+        // than the handler's own timestamp, so the latency math measures
+        // network + read scheduling instead of event-loop dispatch queueing.
+        const serverRecvTime = ws.lastFrameReadAt || Date.now();
+        const serverSendTime = Date.now();
+
+        // Loss-tolerant periodic reply - send as an unreliable datagram so it
+        // never queues behind the reliable stream under load.
+        ws.sendBestEffort(packetManager.timeSync(data, { serverRecvTime, serverSendTime })[0]);
         break;
       }
       case "AUTH": {

@@ -89,8 +89,8 @@ const settings = {
     "rateLimits": {
       "streamsPerSec": 2000,
       "streamsBurst": 4000,
-      "datagramsPerSec": 20000,
-      "datagramsBurst": 50000
+      "datagramsPerSec": 500000,
+      "datagramsBurst": 200000
     }
   },
   "gateway": {

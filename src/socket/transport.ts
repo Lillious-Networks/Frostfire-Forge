@@ -28,6 +28,11 @@ const BATCH_ENTRY_BYTES = 9;
 export const CLOSE_NORMAL = 0;
 export const CLOSE_ABNORMAL = 1;
 
+// Below the library's hard 64MB per-session queue limit: once a connection's
+// queue passes this, sendFrame stops writing instead of letting the transport
+// destroy the stream with E_QUEUE_FULL.
+const MAX_SAFE_QUEUE_BYTES = 48 * 1024 * 1024;
+
 export { encodeCloseReason, decodeCloseReason };
 
 export interface TransportHandlers {
@@ -61,6 +66,7 @@ export class TransportConnection {
   readonly session: any;
   data: any = {};
   readyState: number = 0;
+  lastFrameReadAt: number = 0;
   private writer: any = null;
   private pendingWriteBytes: number = 0;
   private closedFlag: boolean = false;
@@ -74,7 +80,29 @@ export class TransportConnection {
     this.maxFrameSize = maxFrameSize;
   }
 
+  private lastMetricsAt = 0;
+  private lastQueuedBytes = 0;
+  private lastQueueFullLogAt = 0;
+
   get bufferedAmount(): number {
+    if (this.readyState !== 1) return 0;
+
+    // metricsSnapshot() is a native call - the flush samples this for every
+    // receiver on every flush (thousands of times per second at scale), so
+    // cache the snapshot briefly. Backpressure checks tolerate 250ms staleness.
+    const now = Date.now();
+    if (now - this.lastMetricsAt < 250) {
+      return this.lastQueuedBytes + this.pendingWriteBytes;
+    }
+
+    return this.getFreshQueuedBytes() + this.pendingWriteBytes;
+  }
+
+  /**
+   * Bypasses the bufferedAmount cache. Use before writing large bursts (spawn
+   * batches) where a stale reading could push the session queue past its limit.
+   */
+  getFreshQueuedBytes(): number {
     if (this.readyState !== 1) return 0;
 
     let queuedBytes = 0;
@@ -86,7 +114,10 @@ export class TransportConnection {
       queuedBytes = 0;
     }
 
-    return queuedBytes + this.pendingWriteBytes;
+    this.lastMetricsAt = Date.now();
+    this.lastQueuedBytes = queuedBytes;
+
+    return queuedBytes;
   }
 
   isOpen(): boolean {
@@ -113,6 +144,20 @@ export class TransportConnection {
     }
 
     this.sendFrame(payload);
+  }
+
+  /**
+   * Send a message as an unreliable datagram (fire-and-forget, no queueing).
+   * Use for periodic, loss-tolerant messages (SERVER_TIME, TIME_SYNC replies)
+   * that would otherwise contend for the reliable stream's ordering queue.
+   */
+  sendBestEffort(payload: Uint8Array): void {
+    if (this.readyState !== 1 || !payload || payload.length === 0) return;
+    if (payload.length > this.maxDatagramSize) {
+      this.sendFrame(payload);
+      return;
+    }
+    this.sendDatagram(payload);
   }
 
   private sendMovement(payload: Uint8Array): void {
@@ -177,6 +222,23 @@ export class TransportConnection {
     const writer = this.writer;
     if (!writer) return;
 
+    // Last-resort tripwire: if the session's outbound queue is already near the
+    // hard limit (64MB), the client is hopelessly behind - skip the write
+    // instead of letting the transport reject it with E_QUEUE_FULL. The client
+    // either recovers or its own watchdog reconnects.
+    const queuedBytes = this.getFreshQueuedBytes();
+    if (queuedBytes > MAX_SAFE_QUEUE_BYTES) {
+      const now = Date.now();
+      if (now - this.lastQueueFullLogAt > 10000) {
+        this.lastQueueFullLogAt = now;
+        log.warn(
+          `[WebTransport] Stream queue full for connection ${this.data?.id} ` +
+          `(${this.data?.useragent || "unknown agent"}) - ${Math.round(queuedBytes / 1024)}KB queued, dropping stream frames (client is not keeping up)`
+        );
+      }
+      return;
+    }
+
     const frame = encodeFrame(payload);
     this.pendingWriteBytes += frame.length;
 
@@ -186,9 +248,22 @@ export class TransportConnection {
       })
       .catch((error: any) => {
         this.pendingWriteBytes = Math.max(0, this.pendingWriteBytes - frame.length);
-        if (this.readyState !== 3) {
-          log.debug(`Frame write failed: ${error?.message || error}`);
+        if (this.readyState === 3) return;
+
+        const message = String(error?.message || error);
+        if (message.includes("E_QUEUE_FULL")) {
+          const now = Date.now();
+          if (now - this.lastQueueFullLogAt > 10000) {
+            this.lastQueueFullLogAt = now;
+            log.warn(
+              `[WebTransport] Stream queue full for connection ${this.data?.id} ` +
+              `(${this.data?.useragent || "unknown agent"}) - dropping stream frames (client is not keeping up)`
+            );
+          }
+          return;
         }
+
+        log.debug(`Frame write failed: ${message}`);
       });
   }
 
@@ -237,8 +312,8 @@ export function startWebTransportServer(options: TransportServerOptions): any {
       maxHandshakesInFlight: 2000,
       maxStreamsPerSessionBidi: 500,
       maxStreamsPerSessionUni: 500,
-      maxQueuedBytesPerSession: 16 * 1024 * 1024,
-      maxQueuedBytesGlobal: 1024 * 1024 * 1024,
+      maxQueuedBytesPerSession: 64 * 1024 * 1024,
+      maxQueuedBytesGlobal: 4 * 1024 * 1024 * 1024,
       handshakeTimeoutMs: 15000,
     },
     rateLimits: options.rateLimits,
@@ -315,6 +390,7 @@ async function startStreamLoop(
       }
 
       const frames = decoder.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+      const readWallTime = Date.now();
 
       for (const frame of frames) {
         if (!authenticated) {
@@ -325,6 +401,10 @@ async function startStreamLoop(
           }
           continue;
         }
+
+        // Stamp the actual read time so handlers can measure event-loop
+        // queueing between frame arrival and dispatch.
+        connection.lastFrameReadAt = readWallTime;
 
         const message = textDecoder.decode(frame);
         options.handlers.onMessage(connection, message);

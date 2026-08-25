@@ -413,8 +413,8 @@ const webTransportRateLimits = {
   handshakesBurstPerPrefix: (settings as any)?.webtransport?.rateLimits?.handshakesBurstPerPrefix ?? NO_RATE_LIMIT,
   streamsPerSec: (settings as any)?.webtransport?.rateLimits?.streamsPerSec || 2000,
   streamsBurst: (settings as any)?.webtransport?.rateLimits?.streamsBurst || 4000,
-  datagramsPerSec: (settings as any)?.webtransport?.rateLimits?.datagramsPerSec || 20000,
-  datagramsBurst: (settings as any)?.webtransport?.rateLimits?.datagramsBurst || 50000,
+  datagramsPerSec: (settings as any)?.webtransport?.rateLimits?.datagramsPerSec || 500000,
+  datagramsBurst: (settings as any)?.webtransport?.rateLimits?.datagramsBurst || 200000,
 };
 
 const webTransportServer = startWebTransportServer({
@@ -587,64 +587,6 @@ setInterval(() => {
   listener.emit(Events.SERVER_TICK);
 }, 1000);
 
-setInterval(() => {
-  const allPlayers = Object.values(playerCache.list());
-  const connectedPlayers = allPlayers.filter((p: any) => p?.ws && p.ws.readyState === 1);
-
-  if (connectedPlayers.length === 0) return;
-
-  let totalBuffered = 0;
-  let maxBuffered = 0;
-  let playersWithBackpressure = 0;
-  let maxBufferedPlayer: any = null;
-  const BACKPRESSURE_THRESHOLD = 32 * 1024;
-
-  for (const player of connectedPlayers) {
-    const buffered = player.ws.bufferedAmount || 0;
-    totalBuffered += buffered;
-
-    if (buffered > maxBuffered) {
-      maxBuffered = buffered;
-      maxBufferedPlayer = player;
-    }
-
-    if (buffered > BACKPRESSURE_THRESHOLD) {
-      playersWithBackpressure++;
-    }
-  }
-
-  const avgBufferedBytes = totalBuffered / connectedPlayers.length;
-  const movingPlayers = gameLoop.getStats().movingPlayers;
-
-  const formatBuffer = (bytes: number): string => {
-    if (bytes >= 1024) {
-      return `${(bytes / 1024).toFixed(1)}KB`;
-    }
-    return `${Math.round(bytes)}B`;
-  };
-
-  const avgBufferStr = formatBuffer(avgBufferedBytes);
-  const maxBufferStr = formatBuffer(maxBuffered);
-
-  if (playersWithBackpressure > 0 || avgBufferedBytes > 16 * 1024) {
-    log.warn(
-      `[BACKPRESSURE] Players: ${connectedPlayers.length} (${movingPlayers} moving) | ` +
-      `Avg buffer: ${avgBufferStr} | Max: ${maxBufferStr} | ` +
-      `${playersWithBackpressure} players over 32KB` +
-      (maxBufferedPlayer ? ` | Worst: ${maxBufferedPlayer.username || maxBufferedPlayer.id}` : '')
-    );
-  } else if (connectedPlayers.length > 50) {
-
-    const tick = Math.floor(Date.now() / 1000);
-    if (tick % 10 === 0) {
-      log.info(
-        `[BACKPRESSURE] Players: ${connectedPlayers.length} (${movingPlayers} moving) | ` +
-        `Avg buffer: ${avgBufferStr} | Max: ${maxBufferStr}`
-      );
-    }
-  }
-}, 1000);
-
 if (settings?.packetRatelimit?.enabled) {
   setInterval(() => {
     for (const client of ClientRateLimit.values()) {
@@ -715,14 +657,21 @@ listener.on(Events.SERVER_TICK, async () => {
 
     if (userIds.length > 0) {
       try {
-        const dbResults = await query(
-          "SELECT id, session_id FROM accounts WHERE id IN (?)",
-          [userIds]
-        ) as any[];
-
         const dbSessionMap = new Map<string, string>();
-        for (const r of dbResults) {
-          dbSessionMap.set(String(r.id ?? ""), String(r.session_id ?? ""));
+
+        // Chunk the IN-clause query so a 2000-player validation never blocks
+        // the database pool (and the event loop) with one giant query.
+        const VALIDATION_CHUNK_SIZE = 200;
+        for (let i = 0; i < userIds.length; i += VALIDATION_CHUNK_SIZE) {
+          const chunk = userIds.slice(i, i + VALIDATION_CHUNK_SIZE);
+          const dbResults = await query(
+            "SELECT id, session_id FROM accounts WHERE id IN (?)",
+            [chunk]
+          ) as any[];
+
+          for (const r of dbResults) {
+            dbSessionMap.set(String(r.id ?? ""), String(r.session_id ?? ""));
+          }
         }
 
         for (const p of players) {
@@ -733,16 +682,11 @@ listener.on(Events.SERVER_TICK, async () => {
 
           const dbSid = dbSessionMap.get(String(p.userid)) || "";
           if (dbSid !== String(p.id)) {
-            log.info(
-              `[Session] Stale session detected for ${
-                p.username
-              } (local: ${p.id}, db: ${dbSid || "cleared"})`
-            );
             inactiveSet.set(p.id, "session_stolen");
           }
         }
       } catch (e) {
-        log.error(`[Session] Validation query failed: ${e}`);
+        log.error(`Validation query failed: ${e}`);
       }
     }
   }
@@ -750,9 +694,9 @@ listener.on(Events.SERVER_TICK, async () => {
   for (const playerData of players) {
     if (!playerData || inactiveSet.has(playerData.id) || !playerData.ws) continue;
 
-    handleBackpressure(playerData.ws, () =>
-      playerData.ws.send(packetManager.serverTime()[0])
-    );
+    // SERVER_TIME is sent every second to every player; deliver it as an
+    // unreliable datagram so it never queues behind the reliable stream.
+    playerData.ws.sendBestEffort(packetManager.serverTime()[0]);
 
     const rawLA = typeof playerData.last_attack === "number" ? playerData.last_attack : 0;
     const lastAttackEpoch =
@@ -807,6 +751,7 @@ listener.on(Events.SERVER_TICK, async () => {
       }
     }
   }
+
   if (inactiveSet.size > 0) {
     for (const [id, reason] of inactiveSet) {
 
@@ -930,11 +875,11 @@ listener.on("onDisconnect", async (data) => {
     }
 
     if (worldPlayerCount !== null) {
-      log.info(
-        `World: ${playerData.location.map.replace(".json", "")} now has ${
-          worldPlayerCount
-        } players. (${data.reason})`
-      );
+      // log.info(
+      //   `World: ${playerData.location.map.replace(".json", "")} now has ${
+      //     worldPlayerCount
+      //   } players. (${data.reason})`
+      // );
     }
 
     if (!playerData.isGuest) {

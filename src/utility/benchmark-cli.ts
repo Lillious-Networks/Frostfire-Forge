@@ -139,13 +139,132 @@ const packet = {
 
 interface LatencyStats {
     samples: number[];
-    lastSyncTimes: Map<any, number>;
+    oneWaySamples: number[];
+    serverProcSamples: number[];
+    jitterSamples: number[];
+    udpOneWaySamples: number[];
+    lastSyncTimes: Map<any, { seq: number; clientSendTime: number }>;
+    lastSeqs: Map<any, number>;
+    lastRtts: Map<any, number>;
+    offsets: Map<any, number>;
+    offsetCounts: Map<any, number>;
+    lastUdpSeqs: Map<any, number>;
+    lostPackets: number;
+    expectedPackets: number;
+    udpLostFrames: number;
+    udpExpectedFrames: number;
 }
 
 const latencyStats: LatencyStats = {
     samples: [],
-    lastSyncTimes: new Map()
+    oneWaySamples: [],
+    serverProcSamples: [],
+    jitterSamples: [],
+    udpOneWaySamples: [],
+    lastSyncTimes: new Map(),
+    lastSeqs: new Map(),
+    lastRtts: new Map(),
+    offsets: new Map(),
+    offsetCounts: new Map(),
+    lastUdpSeqs: new Map(),
+    lostPackets: 0,
+    expectedPackets: 0,
+    udpLostFrames: 0,
+    udpExpectedFrames: 0,
 };
+
+// Connection ramp-up (TLS/QUIC handshakes, guest-account writes, map loads)
+// produces latency spikes that are not representative of steady-state. Samples
+// collected before this timestamp are excluded from all summary statistics.
+const LATENCY_WARMUP_MS = 10000;
+let latencyWarmupUntil = 0;
+
+// One-way UDP latency measured from server timestamps piggybacked on movement
+// datagrams. Uses the per-client clock offset estimated from TIME_SYNC replies,
+// so no request/response is needed on the UDP path. Samples are only recorded
+// once the offset estimate has stabilized (a handful of TIME_SYNC replies).
+const MIN_OFFSET_SAMPLES_FOR_UDP = 5;
+
+function recordUdpLatency(client: any, serverSendTime: number): void {
+    const offset = latencyStats.offsets.get(client);
+    if (offset === undefined) return;
+    if ((latencyStats.offsetCounts.get(client) ?? 0) < MIN_OFFSET_SAMPLES_FOR_UDP) return;
+
+    const clientRecvTime = Date.now();
+    const oneWay = Math.max(0, clientRecvTime - serverSendTime - offset);
+    latencyStats.udpOneWaySamples.push(oneWay);
+    if (latencyStats.udpOneWaySamples.length > 200000) {
+        latencyStats.udpOneWaySamples.shift();
+    }
+}
+
+function recordUdpBatchLatency(client: any, seq: number, serverSendTime: number): void {
+    recordUdpLatency(client, serverSendTime);
+
+    const prevSeq = latencyStats.lastUdpSeqs.get(client);
+    if (prevSeq !== undefined && seq > prevSeq + 1) {
+        latencyStats.udpLostFrames += seq - prevSeq - 1;
+    }
+    latencyStats.lastUdpSeqs.set(client, seq);
+    latencyStats.udpExpectedFrames++;
+}
+
+function recordTimeSyncReply(client: any, message: any): void {
+    // Skip connection warm-up: handshakes, DB writes and map loads spike
+    // latency during ramp-up and would skew the steady-state statistics.
+    if (Date.now() < latencyWarmupUntil) return;
+
+    const sent = latencyStats.lastSyncTimes.get(client);
+    if (!sent) return;
+
+    const clientRecvTime = Date.now();
+    const rtt = clientRecvTime - sent.clientSendTime;
+    latencyStats.samples.push(rtt);
+    if (latencyStats.samples.length > 200000) {
+        latencyStats.samples.shift();
+    }
+
+    // Packet loss: gaps in the TIME_SYNC sequence number mean lost replies
+    const prevSeq = latencyStats.lastSeqs.get(client);
+    if (prevSeq !== undefined && sent.seq > prevSeq + 1) {
+        latencyStats.lostPackets += sent.seq - prevSeq - 1;
+    }
+    latencyStats.lastSeqs.set(client, sent.seq);
+    latencyStats.expectedPackets++;
+
+    // Jitter: absolute RTT change between consecutive replies
+    const prevRtt = latencyStats.lastRtts.get(client);
+    if (prevRtt !== undefined) {
+        latencyStats.jitterSamples.push(Math.abs(rtt - prevRtt));
+    }
+    latencyStats.lastRtts.set(client, rtt);
+
+    const serverRecvTime = message?.serverRecvTime;
+    const serverSendTime = message?.serverSendTime;
+
+    if (typeof serverRecvTime === 'number' && typeof serverSendTime === 'number') {
+        // One-way latency via NTP-style clock offset estimation (EMA-smoothed
+        // per client), which removes the client/server clock skew without
+        // needing synchronized clocks.
+        const offset = ((serverRecvTime - sent.clientSendTime) - (clientRecvTime - serverSendTime)) / 2;
+        const previousOffset = latencyStats.offsets.get(client);
+        const smoothedOffset = previousOffset === undefined ? offset : previousOffset * 0.8 + offset * 0.2;
+        latencyStats.offsets.set(client, smoothedOffset);
+        latencyStats.offsetCounts.set(client, (latencyStats.offsetCounts.get(client) ?? 0) + 1);
+
+        const oneWay = Math.max(0, serverRecvTime - sent.clientSendTime - smoothedOffset);
+        latencyStats.oneWaySamples.push(oneWay);
+        if (latencyStats.oneWaySamples.length > 200000) {
+            latencyStats.oneWaySamples.shift();
+        }
+
+        const serverProc = Math.max(0, serverSendTime - serverRecvTime);
+        latencyStats.serverProcSamples.push(serverProc);
+        if (latencyStats.serverProcSamples.length > 200000) {
+            latencyStats.serverProcSamples.shift();
+        }
+    }
+}
 
 const movementStats = { starts: 0, aborts: 0, logouts: 0, abruptDisconnects: 0 };
 
@@ -252,11 +371,13 @@ function startKeepAlive(client: any) {
         if (stopped || client.readyState !== 1) return;
 
         const sendTime = Date.now();
-        latencyStats.lastSyncTimes.set(client, sendTime);
+        const previous = latencyStats.lastSyncTimes.get(client);
+        const seq = (previous?.seq ?? 0) + 1;
+        latencyStats.lastSyncTimes.set(client, { seq, clientSendTime: sendTime });
 
         client.send(packet.encode(JSON.stringify({
             type: "TIME_SYNC",
-            data: sendTime
+            data: { seq, clientSendTime: sendTime }
         })));
 
         const nextTimer = setTimeout(sendTimeSync, 3000 + Math.random() * 4000);
@@ -358,14 +479,53 @@ function startMovementSimulation(client: any, initialDelay: number = 0) {
         sessionUntil: Date.now() + (60000 + Math.random() * 240000),
     };
 
-    // Track own position from 0x02 MOVEXY echo datagrams (server echoes mover position every tick)
+    // Track own position from 0x02 MOVEXY echo datagrams (server echoes mover
+    // position every tick) and one-way UDP latency from the trailing server
+    // timestamps piggybacked on movement frames (0x02 echoes and 0x01 batches).
+    // TIME_SYNC replies also arrive as datagrams (best-effort) and are parsed
+    // here for RTT/offset statistics.
     client.onDatagram((bytes: Uint8Array) => {
-        if (bytes.length < 11 || bytes[0] !== 0x02) return;
-        const view = new DataView(bytes.buffer, bytes.byteOffset, 11);
-        const x = view.getInt16(5, true);
-        const y = view.getInt16(7, true);
-        behavior.position = { x, y };
-        if (!behavior.home) behavior.home = { x, y };
+        if (bytes.length < 11) return;
+
+        if (bytes[0] === 0x02) {
+            const view = new DataView(bytes.buffer, bytes.byteOffset, 11);
+            const x = view.getInt16(5, true);
+            const y = view.getInt16(7, true);
+            behavior.position = { x, y };
+            if (!behavior.home) behavior.home = { x, y };
+
+            if (bytes.length >= 17) {
+                const seconds = new DataView(bytes.buffer, bytes.byteOffset + 11, 4).getUint32(0, true);
+                const ms = new DataView(bytes.buffer, bytes.byteOffset + 15, 2).getUint16(0, true);
+                recordUdpLatency(client, seconds * 1000 + ms);
+            }
+            return;
+        }
+
+        if (bytes[0] === 0x01) {
+            const view = new DataView(bytes.buffer, bytes.byteOffset);
+            const count = view.getUint16(1, true);
+            const entriesEnd = 3 + count * 9;
+            if (bytes.length >= entriesEnd + 10) {
+                const seq = view.getUint32(entriesEnd, true);
+                const seconds = view.getUint32(entriesEnd + 4, true);
+                const ms = view.getUint16(entriesEnd + 8, true);
+                recordUdpBatchLatency(client, seq, seconds * 1000 + ms);
+            }
+            return;
+        }
+
+        // JSON datagram (e.g. TIME_SYNC reply)
+        if (bytes[0] === 0x7B) {
+            try {
+                const message = JSON.parse(new TextDecoder().decode(bytes));
+                if (message.type === 'TIME_SYNC') {
+                    recordTimeSyncReply(client, message);
+                }
+            } catch {
+                // Not JSON after all - ignore
+            }
+        }
     });
 
     const track = (fn: () => void, delayMs: number) => {
@@ -730,13 +890,28 @@ async function createClients(amount: number, host: string, clientUrl: string, co
 }
 
 function getLatencyStats() {
-    if (latencyStats.samples.length === 0) {
-        return { avg: 0, min: 0, max: 0, count: 0 };
+    const stats: any = { avg: 0, min: 0, max: 0, p95: 0, p99: 0, count: latencyStats.samples.length, oneWayAvg: 0, serverProcAvg: 0, jitterAvg: 0, udpOneWayAvg: 0, lostPackets: latencyStats.lostPackets, expectedPackets: latencyStats.expectedPackets, udpLostFrames: latencyStats.udpLostFrames, udpExpectedFrames: latencyStats.udpExpectedFrames };
+    if (latencyStats.samples.length > 0) {
+        stats.avg = Math.round(latencyStats.samples.reduce((a, b) => a + b, 0) / latencyStats.samples.length);
+        stats.min = Math.round(Math.min(...latencyStats.samples));
+        stats.max = Math.round(Math.max(...latencyStats.samples));
+        const sorted = [...latencyStats.samples].sort((a, b) => a - b);
+        stats.p95 = Math.round(sorted[Math.floor(sorted.length * 0.95)]);
+        stats.p99 = Math.round(sorted[Math.floor(sorted.length * 0.99)]);
     }
-    const avg = Math.round(latencyStats.samples.reduce((a, b) => a + b, 0) / latencyStats.samples.length);
-    const min = Math.round(Math.min(...latencyStats.samples));
-    const max = Math.round(Math.max(...latencyStats.samples));
-    return { avg, min, max, count: latencyStats.samples.length };
+    if (latencyStats.oneWaySamples.length > 0) {
+        stats.oneWayAvg = Math.round(latencyStats.oneWaySamples.reduce((a, b) => a + b, 0) / latencyStats.oneWaySamples.length);
+    }
+    if (latencyStats.serverProcSamples.length > 0) {
+        stats.serverProcAvg = Math.round(latencyStats.serverProcSamples.reduce((a, b) => a + b, 0) / latencyStats.serverProcSamples.length);
+    }
+    if (latencyStats.jitterSamples.length > 0) {
+        stats.jitterAvg = Math.round(latencyStats.jitterSamples.reduce((a, b) => a + b, 0) / latencyStats.jitterSamples.length);
+    }
+    if (latencyStats.udpOneWaySamples.length > 0) {
+        stats.udpOneWayAvg = Math.round(latencyStats.udpOneWaySamples.reduce((a, b) => a + b, 0) / latencyStats.udpOneWaySamples.length);
+    }
+    return stats;
 }
 
 function cleanupClient(client: any) {
@@ -751,6 +926,11 @@ function cleanupClient(client: any) {
     }
 
     latencyStats.lastSyncTimes.delete(client);
+    latencyStats.lastSeqs.delete(client);
+    latencyStats.lastRtts.delete(client);
+    latencyStats.offsets.delete(client);
+    latencyStats.offsetCounts.delete(client);
+    latencyStats.lastUdpSeqs.delete(client);
 
     if (client.readyState === 1) {
         client.close();
@@ -815,15 +995,7 @@ function attachSimulationHandlers(client: any) {
             const message = JSON.parse(rawMessage);
 
             if (message.type === 'TIME_SYNC') {
-                const sentTime = latencyStats.lastSyncTimes.get(client);
-                if (sentTime) {
-                    const receiveTime = Date.now();
-                    const latency = receiveTime - sentTime;
-                    latencyStats.samples.push(latency);
-                    if (latencyStats.samples.length > 200000) {
-                        latencyStats.samples.shift();
-                    }
-                }
+                recordTimeSyncReply(client, message);
             }
         } catch (e: any) {
             if (!(e instanceof SyntaxError) && !quietMode) {
@@ -919,9 +1091,14 @@ async function runSimulation(config: ReturnType<typeof parseArgs>) {
     log('Starting simulation...', 'info');
 
     const startTime = Date.now();
+    latencyWarmupUntil = startTime + LATENCY_WARMUP_MS;
 
-    const initialWave = Math.max(1, Math.round(peakClients * 0.05));
-    log(`Initial population: ${initialWave} clients (5% of peak)`, 'info');
+    // Fixed connection rate: bigger populations take longer to connect, the
+    // rate itself never scales with the total required.
+    const connectionRate = config.rate > 0 ? config.rate : 25;
+
+    const initialWave = Math.min(Math.round(peakClients * 0.05), connectionRate);
+    log(`Initial population: ${Math.round(peakClients * 0.05)} clients (5% of peak) at ${connectionRate}/sec`, 'info');
     connectWave(initialWave, config);
 
     let lastProgressDraw = 0;
@@ -940,12 +1117,12 @@ async function runSimulation(config: ReturnType<typeof parseArgs>) {
         const churn = Math.max(1, Math.round(active * 0.002));
         disconnectRandomClients(Math.floor(Math.random() * (churn + 1)));
         const churnReconnects = Math.floor(Math.random() * (churn + 1));
-        if (churnReconnects > 0) connectWave(Math.min(churnReconnects, 10), config);
+        if (churnReconnects > 0) connectWave(Math.min(churnReconnects, Math.max(1, Math.floor(connectionRate / 2))), config);
 
         const delta = target - countActiveConnections() - pendingConnects;
 
         if (delta > 0) {
-            connectWave(Math.min(delta, 20), config);
+            connectWave(Math.min(delta, connectionRate), config);
         } else if (delta < 0) {
             disconnectRandomClients(Math.min(-delta, countActiveConnections()));
         }
@@ -989,27 +1166,58 @@ async function runSimulation(config: ReturnType<typeof parseArgs>) {
     console.log(`  ${chalk.bold('Successful Logins:')}    ${chalk.white(loginSuccesses.toLocaleString())}`);
     console.log(`  ${chalk.bold('Logouts/Disconnects:')}  ${chalk.white(totalLogouts.toLocaleString())}`);
 
-    if (finalLatency.count > 0) {
-        console.log(`\n  ${chalk.bold('Latency Statistics:')}`);
-
-        let avgColor = chalk.green;
-        if (finalLatency.avg > 100) avgColor = chalk.yellow;
-        if (finalLatency.avg > 200) avgColor = chalk.red;
-
-        console.log(`    ${chalk.bold('Average:')} ${avgColor(finalLatency.avg + 'ms')}`);
-        console.log(`    ${chalk.bold('Minimum:')} ${chalk.green(finalLatency.min + 'ms')}`);
-
-        let maxColor = chalk.green;
-        if (finalLatency.max > 200) maxColor = chalk.yellow;
-        if (finalLatency.max > 500) maxColor = chalk.red;
-
-        console.log(`    ${chalk.bold('Maximum:')} ${maxColor(finalLatency.max + 'ms')}`);
-        console.log(`    ${chalk.bold('Samples:')} ${chalk.white(finalLatency.count.toLocaleString())}`);
-    } else {
-        console.log(`\n  ${chalk.yellow('⚠')} No latency data collected`);
-    }
+    printLatencySummary(finalLatency);
 
     console.log('\n' + chalk.gray('-'.repeat(60)) + '\n');
+}
+
+function printLatencySummary(latency: any) {
+    if (latency.count <= 0) {
+        console.log(`\n  ${chalk.yellow('⚠')} No latency data collected`);
+        return;
+    }
+
+    console.log(`\n  ${chalk.bold('Latency Statistics:')} ${chalk.gray(`(first ${LATENCY_WARMUP_MS / 1000}s excluded as connection warm-up)`)}`);
+
+    let avgColor = chalk.green;
+    if (latency.avg > 100) avgColor = chalk.yellow;
+    if (latency.avg > 200) avgColor = chalk.red;
+
+    console.log(`    ${chalk.bold('RTT Average:')} ${avgColor(latency.avg + 'ms')}`);
+    console.log(`    ${chalk.bold('RTT Minimum:')} ${chalk.green(latency.min + 'ms')}`);
+
+    let maxColor = chalk.green;
+    if (latency.max > 200) maxColor = chalk.yellow;
+    if (latency.max > 500) maxColor = chalk.red;
+
+    console.log(`    ${chalk.bold('RTT Maximum:')} ${maxColor(latency.max + 'ms')}`);
+    if (latency.p95 > 0) {
+        console.log(`    ${chalk.bold('RTT p95:')} ${chalk.white(latency.p95 + 'ms')} ${chalk.dim('|')} ${chalk.bold('p99:')} ${chalk.white(latency.p99 + 'ms')}`);
+    }
+    console.log(`    ${chalk.bold('Samples:')}     ${chalk.white(latency.count.toLocaleString())}`);
+
+    if (latency.oneWayAvg > 0) {
+        console.log(`    ${chalk.bold('One-way (client→server):')} ${chalk.white(latency.oneWayAvg + 'ms')}`);
+    }
+    if (latency.udpOneWayAvg > 0) {
+        console.log(`    ${chalk.bold('One-way UDP (movement datagrams):')} ${chalk.white(latency.udpOneWayAvg + 'ms')}`);
+    }
+    if (latency.serverProcAvg > 0) {
+        console.log(`    ${chalk.bold('Server processing:')} ${chalk.white(latency.serverProcAvg + 'ms')}`);
+    }
+    if (latency.jitterAvg > 0) {
+        console.log(`    ${chalk.bold('Jitter (mean |ΔRTT|):')} ${chalk.white(latency.jitterAvg + 'ms')}`);
+    }
+    if (latency.expectedPackets > 0) {
+        const lossPercent = ((latency.lostPackets / latency.expectedPackets) * 100).toFixed(2);
+        const lossColor = latency.lostPackets === 0 ? chalk.green : chalk.yellow;
+        console.log(`    ${chalk.bold('TIME_SYNC packet loss:')} ${lossColor(`${latency.lostPackets}/${latency.expectedPackets} (${lossPercent}%)`)}`);
+    }
+    if (latency.udpExpectedFrames > 0) {
+        const udpLossPercent = ((latency.udpLostFrames / latency.udpExpectedFrames) * 100).toFixed(2);
+        const udpLossColor = latency.udpLostFrames === 0 ? chalk.green : chalk.yellow;
+        console.log(`    ${chalk.bold('Movement datagram loss:')} ${udpLossColor(`${latency.udpLostFrames}/${latency.udpExpectedFrames} (${udpLossPercent}%)`)}`);
+    }
 }
 
 async function runBenchmark(config: ReturnType<typeof parseArgs>) {
@@ -1078,15 +1286,7 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
                 const message = JSON.parse(rawMessage);
 
                 if (message.type === 'TIME_SYNC') {
-                    const sentTime = latencyStats.lastSyncTimes.get(client);
-                    if (sentTime) {
-                        const receiveTime = Date.now();
-                        const latency = receiveTime - sentTime;
-                        latencyStats.samples.push(latency);
-                        if (latencyStats.samples.length > actualClientCount * 100) {
-                            latencyStats.samples.shift();
-                        }
-                    }
+                    recordTimeSyncReply(client, message);
                 }
             } catch (e: any) {
                 if (e instanceof SyntaxError) {
@@ -1106,6 +1306,8 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
 
     log('Starting test timer in 3 seconds...', 'info');
     await new Promise(resolve => setTimeout(resolve, 3000));
+
+    latencyWarmupUntil = Date.now() + LATENCY_WARMUP_MS;
 
     console.log('');
     log('Benchmark running...', 'info');
@@ -1168,25 +1370,7 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
         console.log(`  ${chalk.yellow('⚠')} ${chalk.yellow(finalActiveConnections + '/' + actualClientCount)} clients connected at end ${chalk.gray('(' + disconnected + ' disconnected)')}`);
     }
 
-    if (finalLatency.count > 0) {
-        console.log(`\n  ${chalk.bold('Latency Statistics:')}`);
-
-        let avgColor = chalk.green;
-        if (finalLatency.avg > 100) avgColor = chalk.yellow;
-        if (finalLatency.avg > 200) avgColor = chalk.red;
-
-        console.log(`    ${chalk.bold('Average:')} ${avgColor(finalLatency.avg + 'ms')}`);
-        console.log(`    ${chalk.bold('Minimum:')} ${chalk.green(finalLatency.min + 'ms')}`);
-
-        let maxColor = chalk.green;
-        if (finalLatency.max > 200) maxColor = chalk.yellow;
-        if (finalLatency.max > 500) maxColor = chalk.red;
-
-        console.log(`    ${chalk.bold('Maximum:')} ${maxColor(finalLatency.max + 'ms')}`);
-        console.log(`    ${chalk.bold('Samples:')} ${chalk.white(finalLatency.count.toLocaleString())}`);
-    } else {
-        console.log(`\n  ${chalk.yellow('⚠')} No latency data collected`);
-    }
+    printLatencySummary(finalLatency);
 
     console.log('\n' + chalk.gray('-'.repeat(60)) + '\n');
 }

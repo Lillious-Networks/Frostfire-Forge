@@ -1,7 +1,8 @@
 export const BATCH_HEADER = 0x01;
 export const MAX_DATAGRAM_SIZE = 1200;
 const ENTRY_BYTES = 9;
-const MAX_ENTRIES = Math.floor((MAX_DATAGRAM_SIZE - 3) / ENTRY_BYTES);
+const PROBE_BYTES = 10; // [u32 seq][u32 seconds][u16 ms]
+const MAX_ENTRIES = Math.floor((MAX_DATAGRAM_SIZE - 3 - PROBE_BYTES) / ENTRY_BYTES);
 
 export const DIRECTION_MAP: Record<string, number> = {
   up: 0, down: 1, left: 2, right: 3,
@@ -60,13 +61,18 @@ export function collectReceiverEntries(
   return entries;
 }
 
-export function encodeBatch(entries: any[]): { data: Uint8Array; offsets: number[] } {
+export interface MovementProbe {
+  seq: number;
+  serverSendTime: number;
+}
+
+export function encodeBatch(entries: any[], probe?: MovementProbe): { data: Uint8Array; offsets: number[] } {
   const frames: Uint8Array[] = [];
   const offsets: number[] = [];
 
   for (let i = 0; i < entries.length; i += MAX_ENTRIES) {
     const chunkEntries = Math.min(MAX_ENTRIES, entries.length - i);
-    const frame = new Uint8Array(3 + chunkEntries * ENTRY_BYTES);
+    const frame = new Uint8Array(3 + chunkEntries * ENTRY_BYTES + (probe ? PROBE_BYTES : 0));
     const view = new DataView(frame.buffer);
     frame[0] = BATCH_HEADER;
     view.setUint16(1, chunkEntries, true);
@@ -79,6 +85,16 @@ export function encodeBatch(entries: any[]): { data: Uint8Array; offsets: number
       view.setInt16(offset + 6, mover.y, true);
       frame[offset + 8] = mover.direction | (mover.stealth << 4);
       offset += ENTRY_BYTES;
+    }
+
+    // Trailing one-way latency probe: [u32 seq][u32 seconds][u16 ms].
+    // Clients parse exactly `count` entries and ignore the trailing bytes,
+    // so this is transparent to the game client. The timestamp is split into
+    // seconds + milliseconds because Date.now() overflows a single u32.
+    if (probe) {
+      view.setUint32(offset, probe.seq + (i / MAX_ENTRIES), true);
+      view.setUint32(offset + 4, Math.floor(probe.serverSendTime / 1000), true);
+      view.setUint16(offset + 8, probe.serverSendTime % 1000, true);
     }
 
     frames.push(frame);

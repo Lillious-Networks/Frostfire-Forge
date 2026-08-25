@@ -3,6 +3,10 @@ import { collectReceiverEntries, encodeBatch, MoverSnapshot, ReceiverInfo } from
 
 const receiverSets = new Map<string, Set<string>>();
 
+// Per-receiver probe sequence numbers (persist across flushes so the client's
+// loss accounting sees one monotonic stream per receiver).
+const probeSeqs = new Map<string, number>();
+
 function applyDiffs(diffs: Array<{ playerId: string; add: string[]; remove: string[] }>): void {
   for (const diff of diffs) {
     let set = receiverSets.get(diff.playerId);
@@ -25,6 +29,7 @@ parentPort?.on("message", (message: any) => {
     if (message.type === "removePlayers") {
       for (const id of message.ids) {
         receiverSets.delete(id);
+        probeSeqs.delete(id);
         for (const set of receiverSets.values()) set.delete(id);
       }
       return;
@@ -53,7 +58,9 @@ parentPort?.on("message", (message: any) => {
         const entries = collectReceiverEntries(set, movers, receiver, tick, tierDistance);
         if (entries.length === 0) continue;
 
-        const { data, offsets } = encodeBatch(entries);
+        const receiverProbeSeq = probeSeqs.get(receiverId) ?? 0;
+        const { data, offsets } = encodeBatch(entries, { seq: receiverProbeSeq, serverSendTime: Date.now() });
+        probeSeqs.set(receiverId, receiverProbeSeq + (offsets.length - 1));
         batches.push({ receiverId, offsets, data });
         buffers.push(data.buffer as ArrayBuffer);
       }
