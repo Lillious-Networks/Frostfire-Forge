@@ -557,15 +557,15 @@ declare interface LootRollResult {
 }
 
 declare interface PluginHandlerFn {
-  (ws: any, currentPlayer: any, data: any, sendPacketFn: (ws: any, packets: any[]) => void): Promise<void>;
+  (wt: any, currentPlayer: any, data: any, sendPacketFn: (wt: any, packets: any[]) => void): Promise<void>;
 }
 
 declare interface EngineAPI {
   addPacketTypes(types: string[]): void;
   addPacketBuilders(builders: Record<string, (...args: any[]) => any[]>): void;
   registerHandlers(handlers: Record<string, PluginHandlerFn>): void;
-  onWarpCollision(interceptor: (warp: any, ws: any, player: any, sendPacket: any) => Promise<boolean>): void;
-  onPacket(interceptor: (type: string, data: any, ws: any, player: any) => boolean): void;
+  onWarpCollision(interceptor: (warp: any, wt: any, player: any, sendPacket: any) => Promise<boolean>): void;
+  onPacket(interceptor: (type: string, data: any, wt: any, player: any) => boolean): void;
   addHttpRoute(method: string, route: string, handler: (req: Request) => Promise<Response>): void;
   teleportPlayer(playerObj: any, mapName: string, x: number, y: number): Promise<void>;
   registerSpell(spell: SpellData): Promise<void>;

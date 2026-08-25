@@ -560,10 +560,10 @@ try {
       }
       log.success(`Registered ${Object.keys(handlers).length} plugin packet handlers`);
     },
-    onWarpCollision: (interceptor: (warp: any, ws: any, player: any, sendPacket: any) => Promise<boolean>) => {
+    onWarpCollision: (interceptor: (warp: any, wt: any, player: any, sendPacket: any) => Promise<boolean>) => {
       warpInterceptors.push(interceptor);
     },
-    onPacket: (interceptor: (type: string, data: any, ws: any, player: any) => boolean) => {
+    onPacket: (interceptor: (type: string, data: any, wt: any, player: any) => boolean) => {
       packetInterceptors.push(interceptor);
     },
     addHttpRoute: (method: string, route: string, handler: (req: Request) => Promise<Response>) => {

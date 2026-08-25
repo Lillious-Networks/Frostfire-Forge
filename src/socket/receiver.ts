@@ -139,9 +139,9 @@ let globalStateRevision: number = 0;
 
 export const pluginHandlers = new Map<string, PluginHandlerFn>();
 
-export const warpInterceptors: Array<(warp: { map: string; x: number; y: number }, ws: any, player: any, sendPacket: (ws: any, packets: any[]) => void) => Promise<boolean>> = [];
+export const warpInterceptors: Array<(warp: { map: string; x: number; y: number }, wt: any, player: any, sendPacket: (wt: any, packets: any[]) => void) => Promise<boolean>> = [];
 
-export const packetInterceptors: Array<(type: string, data: any, ws: any, player: any) => boolean> = [];
+export const packetInterceptors: Array<(type: string, data: any, wt: any, player: any) => boolean> = [];
 
 export const movementBatchQueue = new Map<string, Map<string, any>>();
 
@@ -1731,6 +1731,18 @@ export default async function packetReceiver(
 
     const currentPlayer = playerCache.get(ws.data.id) || null;
 
+    for (const interceptor of packetInterceptors) {
+      if (interceptor(type, data, ws, currentPlayer)) {
+        return;
+      }
+    }
+
+    const pluginHandler = pluginHandlers.get(type);
+    if (pluginHandler) {
+      await pluginHandler(ws, currentPlayer, data, sendPacket);
+      return;
+    }
+
     // Resolve a DB NPC's comma-separated particle names to full particle objects
     async function resolveNpcParticles(npc: Npc): Promise<Npc> {
       const particlesCache = await assetCache.get("particles") as any[] | null;
@@ -2085,12 +2097,19 @@ export default async function packetReceiver(
                 }
                 return;
               }
-              const currentMap = currentPlayer.location.map;
               const warp = collision.warp as {
                 map: string;
                 x: number;
                 y: number;
               };
+
+              for (const interceptor of warpInterceptors) {
+                if (await interceptor(warp, ws, currentPlayer, sendPacket)) {
+                  return;
+                }
+              }
+
+              const currentMap = currentPlayer.location.map;
 
               const result = await player.setLocation(
                 currentPlayer.id,
