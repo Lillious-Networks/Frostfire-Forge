@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Install dependencies
 FROM base AS deps
-COPY package.json bun.lockb* ./
+COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production --ignore-scripts
 
 # Production stage
@@ -21,10 +21,11 @@ LABEL org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.description="Frostfire Forge Game Server"
 
 EXPOSE 3000
+EXPOSE 3000/udp
 
 RUN bun create-config --environment production
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
-  CMD bun --eval "const useSSL = process.env.WEB_SOCKET_USE_SSL === 'true'; const port = process.env.WEB_SOCKET_PORT || 3000; const protocol = useSSL ? 'https' : 'http'; const res = await fetch(protocol + '://localhost:' + port + '/status').catch(() => ({ok: false})); process.exit(res.ok ? 0 : 1)"
+  CMD bun --env-file=.env.production --eval "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; const useSSL = process.env.HTTP_USE_SSL === 'true'; const port = process.env.GAME_PORT || 3000; const protocol = useSSL ? 'https' : 'http'; const res = await fetch(protocol + '://localhost:' + port + '/status').catch(() => ({ok: false})); process.exit(res.ok ? 0 : 1)"
 
 CMD ["sh", "-c", "bun setup-production && bun run production"]

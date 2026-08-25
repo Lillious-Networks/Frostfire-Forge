@@ -11,7 +11,7 @@ on:
     paths:
       - 'src/**'
       - 'package.json'
-      - 'bun.lockb'
+      - 'bun.lock'
       - 'Dockerfile.*'
       - 'docker-compose*.yml'
       - '.github/workflows/release.yml'

@@ -117,22 +117,29 @@ DATABASE_NAME="your_db_name"
 DATABASE_PASSWORD="your_db_password"
 DATABASE_PORT="3306"
 DATABASE_USER="your_db_user"
-SQL_SSL_MODE="DISABLED" | "ENABLED"
+SQL_SSL_MODE="DISABLED"                    # Set to "ENABLED" to require TLS for the database connection
 
 # Translation Services
 GOOGLE_TRANSLATE_API_KEY="your_google_api_key"
 OPENAI_API_KEY="your_openai_api_key"
-TRANSLATION_SERVICE="google_translate" | "openai"
+TRANSLATION_SERVICE="google_translate"      # Set to "openai" to use OpenAI translation
 OPENAI_MODEL="gpt-4.1-nano-2025-04-14"
 
+# Security (Optional)
+SESSION_KEY="your_session_secret_key"          # Session encryption key
+RSA_PASSPHRASE="your_rsa_passphrase"           # Passphrase for the chat encryption key
+
 # Application Settings
-WEB_SOCKET_PORT="3000"                    # Internal WebSocket port
-WEB_SOCKET_USE_SSL="true" | "false"       # Enable SSL/TLS for WebSocket
-WEB_SOCKET_CERT_PATH="./src/certs/cert.pem"
-WEB_SOCKET_KEY_PATH="./src/certs/key.pem"
-WEB_SOCKET_CA_PATH="./src/certs/cert.ca-bundle"
+GAME_PORT="3000"                            # Game server port - TCP (HTTP API) + UDP (WebTransport) share this port
+HTTP_USE_SSL="true"                         # Set to "false" to disable TLS for the HTTP server
+TLS_CERT_PATH="./src/certs/cert.pem"        # TLS certificate (shared by HTTP + WebTransport)
+TLS_KEY_PATH="./src/certs/key.pem"
+TLS_CA_PATH="./src/certs/cert.ca-bundle"
 GAME_NAME="Your Game Name"
 LOG_LEVEL="info"                          # Logging level: trace, debug, info, warn, error
+
+# Local certificate handling (Optional)
+SKIP_CERT_TRUST="false"                      # Set to "true" to skip Windows certificate trust
 
 # CORS Configuration (Security)
 CORS_ALLOWED_ORIGINS="https://game.example.com,https://client.example.com" # Comma-separated list of allowed origins
@@ -150,8 +157,19 @@ SERVER_DESCRIPTION="The server description"     # Game server description
 ASSET_SERVER_URL="http://assets:8000"           # Asset server endpoint
 ASSET_SERVER_AUTH_KEY="your_secret_key"         # Asset server authentication token
 
+# Cache Configuration
+CACHE="memory"                              # Set to "redis" to use Redis
+REDIS_URL="redis://localhost:6379"
+
+# Worker Pools (Optional)
+DB_WORKER_POOL_SIZE="8"                      # SQL worker threads (default: 8)
+AUTH_POOL_SIZE="8"                           # Authentication worker threads (default: 8)
+
+# Benchmarking (Optional)
+WT_HANDSHAKE_RATE_LIMIT_DISABLED="false"     # Set to "true" to disable WebTransport handshake rate limits
+
 # Realm Configuration
-WHITELIST="true" | "false"                       # Enable/disable username whitelist for this realm
+WHITELIST="false"                             # Set to "true" to enable the username whitelist
 ```
 
 ---
@@ -187,7 +205,7 @@ The realm will display a "whitelist" badge in the realm selection UI when `WHITE
 
 **Option 1: Use prebuilt Docker image:**
 ```bash
-docker run -d --name frostfire-forge-dev -p 3000:3000 ghcr.io/lillious-networks/frostfire-forge-dev:latest
+docker run -d --name frostfire-forge-dev -p 3000:3000 -p 3000:3000/udp ghcr.io/lillious-networks/frostfire-forge-dev:latest
 ```
 
 **Option 2: Build and run from source:**
@@ -202,6 +220,9 @@ Default admin login credentials:
 Username: demo_user
 Password: Changeme123!
 ```
+
+> [!NOTE]
+> **Local WebTransport certificates**: when `TLS_CERT_PATH`/`TLS_KEY_PATH` are set but no certificate exists (or the existing one is expired/unsuitable), the server generates a pin-suitable local certificate (ECDSA P-256, 14-day validity) at those paths automatically at startup. You can also generate one manually with `bun generate-local-cert`. If the variables are not set, the server does not fall back to any default paths - WebTransport requires an explicit certificate.
 
 ---
 
@@ -469,6 +490,40 @@ bun setup-production
 - **Aliases**: `s`
 - **Description**: Send a message to local players
 </details>
+
+---
+
+## 📊 Benchmarking
+
+The engine ships load-testing tools that connect real WebTransport clients (guest accounts) to your game server.
+
+### Concurrent Client Load Test
+
+```bash
+bun benchmark 500 --rate 20 --duration 120
+```
+
+- `[clients]` - number of concurrent clients (positional)
+- `--rate` - connection ramp rate per second (default: 3)
+- `--duration` - test duration in seconds (default: 60)
+- `--host`, `--wt`, `--gateway`, `--gateway-url`, `--realm` - target selection options
+- `bun benchmark:development` / `bun benchmark:production` run against the matching env file
+
+### Daily Activity Curve Simulation
+
+```bash
+bun benchmark 2000 --simulation
+```
+
+Runs a 5-minute simulation of a realistic daily login curve (early-morning ramp, lunch peak, evening decline, late-night tail) scaled to the given peak client count. The simulation includes continuous login/logout churn, realistic player behavior (idle/AFK, wandering, returning to spawn hubs), a low-rate packet mix (targeting, inspecting, chat, mounting), and 1-5 minute player sessions ending in clean logouts or abrupt disconnects. Use `--duration` to change the span (curve stretches to fit).
+
+### Connection Hold Test
+
+```bash
+bun benchmark:connections 1000
+```
+
+Opens and holds the given number of WebTransport connections to measure handshake throughput and connection stability.
 
 ---
 
@@ -833,8 +888,8 @@ import { listener } from "@engine/systems/events";
 
 | Event | Payload | When |
 |-------|---------|------|
-| `onConnection` | `{ id, ... }` | New WebSocket connection |
-| `onDisconnect` | `{ id, ... }` | WebSocket disconnected |
+| `onConnection` | `{ id, ... }` | New WebTransport session |
+| `onDisconnect` | `{ id, ... }` | WebTransport session disconnected |
 
 #### Game Events (Plugin Hooks)
 
@@ -852,7 +907,7 @@ import { listener } from "@engine/systems/events";
 |-------|---------|------|
 | `onPlayerAuthComplete` | `{ username, spawnLocation, playerData }` | After login spawn location is resolved, before map validation. `spawnLocation` is mutable - modify `.map`, `.x`, `.y` to redirect. |
 | `onPlayerLogout` | `{ player }` | After player state saved and logout cleanup |
-| `onPlayerDisconnect` | `{ player }` | After WebSocket disconnect and drag-release cleanup |
+| `onPlayerDisconnect` | `{ player }` | After connection disconnect and drag-release cleanup |
 | `onPlayerStealthChange` | `{ player, isStealth }` | After stealth/unstealth toggle and spawn/despawn packets |
 
 ##### Combat

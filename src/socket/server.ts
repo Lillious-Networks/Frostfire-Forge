@@ -13,17 +13,21 @@ import { Events, setPlayerPvp } from "../systems/events";
 const event = new eventEmitter();
 import log from "../modules/logger.ts";
 import player from "../systems/player.ts";
+import worlds from "../systems/worlds.ts";
 import playerCache from "../services/playermanager.ts";
 import mapIndex from "../services/mapindex";
 import gameLoop from "../services/gameloop";
 import packet from "../modules/packet.ts";
-import path from "node:path";
 import fs from "node:fs";
 import query from "../controllers/sqldatabase";
 import { generateKeyPair } from "../modules/cipher.ts";
 import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondensation, findPlayersWithTargetInAOI } from "./aoi.ts";
 import { loadPlugins, registerAllPlugins, mergePluginSpellsIntoCache } from "../modules/plugin_loader.ts";
 import { pluginHandlers, warpInterceptors, packetInterceptors } from "./receiver.ts";
+import { startWebTransportServer, TransportConnection } from "./transport.ts";
+import { topicBus } from "./topics.ts";
+import { connect } from "@webtransport-bun/webtransport";
+import { ensureLocalCertificate, computeCertificateHash, certificateSupportsPinning } from "../utility/local_cert.ts";
 
 const httpRouteHandlers = new Map<string, (req: Request) => Promise<Response>>();
 
@@ -37,48 +41,63 @@ import { GatewayClient } from "../modules/gateway-client.ts";
 import loot from "../systems/loot";
 import cooldownManager from "../services/cooldownmanager";
 
-const _cert = process.env.WEB_SOCKET_CERT_PATH || path.join(import.meta.dir, "../certs/cert.pem");
-const _key = process.env.WEB_SOCKET_KEY_PATH || path.join(import.meta.dir, "../certs/key.pem");
-const _ca = process.env.WEB_SOCKET_CA_PATH || path.join(import.meta.dir, "../certs/cert.ca-bundle");
-const _https = process.env.WEB_SOCKET_USE_SSL === "true" && fs.existsSync(_cert) && fs.existsSync(_key);
+const _cert = process.env.TLS_CERT_PATH;
+const _key = process.env.TLS_KEY_PATH;
+const _ca = process.env.TLS_CA_PATH;
+
+if (_cert && _key) {
+  await ensureLocalCertificate({ certPath: _cert, keyPath: _key, caPath: _ca });
+}
+
+const _https = process.env.HTTP_USE_SSL === "true" && !!_cert && !!_key && fs.existsSync(_cert) && fs.existsSync(_key);
 let options: Bun.TLSOptions | undefined = undefined;
+let webTransportTls: { certPem: string; keyPem: string } | null = null;
 
-if (_https) {
-  if (!fs.existsSync(_cert) || !fs.existsSync(_key)) {
-    log.error(`Attempted to locate certificate and key but failed`);
-    log.error(`Certificate: ${_cert}`);
-    log.error(`Key: ${_key}`);
-    throw new Error("SSL certificate or key is missing");
-  }
+if (_cert && _key && fs.existsSync(_cert) && fs.existsSync(_key)) {
   try {
-
-    const cert = fs.readFileSync(_cert, 'utf-8');
-    const key = fs.readFileSync(_key, 'utf-8');
-    const ca = fs.existsSync(_ca) ? fs.readFileSync(_ca, 'utf-8') : '';
+    const cert = fs.readFileSync(_cert, 'utf-8').replace(/^\uFEFF/, '').trim();
+    const key = fs.readFileSync(_key, 'utf-8').replace(/^\uFEFF/, '').trim();
+    const ca = _ca && fs.existsSync(_ca) ? fs.readFileSync(_ca, 'utf-8').replace(/^\uFEFF/, '').trim() : '';
     const fullChain = ca ? cert + "\n" + ca : cert;
 
-    options = {
-      key: key,
-      cert: fullChain,
+    webTransportTls = {
+      certPem: fullChain,
+      keyPem: key,
     };
-    log.success(`SSL enabled for WebSocket with certificate chain`);
+
+    if (_https) {
+      options = {
+        key: key,
+        cert: fullChain,
+      };
+      log.success(`SSL enabled for HTTP server with certificate chain`);
+    }
   } catch (e) {
     log.error(e as string);
   }
 }
+
+if (!webTransportTls) {
+  log.error(`Attempted to locate certificate and key but failed`);
+  log.error(`Certificate: ${_cert || "(TLS_CERT_PATH not set)"}`);
+  log.error(`Key: ${_key || "(TLS_KEY_PATH not set)"}`);
+  throw new Error("WebTransport requires a TLS certificate and key. Set TLS_CERT_PATH and TLS_KEY_PATH to your certificate files, or run `bun generate-local-cert` to create a local certificate");
+}
+
+const localCertHash = computeCertificateHash(webTransportTls.certPem);
 const RateLimitOptions: RateLimitOptions = {
 
-  maxRequests: settings?.websocketRatelimit?.maxRequests || 2000,
+  maxRequests: settings?.packetRatelimit?.maxRequests || 2000,
 
-  time: settings?.websocketRatelimit?.time || 2000,
+  time: settings?.packetRatelimit?.time || 2000,
 
-  maxWindowTime: settings?.websocketRatelimit?.maxWindowTime || 1000,
+  maxWindowTime: settings?.packetRatelimit?.maxWindowTime || 1000,
 };
 
-if (settings?.websocketRatelimit?.enabled) {
-  log.success(`Rate limiting enabled for websocket connections`);
+if (settings?.packetRatelimit?.enabled) {
+  log.success(`Rate limiting enabled for connections`);
 } else {
-  log.warn(`Rate limiting is disabled for websocket connections`);
+  log.warn(`Rate limiting is disabled for connections`);
 }
 
 const connections = new Set<Identity>();
@@ -147,11 +166,13 @@ function getCORSHeaders(requestOrigin: string | null): Record<string, string> {
   };
 }
 
-const Server = Bun.serve<Packet, any>({
-  port: process.env.WEB_SOCKET_PORT || 3000,
+const gamePort = parseInt(process.env.GAME_PORT || "3000");
+
+Bun.serve<Packet, any>({
+  port: gamePort,
   reusePort: false,
   development: false,
-  fetch(req, Server) {
+  fetch(req) {
     const url = new URL(req.url, `http://${req.headers.get("host")}`);
     const requestOrigin = req.headers.get("origin");
 
@@ -186,184 +207,269 @@ const Server = Bun.serve<Packet, any>({
       });
     }
 
+    if (url.pathname === "/wt-cert-hash" && req.method === "GET") {
+      const corsHeaders = getCORSHeaders(requestOrigin);
+      const headers = {
+        "Content-Type": "application/json",
+        ...corsHeaders
+      };
+
+      if (!certificateSupportsPinning(webTransportTls!.certPem)) {
+        return new Response(JSON.stringify({ error: "Certificate is not suitable for pinning" }), {
+          status: 404,
+          headers
+        });
+      }
+
+      return new Response(JSON.stringify({
+        algorithm: "sha-256",
+        value: localCertHash,
+      }), {
+        status: 200,
+        headers
+      });
+    }
+
     const routeKey = `${req.method}:${url.pathname}`;
     const httpHandler = httpRouteHandlers.get(routeKey);
     if (httpHandler) {
       return httpHandler(req);
     }
 
-
-    const id = parseInt(crypto.randomBytes(4).toString("hex"), 16);
-    const useragent = req.headers.get("user-agent") || "unknown";
-    const chatDecryptionKey = keyPair.publicKey;
-
-    const token = url.searchParams.get("token");
-    const timestamp = url.searchParams.get("timestamp");
-    const expiresAt = url.searchParams.get("expiresAt");
-    const signature = url.searchParams.get("signature");
-
-    if (!token || !timestamp || !expiresAt || !signature) {
-      return new Response("Unauthorized: Missing connection token", { status: 401 });
-    }
-
-    const sharedSecret = process.env.GATEWAY_GAME_SERVER_SECRET;
-    if (!sharedSecret) {
-      log.error("GATEWAY_GAME_SERVER_SECRET environment variable is not set");
-      return new Response("Server misconfiguration", { status: 500 });
-    }
-    const expectedSignature = crypto
-      .createHmac("sha256", sharedSecret)
-      .update(`${token}:${timestamp}:${expiresAt}`)
-      .digest("hex");
-
-    if (signature !== expectedSignature) {
-      log.warn(`Connection attempt with invalid token signature from: ${req.headers.get("x-forwarded-for") || "unknown"}`);
-      return new Response("Unauthorized: Invalid token", { status: 401 });
-    }
-
-    const now = Date.now();
-    if (now > parseInt(expiresAt)) {
-      log.warn(`Connection attempt with expired token from: ${req.headers.get("x-forwarded-for") || "unknown"}`);
-      return new Response("Unauthorized: Token expired", { status: 401 });
-    }
-
-    if (ALLOWED_ORIGINS.length > 0) {
-      const origin = req.headers.get("Origin");
-      if (origin && !ALLOWED_ORIGINS.some(o => o.trim() === origin)) {
-        log.warn(`Connection attempt with disallowed origin: ${origin} from: ${req.headers.get("x-forwarded-for") || "unknown"}`);
-        return new Response("Forbidden: Origin not allowed", { status: 403 });
-      }
-    }
-
-    const success = Server.upgrade(req, { data: { id, useragent, chatDecryptionKey } as any });
-    if (!success) {
-      log.error(`WebSocket upgrade failed for client with id: ${id}`);
-    }
-    return success
-      ? undefined
-      : new Response("WebSocket upgrade error", { status: 400 });
+    return new Response("Not found", { status: 404 });
   },
   tls: options,
-  websocket: {
-    perMessageDeflate: false,
-    maxPayloadLength: 1024 * 1024 * settings?.websocket?.maxPayloadMB || 1024 * 1024,
-    idleTimeout: settings?.websocket?.idleTimeout || 120,
-    sendPings: true,
-    backpressureLimit: 1024 * 512,
-    async open(ws: any) {
-      ws.binaryType = "arraybuffer";
+});
 
-      if (!ws.data?.id || !ws.data?.useragent || !ws.data?.chatDecryptionKey) {
-        log.error(`WebSocket connection missing identity information. Closing connection.`);
-        ws.close(1000, "Missing identity information");
-        return;
-      }
+function validateConnectionToken(
+  token: string | null,
+  timestamp: string | null,
+  expiresAt: string | null,
+  signature: string | null,
+  origin: string | null
+): boolean {
+  if (!token || !timestamp || !expiresAt || !signature) {
+    return false;
+  }
 
-      connections.add({ id: ws.data.id, useragent: ws.data.useragent, chatDecryptionKey: ws.data.chatDecryptionKey });
-      packetQueue.set(ws.data.id, []);
-      listener.emit("onConnection", ws.data.id);
+  const sharedSecret = process.env.GATEWAY_GAME_SERVER_SECRET;
+  if (!sharedSecret) {
+    log.error("GATEWAY_GAME_SERVER_SECRET environment variable is not set");
+    return false;
+  }
 
-      if (settings?.websocketRatelimit?.enabled) {
-        ClientRateLimit.set(ws.data.id, {
-          id: ws.data.id,
-          requests: 0,
-          rateLimited: false,
-          time: null,
-          windowTime: 0,
-        });
-      }
+  const expectedSignature = crypto
+    .createHmac("sha256", sharedSecret)
+    .update(`${token}:${timestamp}:${expiresAt}`)
+    .digest("hex");
 
-      ws.subscribe("CONNECTION_COUNT" as Subscription["event"]);
-      ws.subscribe("BROADCAST" as Subscription["event"]);
-      ws.subscribe("DISCONNECT_PLAYER" as Subscription["event"]);
+  if (signature !== expectedSignature) {
+    log.warn(`Connection attempt with invalid token signature`);
+    return false;
+  }
 
-      const timeout = ws.data.useragent.includes("iPhone") || ws.data.useragent.includes("iPad") || ws.data.useragent.includes("Macintosh") ? 1000 : 0;
+  if (Date.now() > parseInt(expiresAt)) {
+    log.warn(`Connection attempt with expired token`);
+    return false;
+  }
 
-      setTimeout(() => {
-        Server.publish(
-          "CONNECTION_COUNT" as Subscription["event"],
-          packet.encode(JSON.stringify({
-            type: "CONNECTION_COUNT",
-            data: connections.size,
-          }))
-        );
-      }, timeout);
-    },
-    async close(ws: any) {
+  if (ALLOWED_ORIGINS.length > 0) {
+    if (!origin || !ALLOWED_ORIGINS.some(o => o.trim() === origin)) {
+      log.warn(`Connection attempt with disallowed origin: ${origin}`);
+      return false;
+    }
+  }
 
-      if (!ws.data.id) return;
-      packetQueue.delete(ws.data.id);
+  return true;
+}
 
-      let clientToDelete;
-      for (const client of connections) {
-        if (client.id === ws.data.id) {
-          clientToDelete = client;
-          break;
-        }
-      }
+function onTransportOpen(connection: TransportConnection) {
+  const id = connection.data.id;
 
-      if (clientToDelete) {
-        const deleted = connections.delete(clientToDelete);
-        if (deleted) {
-          listener.emit("onDisconnect", { id: ws.data.id, reason: "player_left" });
+  connections.add({ id, useragent: connection.data.useragent, chatDecryptionKey: connection.data.chatDecryptionKey });
+  packetQueue.set(id, []);
+  listener.emit("onConnection", id);
 
-          const _packet = {
-            type: "CONNECTION_COUNT",
-            data: connections.size,
-          } as unknown as Packet;
-          Server.publish(
-            "CONNECTION_COUNT" as Subscription["event"],
-            packet.encode(JSON.stringify(_packet))
+  if (settings?.packetRatelimit?.enabled) {
+    ClientRateLimit.set(id, {
+      id,
+      requests: 0,
+      rateLimited: false,
+      time: null,
+      windowTime: 0,
+    });
+  }
+
+  connection.subscribe("CONNECTION_COUNT");
+  connection.subscribe("BROADCAST");
+  connection.subscribe("DISCONNECT_PLAYER");
+
+  const timeout = connection.data.useragent.includes("iPhone") || connection.data.useragent.includes("iPad") || connection.data.useragent.includes("Macintosh") ? 1000 : 0;
+
+  setTimeout(() => {
+    broadcastConnectionCount();
+  }, timeout);
+}
+
+let lastConnectionCountBroadcast = 0;
+let connectionCountDirty = false;
+
+function broadcastConnectionCount() {
+  const now = Date.now();
+  if (now - lastConnectionCountBroadcast < 500) {
+    connectionCountDirty = true;
+    return;
+  }
+
+  lastConnectionCountBroadcast = now;
+  connectionCountDirty = false;
+
+  topicBus.publish(
+    "CONNECTION_COUNT",
+    packet.encode(JSON.stringify({
+      type: "CONNECTION_COUNT",
+      data: connections.size,
+    }))
+  );
+}
+
+setInterval(() => {
+  if (!connectionCountDirty) return;
+  broadcastConnectionCount();
+}, 1000);
+
+function onTransportClose(connection: TransportConnection) {
+  const id = connection.data.id;
+  if (!id) return;
+
+  packetQueue.delete(id);
+
+  let clientToDelete;
+  for (const client of connections) {
+    if (client.id === id) {
+      clientToDelete = client;
+      break;
+    }
+  }
+
+  if (clientToDelete) {
+    const deleted = connections.delete(clientToDelete);
+    if (deleted) {
+      listener.emit("onDisconnect", { id, reason: "player_left" });
+
+      broadcastConnectionCount();
+      connection.unsubscribe("CONNECTION_COUNT");
+      connection.unsubscribe("BROADCAST");
+      connection.unsubscribe("DISCONNECT_PLAYER");
+
+      ClientRateLimit.delete(id);
+    }
+  }
+}
+
+function onTransportMessage(connection: TransportConnection, message: string) {
+  try {
+    if (!connection.data?.id || !message) return;
+
+    const parsedMessage = JSON.parse(message);
+    const packetType = parsedMessage?.type;
+
+    if (settings?.packetRatelimit?.enabled) {
+      const client = ClientRateLimit.get(connection.data.id);
+      if (client) {
+        if (client.rateLimited) return;
+
+        client.requests++;
+        if (client.requests >= RateLimitOptions.maxRequests) {
+          client.rateLimited = true;
+          client.time = Date.now();
+          log.debug(`Client with id: ${connection.data.id} is rate limited`);
+          connection.send(
+            packet.encode(
+              JSON.stringify({ type: "RATE_LIMITED", data: "Rate limited" })
+            )
           );
-          ws.unsubscribe("CONNECTION_COUNT" as Subscription["event"]);
-          ws.unsubscribe("BROADCAST" as Subscription["event"]);
-          ws.unsubscribe("DISCONNECT_PLAYER" as Subscription["event"]);
-
-          ClientRateLimit.delete(ws.data.id);
-        }
-
-      }
-    },
-    async message(ws: any, message: any) {
-      try {
-        if (!ws.data?.id || !message) return;
-
-        message = packet.decode(message);
-        const parsedMessage = JSON.parse(message.toString());
-        const packetType = parsedMessage?.type;
-
-        const processImmediately = ["TIME_SYNC", "MOVEXY", "STATS", "SERVER_TIME", "ANIMATION"];
-        if (processImmediately.includes(packetType)) {
-          packetReceiver(null, ws, message.toString());
           return;
         }
-
-        if (settings?.websocketRatelimit?.enabled) {
-          const client = ClientRateLimit.get(ws.data.id);
-          if (client) {
-            if (client.rateLimited) return;
-
-            client.requests++;
-            if (client.requests >= RateLimitOptions.maxRequests) {
-              client.rateLimited = true;
-              client.time = Date.now();
-              log.debug(`Client with id: ${ws.data.id} is rate limited`);
-              ws.send(
-                packet.encode(
-                  JSON.stringify({ type: "RATE_LIMITED", data: "Rate limited" })
-                )
-              );
-              return;
-            }
-          }
-        }
-        handleBackpressure(ws as any, () => packetReceiver(null, ws, message.toString()));
-      } catch (e) {
-        log.error(e as string);
       }
-    },
+    }
+
+    const processImmediately = ["TIME_SYNC", "MOVEXY", "STATS", "SERVER_TIME", "ANIMATION"];
+    if (processImmediately.includes(packetType)) {
+      packetReceiver(null, connection, message);
+      return;
+    }
+
+    handleBackpressure(connection as any, () => packetReceiver(null, connection, message));
+  } catch (e) {
+    log.error(e as string);
+  }
+}
+
+const NO_RATE_LIMIT = Number.MAX_SAFE_INTEGER;
+
+// Handshake rate limits default to safe production values, but benchmarking
+// needs them disabled. Set WT_HANDSHAKE_RATE_LIMIT_DISABLED=true to remove
+// the handshake caps.
+const handshakeLimitsDisabled = process.env.WT_HANDSHAKE_RATE_LIMIT_DISABLED === "true";
+
+const webTransportRateLimits = {
+  handshakesPerSec: handshakeLimitsDisabled
+    ? NO_RATE_LIMIT
+    : (settings as any)?.webtransport?.rateLimits?.handshakesPerSec ?? 100,
+  handshakesBurst: handshakeLimitsDisabled
+    ? NO_RATE_LIMIT
+    : (settings as any)?.webtransport?.rateLimits?.handshakesBurst ?? 200,
+  handshakesBurstPerPrefix: handshakeLimitsDisabled
+    ? NO_RATE_LIMIT
+    : (settings as any)?.webtransport?.rateLimits?.handshakesBurstPerPrefix ?? 50,
+  streamsPerSec: (settings as any)?.webtransport?.rateLimits?.streamsPerSec ?? 2000,
+  streamsBurst: (settings as any)?.webtransport?.rateLimits?.streamsBurst ?? 4000,
+  datagramsPerSec: (settings as any)?.webtransport?.rateLimits?.datagramsPerSec ?? 500000,
+  datagramsBurst: (settings as any)?.webtransport?.rateLimits?.datagramsBurst ?? 200000,
+};
+
+const webTransportServer = startWebTransportServer({
+  port: gamePort,
+  certPem: webTransportTls!.certPem,
+  keyPem: webTransportTls!.keyPem,
+  chatDecryptionKey: keyPair.publicKey,
+  maxFrameSize: 1024 * 1024 * (((settings as any)?.webtransport?.maxPayloadMB) || 1),
+  maxDatagramSize: (settings as any)?.webtransport?.maxDatagramSize || 1200,
+  authTimeoutMs: (settings as any)?.webtransport?.authTimeoutMs || 10000,
+  idleTimeoutMs: ((settings as any)?.webtransport?.idleTimeout || 120) * 1000,
+  maxSessions: (settings as any)?.webtransport?.maxSessions || 2000,
+  rateLimits: webTransportRateLimits,
+  handlers: {
+    validateConnectionToken,
+    onOpen: onTransportOpen,
+    onClose: onTransportClose,
+    onMessage: onTransportMessage,
   },
 });
+
+const webTransportPort = gamePort;
+
+async function verifyWebTransportListener(port: number): Promise<void> {
+  try {
+    const probe = await connect(`https://127.0.0.1:${port}`, { tls: { insecureSkipVerify: true } });
+    try {
+      probe.close({ code: 0, reason: "startup-probe" });
+    } catch (error: any) {
+      log.debug(`[WebTransport] Startup probe close failed: ${error?.message || error}`);
+    }
+  } catch (error: any) {
+    throw new Error(`WebTransport server failed to accept connections on UDP port ${port}: ${error?.message || error}`);
+  }
+}
+
+try {
+  await verifyWebTransportListener(webTransportPort);
+  log.success(`WebTransport listening on UDP port ${webTransportPort}`);
+} catch (error: any) {
+  log.error(error?.message || String(error));
+  throw error;
+}
 
 listener.on(Events.AWAKE, async () => {
   await player.clear();
@@ -385,7 +491,6 @@ let gatewayClient: GatewayClient | null = null;
 const serverId = process.env.SERVER_ID || `server-${crypto.randomBytes(8).toString("hex")}`;
 const serverHost = process.env.SERVER_HOST || "localhost";
 const publicHost = process.env.PUBLIC_HOST || serverHost;
-const wsPort = parseInt(process.env.WEB_SOCKET_PORT || "3000");
 
 gatewayClient = new GatewayClient({
   gatewayUrl: process.env.GATEWAY_URL || "http://localhost:9999",
@@ -393,9 +498,10 @@ gatewayClient = new GatewayClient({
   description: process.env.SERVER_DESCRIPTION || "",
   host: serverHost,
   publicHost: publicHost,
-  port: wsPort,
-  wsPort: wsPort,
-  maxConnections: settings?.websocket?.maxConnections || 500,
+  port: gamePort,
+  wtPort: gamePort,
+  wtEnabled: true,
+  maxConnections: (settings as any)?.webtransport?.maxSessions || 2000,
   heartbeatInterval: settings?.gateway?.heartbeatInterval || 5000,
   assetServerUrl: process.env.ASSET_SERVER_URL || "http://localhost:8000",
 });
@@ -493,65 +599,7 @@ setInterval(() => {
   listener.emit(Events.SERVER_TICK);
 }, 1000);
 
-setInterval(() => {
-  const allPlayers = Object.values(playerCache.list());
-  const connectedPlayers = allPlayers.filter((p: any) => p?.ws && p.ws.readyState === 1);
-
-  if (connectedPlayers.length === 0) return;
-
-  let totalBuffered = 0;
-  let maxBuffered = 0;
-  let playersWithBackpressure = 0;
-  let maxBufferedPlayer: any = null;
-  const BACKPRESSURE_THRESHOLD = 32 * 1024;
-
-  for (const player of connectedPlayers) {
-    const buffered = player.ws.bufferedAmount || 0;
-    totalBuffered += buffered;
-
-    if (buffered > maxBuffered) {
-      maxBuffered = buffered;
-      maxBufferedPlayer = player;
-    }
-
-    if (buffered > BACKPRESSURE_THRESHOLD) {
-      playersWithBackpressure++;
-    }
-  }
-
-  const avgBufferedBytes = totalBuffered / connectedPlayers.length;
-  const movingPlayers = gameLoop.getStats().movingPlayers;
-
-  const formatBuffer = (bytes: number): string => {
-    if (bytes >= 1024) {
-      return `${(bytes / 1024).toFixed(1)}KB`;
-    }
-    return `${Math.round(bytes)}B`;
-  };
-
-  const avgBufferStr = formatBuffer(avgBufferedBytes);
-  const maxBufferStr = formatBuffer(maxBuffered);
-
-  if (playersWithBackpressure > 0 || avgBufferedBytes > 16 * 1024) {
-    log.warn(
-      `[BACKPRESSURE] Players: ${connectedPlayers.length} (${movingPlayers} moving) | ` +
-      `Avg buffer: ${avgBufferStr} | Max: ${maxBufferStr} | ` +
-      `${playersWithBackpressure} players over 32KB` +
-      (maxBufferedPlayer ? ` | Worst: ${maxBufferedPlayer.username || maxBufferedPlayer.id}` : '')
-    );
-  } else if (connectedPlayers.length > 50) {
-
-    const tick = Math.floor(Date.now() / 1000);
-    if (tick % 10 === 0) {
-      log.info(
-        `[BACKPRESSURE] Players: ${connectedPlayers.length} (${movingPlayers} moving) | ` +
-        `Avg buffer: ${avgBufferStr} | Max: ${maxBufferStr}`
-      );
-    }
-  }
-}, 1000);
-
-if (settings?.websocketRatelimit?.enabled) {
+if (settings?.packetRatelimit?.enabled) {
   setInterval(() => {
     for (const client of ClientRateLimit.values()) {
       if (client.rateLimited) {
@@ -569,7 +617,7 @@ if (settings?.websocketRatelimit?.enabled) {
 }
 
 listener.on(Events.FIXED_UPDATE, async () => {
-  if (settings?.websocketRatelimit?.enabled) {
+  if (settings?.packetRatelimit?.enabled) {
     if (ClientRateLimit.size < 1) return;
     const timestamp = Date.now();
     for (const client of ClientRateLimit.values()) {
@@ -605,7 +653,7 @@ listener.on(Events.SERVER_TICK, async () => {
         ? PROCESS_STARTED_AT + rawLU
         : nowEpoch;
 
-    const wsClosed = !p.ws || p.ws.readyState !== WebSocket.OPEN;
+    const wsClosed = !p.ws || p.ws.readyState !== 1;
     const tooIdle = (nowEpoch - lastUpdatedEpoch) > 30000;
 
     if (wsClosed || tooIdle) {
@@ -621,14 +669,21 @@ listener.on(Events.SERVER_TICK, async () => {
 
     if (userIds.length > 0) {
       try {
-        const dbResults = await query(
-          "SELECT id, session_id FROM accounts WHERE id IN (?)",
-          [userIds]
-        ) as any[];
-
         const dbSessionMap = new Map<string, string>();
-        for (const r of dbResults) {
-          dbSessionMap.set(String(r.id ?? ""), String(r.session_id ?? ""));
+
+        // Chunk the IN-clause query so a 2000-player validation never blocks
+        // the database pool (and the event loop) with one giant query.
+        const VALIDATION_CHUNK_SIZE = 200;
+        for (let i = 0; i < userIds.length; i += VALIDATION_CHUNK_SIZE) {
+          const chunk = userIds.slice(i, i + VALIDATION_CHUNK_SIZE);
+          const dbResults = await query(
+            "SELECT id, session_id FROM accounts WHERE id IN (?)",
+            [chunk]
+          ) as any[];
+
+          for (const r of dbResults) {
+            dbSessionMap.set(String(r.id ?? ""), String(r.session_id ?? ""));
+          }
         }
 
         for (const p of players) {
@@ -639,16 +694,11 @@ listener.on(Events.SERVER_TICK, async () => {
 
           const dbSid = dbSessionMap.get(String(p.userid)) || "";
           if (dbSid !== String(p.id)) {
-            log.info(
-              `[Session] Stale session detected for ${
-                p.username
-              } (local: ${p.id}, db: ${dbSid || "cleared"})`
-            );
             inactiveSet.set(p.id, "session_stolen");
           }
         }
       } catch (e) {
-        log.error(`[Session] Validation query failed: ${e}`);
+        log.error(`Validation query failed: ${e}`);
       }
     }
   }
@@ -656,9 +706,9 @@ listener.on(Events.SERVER_TICK, async () => {
   for (const playerData of players) {
     if (!playerData || inactiveSet.has(playerData.id) || !playerData.ws) continue;
 
-    handleBackpressure(playerData.ws, () =>
-      playerData.ws.send(packetManager.serverTime()[0])
-    );
+    // SERVER_TIME is sent every second to every player; deliver it as an
+    // unreliable datagram so it never queues behind the reliable stream.
+    playerData.ws.sendBestEffort(packetManager.serverTime()[0]);
 
     const rawLA = typeof playerData.last_attack === "number" ? playerData.last_attack : 0;
     const lastAttackEpoch =
@@ -705,7 +755,7 @@ listener.on(Events.SERVER_TICK, async () => {
         other &&
         !inactiveSet.has(other.id) &&
         other.ws &&
-        other.ws.readyState === WebSocket.OPEN
+        other.ws.readyState === 1
       ) {
         handleBackpressure(other.ws, () =>
           other.ws.send(packetManager.updateStats(updateStatsData)[0])
@@ -713,6 +763,7 @@ listener.on(Events.SERVER_TICK, async () => {
       }
     }
   }
+
   if (inactiveSet.size > 0) {
     for (const [id, reason] of inactiveSet) {
 
@@ -728,7 +779,7 @@ listener.on(Events.SERVER_TICK, async () => {
       }
       if (!stillConnected) continue;
 
-      if (reason === "session_stolen" && stillInCache.ws?.readyState === WebSocket.OPEN) {
+      if (reason === "session_stolen" && stillInCache.ws?.readyState === 1) {
         try {
           stillInCache.ws.send(
             packetManager.notify({
@@ -743,7 +794,7 @@ listener.on(Events.SERVER_TICK, async () => {
         try {
           stillInCache.ws.close(1000, "Logged in from another location");
         } catch {
-          console.error(`Failed to close WebSocket for player ${id}`);
+          console.error(`Failed to close connection for player ${id}`);
         }
         continue;
       }
@@ -767,7 +818,6 @@ listener.on("onConnection", (data) => {
 function cleanupPlayerState(playerData: any) {
     const id = playerData.id;
     const username = playerData.username?.toLowerCase();
-    const map = playerData.location?.map;
 
     gameLoop.unregisterMovingPlayer(id);
     dots.clearDots(id);
@@ -776,7 +826,7 @@ function cleanupPlayerState(playerData: any) {
     spellEffects.clearVanishes(id);
     playerCache.remove(id);
     mapIndex.removePlayer(id);
-    if (map) clearBatchQueuesForPlayer(id, map);
+    clearBatchQueuesForPlayer(id);
     clearPlayerTarget(id);
     removePlayerFromCleanupMaps(id);
     if (username) cooldownManager.removePlayer(username);
@@ -790,7 +840,7 @@ listener.on("onDisconnect", async (data) => {
     const playerData = playerCache.get(data.id);
     if (!playerData) return;
 
-    if (data.reason === "session_stolen" && playerData.ws?.readyState === WebSocket.OPEN) {
+    if (data.reason === "session_stolen" && playerData.ws?.readyState === 1) {
       try {
         playerData.ws.send(
           packetManager.notify({
@@ -803,7 +853,7 @@ listener.on("onDisconnect", async (data) => {
       try {
         playerData.ws.close(1000, "Logged in from another location");
       } catch (err) {
-        console.error(`Failed to close WebSocket for player ${data.id}`);
+        console.error(`Failed to close connection for player ${data.id}`);
       }
     }
 
@@ -828,31 +878,19 @@ listener.on("onDisconnect", async (data) => {
         );
     }
 
-    let _worlds: WorldData[] = [];
+    let worldPlayerCount: number | null = null;
     try {
-      const cachedWorlds = await assetCache.get("worlds");
-      if (cachedWorlds) {
-        _worlds = Array.isArray(cachedWorlds)
-          ? cachedWorlds
-          : JSON.parse(cachedWorlds);
-      }
+      worldPlayerCount = await worlds.adjustPlayerCount(playerData?.location?.map || "", -1);
     } catch (err) {
-      log.error(`[WorldsFetchError] Failed to fetch worlds: ${err}`);
-      _worlds = [];
+      log.error(`[WorldsFetchError] Failed to update world player count: ${err}`);
     }
 
-    const thisWorld = _worlds.find(
-      (w) => w.name === playerData?.location?.map?.replace(".json", "")
-    ) || null;
-
-    if (thisWorld) {
-      thisWorld.players = Math.max(0, (thisWorld.players || 0) - 1);
-      await assetCache.set("worlds", JSON.stringify(_worlds));
-      log.info(
-        `World: ${playerData.location.map.replace(".json", "")} now has ${
-          thisWorld.players
-        } players. (${data.reason})`
-      );
+    if (worldPlayerCount !== null) {
+      // log.info(
+      //   `World: ${playerData.location.map.replace(".json", "")} now has ${
+      //     worldPlayerCount
+      //   } players. (${data.reason})`
+      // );
     }
 
     if (!playerData.isGuest) {
@@ -978,8 +1016,8 @@ export const events = {
   },
   Broadcast(_packet: string) {
     log.debug(`Broadcasting packet: ${_packet}`);
-    Server.publish(
-      "BROADCAST" as Subscription["event"],
+    topicBus.publish(
+      "BROADCAST",
       packet.encode(JSON.stringify(_packet))
     );
   },
@@ -997,14 +1035,14 @@ function handleBackpressure(ws: any, action: () => void, retryCount = 0) {
     return;
   }
 
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    log.warn("WebSocket is not open. Action cannot proceed.");
+  if (!ws || ws.readyState !== 1) {
+    log.warn("Connection is not open. Action cannot proceed.");
     return;
   }
 
   const queue = packetQueue.get(ws.data.id);
   if (!queue) {
-    log.warn("No packet queue found for WebSocket. Action cannot proceed.");
+    log.warn("No packet queue found for connection. Action cannot proceed.");
     return;
   }
 
@@ -1033,6 +1071,12 @@ async function gracefulShutdown(signal: string) {
 
   if (gatewayClient) {
     await gatewayClient.unregister();
+  }
+
+  try {
+    await webTransportServer.close();
+  } catch (error) {
+    log.debug(`Failed to close WebTransport server: ${error}`);
   }
 
   log.info("Shutdown complete");

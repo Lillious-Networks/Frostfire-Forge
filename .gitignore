@@ -11,10 +11,13 @@ src/certs/*.pfx
 src/certs/*.jks
 src/certs/*.jceks
 src/certs/*.ca-bundle
+src/certs/*.backup
+src/certs/*.mkcert-backup
 src/logs/
 config/
 .env*
 !.env.development
+!.env.example
 
 src/assets/sfx/*
 !src/assets/sfx/attack_sword.mp3

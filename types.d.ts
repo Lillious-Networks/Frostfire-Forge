@@ -20,11 +20,6 @@ declare interface PacketData {
   data: Array<any>;
 }
 
-declare interface Subscription {
-  event: string;
-  callback: (data: any) => void;
-}
-
 declare interface Identity {
   id: string;
   useragent: string;
@@ -340,12 +335,6 @@ declare interface Quest {
   required_level: number;
 }
 
-declare interface WebSocket {
-  data: {
-    [key: string]: any;
-  };
-}
-
 declare interface MapProperties {
   name: string;
   width: number;
@@ -524,7 +513,8 @@ declare interface ServerRegistrationConfig {
   host: string;
   publicHost: Nullable<string>;
   port: number;
-  wsPort: number;
+  wtPort?: number;
+  wtEnabled?: boolean;
   maxConnections: number;
   heartbeatInterval: number;
 }

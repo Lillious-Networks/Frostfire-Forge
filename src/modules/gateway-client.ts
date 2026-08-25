@@ -2,12 +2,17 @@
 
 import log from "./logger.ts";
 import os from "os";
-import path from "node:path";
 import fs from "node:fs";
 
-const _cert = process.env.WEB_SOCKET_CERT_PATH || path.join(import.meta.dir, "../certs/cert.pem");
-const _key = process.env.WEB_SOCKET_KEY_PATH || path.join(import.meta.dir, "../certs/key.pem");
-const useSSL = process.env.WEB_SOCKET_USE_SSL === "true" && fs.existsSync(_cert) && fs.existsSync(_key);
+// Evaluate the TLS state at registration time rather than at import time:
+// the local certificate provisioning (ensureLocalCertificate) runs after
+// module imports, so an import-time check would report useSSL=false even
+// though the listeners are serving TLS.
+function resolveUseSSL(): boolean {
+  const _cert = process.env.TLS_CERT_PATH;
+  const _key = process.env.TLS_KEY_PATH;
+  return process.env.HTTP_USE_SSL === "true" && !!_cert && !!_key && fs.existsSync(_cert) && fs.existsSync(_key);
+}
 
 class GatewayClient {
   private config: ServerRegistrationConfig;
@@ -46,8 +51,11 @@ class GatewayClient {
           host: this.config.host,
           publicHost: this.config.publicHost || this.config.host,
           port: this.config.port,
-          wsPort: this.config.wsPort,
-          useSSL: useSSL,
+          wtPort: this.config.wtPort ?? this.config.port,
+          wtEnabled: this.config.wtEnabled !== false,
+          // Legacy field: older gateway versions require wsPort during registration
+          wsPort: this.config.wtPort ?? this.config.port,
+          useSSL: resolveUseSSL(),
           maxConnections: this.config.maxConnections,
           authKey: process.env.GATEWAY_AUTH_KEY,
           whitelisted: process.env.WHITELIST === 'true'

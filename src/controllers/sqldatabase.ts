@@ -1,7 +1,11 @@
 import log from "../modules/logger";
 import path from "node:path";
 
-const WORKER_POOL_SIZE = 4;
+const MAX_DB_WORKER_POOL_SIZE = 64;
+const parsedDbWorkerPoolSize = parseInt(process.env.DB_WORKER_POOL_SIZE || "", 10);
+const WORKER_POOL_SIZE = Number.isInteger(parsedDbWorkerPoolSize) && parsedDbWorkerPoolSize > 0
+  ? Math.min(parsedDbWorkerPoolSize, MAX_DB_WORKER_POOL_SIZE)
+  : 8;
 const workerPool: Worker[] = [];
 const pendingQueries = new Map<string, { resolve: (value: any) => void; reject: (error: any) => void }>();
 let nextWorkerId = 0;

@@ -1,17 +1,17 @@
 #!/usr/bin/env bun
 
 import chalk from 'chalk';
-import crypto from 'crypto';
+import { BenchmarkConnection, normalizeHost, setBenchmarkQuiet } from './benchmark-transport.ts';
 
 function parseArgs() {
     const args = process.argv.slice(2);
 
-    const wsPort = process.env.WEB_SOCKET_PORT || '3000';
+    const wtPort = process.env.GAME_PORT || '3000';
     const gatewayEnabled = process.env.GATEWAY_ENABLED === 'true';
     const defaultGatewayUrl = process.env.GATEWAY_URL || 'http://localhost:9999';
 
-    const useSSL = process.env.WEB_SOCKET_USE_SSL === 'true';
-    const defaultWebsocketUrl = `${useSSL ? 'wss' : 'ws'}://localhost:${wsPort}`;
+    const useSSL = process.env.HTTP_USE_SSL === 'true';
+    const defaultTransportUrl = `https://localhost:${wtPort}`;
 
     const httpHost = process.env.PUBLIC_HOST || process.env.SERVER_HOST || 'localhost';
     const httpProtocol = useSSL ? 'https' : 'http';
@@ -27,13 +27,17 @@ function parseArgs() {
     const config = {
         clients: 50,
         duration: 60,
+        durationSet: false,
         rate: 0,
-        websocketUrl: defaultWebsocketUrl,
+        transportUrl: defaultTransportUrl,
         host: effectiveHost,
         gatewayEnabled: gatewayEnabled,
         gatewayUrl: defaultGatewayUrl,
         realmId: undefined as string | undefined,
-        ssl: useSSL,
+        simulation: false,
+        quiet: false,
+        onClientLoggedIn: undefined as ((client: any) => void) | undefined,
+        onClientFailed: undefined as (() => void) | undefined,
         help: false
     };
 
@@ -52,9 +56,13 @@ function parseArgs() {
                 break;
             case '--duration':
                 config.duration = Math.max(10, parseInt(args[++i]) || 60);
+                config.durationSet = true;
                 break;
-            case '--ws':
-                config.websocketUrl = args[++i] || defaultWebsocketUrl;
+            case '--simulation':
+                config.simulation = true;
+                break;
+            case '--wt':
+                config.transportUrl = args[++i] || defaultTransportUrl;
                 break;
             case '--host':
                 config.host = args[++i] || effectiveHost;
@@ -70,9 +78,6 @@ function parseArgs() {
                     config.host = `${gwUrl.protocol}//${gwUrl.hostname}`;
                 } catch { /* keep existing host if URL is invalid */ }
                 break;
-            case '--ssl':
-                config.ssl = true;
-                break;
             case '--rate':
                 config.rate = Math.max(1, parseInt(args[++i]) || 5);
                 break;
@@ -82,20 +87,6 @@ function parseArgs() {
             case '--help':
                 config.help = true;
                 break;
-        }
-    }
-
-    // Rebuild URLs based on final SSL setting
-    if (config.ssl) {
-        config.websocketUrl = `wss://localhost:${wsPort}`;
-        if (config.gatewayEnabled) {
-            try {
-                const gwUrl = new URL(config.gatewayUrl);
-                config.host = `https://${gwUrl.hostname}`;
-            } catch { /* keep existing */ }
-        } else {
-            const sslHost = process.env.PUBLIC_HOST || process.env.SERVER_HOST || 'localhost';
-            config.host = `https://${sslHost}`;
         }
     }
 
@@ -115,32 +106,31 @@ Positional Args:
   <player count>       Number of concurrent players (default: 50)
 
 Options:
-  --ssl               Use HTTPS/WSS (force secure connections)
   --rate <conns/sec>  Connection rate per second (default: 3/sec, higher = faster ramp-up)
   --clients <number>  Number of concurrent clients (overrides positional, min: 1, default: 50)
   --duration <number> Test duration in seconds (min: 10, default: 60)
   --host <url>        HTTP host URL for API calls (guest-login, etc.)
-  --ws <url>          WebSocket URL (default: ws://localhost:3000 or wss:// if SSL enabled)
+  --wt <url>          WebTransport URL (default: https://localhost:3000)
   --gateway           Enable gateway load balancer routing
   --gateway-url <url> Gateway HTTP URL (default from GATEWAY_URL env or http://localhost:9999)
   --realm <id>        Specific realm/server ID to benchmark (optional)
+  --simulation        Simulate a realistic 5-minute daily login curve (slow times, peaks,
+                      logins and logouts) instead of a fixed client count
+  --duration <number> Override simulation span in seconds (default: 300)
   --help              Show this help message
 
 Examples:
   bun benchmark 100
-  bun benchmark 100 --ssl
-  bun benchmark 100 --ssl --rate 20
+  bun benchmark 100 --rate 20
   bun benchmark 50 --duration 120
-  bun benchmark:development 200 --ssl --gateway
+  bun benchmark:development 200 --gateway
   bun benchmark:production 500 --realm server-1 --duration 300
+  bun benchmark 2000 --simulation
+  bun benchmark 2000 --simulation --duration 600
 `);
 }
 
 const packet = {
-    decode(data: ArrayBuffer): string {
-        const decoder = new TextDecoder();
-        return decoder.decode(data);
-    },
     encode(data: string): Uint8Array {
         const encoder = new TextEncoder();
         return encoder.encode(data);
@@ -149,21 +139,158 @@ const packet = {
 
 interface LatencyStats {
     samples: number[];
-    lastSyncTimes: Map<any, number>;
+    oneWaySamples: number[];
+    serverProcSamples: number[];
+    jitterSamples: number[];
+    udpOneWaySamples: number[];
+    lastSyncTimes: Map<any, { seq: number; clientSendTime: number }>;
+    lastSeqs: Map<any, number>;
+    lastRtts: Map<any, number>;
+    offsets: Map<any, number>;
+    offsetCounts: Map<any, number>;
+    lastUdpSeqs: Map<any, number>;
+    lostPackets: number;
+    expectedPackets: number;
+    udpLostFrames: number;
+    udpExpectedFrames: number;
 }
 
 const latencyStats: LatencyStats = {
     samples: [],
-    lastSyncTimes: new Map()
+    oneWaySamples: [],
+    serverProcSamples: [],
+    jitterSamples: [],
+    udpOneWaySamples: [],
+    lastSyncTimes: new Map(),
+    lastSeqs: new Map(),
+    lastRtts: new Map(),
+    offsets: new Map(),
+    offsetCounts: new Map(),
+    lastUdpSeqs: new Map(),
+    lostPackets: 0,
+    expectedPackets: 0,
+    udpLostFrames: 0,
+    udpExpectedFrames: 0,
 };
 
-const websocketIntervals = new Map<any, { timeSync: any }>();
+// Connection ramp-up (TLS/QUIC handshakes, guest-account writes, map loads)
+// produces latency spikes that are not representative of steady-state. Samples
+// collected before this timestamp are excluded from all summary statistics.
+const LATENCY_WARMUP_MS = 10000;
+let latencyWarmupUntil = 0;
+
+// One-way UDP latency measured from server timestamps piggybacked on movement
+// datagrams. Uses the per-client clock offset estimated from TIME_SYNC replies,
+// so no request/response is needed on the UDP path. Samples are only recorded
+// once the offset estimate has stabilized (a handful of TIME_SYNC replies).
+const MIN_OFFSET_SAMPLES_FOR_UDP = 5;
+
+function recordUdpLatency(client: any, serverSendTime: number): void {
+    // Skip connection warm-up like the stream metrics do
+    if (Date.now() < latencyWarmupUntil) return;
+
+    const offset = latencyStats.offsets.get(client);
+    if (offset === undefined) return;
+    if ((latencyStats.offsetCounts.get(client) ?? 0) < MIN_OFFSET_SAMPLES_FOR_UDP) return;
+
+    const clientRecvTime = Date.now();
+    const oneWay = Math.max(0, clientRecvTime - serverSendTime - offset);
+    latencyStats.udpOneWaySamples.push(oneWay);
+    if (latencyStats.udpOneWaySamples.length > 200000) {
+        latencyStats.udpOneWaySamples.shift();
+    }
+}
+
+function recordUdpBatchLatency(client: any, seq: number, serverSendTime: number): void {
+    // Skip connection warm-up like the stream metrics do
+    if (Date.now() < latencyWarmupUntil) return;
+
+    recordUdpLatency(client, serverSendTime);
+
+    const prevSeq = latencyStats.lastUdpSeqs.get(client);
+    if (prevSeq !== undefined && seq > prevSeq + 1) {
+        const lost = seq - prevSeq - 1;
+        latencyStats.udpLostFrames += lost;
+        latencyStats.udpExpectedFrames += lost;
+    }
+    latencyStats.lastUdpSeqs.set(client, seq);
+    latencyStats.udpExpectedFrames++;
+}
+
+function recordTimeSyncReply(client: any, message: any): void {
+    // Skip connection warm-up: handshakes, DB writes and map loads spike
+    // latency during ramp-up and would skew the steady-state statistics.
+    if (Date.now() < latencyWarmupUntil) return;
+
+    const sent = latencyStats.lastSyncTimes.get(client);
+    if (!sent) return;
+
+    const clientRecvTime = Date.now();
+    const rtt = clientRecvTime - sent.clientSendTime;
+    latencyStats.samples.push(rtt);
+    if (latencyStats.samples.length > 200000) {
+        latencyStats.samples.shift();
+    }
+
+    // Packet loss: gaps in the TIME_SYNC sequence number mean lost replies
+    const prevSeq = latencyStats.lastSeqs.get(client);
+    if (prevSeq !== undefined && sent.seq > prevSeq + 1) {
+        const lost = sent.seq - prevSeq - 1;
+        latencyStats.lostPackets += lost;
+        latencyStats.expectedPackets += lost;
+    }
+    latencyStats.lastSeqs.set(client, sent.seq);
+    latencyStats.expectedPackets++;
+
+    // Jitter: absolute RTT change between consecutive replies
+    const prevRtt = latencyStats.lastRtts.get(client);
+    if (prevRtt !== undefined) {
+        latencyStats.jitterSamples.push(Math.abs(rtt - prevRtt));
+    }
+    latencyStats.lastRtts.set(client, rtt);
+
+    const serverRecvTime = message?.serverRecvTime;
+    const serverSendTime = message?.serverSendTime;
+
+    if (typeof serverRecvTime === 'number' && typeof serverSendTime === 'number') {
+        // One-way latency via NTP-style clock offset estimation (EMA-smoothed
+        // per client), which removes the client/server clock skew without
+        // needing synchronized clocks.
+        const offset = ((serverRecvTime - sent.clientSendTime) - (clientRecvTime - serverSendTime)) / 2;
+        const previousOffset = latencyStats.offsets.get(client);
+        const smoothedOffset = previousOffset === undefined ? offset : previousOffset * 0.8 + offset * 0.2;
+        latencyStats.offsets.set(client, smoothedOffset);
+        latencyStats.offsetCounts.set(client, (latencyStats.offsetCounts.get(client) ?? 0) + 1);
+
+        const oneWay = Math.max(0, serverRecvTime - sent.clientSendTime - smoothedOffset);
+        latencyStats.oneWaySamples.push(oneWay);
+        if (latencyStats.oneWaySamples.length > 200000) {
+            latencyStats.oneWaySamples.shift();
+        }
+
+        const serverProc = Math.max(0, serverSendTime - serverRecvTime);
+        latencyStats.serverProcSamples.push(serverProc);
+        if (latencyStats.serverProcSamples.length > 200000) {
+            latencyStats.serverProcSamples.shift();
+        }
+    }
+}
+
+const movementStats = { starts: 0, aborts: 0, logouts: 0, abruptDisconnects: 0 };
+
+const clientIntervals = new Map<any, { timeSync: any }>();
 
 const pendingTimeouts = new Map<any, Set<any>>();
 
+const openClients = new Set<any>();
+
 let stopped = false;
 
+let quietMode = false;
+
 function log(message: string, level: 'info' | 'error' | 'success' | 'warn' = 'info') {
+    if (quietMode) return;
+
     const timestamp = chalk.gray(new Date().toLocaleTimeString());
     const prefix = {
         info: chalk.cyan('ℹ'),
@@ -174,7 +301,7 @@ function log(message: string, level: 'info' | 'error' | 'success' | 'warn' = 'in
     console.log(`${timestamp} ${prefix} ${message}`);
 }
 
-async function fetchAvailableServers(host: string): Promise<any[]> {
+async function fetchAvailableServers(host: string, quiet: boolean = false): Promise<any[]> {
     try {
 
         const endpoint = '/api/gateway/servers';
@@ -202,7 +329,9 @@ async function fetchAvailableServers(host: string): Promise<any[]> {
             log(`Server list response not JSON (${response.status}): ${text.substring(0, 200)}`, 'warn');
             return [];
         }
-        log(`Gateway servers response: ${JSON.stringify(data).substring(0, 300)}`, 'info');
+        if (!quiet) {
+            log(`Gateway servers response: ${JSON.stringify(data).substring(0, 300)}`, 'info');
+        }
         if (Array.isArray(data)) return data;
         if (Array.isArray(data.servers)) return data.servers;
         return [];
@@ -247,146 +376,354 @@ function drawProgress(current: number, total: number, activeConnections: number,
     process.stdout.write(`\r  ${chalk.bold('Progress:')} [${bar}] ${chalk.bold(percentage + '%')} ${timeDisplay} │ Clients: ${connectionStatus}${latencyDisplay}`);
 }
 
-function startKeepAlive(websocket: any) {
+function startKeepAlive(client: any) {
     const sendTimeSync = () => {
-        if (stopped || websocket.readyState !== 1) {
-            const intervals = websocketIntervals.get(websocket);
-            if (intervals?.timeSync) clearInterval(intervals.timeSync);
-            return;
-        }
+        if (stopped || client.readyState !== 1) return;
 
         const sendTime = Date.now();
-        latencyStats.lastSyncTimes.set(websocket, sendTime);
+        const previous = latencyStats.lastSyncTimes.get(client);
+        const seq = (previous?.seq ?? 0) + 1;
+        latencyStats.lastSyncTimes.set(client, { seq, clientSendTime: sendTime });
 
-        websocket.send(packet.encode(JSON.stringify({
+        client.send(packet.encode(JSON.stringify({
             type: "TIME_SYNC",
-            data: sendTime
+            data: { seq, clientSendTime: sendTime }
         })));
+
+        const nextTimer = setTimeout(sendTimeSync, 3000 + Math.random() * 4000);
+        const intervals = clientIntervals.get(client) || { timeSync: null };
+        intervals.timeSync = nextTimer;
+        clientIntervals.set(client, intervals);
     };
 
-    sendTimeSync();
-
-    const timeSyncInterval = setInterval(sendTimeSync, 5000);
-
-    const intervals = websocketIntervals.get(websocket) || { timeSync: null };
-    intervals.timeSync = timeSyncInterval;
-    websocketIntervals.set(websocket, intervals);
+    const initialTimer = setTimeout(sendTimeSync, 1000 + Math.random() * 4000);
+    const intervals = clientIntervals.get(client) || { timeSync: null };
+    intervals.timeSync = initialTimer;
+    clientIntervals.set(client, intervals);
 }
 
-function startMovementSimulation(websocket: any, initialDelay: number = 0) {
-    const directions = ['up', 'down', 'left', 'right', 'upleft', 'upright', 'downleft', 'downright'];
+const packetMixStats = { select: 0, target: 0, inspect: 0, chat: 0, mount: 0 };
 
-    if (!pendingTimeouts.has(websocket)) {
-        pendingTimeouts.set(websocket, new Set());
+function startPacketMix(client: any, behavior: { position: { x: number; y: number } | null }) {
+    if (!pendingTimeouts.has(client)) {
+        pendingTimeouts.set(client, new Set());
     }
 
-    const scheduleNextMovement = () => {
-        if (stopped || websocket.readyState !== 1) return;
-
-        const moveDuration = 1000 + Math.floor(Math.random() * 3000);
-        const holdTime = 1000 + Math.floor(Math.random() * 3000);
-
-        const randomDirection = directions[Math.floor(Math.random() * directions.length)];
-        websocket.send(packet.encode(JSON.stringify({
-            type: "MOVEXY",
-            data: randomDirection
-        })));
-
-        const abortTimeout = setTimeout(() => {
-            if (stopped || websocket.readyState !== 1) {
-                pendingTimeouts.get(websocket)?.delete(abortTimeout);
-                return;
-            }
-
-            websocket.send(packet.encode(JSON.stringify({
-                type: "MOVEXY",
-                data: "abort"
-            })));
-
-            pendingTimeouts.get(websocket)?.delete(abortTimeout);
-
-            const nextMoveTimeout = setTimeout(() => {
-                if (stopped || websocket.readyState !== 1) {
-                    pendingTimeouts.get(websocket)?.delete(nextMoveTimeout);
-                    return;
-                }
-
-                pendingTimeouts.get(websocket)?.delete(nextMoveTimeout);
-                scheduleNextMovement();
-            }, holdTime);
-
-            pendingTimeouts.get(websocket)?.add(nextMoveTimeout);
-        }, moveDuration);
-
-        pendingTimeouts.get(websocket)?.add(abortTimeout);
+    const track = (fn: () => void, delayMs: number) => {
+        const timer = setTimeout(() => {
+            pendingTimeouts.get(client)?.delete(timer);
+            if (stopped || client.readyState !== 1) return;
+            fn();
+        }, delayMs);
+        pendingTimeouts.get(client)?.add(timer);
     };
 
-    const startTimeout = setTimeout(() => {
-        if (stopped || websocket.readyState !== 1) {
-            pendingTimeouts.get(websocket)?.delete(startTimeout);
+    const jitter = (ms: number) => ms * (0.7 + Math.random() * 0.6);
+
+    const mix: Array<{ min: number; max: number; send: () => void }> = [
+        {
+            min: 45000, max: 150000,
+            send: () => {
+                if (!behavior.position) return;
+                client.send(packet.encode(JSON.stringify({
+                    type: "SELECTPLAYER",
+                    data: {
+                        x: behavior.position.x + Math.round(Math.random() * 80 - 40),
+                        y: behavior.position.y + Math.round(Math.random() * 80 - 40),
+                    }
+                })));
+                packetMixStats.select++;
+            },
+        },
+        {
+            min: 30000, max: 120000,
+            send: () => {
+                client.send(packet.encode(JSON.stringify({ type: "TARGETCLOSEST" })));
+                packetMixStats.target++;
+            },
+        },
+        {
+            min: 90000, max: 240000,
+            send: () => {
+                client.send(packet.encode(JSON.stringify({ type: "INSPECTPLAYER" })));
+                packetMixStats.inspect++;
+            },
+        },
+        {
+            min: 120000, max: 300000,
+            send: () => {
+                client.send(packet.encode(JSON.stringify({ type: "CHAT", data: { message: "hello" } })));
+                packetMixStats.chat++;
+            },
+        },
+        {
+            min: 120000, max: 240000,
+            send: () => {
+                client.send(packet.encode(JSON.stringify({ type: "MOUNT", data: { mount: "unicorn" } })));
+                packetMixStats.mount++;
+            },
+        },
+    ];
+
+    for (const entry of mix) {
+        const loop = () => {
+            if (stopped || client.readyState !== 1) return;
+            entry.send();
+            track(loop, jitter(entry.min + Math.random() * (entry.max - entry.min)));
+        };
+        track(loop, jitter(entry.min + Math.random() * (entry.max - entry.min)));
+    }
+}
+
+function startMovementSimulation(client: any, initialDelay: number = 0) {
+    const directions = ['up', 'down', 'left', 'right', 'upleft', 'upright', 'downleft', 'downright'];
+
+    if (!pendingTimeouts.has(client)) {
+        pendingTimeouts.set(client, new Set());
+    }
+
+    const behavior = {
+        position: null as { x: number; y: number } | null,
+        home: null as { x: number; y: number } | null,
+        state: 'idle' as string,
+        sessionUntil: Date.now() + (60000 + Math.random() * 240000),
+    };
+
+    // Track own position from 0x02 MOVEXY echo datagrams (server echoes mover
+    // position every tick) and one-way UDP latency from the trailing server
+    // timestamps piggybacked on movement frames (0x02 echoes and 0x01 batches).
+    // TIME_SYNC replies also arrive as datagrams (best-effort) and are parsed
+    // here for RTT/offset statistics.
+    client.onDatagram((bytes: Uint8Array) => {
+        if (bytes.length < 11) return;
+
+        if (bytes[0] === 0x02) {
+            const view = new DataView(bytes.buffer, bytes.byteOffset, 11);
+            const x = view.getInt16(5, true);
+            const y = view.getInt16(7, true);
+            behavior.position = { x, y };
+            if (!behavior.home) behavior.home = { x, y };
+
+            if (bytes.length >= 17) {
+                const seconds = new DataView(bytes.buffer, bytes.byteOffset + 11, 4).getUint32(0, true);
+                const ms = new DataView(bytes.buffer, bytes.byteOffset + 15, 2).getUint16(0, true);
+                recordUdpLatency(client, seconds * 1000 + ms);
+            }
             return;
         }
 
-        pendingTimeouts.get(websocket)?.delete(startTimeout);
-        scheduleNextMovement();
-    }, initialDelay);
+        if (bytes[0] === 0x01) {
+            const view = new DataView(bytes.buffer, bytes.byteOffset);
+            const count = view.getUint16(1, true);
+            const entriesEnd = 3 + count * 9;
+            if (bytes.length >= entriesEnd + 10) {
+                const seq = view.getUint32(entriesEnd, true);
+                const seconds = view.getUint32(entriesEnd + 4, true);
+                const ms = view.getUint16(entriesEnd + 8, true);
+                recordUdpBatchLatency(client, seq, seconds * 1000 + ms);
+            }
+            return;
+        }
 
-    pendingTimeouts.get(websocket)?.add(startTimeout);
+        // JSON datagram (e.g. TIME_SYNC reply)
+        if (bytes[0] === 0x7B) {
+            try {
+                const message = JSON.parse(new TextDecoder().decode(bytes));
+                if (message.type === 'TIME_SYNC') {
+                    recordTimeSyncReply(client, message);
+                }
+            } catch {
+                // Not JSON after all - ignore
+            }
+        }
+    });
+
+    const track = (fn: () => void, delayMs: number) => {
+        const timer = setTimeout(() => {
+            pendingTimeouts.get(client)?.delete(timer);
+            if (stopped || client.readyState !== 1) return;
+            fn();
+        }, delayMs);
+        pendingTimeouts.get(client)?.add(timer);
+    };
+
+    const jitter = (ms: number) => ms * (0.7 + Math.random() * 0.6);
+
+    const sendMove = (dir: string) => {
+        client.send(packet.encode(JSON.stringify({ type: "MOVEXY", data: dir })));
+        movementStats.starts++;
+    };
+
+    const sendAbort = () => {
+        client.send(packet.encode(JSON.stringify({ type: "MOVEXY", data: "abort" })));
+        movementStats.aborts++;
+    };
+
+    const randomDirection = () => directions[Math.floor(Math.random() * directions.length)];
+
+    const directionToward = (from: { x: number; y: number }, to: { x: number; y: number }): string | null => {
+        const dx = to.x - from.x;
+        const dy = to.y - from.y;
+        const adx = Math.abs(dx);
+        const ady = Math.abs(dy);
+        if (adx < 48 && ady < 48) return null;
+        let dir: string;
+        if (adx > ady * 2) {
+            dir = dx > 0 ? 'right' : 'left';
+        } else if (ady > adx * 2) {
+            dir = dy > 0 ? 'down' : 'up';
+        } else {
+            dir = (dy > 0 ? 'down' : 'up') + (dx > 0 ? 'right' : 'left');
+        }
+        return dir;
+    };
+
+    const startState = () => {
+        if (stopped || client.readyState !== 1) return;
+
+        if (Date.now() >= behavior.sessionUntil) {
+            // End of session: clean logout 70%, abrupt disconnect 30%
+            if (Math.random() < 0.7) {
+                client.send(packet.encode(JSON.stringify({ type: "LOGOUT" })));
+                movementStats.logouts++;
+            } else {
+                movementStats.abruptDisconnects++;
+            }
+            track(() => {
+                if (client.readyState === 1) cleanupClient(client);
+            }, jitter(500 + Math.random() * 2000));
+            return;
+        }
+
+        const roll = Math.random();
+        if (roll < 0.45) {
+            // Idle / AFK - the dominant state for real players
+            const longAfk = Math.random() < 0.08;
+            behavior.state = 'idle';
+            track(() => startState(), jitter(longAfk ? 90000 + Math.random() * 150000 : 8000 + Math.random() * 60000));
+        } else if (roll < 0.70) {
+            // Wander: short random walk
+            behavior.state = 'wander';
+            sendMove(randomDirection());
+            track(() => {
+                sendAbort();
+                startState();
+            }, jitter(2000 + Math.random() * 6000));
+        } else if (roll < 0.88) {
+            // Return home: gravitate back toward spawn/hub (creates hotspot clustering)
+            if (!behavior.position || !behavior.home) {
+                startState();
+                return;
+            }
+            const dir = directionToward(behavior.position, behavior.home);
+            if (!dir) {
+                startState();
+                return;
+            }
+            behavior.state = 'return';
+            sendMove(dir);
+            track(() => {
+                sendAbort();
+                startState();
+            }, jitter(4000 + Math.random() * 6000));
+        } else {
+            // Movement burst: 2-5 quick direction changes (questing-like)
+            behavior.state = 'burst';
+            const steps = 2 + Math.floor(Math.random() * 4);
+            let remaining = steps;
+            const step = () => {
+                if (remaining <= 0) {
+                    sendAbort();
+                    startState();
+                    return;
+                }
+                remaining--;
+                sendMove(randomDirection());
+                track(() => {
+                    sendAbort();
+                    step();
+                }, jitter(800 + Math.random() * 1600));
+            };
+            step();
+        }
+    };
+
+    startPacketMix(client, behavior);
+
+    track(() => startState(), jitter(initialDelay));
 }
 
-async function createClients(amount: number, host: string, websocketUrl: string, config: ReturnType<typeof parseArgs>): Promise<any[]> {
-    const allWebsockets: any[] = [];
-    const loggedInWebsockets: any[] = [];
+let cachedAvailableServers: Promise<any[]> | null = null;
 
-    let availableServers: any[] = [];
-    if (config.gatewayEnabled) {
-
-        availableServers = await fetchAvailableServers(config.gatewayUrl);
-        if (availableServers.length > 0) {
-            log(`Found ${availableServers.length} server(s) from gateway`, 'info');
-
-            const firstServer = availableServers[0];
-            log(`Server details: ${firstServer.id} - ${firstServer.useSSL ? 'wss' : 'ws'}://${firstServer.publicHost || firstServer.host}:${firstServer.wsPort}`, 'info');
-
-            if (config.realmId) {
-                const specificServer = availableServers.find(s => s.id === config.realmId);
-                if (specificServer) {
-                    availableServers = [specificServer];
-                    log(`Using specific realm: ${config.realmId}`, 'info');
-                } else {
-                    log(`Realm '${config.realmId}' not found, using all available realms`, 'warn');
+async function getAvailableServers(host: string, gatewayEnabled: boolean, gatewayUrl: string, realmId?: string, quiet: boolean = false): Promise<any[]> {
+    if (!cachedAvailableServers) {
+        cachedAvailableServers = (async () => {
+            let servers: any[] = [];
+            if (gatewayEnabled) {
+                servers = await fetchAvailableServers(gatewayUrl, quiet);
+                if (servers.length > 0 && !quiet) {
+                    log(`Found ${servers.length} server(s) from gateway`, 'info');
+                } else if (!quiet) {
+                    log('No servers found from gateway', 'warn');
+                }
+            } else {
+                servers = await fetchAvailableServers(host, quiet);
+                if (servers.length > 0 && !quiet) {
+                    log(`Found ${servers.length} available realm(s)`, 'info');
+                } else if (!quiet) {
+                    log('No realms found, using default connection', 'warn');
                 }
             }
-        } else {
-            log('No servers found from gateway', 'warn');
-        }
-    } else {
 
-        availableServers = await fetchAvailableServers(host);
-        if (availableServers.length > 0) {
-            log(`Found ${availableServers.length} available realm(s)`, 'info');
-
-            if (config.realmId) {
-                const specificServer = availableServers.find(s => s.id === config.realmId);
+            if (realmId) {
+                const specificServer = servers.find(s => s.id === realmId);
                 if (specificServer) {
-                    availableServers = [specificServer];
-                    log(`Using specific realm: ${config.realmId}`, 'info');
-                } else {
-                    log(`Realm '${config.realmId}' not found, using all available realms`, 'warn');
+                    servers = [specificServer];
+                    if (!quiet) log(`Using specific realm: ${realmId}`, 'info');
+                } else if (!quiet) {
+                    log(`Realm '${realmId}' not found, using all available realms`, 'warn');
                 }
             }
-        } else {
-            log('No realms found, using default connection', 'warn');
-        }
+
+            return servers;
+        })();
     }
 
-    return new Promise(async (resolve) => {
+    return await cachedAvailableServers;
+}
+
+async function createClients(amount: number, host: string, clientUrl: string, config: ReturnType<typeof parseArgs>): Promise<any[]> {
+    const allClients: any[] = [];
+    const loggedInClients: any[] = [];
+
+    // The wave settles only when every client attempt reaches a terminal
+    // state: LOAD_MAP received, closed before login, failed, or the login
+    // timeout fires. Resolving on connect alone would let the simulation
+    // overshoot its target while LOAD_MAP responses are still in flight.
+    let resolveLoggedIn!: (clients: any[]) => void;
+    const loginCompletion = new Promise<any[]>((resolve) => { resolveLoggedIn = resolve; });
+
+    const availableServers = await getAvailableServers(host, config.gatewayEnabled, config.gatewayUrl, config.realmId, config.quiet);
         let openedCount = 0;
         let loggedInCount = 0;
+        let settledCount = 0;
+        const settledIndexes = new Set<number>();
         let loginTimeout: any = null;
         let lastUpdateTime = 0;
 
+        const settleClient = (index: number) => {
+            if (settledIndexes.has(index)) return;
+            settledIndexes.add(index);
+            settledCount++;
+            if (settledCount === amount) {
+                if (loginTimeout) clearTimeout(loginTimeout);
+                resolveLoggedIn(loggedInClients);
+            }
+        };
+
         const updateConnectionStatus = () => {
+            if (config.quiet) return;
+
             const now = Date.now();
             if (now - lastUpdateTime < 250) return;
             lastUpdateTime = now;
@@ -414,15 +751,15 @@ async function createClients(amount: number, host: string, websocketUrl: string,
                     process.stdout.write('\r' + ' '.repeat(120) + '\r');
                     log(`Login timeout: ${loggedInCount}/${amount} clients logged in`, 'warn');
 
-                    allWebsockets.forEach(ws => {
-                        if (!loggedInWebsockets.includes(ws) && ws.readyState === 1) {
-                            ws.close();
+                    allClients.forEach(client => {
+                        if (!loggedInClients.includes(client) && client.readyState === 1) {
+                            client.close();
                         }
                     });
 
                     log(`${loggedInCount}/${amount} clients logged in - proceeding`, 'info');
-                    resolve(loggedInWebsockets);
                 }
+                resolveLoggedIn(loggedInClients);
             }, 30000);
         };
 
@@ -475,157 +812,454 @@ async function createClients(amount: number, host: string, websocketUrl: string,
                     return;
                 }
 
-                let finalWebsocketUrl = websocketUrl;
+                let finalTransportUrl = clientUrl;
                 if (availableServers.length > 0) {
 
                     const serverIndex = i % availableServers.length;
                     const selectedServer = availableServers[serverIndex];
 
-                    const protocol = selectedServer.useSSL ? 'wss' : 'ws';
                     const hostName = selectedServer.publicHost?.replace(/^https?:\/\//, '') || selectedServer.host;
-                    finalWebsocketUrl = `${protocol}://${hostName}:${selectedServer.wsPort}`;
+                    finalTransportUrl = `https://${normalizeHost(hostName)}:${selectedServer.wtPort || 3000}`;
                 } else if (config.gatewayEnabled) {
                     try {
                         const gwUrl = new URL(config.gatewayUrl);
-                        const protocol = gwUrl.protocol === 'https:' ? 'wss' : 'ws';
-                        finalWebsocketUrl = `${protocol}://${gwUrl.hostname}`;
-                        if (gwUrl.port) finalWebsocketUrl += `:${gwUrl.port}`;
-                    } catch { /* keep default websocketUrl */ }
+                        finalTransportUrl = `https://${gwUrl.hostname}:${process.env.GAME_PORT || '3000'}`;
+                    } catch { /* keep default clientUrl */ }
                 }
-
-                const wsUrlWithAuth = new URL(finalWebsocketUrl);
-                const connectionToken = crypto.randomBytes(32).toString('hex');
-                const timestamp = Date.now().toString();
-                const expiresAt = (Date.now() + 60000).toString();
 
                 const sharedSecret = process.env.GATEWAY_GAME_SERVER_SECRET;
                 if (!sharedSecret) {
                     log('GATEWAY_GAME_SERVER_SECRET environment variable is not set', 'error');
                     return;
                 }
-                const signature = crypto
-                    .createHmac('sha256', sharedSecret)
-                    .update(`${connectionToken}:${timestamp}:${expiresAt}`)
-                    .digest('hex');
 
-                wsUrlWithAuth.searchParams.set('token', connectionToken);
-                wsUrlWithAuth.searchParams.set('timestamp', timestamp);
-                wsUrlWithAuth.searchParams.set('expiresAt', expiresAt);
-                wsUrlWithAuth.searchParams.set('signature', signature);
-
-                if (i === 0) {
-                    log(`Connecting to WebSocket: ${finalWebsocketUrl}`, 'info');
+                if (i === 0 && !config.quiet) {
+                    log(`Connecting to WebTransport: ${finalTransportUrl}`, 'info');
                 }
 
-                const websocket = new WebSocket(wsUrlWithAuth.toString());
+                const client = await BenchmarkConnection.connect(finalTransportUrl, sharedSecret, 'Frostfire-Forge-Benchmark-CLI/1.0');
 
-                websocket.addEventListener('open', () => {
-                    allWebsockets.push(websocket);
-                    openedCount++;
-                    updateConnectionStatus();
+                allClients.push(client);
+                openClients.add(client);
+                openedCount++;
+                updateConnectionStatus();
 
-                    websocket.send(Buffer.from(packet.encode(JSON.stringify({
-                        type: "AUTH",
-                        data: token,
-                        language: "en"
-                    }))));
-
-                    if (openedCount === amount && !stopped) {
-                        startLoginTimeout();
-                    }
-                });
-
-                const loginHandler = (event: any) => {
+                const loginHandler = (rawMessage: string) => {
                     try {
-                        const message = JSON.parse(packet.decode(event.data));
+                        const message = JSON.parse(rawMessage);
                         if (message.type === 'LOAD_MAP') {
                             loggedInCount++;
-                            loggedInWebsockets.push(websocket);
+                            loggedInClients.push(client);
 
                             updateConnectionStatus();
-                            websocket.removeEventListener('message', loginHandler);
+                            client.offMessage(loginHandler);
 
-                            startKeepAlive(websocket);
+                            if (config.onClientLoggedIn) {
+                                config.onClientLoggedIn(client);
+                            }
+
+                            settleClient(i);
+
+                            startKeepAlive(client);
 
                             const randomDelay = Math.floor(Math.random() * 10000);
-                            startMovementSimulation(websocket, randomDelay);
+                            startMovementSimulation(client, randomDelay);
 
-                            if (loggedInCount === amount) {
-                                clearTimeout(loginTimeout);
-
+                            if (loggedInCount === amount && !config.quiet) {
                                 const finalBar = chalk.green('█'.repeat(50));
                                 process.stdout.write(`\r  ${chalk.bold.green('Logging in:')} [${finalBar}] ${chalk.bold('100%')} ${chalk.white(amount)}${chalk.gray('/')}${chalk.white(amount)} clients\n`);
                                 log(`All ${amount} clients logged in and moving`, 'success');
-                                resolve(loggedInWebsockets);
                             }
                         }
                     } catch (e: any) {
-                        console.error(chalk.red(`Error processing message for connection ${i}: ${e.message}`));
+                        if (!quietMode) {
+                            console.error(chalk.red(`Error processing message for connection ${i}: ${e.message}`));
+                        }
                     }
                 };
-                websocket.addEventListener('message', loginHandler);
+                client.onMessage(loginHandler);
 
-                websocket.addEventListener('error', () => {
-                    log(`WebSocket connection error during login`, 'error');
-                });
-
-                websocket.addEventListener('close', (event: any) => {
-                    if (loggedInCount < amount) {
-                        log(`Client disconnected during login (Code: ${event.code})`, 'error');
+                client.onClose((code: number) => {
+                    if (loggedInCount < amount && !config.quiet) {
+                        log(`Client disconnected during login (Code: ${code})`, 'error');
                     }
+                    settleClient(i);
                 });
+
+                client.send(packet.encode(JSON.stringify({
+                    type: "AUTH",
+                    data: token,
+                    language: "en"
+                })));
+
+                if (openedCount === amount && !stopped) {
+                    startLoginTimeout();
+                }
                 } catch (error: any) {
+                    if (config.onClientFailed) {
+                        config.onClientFailed();
+                    }
                     if (error.name === 'AbortError' || error.name === 'TimeoutError') {
                         log(`Guest account creation timed out after 15s (possible database contention)`, 'error');
                     } else {
                         log(`Error creating guest account: ${error.message}`, 'error');
                     }
+                    settleClient(i);
                 }
             })();
 
             clientPromises.push(clientPromise);
         }
 
-        await Promise.all(clientPromises);
-    });
+        await Promise.allSettled(clientPromises);
+
+        return await loginCompletion;
 }
 
 function getLatencyStats() {
-    if (latencyStats.samples.length === 0) {
-        return { avg: 0, min: 0, max: 0, count: 0 };
+    const stats: any = { avg: 0, min: 0, max: 0, p95: 0, p99: 0, count: latencyStats.samples.length, oneWayAvg: 0, serverProcAvg: 0, jitterAvg: 0, udpOneWayAvg: 0, lostPackets: latencyStats.lostPackets, expectedPackets: latencyStats.expectedPackets, udpLostFrames: latencyStats.udpLostFrames, udpExpectedFrames: latencyStats.udpExpectedFrames };
+    if (latencyStats.samples.length > 0) {
+        stats.avg = Math.round(latencyStats.samples.reduce((a, b) => a + b, 0) / latencyStats.samples.length);
+        stats.min = Math.round(Math.min(...latencyStats.samples));
+        stats.max = Math.round(Math.max(...latencyStats.samples));
+        const sorted = [...latencyStats.samples].sort((a, b) => a - b);
+        stats.p95 = Math.round(sorted[Math.floor(sorted.length * 0.95)]);
+        stats.p99 = Math.round(sorted[Math.floor(sorted.length * 0.99)]);
     }
-    const avg = Math.round(latencyStats.samples.reduce((a, b) => a + b, 0) / latencyStats.samples.length);
-    const min = Math.round(Math.min(...latencyStats.samples));
-    const max = Math.round(Math.max(...latencyStats.samples));
-    return { avg, min, max, count: latencyStats.samples.length };
+    if (latencyStats.oneWaySamples.length > 0) {
+        stats.oneWayAvg = Math.round(latencyStats.oneWaySamples.reduce((a, b) => a + b, 0) / latencyStats.oneWaySamples.length);
+    }
+    if (latencyStats.serverProcSamples.length > 0) {
+        stats.serverProcAvg = Math.round(latencyStats.serverProcSamples.reduce((a, b) => a + b, 0) / latencyStats.serverProcSamples.length);
+    }
+    if (latencyStats.jitterSamples.length > 0) {
+        stats.jitterAvg = Math.round(latencyStats.jitterSamples.reduce((a, b) => a + b, 0) / latencyStats.jitterSamples.length);
+    }
+    if (latencyStats.udpOneWaySamples.length > 0) {
+        stats.udpOneWayAvg = Math.round(latencyStats.udpOneWaySamples.reduce((a, b) => a + b, 0) / latencyStats.udpOneWaySamples.length);
+    }
+    return stats;
 }
 
-function cleanupWebsocket(ws: any) {
-    const intervals = websocketIntervals.get(ws);
+function cleanupClient(client: any) {
+    const intervals = clientIntervals.get(client);
     if (intervals?.timeSync) clearInterval(intervals.timeSync);
-    websocketIntervals.delete(ws);
+    clientIntervals.delete(client);
 
-    const timeouts = pendingTimeouts.get(ws);
+    const timeouts = pendingTimeouts.get(client);
     if (timeouts) {
         timeouts.forEach(timeoutId => clearTimeout(timeoutId));
-        pendingTimeouts.delete(ws);
+        pendingTimeouts.delete(client);
     }
 
-    latencyStats.lastSyncTimes.delete(ws);
+    latencyStats.lastSyncTimes.delete(client);
+    latencyStats.lastSeqs.delete(client);
+    latencyStats.lastRtts.delete(client);
+    latencyStats.offsets.delete(client);
+    latencyStats.offsetCounts.delete(client);
+    latencyStats.lastUdpSeqs.delete(client);
 
-    if (ws.readyState === 1) {
-        ws.close();
+    if (client.readyState === 1) {
+        client.close();
+    }
+    openClients.delete(client);
+}
+
+function closeAllClients() {
+    stopped = true;
+    for (const client of openClients) {
+        try {
+            client.close();
+        } catch (error: any) {
+            if (!quietMode) {
+                console.debug("Benchmark client close failed:", error);
+            }
+        }
+    }
+}
+
+const SIMULATION_SEGMENTS: Array<{ start: number; end: number; from: number; to: number; label: string }> = [
+    { start: 0.00, end: 0.10, from: 0.05, to: 0.20, label: 'Early morning' },
+    { start: 0.10, end: 0.20, from: 0.20, to: 0.15, label: 'Mid-morning dip' },
+    { start: 0.20, end: 0.40, from: 0.15, to: 0.70, label: 'Lunch ramp' },
+    { start: 0.40, end: 0.50, from: 0.70, to: 1.00, label: 'Peak buildup' },
+    { start: 0.50, end: 0.65, from: 1.00, to: 0.85, label: 'Peak hours' },
+    { start: 0.65, end: 0.85, from: 0.85, to: 0.30, label: 'Evening decline' },
+    { start: 0.85, end: 1.00, from: 0.30, to: 0.10, label: 'Late night' },
+];
+
+function simulateTargetFraction(t: number): { fraction: number; phase: string } {
+    for (const seg of SIMULATION_SEGMENTS) {
+        if (t <= seg.end) {
+            const progress = (t - seg.start) / (seg.end - seg.start);
+            return { fraction: seg.from + (seg.to - seg.from) * progress, phase: seg.label };
+        }
+    }
+    return { fraction: 0.10, phase: 'Late night' };
+}
+
+let pendingConnects = 0;
+let totalLogins = 0;
+let loginSuccesses = 0;
+let totalLogouts = 0;
+let maxConcurrent = 0;
+
+function countActiveConnections(): number {
+    let active = 0;
+    for (const client of openClients) {
+        if (client.readyState === 1) active++;
+    }
+    return active;
+}
+
+function attachSimulationHandlers(client: any) {
+    client.onMessage((rawMessage: string) => {
+        try {
+            if (!rawMessage || rawMessage.trim().length === 0) {
+                return;
+            }
+
+            const message = JSON.parse(rawMessage);
+
+            if (message.type === 'TIME_SYNC') {
+                recordTimeSyncReply(client, message);
+            }
+        } catch (e: any) {
+            if (!(e instanceof SyntaxError) && !quietMode) {
+                console.error(chalk.red(`Error processing message for latency: ${e.message}`));
+            }
+        }
+    });
+
+    client.onClose((_code: number) => {
+        if (!stopped) {
+            totalLogouts++;
+        }
+        cleanupClient(client);
+    });
+}
+
+async function connectWave(count: number, config: ReturnType<typeof parseArgs>): Promise<void> {
+    if (count <= 0 || stopped) return;
+
+    pendingConnects += count;
+    totalLogins += count;
+
+    let settled = 0;
+    const settleOne = () => {
+        settled++;
+        pendingConnects = Math.max(0, pendingConnects - 1);
+    };
+
+    const waveConfig: ReturnType<typeof parseArgs> = {
+        ...config,
+        rate: config.rate > 0 ? config.rate : 25,
+        quiet: true,
+        onClientLoggedIn: (client: any) => {
+            settleOne();
+            loginSuccesses++;
+            attachSimulationHandlers(client);
+        },
+        onClientFailed: () => {
+            settleOne();
+        },
+    };
+
+    try {
+        await createClients(count, waveConfig.host, waveConfig.transportUrl, waveConfig);
+    } catch (error) {
+        // Ignore errors, settle remaining connections
+    } finally {
+        while (settled < count) settleOne();
+    }
+}
+
+function disconnectRandomClients(count: number): void {
+    if (count <= 0) return;
+
+    const candidates: any[] = [];
+    for (const client of openClients) {
+        if (client.readyState === 1) candidates.push(client);
+    }
+
+    if (candidates.length === 0) return;
+
+    const toDisconnect = candidates.sort(() => Math.random() - 0.5).slice(0, Math.min(count, candidates.length));
+
+    for (const client of toDisconnect) {
+        totalLogouts++;
+        cleanupClient(client);
+    }
+}
+
+async function runSimulation(config: ReturnType<typeof parseArgs>) {
+    const duration = config.durationSet ? config.duration : 300;
+    const peakClients = config.clients;
+
+    console.log('\n' + chalk.bold.cyan('-'.repeat(60)));
+    console.log(chalk.bold.cyan('  Frostfire Forge CLI Benchmark - Simulation Mode'));
+    console.log(chalk.bold.cyan('-'.repeat(60)) + '\n');
+
+    console.log(`  ${chalk.bold('Peak clients:')} ${chalk.white(peakClients)}`);
+    console.log(`  ${chalk.bold('Duration:')}     ${chalk.white(duration + 's')} ${chalk.gray('(5-minute daily curve)')}`);
+    console.log(`  ${chalk.bold('Curve:')}       ${chalk.white('early-morning → lunch ramp → peak → evening decline')}`);
+    console.log(`  ${chalk.bold('Host:')}         ${chalk.blue(config.host)}`);
+    console.log(`  ${chalk.bold('Rate:')}         ${config.rate > 0 ? chalk.white(config.rate + '/sec') : chalk.gray('default (25/sec)')}`);
+
+    if (config.gatewayEnabled) {
+        console.log(`  ${chalk.bold('Gateway:')}      ${chalk.green('Enabled')} ${chalk.gray('→')} ${chalk.blue(config.gatewayUrl)}`);
+    }
+
+    console.log('\n' + chalk.gray('─'.repeat(60)) + '\n');
+
+    quietMode = true;
+    setBenchmarkQuiet(true);
+
+    log('Starting simulation...', 'info');
+
+    const startTime = Date.now();
+    latencyWarmupUntil = startTime + LATENCY_WARMUP_MS;
+
+    // Fixed connection rate: bigger populations take longer to connect, the
+    // rate itself never scales with the total required.
+    const connectionRate = config.rate > 0 ? config.rate : 25;
+
+    const initialWave = Math.min(Math.round(peakClients * 0.05), connectionRate);
+    log(`Initial population: ${Math.round(peakClients * 0.05)} clients (5% of peak) at ${connectionRate}/sec`, 'info');
+    connectWave(initialWave, config);
+
+    let lastProgressDraw = 0;
+
+    const tick = () => {
+        if (stopped) return;
+
+        const elapsed = (Date.now() - startTime) / 1000;
+        const t = Math.min(elapsed / duration, 1);
+        const { fraction } = simulateTargetFraction(t);
+        const target = Math.max(0, Math.round(peakClients * fraction));
+
+        const active = countActiveConnections();
+        if (active > maxConcurrent) maxConcurrent = active;
+
+        const churn = Math.max(1, Math.round(active * 0.002));
+        disconnectRandomClients(Math.floor(Math.random() * (churn + 1)));
+        const churnReconnects = Math.floor(Math.random() * (churn + 1));
+        if (churnReconnects > 0) connectWave(Math.min(churnReconnects, Math.max(1, Math.floor(connectionRate / 2))), config);
+
+        const delta = target - countActiveConnections() - pendingConnects;
+
+        if (delta > 0) {
+            connectWave(Math.min(delta, connectionRate), config);
+        } else if (delta < 0) {
+            disconnectRandomClients(Math.min(-delta, countActiveConnections()));
+        }
+
+        const now = Date.now();
+        if (now - lastProgressDraw >= 1000) {
+            lastProgressDraw = now;
+            process.stdout.write('\x1b[2K\r');
+            drawProgress(Math.floor(elapsed), duration, countActiveConnections(), peakClients, getLatencyStats());
+        }
+    };
+
+    tick();
+    const tickInterval = setInterval(tick, 1000);
+
+    await new Promise(resolve => setTimeout(resolve, duration * 1000));
+
+    clearInterval(tickInterval);
+    stopped = true;
+    closeAllClients();
+
+    process.stdout.write('\x1b[2K\r');
+    drawProgress(duration, duration, countActiveConnections(), peakClients, getLatencyStats());
+    console.log('');
+
+    quietMode = false;
+    setBenchmarkQuiet(false);
+
+    const endTime = Date.now();
+    const totalTime = ((endTime - startTime) / 1000).toFixed(2);
+    const finalLatency = getLatencyStats();
+
+    console.log('\n\n' + chalk.bold.green('-'.repeat(60)));
+    console.log(chalk.bold.green('  Simulation Complete'));
+    console.log(chalk.bold.green('-'.repeat(60)) + '\n');
+
+    console.log(`  ${chalk.bold('Test Duration:')}       ${chalk.white(totalTime + 's')}`);
+    console.log(`  ${chalk.bold('Peak Target:')}         ${chalk.white(peakClients)}`);
+    console.log(`  ${chalk.bold('Max Concurrent:')}      ${chalk.white(maxConcurrent)}`);
+    console.log(`  ${chalk.bold('Total Login Attempts:')} ${chalk.white(totalLogins.toLocaleString())}`);
+    console.log(`  ${chalk.bold('Successful Logins:')}    ${chalk.white(loginSuccesses.toLocaleString())}`);
+    console.log(`  ${chalk.bold('Logouts/Disconnects:')}  ${chalk.white(totalLogouts.toLocaleString())}`);
+
+    printLatencySummary(finalLatency);
+
+    console.log('\n' + chalk.gray('-'.repeat(60)) + '\n');
+}
+
+function printLatencySummary(latency: any) {
+    if (latency.count <= 0) {
+        console.log(`\n  ${chalk.yellow('⚠')} No latency data collected`);
+        return;
+    }
+
+    console.log(`\n  ${chalk.bold('Latency Statistics:')} ${chalk.gray(`(first ${LATENCY_WARMUP_MS / 1000}s excluded as connection warm-up)`)}`);
+
+    let avgColor = chalk.green;
+    if (latency.avg > 100) avgColor = chalk.yellow;
+    if (latency.avg > 200) avgColor = chalk.red;
+
+    console.log(`    ${chalk.bold('RTT Average:')} ${avgColor(latency.avg + 'ms')}`);
+    console.log(`    ${chalk.bold('RTT Minimum:')} ${chalk.green(latency.min + 'ms')}`);
+
+    let maxColor = chalk.green;
+    if (latency.max > 200) maxColor = chalk.yellow;
+    if (latency.max > 500) maxColor = chalk.red;
+
+    console.log(`    ${chalk.bold('RTT Maximum:')} ${maxColor(latency.max + 'ms')}`);
+    if (latency.p95 > 0) {
+        console.log(`    ${chalk.bold('RTT p95:')} ${chalk.white(latency.p95 + 'ms')} ${chalk.dim('|')} ${chalk.bold('p99:')} ${chalk.white(latency.p99 + 'ms')}`);
+    }
+    console.log(`    ${chalk.bold('Samples:')}     ${chalk.white(latency.count.toLocaleString())}`);
+
+    if (latency.oneWayAvg > 0) {
+        console.log(`    ${chalk.bold('One-way (client→server):')} ${chalk.white(latency.oneWayAvg + 'ms')}`);
+    }
+    if (latency.udpOneWayAvg > 0) {
+        console.log(`    ${chalk.bold('One-way UDP (movement datagrams):')} ${chalk.white(latency.udpOneWayAvg + 'ms')}`);
+    }
+    if (latency.serverProcAvg > 0) {
+        console.log(`    ${chalk.bold('Server processing:')} ${chalk.white(latency.serverProcAvg + 'ms')}`);
+    }
+    if (latency.jitterAvg > 0) {
+        console.log(`    ${chalk.bold('Jitter (mean |ΔRTT|):')} ${chalk.white(latency.jitterAvg + 'ms')}`);
+    }
+    if (latency.expectedPackets > 0) {
+        const lossPercent = ((latency.lostPackets / latency.expectedPackets) * 100).toFixed(2);
+        const lossColor = latency.lostPackets === 0 ? chalk.green : chalk.yellow;
+        console.log(`    ${chalk.bold('TIME_SYNC packet loss:')} ${lossColor(`${latency.lostPackets}/${latency.expectedPackets} (${lossPercent}%)`)}`);
+    }
+    if (latency.udpExpectedFrames > 0) {
+        const udpLossPercent = ((latency.udpLostFrames / latency.udpExpectedFrames) * 100).toFixed(2);
+        const udpLossColor = latency.udpLostFrames === 0 ? chalk.green : chalk.yellow;
+        console.log(`    ${chalk.bold('Movement datagram loss:')} ${udpLossColor(`${latency.udpLostFrames}/${latency.udpExpectedFrames} (${udpLossPercent}%)`)}`);
     }
 }
 
 async function runBenchmark(config: ReturnType<typeof parseArgs>) {
-    console.log('\n' + chalk.bold.cyan('━'.repeat(60)));
+    if (config.simulation) {
+        await runSimulation(config);
+        return;
+    }
+
+    console.log('\n' + chalk.bold.cyan('-'.repeat(60)));
     console.log(chalk.bold.cyan('  Frostfire Forge CLI Benchmark'));
-    console.log(chalk.bold.cyan('━'.repeat(60)) + '\n');
+    console.log(chalk.bold.cyan('-'.repeat(60)) + '\n');
 
     console.log(`  ${chalk.bold('Clients:')}  ${chalk.white(config.clients)}`);
     console.log(`  ${chalk.bold('Duration:')} ${chalk.white(config.duration + 's')}`);
-    console.log(`  ${chalk.bold('SSL:')}      ${config.ssl ? chalk.green('Enabled (wss/https)') : chalk.gray('Disabled (ws/http)')}`);
+    console.log(`  ${chalk.bold('TLS:')}      ${chalk.green('Required (WebTransport)')}`);
     console.log(`  ${chalk.bold('Rate:')}     ${config.rate > 0 ? chalk.white(config.rate + '/sec') : chalk.gray('default (3/sec)')}`);
     console.log(`  ${chalk.bold('Host:')}     ${chalk.blue(config.host)}`);
 
@@ -633,7 +1267,7 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
         console.log(`  ${chalk.bold('Gateway:')}  ${chalk.green('Enabled')} ${chalk.gray('→')} ${chalk.blue(config.gatewayUrl)}`);
         console.log(`  ${chalk.dim('Note:')} ${chalk.dim('Each client will be assigned to a server via gateway')}`);
     } else {
-        console.log(`  ${chalk.bold('WS URL:')}   ${chalk.blue(config.websocketUrl)}`);
+        console.log(`  ${chalk.bold('Transport URL:')} ${chalk.blue(config.transportUrl)}`);
         console.log(`  ${chalk.bold('Gateway:')}  ${chalk.gray('Disabled')}`);
         if (config.realmId) {
             console.log(`  ${chalk.bold('Realm:')}    ${chalk.cyan(config.realmId)} ${chalk.dim('(specific)')}`);
@@ -653,8 +1287,8 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
     } else {
         log(`Creating ${config.clients} guest accounts...`, 'info');
     }
-    const websockets = await createClients(config.clients, config.host, config.websocketUrl, config);
-    const actualClientCount = websockets.length;
+    const clients = await createClients(config.clients, config.host, config.transportUrl, config);
+    const actualClientCount = clients.length;
 
     console.log('');
 
@@ -669,50 +1303,38 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
         log(`All ${actualClientCount} clients logged in`, 'success');
     }
 
-    websockets.forEach((websocket: any) => {
-        websocket.addEventListener('message', (event: any) => {
+    clients.forEach((client: any) => {
+        client.onMessage((rawMessage: string) => {
             try {
-                const decodedMessage = packet.decode(event.data);
-
-                // Skip empty messages
-                if (!decodedMessage || decodedMessage.trim().length === 0) {
+                if (!rawMessage || rawMessage.trim().length === 0) {
                     return;
                 }
 
-                const message = JSON.parse(decodedMessage);
+                const message = JSON.parse(rawMessage);
 
                 if (message.type === 'TIME_SYNC') {
-                    const sentTime = latencyStats.lastSyncTimes.get(websocket);
-                    if (sentTime) {
-                        const receiveTime = Date.now();
-                        const latency = receiveTime - sentTime;
-                        latencyStats.samples.push(latency);
-                        if (latencyStats.samples.length > actualClientCount * 100) {
-                            latencyStats.samples.shift();
-                        }
-                    }
+                    recordTimeSyncReply(client, message);
                 }
-                // Silently ignore other message types
             } catch (e: any) {
-                // Only log unexpected errors, not JSON parse failures on non-JSON data
                 if (e instanceof SyntaxError) {
-                    // Silently ignore JSON parse errors (expected for binary packets)
                     return;
                 }
                 console.error(chalk.red(`Error processing message for latency: ${e.message}`));
             }
         });
 
-        websocket.addEventListener('close', (event: any) => {
+        client.onClose((code: number) => {
             if (!stopped) {
-                log(`Client disconnected (Code: ${event.code})`, 'warn');
+                log(`Client disconnected (Code: ${code})`, 'warn');
             }
-            cleanupWebsocket(websocket);
+            cleanupClient(client);
         });
     });
 
     log('Starting test timer in 3 seconds...', 'info');
     await new Promise(resolve => setTimeout(resolve, 3000));
+
+    latencyWarmupUntil = Date.now() + LATENCY_WARMUP_MS;
 
     console.log('');
     log('Benchmark running...', 'info');
@@ -727,8 +1349,8 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
         elapsedSeconds++;
 
         let activeConnections = 0;
-        websockets.forEach((ws: any) => {
-            if (ws.readyState === 1) activeConnections++;
+        clients.forEach((client: any) => {
+            if (client.readyState === 1) activeConnections++;
         });
 
         const latency = getLatencyStats();
@@ -743,8 +1365,8 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
     clearInterval(progressInterval);
 
     let finalActiveConnections = 0;
-    websockets.forEach((ws: any) => {
-        if (ws.readyState === 1) finalActiveConnections++;
+    clients.forEach((client: any) => {
+        if (client.readyState === 1) finalActiveConnections++;
     });
     const finalLatencyDuringTest = getLatencyStats();
     process.stdout.write('\x1b[2K\r');
@@ -754,13 +1376,13 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
     const endTime = Date.now();
     const totalTime = ((endTime - startTime) / 1000).toFixed(2);
 
-    websockets.forEach((ws: any) => cleanupWebsocket(ws));
+    clients.forEach((client: any) => cleanupClient(client));
 
     const finalLatency = getLatencyStats();
 
-    console.log('\n\n' + chalk.bold.green('━'.repeat(60)));
+    console.log('\n\n' + chalk.bold.green('-'.repeat(60)));
     console.log(chalk.bold.green('  Benchmark Complete'));
-    console.log(chalk.bold.green('━'.repeat(60)) + '\n');
+    console.log(chalk.bold.green('-'.repeat(60)) + '\n');
 
     console.log(`  ${chalk.bold('Test Duration:')} ${chalk.white(totalTime + 's')}`);
 
@@ -775,27 +1397,9 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
         console.log(`  ${chalk.yellow('⚠')} ${chalk.yellow(finalActiveConnections + '/' + actualClientCount)} clients connected at end ${chalk.gray('(' + disconnected + ' disconnected)')}`);
     }
 
-    if (finalLatency.count > 0) {
-        console.log(`\n  ${chalk.bold('Latency Statistics:')}`);
+    printLatencySummary(finalLatency);
 
-        let avgColor = chalk.green;
-        if (finalLatency.avg > 100) avgColor = chalk.yellow;
-        if (finalLatency.avg > 200) avgColor = chalk.red;
-
-        console.log(`    ${chalk.bold('Average:')} ${avgColor(finalLatency.avg + 'ms')}`);
-        console.log(`    ${chalk.bold('Minimum:')} ${chalk.green(finalLatency.min + 'ms')}`);
-
-        let maxColor = chalk.green;
-        if (finalLatency.max > 200) maxColor = chalk.yellow;
-        if (finalLatency.max > 500) maxColor = chalk.red;
-
-        console.log(`    ${chalk.bold('Maximum:')} ${maxColor(finalLatency.max + 'ms')}`);
-        console.log(`    ${chalk.bold('Samples:')} ${chalk.white(finalLatency.count.toLocaleString())}`);
-    } else {
-        console.log(`\n  ${chalk.yellow('⚠')} No latency data collected`);
-    }
-
-    console.log('\n' + chalk.gray('━'.repeat(60)) + '\n');
+    console.log('\n' + chalk.gray('-'.repeat(60)) + '\n');
 }
 
 const config = parseArgs();
@@ -807,12 +1411,12 @@ if (config.help) {
 
 process.on('SIGINT', () => {
     console.log('\n\n' + chalk.yellow('⚠ Benchmark interrupted by user') + '\n');
-    stopped = true;
-    process.exit(0);
+    closeAllClients();
+    setTimeout(() => process.exit(0), 500);
 });
 
 runBenchmark(config).then(() => {
-    process.exit(0);
+    setTimeout(() => process.exit(0), 500);
 }).catch((error) => {
     log(`Benchmark failed: ${error.message}`, 'error');
     process.exit(1);

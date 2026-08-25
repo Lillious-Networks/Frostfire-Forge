@@ -10,6 +10,21 @@ const items = workerData?.assets?.items ? JSON.parse(workerData.assets.items) : 
 const spells = workerData?.assets?.spells ? JSON.parse(workerData.assets.spells) : [];
 const mounts = workerData?.assets?.mounts ? JSON.parse(workerData.assets.mounts) : [];
 
+const itemsByName = new Map<string, Item>();
+for (const item of items) {
+    itemsByName.set(String(item.name || "").toLowerCase(), item);
+}
+
+const mountsByName = new Map<string, Mount>();
+for (const mount of mounts) {
+    mountsByName.set(String(mount.name || "").toLowerCase(), mount);
+}
+
+const spellsByName: Record<string, SpellData> = Object.create(null);
+for (const spell of spells) {
+    spellsByName[spell.name] = spell;
+}
+
 const authentication = {
     async process(token: string, id: string): Promise<Authentication> {
         try {
@@ -24,10 +39,8 @@ const authentication = {
                 } as Authentication;
             }
 
-            const getUsername = (await player.getUsernameBySession(id)) as any[];
-            const username = getUsername[0]?.username as string;
+            const username = session as string;
             const playerData = await player.GetPlayerLoginData(username) as unknown as PlayerData;
-            const equipmentItems = items.filter((i: Item) => i.type === "equipment" && i.equipment_slot && i.name);
 
             for (const slot in playerData.equipment) {
 
@@ -38,7 +51,8 @@ const authentication = {
 
                 const itemName = playerData.equipment[slot as keyof Equipment];
                 if (itemName) {
-                    const exists = equipmentItems.some((item: Item) => item.name.toLowerCase() === itemName.toLowerCase() && item.equipment_slot?.toLowerCase() === slot.toLowerCase());
+                    const itemDetails = itemsByName.get(String(itemName).toLowerCase());
+                    const exists = itemDetails && itemDetails.equipment_slot?.toLowerCase() === slot.toLowerCase();
                     if (!exists) {
                         playerData.equipment[slot as keyof Equipment] = null as any;
                     }
@@ -51,13 +65,13 @@ const authentication = {
                 query("SELECT spell FROM learned_spells WHERE username = ?", [username]) as Promise<any[]>,
             ]);
 
-            collectablesData.filter((c) => c.type === "mount" && !mounts.some((m: Mount) => m.name === c.item)).forEach((invalidMount) => {
+            collectablesData.filter((c) => c.type === "mount" && !mountsByName.has(String(c.item || "").toLowerCase())).forEach((invalidMount) => {
                 collectablesData.splice(collectablesData.indexOf(invalidMount), 1);
             });
 
             collectablesData.forEach((c) => {
                 if (c.type === "mount") {
-                    const mountDetails = (mounts as any).find((m: Mount) => m.name === c.item);
+                    const mountDetails = mountsByName.get(String(c.item || "").toLowerCase());
                     c.icon = mountDetails ? mountDetails.icon : null;
                 }
             });
@@ -67,7 +81,7 @@ const authentication = {
             const playerInventoryData = await Promise.all(
                 inventoryData.map(async (item: any) => {
 
-                    const itemDetails = (items as any).find((i: any) => i.name === item.item);
+                    const itemDetails = itemsByName.get(String(item.item || "").toLowerCase());
 
                     if (itemDetails) {
                     return {
@@ -96,11 +110,6 @@ const authentication = {
             playerData.inventory = playerInventoryData;
             playerData.party = partyMembers || [];
             playerData.guild = guildMembers || [];
-
-            const spellsByName: Record<string, SpellData> = Object.create(null);
-            for (const sp of spells) {
-                spellsByName[sp.name] = sp;
-            }
 
             const learnedSpells: Record<string, {
                 icon: string | null,

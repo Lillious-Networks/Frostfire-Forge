@@ -6,6 +6,8 @@ import permissions from "../systems/permissions";
 import { getAuthWorker } from "./authentication_pool.ts";
 import { listener } from "../modules/event_bus";
 import { Events, setPlayerPvp } from "../systems/events";
+import { collectReceiverEntries, encodeBatch, MoverSnapshot, ReceiverInfo } from "./movement_batch.ts";
+import { queueLayerWorkerFlush, postToAllWorkers, setOnWorkerRetired } from "./movement_worker_pool.ts";
 const authentication_queue = new Set<string>();
 const authentication_session_queue = new Set<string>();
 
@@ -48,6 +50,7 @@ import inventory from "../systems/inventory";
 import particles from "../systems/particles";
 import worlds from "../systems/worlds";
 import npcSystem from "../systems/npcs";
+import os from "os";
 import entitySystem from "../systems/entities";
 import entityAI from "../systems/entityAI";
 import spellEffects, { registerSpellEffect, spellHasHostileEffects, cancelEffect, setStunsForPlayer, setSlowsForPlayer } from "../systems/spelleffects";
@@ -142,12 +145,28 @@ export const packetInterceptors: Array<(type: string, data: any, ws: any, player
 
 export const movementBatchQueue = new Map<string, Map<string, any>>();
 
-let BATCH_INTERVAL = 8; // Will be set dynamically based on flush latency
+const receiverSetCache = new Map<string, { revision: number; receivers: Set<string> }>();
+
+let flushOffset = 0;
+let flushTick = 0;
+
+// Per-receiver probe sequence numbers: loss accounting on the client requires
+// a monotonic sequence for each receiver's own frame stream. A global counter
+// would make every client count the other players' frames as "lost".
+const movementProbeSeqs = new Map<string, number>();
+
+// Per-layer worker pool: keeps the movement batch encoding off the main event
+// loop (which the [LAG] diagnostics showed was saturated at high player counts).
+const workerLayerSynced = new Set<string>();
+
+setOnWorkerRetired((layerId: string) => {
+  workerLayerSynced.delete(layerId);
+});
 
 const MAX_BUFFER_BACKPRESSURE = 1024 * 32; // 32KB - aggressive at high loads
-
-let lastFlushTime = Date.now();
-let flushCount = 0;
+// Spawn payloads are much larger than movement frames; gate them with a
+// higher threshold so churn bursts don't pile past the transport queue limit.
+const SPAWN_BACKPRESSURE_THRESHOLD = 1024 * 512; // 512KB
 
 // Track recent flush latencies for adaptive batch scheduling
 const LATENCY_HISTORY_SIZE = 5; // Keep last 5 flushes for fast recovery
@@ -226,6 +245,13 @@ async function getInventorySlots(player: any): Promise<number> {
 function getAdaptiveBatchInterval(): number {
   const avgLatency = getAverageFlushLatency();
 
+  if (currentCpuBusy > 0.85) {
+    return 100;
+  }
+  if (currentCpuBusy > 0.7) {
+    return 80;
+  }
+
   // Thresholds based on flush latency (in milliseconds)
   if (avgLatency < 5) {
     return 25; // <5ms: 40 Hz - very responsive
@@ -246,16 +272,28 @@ function getAdaptiveBatchInterval(): number {
   }
 }
 
-function flushMovementBatches() {
+let lastCpuSample = process.cpuUsage();
+let lastCpuSampleTime = Date.now();
+let currentCpuBusy = 0;
+const cpuCount = os.cpus().length;
+
+setInterval(() => {
+  const now = Date.now();
+  const elapsed = now - lastCpuSampleTime;
+  const cpu = process.cpuUsage(lastCpuSample);
+  lastCpuSample = process.cpuUsage();
+  lastCpuSampleTime = now;
+
+  if (elapsed > 0) {
+    const busyMs = (cpu.user + cpu.system) / 1000;
+    currentCpuBusy = (busyMs / cpuCount) / elapsed;
+  }
+}, 1000);
+
+async function flushMovementBatches() {
   const startTime = Date.now();
 
-  const timeSinceLastFlush = startTime - lastFlushTime;
-  lastFlushTime = startTime;
-
   const avgLatency = getAverageFlushLatency();
-
-  // Overloaded if current cycle is taking longer than average or latency is building
-  const isOverloaded = timeSinceLastFlush > 30 || avgLatency > 25;
 
   let skippedDueToLoad = 0;
 
@@ -269,24 +307,33 @@ function flushMovementBatches() {
     for (let i = 0; i < toDrop; i++) {
       movementBatchQueue.delete(keys[i]);
     }
-    log.debug(`[MOVEMENT] Dropped ${toDrop} movement batches due to queue overflow (latency: ${Math.round(avgLatency)}ms)`);
   }
 
-  for (const [_mapName, playerMovements] of movementBatchQueue.entries()) {
+  for (const [groupKey, playerMovements] of movementBatchQueue.entries()) {
     if (playerMovements.size === 0) continue;
 
     const allPlayers = playerCache.list();
-    const mapPlayerIds = mapIndex.getPlayersOnMap(_mapName);
+    const groupPlayerIds = groupKey.includes(":layer_")
+      ? layerManager.getPlayersInLayer(groupKey)
+      : mapIndex.getPlayersOnMap(groupKey);
     const mapPlayers: Record<string, any> = {};
-    for (const id of mapPlayerIds) {
+    for (const id of groupPlayerIds) {
       if (allPlayers[id]) mapPlayers[id] = allPlayers[id];
     }
 
     const receiverSets = new Map<string, Set<string>>();
+    const changedSets: Array<{ playerId: string; add: string[]; remove: string[] }> = [];
 
     for (const playerId in mapPlayers) {
       const player = mapPlayers[playerId];
       if (!player || !player.aoi) continue;
+
+      const revision = player.aoi.revision || 0;
+      const cached = receiverSetCache.get(playerId);
+      if (cached && cached.revision === revision) {
+        receiverSets.set(playerId, cached.receivers);
+        continue;
+      }
 
       const receivers = new Set<string>([playerId]);
       if (player.aoi.playersInAOI) {
@@ -295,40 +342,79 @@ function flushMovementBatches() {
         }
       }
       receiverSets.set(playerId, receivers);
-    }
+      receiverSetCache.set(playerId, { revision, receivers });
 
-    const receiverMovements = new Map<string, any[]>();
-
-    for (const [movingPlayerId, movementData] of playerMovements.entries()) {
-      const movingPlayer = allPlayers[movingPlayerId];
-      if (!movingPlayer || !movingPlayer.aoi) continue;
-
-      for (const [potentialReceiverId, receiversForPlayer] of receiverSets.entries()) {
-        if (!receiversForPlayer.has(movingPlayerId)) continue;
-
-        if (movementData.isStealth || movingPlayer.isStealth) {
-          const receiver = allPlayers[potentialReceiverId];
-          if (!receiver || !receiver.isAdmin) continue;
+      const oldSet = cached?.receivers;
+      if (!oldSet) {
+        changedSets.push({ playerId, add: [...receivers], remove: [] });
+      } else {
+        const add = [...receivers].filter((id) => !oldSet.has(id));
+        const remove = [...oldSet].filter((id) => !receivers.has(id));
+        if (add.length > 0 || remove.length > 0) {
+          changedSets.push({ playerId, add, remove });
         }
-
-        if (movingPlayer.isVanished) {
-          const receiver = allPlayers[potentialReceiverId];
-          if (!receiver || (!receiver.isAdmin && !receiver.party?.includes(movingPlayer.username))) continue;
-        }
-
-        if (!receiverMovements.has(potentialReceiverId)) {
-          receiverMovements.set(potentialReceiverId, []);
-        }
-        receiverMovements.get(potentialReceiverId)!.push(movementData);
       }
     }
 
+    const movers: MoverSnapshot[] = [];
+    for (const [movingPlayerId, movementData] of playerMovements.entries()) {
+      const movingPlayer = allPlayers[movingPlayerId];
+      if (!movingPlayer || !movingPlayer.aoi) continue;
+      movers.push({
+        id: movingPlayerId,
+        x: movementData.d?.x ?? movingPlayer.location.position.x,
+        y: movementData.d?.y ?? movingPlayer.location.position.y,
+        direction: movementData.d?.dr ?? movingPlayer.location.position.direction ?? "down",
+        stealth: !!(movementData.isStealth || movingPlayer.isStealth),
+        vanished: !!movingPlayer.isVanished,
+        party: movingPlayer.party || [],
+      });
+    }
+
     let sentCount = 0;
-    const receiverArray = Array.from(receiverMovements.entries());
+    let processedReceivers = 0;
 
-    receiverArray.sort((a, b) => a[1].length - b[1].length);
+    const maxReceiversPerFlush = currentCpuBusy > 0.7 ? 100 : (currentCpuBusy > 0.5 ? 300 : Number.MAX_SAFE_INTEGER);
 
-    for (const [receiverId, movements] of receiverArray) {
+    const receiverArray = Array.from(receiverSets.entries());
+    const startIndex = flushOffset % Math.max(receiverArray.length, 1);
+
+    // Layers above this size offload batch encoding to a per-layer worker
+    // thread (keeps the main event loop free at high player counts).
+    const useWorker = receiverArray.length > 20;
+
+    let workerDiffs: Array<{ playerId: string; add: string[]; remove: string[] }> = [];
+    if (useWorker) {
+      if (!workerLayerSynced.has(groupKey)) {
+        // First flush for this layer's worker: send a full snapshot of the
+        // layer's receiver sets so the worker mirror starts correct.
+        for (const [playerId, cachedEntry] of receiverSetCache.entries()) {
+          if (mapPlayers[playerId]) {
+            workerDiffs.push({ playerId, add: [...cachedEntry.receivers], remove: [] });
+          }
+        }
+        workerLayerSynced.add(groupKey);
+      } else {
+        workerDiffs = changedSets;
+      }
+    }
+
+    const selectedReceiverIds: string[] = [];
+    const selectedSets = new Map<string, Set<string>>();
+    const receiverInfo: Record<string, ReceiverInfo> = {};
+
+    for (let i = 0; i < receiverArray.length; i++) {
+      const [receiverId, receiversForPlayer] = receiverArray[(startIndex + i) % receiverArray.length];
+
+      const isSelfReceiver = playerMovements.has(receiverId);
+      if (!isSelfReceiver && processedReceivers >= maxReceiversPerFlush) {
+        skippedDueToLoad++;
+        continue;
+      }
+      if (!isSelfReceiver) {
+        processedReceivers++;
+      }
+
       const receiver = allPlayers[receiverId];
       if (!receiver || !receiver.ws || receiver.ws.readyState !== 1) continue;
 
@@ -342,27 +428,74 @@ function flushMovementBatches() {
         continue;
       }
 
-      const batchPacket = packetManager.batchMoveXY(movements);
-      sendPacket(receiver.ws, batchPacket);
-      sentCount++;
+      selectedReceiverIds.push(receiverId);
+      selectedSets.set(receiverId, receiversForPlayer);
+      receiverInfo[receiverId] = {
+        x: receiver.location?.position?.x ?? 0,
+        y: receiver.location?.position?.y ?? 0,
+        isAdmin: !!receiver.isAdmin,
+        username: receiver.username || "",
+        seq: movementProbeSeqs.get(receiverId) ?? 0,
+      };
+    }
 
-      // Early-exit thresholds based on latency
-      let sentThreshold = 200;
-      let timeThreshold = 40;
+    if (selectedReceiverIds.length > 0) {
+      const movementTick = flushTick++;
 
-      if (avgLatency > 40) {
-        sentThreshold = 50;
-        timeThreshold = 20;
-      } else if (avgLatency > 25) {
-        sentThreshold = 100;
-        timeThreshold = 30;
-      }
+      if (useWorker) {
+        const allPlayersRef = allPlayers;
+        queueLayerWorkerFlush(groupKey, {
+          tick: movementTick,
+          movers,
+          receiverIds: selectedReceiverIds,
+          receiverInfo,
+          diffs: workerDiffs,
+          onBatches: (batches, updatedSeqs) => {
+            if (updatedSeqs) {
+              for (const [receiverId, seq] of Object.entries(updatedSeqs)) {
+                movementProbeSeqs.set(receiverId, seq);
+              }
+            }
+            for (const batch of batches) {
+              const receiver = allPlayersRef[batch.receiverId];
+              if (!receiver?.ws || receiver.ws.readyState !== 1) continue;
 
-      if (isOverloaded && sentCount > sentThreshold && Date.now() - startTime > timeThreshold) {
-        skippedDueToLoad += receiverArray.length - sentCount;
-        break;
+              const data = batch.data;
+              for (let i = 0; i < batch.offsets.length - 1; i++) {
+                const start = batch.offsets[i];
+                const end = batch.offsets[i + 1];
+                receiver.ws.send(new Uint8Array(data.buffer, data.byteOffset + start, end - start));
+              }
+              sentCount++;
+            }
+          },
+        });
+      } else {
+        // Layer served inline: its worker mirror (if any) goes stale. Forget
+        // the sync flag so the next worker engagement starts with a full sync.
+        workerLayerSynced.delete(groupKey);
+
+        for (const receiverId of selectedReceiverIds) {
+          const receiver = allPlayers[receiverId];
+          if (!receiver?.ws || receiver.ws.readyState !== 1) continue;
+
+          const entries = collectReceiverEntries(selectedSets.get(receiverId)!, movers, receiverInfo[receiverId], movementTick);
+          if (entries.length === 0) continue;
+
+          const receiverProbeSeq = movementProbeSeqs.get(receiverId) ?? 0;
+          const { data, offsets } = encodeBatch(entries, { seq: receiverProbeSeq, serverSendTime: Date.now() });
+          movementProbeSeqs.set(receiverId, receiverProbeSeq + (offsets.length - 1));
+          for (let i = 0; i < offsets.length - 1; i++) {
+            const start = offsets[i];
+            const end = offsets[i + 1];
+            receiver.ws.send(new Uint8Array(data.buffer, data.byteOffset + start, end - start));
+          }
+          sentCount++;
+        }
       }
     }
+
+    flushOffset += Math.max(processedReceivers, 1);
   }
 
   movementBatchQueue.clear();
@@ -373,25 +506,15 @@ function flushMovementBatches() {
   if (recentFlushLatencies.length > LATENCY_HISTORY_SIZE) {
     recentFlushLatencies.shift();
   }
-
-  flushCount++;
-  if (flushCount % 100 === 0) {
-    const playerCount = Object.keys(playerCache.list()).length;
-
-    const allPlayersForStats = playerCache.list();
-    const allPlayersList = Object.values(allPlayersForStats);
-    const connectedPlayers = allPlayersList.filter(p => p?.ws && p.ws.readyState === 1);
-    const avgBuffered = connectedPlayers.length > 0
-      ? Math.round(connectedPlayers.reduce((sum, p) => sum + (p.ws?.bufferedAmount || 0), 0) / connectedPlayers.length / 1024)
-      : 0;
-
-    if (skippedDueToLoad > 0 || avgBuffered > 24) {
-      log.warn(`[MOVEMENT] ${playerCount} players | Skipped ${skippedDueToLoad} updates | Avg buffer: ${avgBuffered}KB | Flush latency: ${Math.round(avgLatency)}ms | Rate: ${Math.round(1000/BATCH_INTERVAL)}Hz`);
-    }
-  }
 }
 
 export const spawnBatchQueue = new Map<string, Map<string, any>>();
+
+// Sprite/animation payload caches live at module scope: spawn data for a given
+// player+animation is identical across receivers and flushes, so rebuilding it
+// per flush was pure repeated work during churn.
+const spriteDataCache = new Map<string, any>();
+const animationDataCache = new Map<string, any>();
 
 function queueSpawnForReceivers(spawnedPlayer: any, receivers: any[], spriteData: any = null) {
   for (const receiver of receivers) {
@@ -426,7 +549,10 @@ async function flushSpawnBatches() {
       continue;
     }
 
-    if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
+    // Spawn batches are the largest stream payloads. Use a FRESH queue reading
+    // (not the 250ms cache) so a burst can't pile past the transport limit
+    // before the gate notices. Skipped spawns stay queued for a later flush.
+    if (receivingPlayer.ws.getFreshQueuedBytes() > SPAWN_BACKPRESSURE_THRESHOLD) {
       continue;
     }
 
@@ -452,7 +578,13 @@ async function flushSpawnBatches() {
             fullPlayer.mount_type,
             !!fullPlayer.casting
           );
-          const playerSpriteData = await getPlayerSpriteSheetData(animationName, fullPlayer.equipment || null);
+
+          const spriteCacheKey = `${queuedPlayer.id}:${animationName}:${fullPlayer.equipmentRevision || 0}`;
+          let playerSpriteData = spriteDataCache.get(spriteCacheKey);
+          if (playerSpriteData === undefined) {
+            playerSpriteData = await getPlayerSpriteSheetData(animationName, fullPlayer.equipment || null);
+            spriteDataCache.set(spriteCacheKey, playerSpriteData);
+          }
 
           const mountSpriteForBatch = fullPlayer.mount_type ? getMountSpriteUrl(fullPlayer.mount_type) : null;
 
@@ -504,7 +636,14 @@ async function flushSpawnBatches() {
           spawnedPlayer.casting || false
         );
 
-        const animData = await getAnimationData(animationName, spawnData.id);
+        const fullPlayer = allPlayers[spawnData.id];
+        const equipRev = fullPlayer?.equipmentRevision || 0;
+        const animCacheKey = `${spawnData.id}:${animationName}:${equipRev}`;
+        let animData = animationDataCache.get(animCacheKey);
+        if (animData === undefined) {
+          animData = await getAnimationData(animationName, spawnData.id);
+          animationDataCache.set(animCacheKey, animData);
+        }
         return animData;
       });
 
@@ -556,7 +695,7 @@ function flushDespawnBatches() {
 }
 
 async function flushAllBatches() {
-  flushMovementBatches();
+  await flushMovementBatches();
   await flushSpawnBatches();
   flushDespawnBatches();
 }
@@ -572,14 +711,12 @@ async function scheduleBatchFlush() {
     if (batchTimer) clearTimeout(batchTimer);
     // Use adaptive interval based on current player count
     const adaptiveInterval = getAdaptiveBatchInterval();
-    BATCH_INTERVAL = adaptiveInterval;
     batchTimer = setTimeout(scheduleBatchFlush, adaptiveInterval);
   }
 }
 
 // Initialize with adaptive interval
 const initialInterval = getAdaptiveBatchInterval();
-BATCH_INTERVAL = initialInterval;
 batchTimer = setTimeout(scheduleBatchFlush, initialInterval);
 
 function constructMapMetadata(
@@ -852,21 +989,32 @@ async function transitionPlayerToMap(
   });
 }
 
-export function clearBatchQueuesForPlayer(playerId: string, mapName: string) {
+export function clearBatchQueuesForPlayer(playerId: string) {
 
-  const mapMovements = movementBatchQueue.get(mapName);
-  if (mapMovements) {
-    mapMovements.delete(playerId);
-    if (mapMovements.size === 0) {
-      movementBatchQueue.delete(mapName);
+  receiverSetCache.delete(playerId);
+  movementProbeSeqs.delete(playerId);
+  postToAllWorkers({ type: "removePlayers", ids: [playerId] });
+
+  for (const [groupKey, groupMovements] of movementBatchQueue.entries()) {
+    if (!groupMovements.has(playerId)) continue;
+    groupMovements.delete(playerId);
+    if (groupMovements.size === 0) {
+      movementBatchQueue.delete(groupKey);
     }
   }
 
-  const spawnsToPlayer = spawnBatchQueue.get(playerId);
-  if (spawnsToPlayer && spawnsToPlayer.size > 0) {
-    log.debug(`[CLEAR] Removing ${spawnsToPlayer.size} queued spawns TO ${playerId}`);
-  }
   spawnBatchQueue.delete(playerId);
+
+  for (const key of spriteDataCache.keys()) {
+    if (key.startsWith(`${playerId}:`)) {
+      spriteDataCache.delete(key);
+    }
+  }
+  for (const key of animationDataCache.keys()) {
+    if (key.startsWith(`${playerId}:`)) {
+      animationDataCache.delete(key);
+    }
+  }
 
   let clearedSpawnsFrom = 0;
   for (const [receivingPlayerId, spawnedPlayers] of spawnBatchQueue.entries()) {
@@ -877,9 +1025,6 @@ export function clearBatchQueuesForPlayer(playerId: string, mapName: string) {
     if (spawnedPlayers.size === 0) {
       spawnBatchQueue.delete(receivingPlayerId);
     }
-  }
-  if (clearedSpawnsFrom > 0) {
-    log.debug(`[CLEAR] Removed spawn of ${playerId} FROM ${clearedSpawnsFrom} player queues`);
   }
 
   despawnBatchQueue.delete(playerId);
@@ -1087,14 +1232,12 @@ authWorker.on("message", async (result: any) => {
 
 
     if (world) {
-      world.players = (world.players || 0) + 1;
-      log.info(
-        `World: ${world.name} now has ${world.players} players. (player_join)`
-      );
-
-      assetCache.set("worlds", JSON.stringify(worldData)).catch(err =>
-        log.error(`Failed to update world player count: ${err}`)
-      );
+      const worldPlayerCount = await worlds.adjustPlayerCount(spawnLocation.map, 1);
+      if (worldPlayerCount !== null) {
+        // log.info(
+        //   `World: ${world.name} now has ${worldPlayerCount} players. (player_join)`
+        // );
+      }
     }
 
     // Only apply weather/ambience if the map has a defined world entry
@@ -1163,12 +1306,13 @@ authWorker.on("message", async (result: any) => {
       learnedSpells: limitedLearnedSpells,
       inventory: limitedInventory,
       equipment: playerData.equipment || {},
+      equipmentRevision: 0,
     });
 
     const _pcache = playerCache.get(ws.data.id);
     if (!_pcache) return;
 
-    // Send initial packets immediately — stats sync and effect restoration follow asynchronously
+    // Send initial packets immediately - stats sync and effect restoration follow asynchronously
     await initializePlayerAOI(_pcache);
     playerCache.set(_pcache.id, _pcache);
     mapIndex.addPlayer(_pcache.id, _pcache.location.map);
@@ -1337,8 +1481,9 @@ authWorker.on("message", async (result: any) => {
         }
       }
 
-      const mapName = currentPlayer.location.map;
-      const queuedMovements = movementBatchQueue.get(mapName);
+      const layerId = currentPlayer.aoi?.layerId || layerManager.getPlayerLayer(currentPlayer.id);
+      const groupKey = layerId || currentPlayer.location.map;
+      const queuedMovements = movementBatchQueue.get(groupKey);
       if (queuedMovements && queuedMovements.size > 0) {
         const movementsForNewPlayer: any[] = [];
 
@@ -1568,9 +1713,9 @@ export default async function packetReceiver(
     const parsedMessage: Packet = tryParsePacket(message) as Packet;
     if (
       message.length >
-      (1024 * 1024 * settings?.websocket?.maxPayloadMB || 1024 * 1024) &&
+      (1024 * 1024 * ((settings as any)?.webtransport?.maxPayloadMB || 1)) &&
       parsedMessage.type !== "BENCHMARK" &&
-      !settings?.websocket?.benchmarkenabled
+      !(settings as any)?.webtransport?.benchmarkenabled
     )
       return ws.close(1009, "Message too large");
 
@@ -1632,7 +1777,15 @@ export default async function packetReceiver(
 
         currentPlayer.lastUpdated = performance.now();
 
-        sendPacket(ws, packetManager.timeSync(data));
+        // Use the frame's actual read time (stamped by the stream loop) rather
+        // than the handler's own timestamp, so the latency math measures
+        // network + read scheduling instead of event-loop dispatch queueing.
+        const serverRecvTime = ws.lastFrameReadAt || Date.now();
+        const serverSendTime = Date.now();
+
+        // Loss-tolerant periodic reply - send as an unreliable datagram so it
+        // never queues behind the reliable stream under load.
+        ws.sendBestEffort(packetManager.timeSync(data, { serverRecvTime, serverSendTime })[0]);
         break;
       }
       case "AUTH": {
@@ -1675,9 +1828,9 @@ export default async function packetReceiver(
         );
         player.logout(currentPlayer.id);
         listener.emit(Events.PLAYER_LOGOUT, { player: currentPlayer });
-        // Close the WebSocket so the onDisconnect handler fires and does the
+        // Close the connection so the onDisconnect handler fires and does the
         // full in-memory cleanup (despawn, remove from cache, update friends, etc.)
-        if (ws.readyState === WebSocket.OPEN) {
+        if (ws.readyState === 1) {
           ws.close(1000, "Player logout");
         }
         break;
@@ -2127,11 +2280,12 @@ export default async function packetReceiver(
           sendPacket(ws, packetManager.moveXY(movementData));
 
           if (ws.readyState === 1) {
-            const mapName = currentPlayer.location.map;
-            if (!movementBatchQueue.has(mapName)) {
-              movementBatchQueue.set(mapName, new Map());
+            const layerId = currentPlayer.aoi?.layerId || layerManager.getPlayerLayer(currentPlayer.id);
+            const groupKey = layerId || currentPlayer.location.map;
+            if (!movementBatchQueue.has(groupKey)) {
+              movementBatchQueue.set(groupKey, new Map());
             }
-            movementBatchQueue.get(mapName)!.set(currentPlayer.id, movementData);
+            movementBatchQueue.get(groupKey)!.set(currentPlayer.id, movementData);
           }
         };
 
@@ -9053,6 +9207,8 @@ export default async function packetReceiver(
               packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer))
             );
 
+            currentPlayer.equipmentRevision = (currentPlayer.equipmentRevision || 0) + 1;
+
             const currentAnimationName = getAnimationNameForDirection(
               currentPlayer.location.position?.direction || "down",
               !!currentPlayer.moving,
@@ -9176,6 +9332,8 @@ export default async function packetReceiver(
               ws,
               packetManager.equipment(currentPlayer.equipment)
             );
+
+            currentPlayer.equipmentRevision = (currentPlayer.equipmentRevision || 0) + 1;
 
             const currentAnimationName = getAnimationNameForDirection(
               currentPlayer.location.position?.direction || "down",
@@ -9919,7 +10077,7 @@ function getAnimationNameForDirection(
 }
 
 async function sendPositionAnimation(
-  ws: WebSocket,
+  ws: any,
   direction: string,
   walking: boolean,
   mounted: boolean = false,

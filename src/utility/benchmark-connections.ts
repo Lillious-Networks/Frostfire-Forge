@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 
 import chalk from 'chalk';
-import crypto from 'crypto';
+import { BenchmarkConnection, normalizeHost } from './benchmark-transport.ts';
 
 interface BenchmarkConfig {
     connections: number;
     duration: number;
-    websocketUrl: string;
+    transportUrl: string;
     serverSecret: string;
     help: boolean;
 }
@@ -14,12 +14,8 @@ interface BenchmarkConfig {
 function parseArgs(): BenchmarkConfig {
     const args = process.argv.slice(2);
 
-    const useSSL = process.env.WEB_SOCKET_USE_SSL === 'true';
     const host = process.env.PUBLIC_HOST || process.env.SERVER_HOST || 'localhost';
-    const port = process.env.WEB_SOCKET_PORT || '3000';
-    const protocol = useSSL ? 'wss' : 'ws';
-
-    const serverSecret = process.env.GATEWAY_GAME_SERVER_SECRET;
+    const port = process.env.GAME_PORT || '3000';    const serverSecret = process.env.GATEWAY_GAME_SERVER_SECRET;
     if (!serverSecret) {
         console.error(chalk.red('Error: GATEWAY_GAME_SERVER_SECRET environment variable is not set'));
         process.exit(1);
@@ -28,7 +24,7 @@ function parseArgs(): BenchmarkConfig {
     const config: BenchmarkConfig = {
         connections: 100,
         duration: 60,
-        websocketUrl: `${protocol}://${host}:${port}`,
+        transportUrl: `https://${normalizeHost(host)}:${port}`,
         serverSecret: serverSecret,
         help: false
     };
@@ -45,8 +41,8 @@ function parseArgs(): BenchmarkConfig {
             case '--server-secret':
                 config.serverSecret = args[++i] || config.serverSecret;
                 break;
-            case '--ws':
-                config.websocketUrl = args[++i] || config.websocketUrl;
+            case '--wt':
+                config.transportUrl = args[++i] || config.transportUrl;
                 break;
             case '--help':
                 config.help = true;
@@ -68,12 +64,11 @@ ${chalk.bold('Options:')}
   --connections <number>  Number of concurrent connections (min: 1, default: 100)
   --duration <number>     How long to hold connections in seconds (min: 10, default: 60)
   --server-secret <key>  Shared secret for token generation
-  --ws <url>             WebSocket URL (overrides environment detection)
+  --wt <url>             WebTransport URL (overrides environment detection)
   --help                 Show this help message
 
 ${chalk.bold('Environment Variables:')}
-  WEB_SOCKET_PORT              WebSocket port (default: 3000)
-  WEB_SOCKET_USE_SSL           Use SSL/TLS (wss://) for connections
+  GAME_PORT                    Game server port (TCP HTTP + UDP WebTransport, default: 3000)
   PUBLIC_HOST                  Public hostname for connections
   SERVER_HOST                  Server hostname (fallback if PUBLIC_HOST not set)
   GATEWAY_GAME_SERVER_SECRET   Shared secret for token signing
@@ -90,23 +85,13 @@ ${chalk.bold('Examples:')}
 
 ${chalk.bold('Notes:')}
   - This tool bypasses the gateway and connects directly to the game server
-  - Opens WebSocket connections, sends one BENCHMARK packet, then holds them
+  - Opens WebTransport sessions, sends one BENCHMARK packet, then holds them
   - No guest accounts created, no authentication, no movement simulation
   - Designed to stress-test raw connection capacity
   - Automatically generates connection tokens using GATEWAY_GAME_SERVER_SECRET
+  - Requires a TLS certificate on the game server (self-signed certs are accepted)
 `);
 }
-
-const packet = {
-    encode(data: string): Uint8Array {
-        const encoder = new TextEncoder();
-        return encoder.encode(data);
-    },
-    decode(data: ArrayBuffer): string {
-        const decoder = new TextDecoder();
-        return decoder.decode(data);
-    }
-};
 
 interface ConnectionStats {
     opened: number;
@@ -128,8 +113,8 @@ const stats: ConnectionStats = {
     latencies: []
 };
 
-const activeConnections = new Set<WebSocket>();
-const connectionTimestamps = new Map<WebSocket, number>();
+const activeConnections = new Set<BenchmarkConnection>();
+const connectionTimestamps = new Map<BenchmarkConnection, number>();
 
 let testRunning = true;
 
@@ -144,58 +129,35 @@ function log(message: string, level: 'info' | 'error' | 'success' | 'warn' = 'in
     console.log(`${timestamp} ${prefix} ${message}`);
 }
 
-function generateConnectionToken(config: BenchmarkConfig): string {
-    const token = crypto.randomBytes(32).toString('hex');
-    const timestamp = Date.now().toString();
-    const expiresAt = (Date.now() + 60000).toString();
-
-    const signature = crypto
-        .createHmac('sha256', config.serverSecret)
-        .update(`${token}:${timestamp}:${expiresAt}`)
-        .digest('hex');
-
-    const url = new URL(config.websocketUrl);
-    url.searchParams.set('token', token);
-    url.searchParams.set('timestamp', timestamp);
-    url.searchParams.set('expiresAt', expiresAt);
-    url.searchParams.set('signature', signature);
-
-    return url.toString();
-}
-
 async function createConnection(index: number, config: BenchmarkConfig): Promise<void> {
     try {
+        const client = await BenchmarkConnection.connect(config.transportUrl, config.serverSecret);
 
-        const wsUrl = generateConnectionToken(config);
+        stats.opened++;
+        stats.active++;
+        activeConnections.add(client);
 
-        const ws = new WebSocket(wsUrl);
+        const sendTime = Date.now();
+        connectionTimestamps.set(client, sendTime);
 
-        ws.addEventListener('open', () => {
-            stats.opened++;
-            stats.active++;
-            activeConnections.add(ws);
+        client.send(JSON.stringify({
+            type: 'BENCHMARK',
+            data: {
+                connectionId: index,
+                timestamp: sendTime
+            }
+        }));
 
-            const sendTime = Date.now();
-            connectionTimestamps.set(ws, sendTime);
-            ws.send(Buffer.from(packet.encode(JSON.stringify({
-                type: 'BENCHMARK',
-                data: {
-                    connectionId: index,
-                    timestamp: sendTime
-                }
-            }))));
+        stats.benchmarkPacketsSent++;
 
-            stats.benchmarkPacketsSent++;
-        });
-
-        ws.addEventListener('message', (event: any) => {
+        client.onMessage((message) => {
             try {
-                const message = JSON.parse(packet.decode(event.data));
+                const parsed = JSON.parse(message);
 
-                if (message.type === 'BENCHMARK') {
+                if (parsed.type === 'BENCHMARK') {
                     stats.benchmarkPacketsReceived++;
 
-                    const sentTime = connectionTimestamps.get(ws);
+                    const sentTime = connectionTimestamps.get(client);
                     if (sentTime) {
                         const latency = Date.now() - sentTime;
                         stats.latencies.push(latency);
@@ -210,17 +172,12 @@ async function createConnection(index: number, config: BenchmarkConfig): Promise
             }
         });
 
-        ws.addEventListener('error', (_error) => {
-            stats.failed++;
-        });
-
-        ws.addEventListener('close', () => {
+        client.onClose(() => {
             stats.closed++;
             stats.active = Math.max(0, stats.active - 1);
-            activeConnections.delete(ws);
-            connectionTimestamps.delete(ws);
+            activeConnections.delete(client);
+            connectionTimestamps.delete(client);
         });
-
     } catch (error: any) {
         stats.failed++;
         log(`Connection ${index} failed: ${error.message}`, 'error');
@@ -228,14 +185,14 @@ async function createConnection(index: number, config: BenchmarkConfig): Promise
 }
 
 async function runBenchmark(config: BenchmarkConfig) {
-    console.log('\n' + chalk.bold.cyan('━'.repeat(70)));
+    console.log('\n' + chalk.bold.cyan('-'.repeat(70)));
     console.log(chalk.bold.cyan('  Frostfire Forge - Connection Hold Test'));
-    console.log(chalk.bold.cyan('━'.repeat(70)) + '\n');
+    console.log(chalk.bold.cyan('-'.repeat(70)) + '\n');
 
     console.log(`  ${chalk.bold('Connections:')} ${chalk.white(config.connections)}`);
     console.log(`  ${chalk.bold('Duration:')}    ${chalk.white(config.duration + 's')}`);
     console.log(`  ${chalk.bold('Mode:')}        ${chalk.cyan('Direct')} ${chalk.gray('(bypassing gateway)')}`);
-    console.log(`  ${chalk.bold('Target:')}      ${chalk.blue(config.websocketUrl)}`);
+    console.log(`  ${chalk.bold('Target:')}      ${chalk.blue(config.transportUrl)}`);
 
     console.log('\n' + chalk.gray('─'.repeat(70)) + '\n');
 
@@ -330,17 +287,17 @@ async function runBenchmark(config: BenchmarkConfig) {
     console.log('');
 
     log('Closing connections...', 'info');
-    for (const ws of activeConnections) {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.close();
+    for (const client of activeConnections) {
+        if (client.readyState === 1) {
+            client.close();
         }
     }
 
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    console.log('\n' + chalk.bold.green('━'.repeat(70)));
+    console.log('\n' + chalk.bold.green('-'.repeat(70)));
     console.log(chalk.bold.green('  Connection Test Complete'));
-    console.log(chalk.bold.green('━'.repeat(70)) + '\n');
+    console.log(chalk.bold.green('-'.repeat(70)) + '\n');
 
     console.log(`  ${chalk.bold('Total Duration:')} ${chalk.white(config.duration + 's')}`);
     console.log(`\n  ${chalk.bold('Connection Statistics:')}`);
@@ -355,7 +312,7 @@ async function runBenchmark(config: BenchmarkConfig) {
         console.log(`    ${chalk.bold('Active at End:')}  ${chalk.yellow(stats.active)} ${chalk.yellow('(' + disconnected + ' disconnected)')}`);
     }
 
-    console.log('\n' + chalk.gray('━'.repeat(70)) + '\n');
+    console.log('\n' + chalk.gray('-'.repeat(70)) + '\n');
 }
 
 const config = parseArgs();
@@ -369,13 +326,15 @@ process.on('SIGINT', () => {
     console.log('\n\n' + chalk.yellow('⚠ Benchmark interrupted by user') + '\n');
     testRunning = false;
 
-    for (const ws of activeConnections) {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.close();
+    for (const client of activeConnections) {
+        try {
+            client.close();
+        } catch (error: any) {
+            console.debug("Benchmark client close failed:", error);
         }
     }
 
-    process.exit(0);
+    setTimeout(() => process.exit(0), 500);
 });
 
 runBenchmark(config).then(() => {
