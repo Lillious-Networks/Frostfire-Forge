@@ -12,12 +12,12 @@ const mounts = workerData?.assets?.mounts ? JSON.parse(workerData.assets.mounts)
 
 const itemsByName = new Map<string, Item>();
 for (const item of items) {
-    itemsByName.set(item.name, item);
+    itemsByName.set(String(item.name || "").toLowerCase(), item);
 }
 
 const mountsByName = new Map<string, Mount>();
 for (const mount of mounts) {
-    mountsByName.set(mount.name, mount);
+    mountsByName.set(String(mount.name || "").toLowerCase(), mount);
 }
 
 const spellsByName: Record<string, SpellData> = Object.create(null);
@@ -51,7 +51,7 @@ const authentication = {
 
                 const itemName = playerData.equipment[slot as keyof Equipment];
                 if (itemName) {
-                    const itemDetails = itemsByName.get(itemName);
+                    const itemDetails = itemsByName.get(String(itemName).toLowerCase());
                     const exists = itemDetails && itemDetails.equipment_slot?.toLowerCase() === slot.toLowerCase();
                     if (!exists) {
                         playerData.equipment[slot as keyof Equipment] = null as any;
@@ -65,13 +65,13 @@ const authentication = {
                 query("SELECT spell FROM learned_spells WHERE username = ?", [username]) as Promise<any[]>,
             ]);
 
-            collectablesData.filter((c) => c.type === "mount" && !mountsByName.has(c.item)).forEach((invalidMount) => {
+            collectablesData.filter((c) => c.type === "mount" && !mountsByName.has(String(c.item || "").toLowerCase())).forEach((invalidMount) => {
                 collectablesData.splice(collectablesData.indexOf(invalidMount), 1);
             });
 
             collectablesData.forEach((c) => {
                 if (c.type === "mount") {
-                    const mountDetails = mountsByName.get(c.item);
+                    const mountDetails = mountsByName.get(String(c.item || "").toLowerCase());
                     c.icon = mountDetails ? mountDetails.icon : null;
                 }
             });
@@ -81,7 +81,7 @@ const authentication = {
             const playerInventoryData = await Promise.all(
                 inventoryData.map(async (item: any) => {
 
-                    const itemDetails = itemsByName.get(item.item);
+                    const itemDetails = itemsByName.get(String(item.item || "").toLowerCase());
 
                     if (itemDetails) {
                     return {

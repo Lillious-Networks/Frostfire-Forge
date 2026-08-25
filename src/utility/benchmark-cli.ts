@@ -186,6 +186,9 @@ let latencyWarmupUntil = 0;
 const MIN_OFFSET_SAMPLES_FOR_UDP = 5;
 
 function recordUdpLatency(client: any, serverSendTime: number): void {
+    // Skip connection warm-up like the stream metrics do
+    if (Date.now() < latencyWarmupUntil) return;
+
     const offset = latencyStats.offsets.get(client);
     if (offset === undefined) return;
     if ((latencyStats.offsetCounts.get(client) ?? 0) < MIN_OFFSET_SAMPLES_FOR_UDP) return;
@@ -199,11 +202,16 @@ function recordUdpLatency(client: any, serverSendTime: number): void {
 }
 
 function recordUdpBatchLatency(client: any, seq: number, serverSendTime: number): void {
+    // Skip connection warm-up like the stream metrics do
+    if (Date.now() < latencyWarmupUntil) return;
+
     recordUdpLatency(client, serverSendTime);
 
     const prevSeq = latencyStats.lastUdpSeqs.get(client);
     if (prevSeq !== undefined && seq > prevSeq + 1) {
-        latencyStats.udpLostFrames += seq - prevSeq - 1;
+        const lost = seq - prevSeq - 1;
+        latencyStats.udpLostFrames += lost;
+        latencyStats.udpExpectedFrames += lost;
     }
     latencyStats.lastUdpSeqs.set(client, seq);
     latencyStats.udpExpectedFrames++;
@@ -227,7 +235,9 @@ function recordTimeSyncReply(client: any, message: any): void {
     // Packet loss: gaps in the TIME_SYNC sequence number mean lost replies
     const prevSeq = latencyStats.lastSeqs.get(client);
     if (prevSeq !== undefined && sent.seq > prevSeq + 1) {
-        latencyStats.lostPackets += sent.seq - prevSeq - 1;
+        const lost = sent.seq - prevSeq - 1;
+        latencyStats.lostPackets += lost;
+        latencyStats.expectedPackets += lost;
     }
     latencyStats.lastSeqs.set(client, sent.seq);
     latencyStats.expectedPackets++;

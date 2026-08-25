@@ -26,6 +26,6 @@ EXPOSE 3000/udp
 RUN bun create-config --environment production
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
-  CMD bun --eval "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; const useSSL = process.env.HTTP_USE_SSL === 'true'; const port = process.env.GAME_PORT || 3000; const protocol = useSSL ? 'https' : 'http'; const res = await fetch(protocol + '://localhost:' + port + '/status').catch(() => ({ok: false})); process.exit(res.ok ? 0 : 1)"
+  CMD bun --env-file=.env.production --eval "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; const useSSL = process.env.HTTP_USE_SSL === 'true'; const port = process.env.GAME_PORT || 3000; const protocol = useSSL ? 'https' : 'http'; const res = await fetch(protocol + '://localhost:' + port + '/status').catch(() => ({ok: false})); process.exit(res.ok ? 0 : 1)"
 
 CMD ["sh", "-c", "bun setup-production && bun run production"]

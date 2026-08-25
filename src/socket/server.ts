@@ -501,7 +501,7 @@ gatewayClient = new GatewayClient({
   port: gamePort,
   wtPort: gamePort,
   wtEnabled: true,
-  maxConnections: (settings as any)?.webtransport?.maxSessions || 500,
+  maxConnections: (settings as any)?.webtransport?.maxSessions || 2000,
   heartbeatInterval: settings?.gateway?.heartbeatInterval || 5000,
   assetServerUrl: process.env.ASSET_SERVER_URL || "http://localhost:8000",
 });
@@ -818,7 +818,6 @@ listener.on("onConnection", (data) => {
 function cleanupPlayerState(playerData: any) {
     const id = playerData.id;
     const username = playerData.username?.toLowerCase();
-    const map = playerData.location?.map;
 
     gameLoop.unregisterMovingPlayer(id);
     dots.clearDots(id);
@@ -827,7 +826,7 @@ function cleanupPlayerState(playerData: any) {
     spellEffects.clearVanishes(id);
     playerCache.remove(id);
     mapIndex.removePlayer(id);
-    if (map) clearBatchQueuesForPlayer(id);
+    clearBatchQueuesForPlayer(id);
     clearPlayerTarget(id);
     removePlayerFromCleanupMaps(id);
     if (username) cooldownManager.removePlayer(username);

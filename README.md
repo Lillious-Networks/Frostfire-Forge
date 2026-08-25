@@ -117,12 +117,12 @@ DATABASE_NAME="your_db_name"
 DATABASE_PASSWORD="your_db_password"
 DATABASE_PORT="3306"
 DATABASE_USER="your_db_user"
-SQL_SSL_MODE="DISABLED" | "ENABLED"
+SQL_SSL_MODE="DISABLED"                    # Set to "ENABLED" to require TLS for the database connection
 
 # Translation Services
 GOOGLE_TRANSLATE_API_KEY="your_google_api_key"
 OPENAI_API_KEY="your_openai_api_key"
-TRANSLATION_SERVICE="google_translate" | "openai"
+TRANSLATION_SERVICE="google_translate"      # Set to "openai" to use OpenAI translation
 OPENAI_MODEL="gpt-4.1-nano-2025-04-14"
 
 # Security (Optional)
@@ -131,7 +131,7 @@ RSA_PASSPHRASE="your_rsa_passphrase"           # Passphrase for the chat encrypt
 
 # Application Settings
 GAME_PORT="3000"                            # Game server port - TCP (HTTP API) + UDP (WebTransport) share this port
-HTTP_USE_SSL="true" | "false"               # Enable SSL/TLS for the HTTP server
+HTTP_USE_SSL="true"                         # Set to "false" to disable TLS for the HTTP server
 TLS_CERT_PATH="./src/certs/cert.pem"        # TLS certificate (shared by HTTP + WebTransport)
 TLS_KEY_PATH="./src/certs/key.pem"
 TLS_CA_PATH="./src/certs/cert.ca-bundle"
@@ -139,7 +139,7 @@ GAME_NAME="Your Game Name"
 LOG_LEVEL="info"                          # Logging level: trace, debug, info, warn, error
 
 # Local certificate handling (Optional)
-SKIP_CERT_TRUST="true" | "false"             # Skip auto-trusting generated certificates on Windows
+SKIP_CERT_TRUST="false"                      # Set to "true" to skip Windows certificate trust
 
 # CORS Configuration (Security)
 CORS_ALLOWED_ORIGINS="https://game.example.com,https://client.example.com" # Comma-separated list of allowed origins
@@ -158,7 +158,7 @@ ASSET_SERVER_URL="http://assets:8000"           # Asset server endpoint
 ASSET_SERVER_AUTH_KEY="your_secret_key"         # Asset server authentication token
 
 # Cache Configuration
-CACHE="memory" | "redis"
+CACHE="memory"                              # Set to "redis" to use Redis
 REDIS_URL="redis://localhost:6379"
 
 # Worker Pools (Optional)
@@ -166,10 +166,10 @@ DB_WORKER_POOL_SIZE="8"                      # SQL worker threads (default: 8)
 AUTH_POOL_SIZE="8"                           # Authentication worker threads (default: 8)
 
 # Benchmarking (Optional)
-WT_HANDSHAKE_RATE_LIMIT_DISABLED="true" | "false"  # Disable WebTransport handshake rate limits
+WT_HANDSHAKE_RATE_LIMIT_DISABLED="false"     # Set to "true" to disable WebTransport handshake rate limits
 
 # Realm Configuration
-WHITELIST="true" | "false"                       # Enable/disable username whitelist for this realm
+WHITELIST="false"                             # Set to "true" to enable the username whitelist
 ```
 
 ---

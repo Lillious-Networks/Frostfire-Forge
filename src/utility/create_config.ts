@@ -119,7 +119,41 @@ if (!fs.existsSync(path.join(configPath, "settings.json"))) {
   );
   console.log(`Created settings file at ${path.join(configPath, "settings.json")}`);
 } else {
-  console.log(`Settings loaded from ${path.join(configPath, "settings.json")}`);
+  // Migrate legacy WebSocket-era keys so existing installations get the
+  // current schema instead of silently falling back to defaults.
+  const settingsPath = path.join(configPath, "settings.json");
+  const existing = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as Record<string, any>;
+
+  if (existing.websocketRatelimit && !existing.packetRatelimit) {
+    existing.packetRatelimit = {
+      enabled: existing.websocketRatelimit.enabled ?? true,
+      maxRequests: existing.websocketRatelimit.maxRequests ?? 2000,
+      time: existing.websocketRatelimit.time ?? 2000,
+      maxWindowTime: existing.websocketRatelimit.maxWindowTime ?? 1000,
+    };
+    console.log(`Migrated 'websocketRatelimit' to 'packetRatelimit'`);
+  }
+
+  if (existing.websocket && !existing.webtransport) {
+    existing.webtransport = {
+      enabled: existing.websocket.enabled ?? true,
+      maxPayloadMB: existing.websocket.maxPayloadMB ?? 50,
+      benchmarkenabled: existing.websocket.benchmarkenabled ?? false,
+      idleTimeout: existing.websocket.idleTimeout ?? 120,
+      maxSessions: existing.websocket.maxConnections ?? 50000,
+      maxDatagramSize: 1200,
+      authTimeoutMs: 10000,
+      rateLimits: settings.webtransport.rateLimits,
+    };
+    console.log(`Migrated 'websocket' to 'webtransport'`);
+  }
+
+  if (existing.websocketRatelimit || existing.websocket) {
+    fs.writeFileSync(settingsPath, JSON.stringify(existing, null, 2));
+    console.log(`Settings migrated at ${settingsPath}`);
+  } else {
+    console.log(`Settings loaded from ${settingsPath}`);
+  }
 }
 
 const AOI_CONFIG = {

@@ -408,8 +408,8 @@ async function flushMovementBatches() {
 
       const isSelfReceiver = playerMovements.has(receiverId);
       if (!isSelfReceiver && processedReceivers >= maxReceiversPerFlush) {
-        skippedDueToLoad += receiverArray.length - processedReceivers;
-        break;
+        skippedDueToLoad++;
+        continue;
       }
       if (!isSelfReceiver) {
         processedReceivers++;

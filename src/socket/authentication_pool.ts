@@ -2,7 +2,11 @@ import { Worker } from "worker_threads";
 import assetCache from "../services/assetCache";
 import log from "../modules/logger";
 
-const AUTH_POOL_SIZE = parseInt(process.env.AUTH_POOL_SIZE || "") || 8;
+const MAX_AUTH_POOL_SIZE = 64;
+const parsedAuthPoolSize = parseInt(process.env.AUTH_POOL_SIZE || "", 10);
+const AUTH_POOL_SIZE = Number.isInteger(parsedAuthPoolSize) && parsedAuthPoolSize > 0
+  ? Math.min(parsedAuthPoolSize, MAX_AUTH_POOL_SIZE)
+  : 8;
 
 const prepareAssets = async () => {
     const items = await assetCache.get("items");

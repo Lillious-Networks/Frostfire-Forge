@@ -379,8 +379,8 @@ async function writeGeneratedCertificate(
       hostnames: options.hostnames,
     });
   } catch (error: any) {
-    log.warn(`Local certificate generation skipped: ${error?.message || error}`);
-    return null;
+    log.error(`Local certificate generation failed: ${error?.message || error}`);
+    throw error;
   }
 
   fs.mkdirSync(path.dirname(certPath), { recursive: true });

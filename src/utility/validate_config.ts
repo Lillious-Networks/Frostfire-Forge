@@ -106,6 +106,48 @@ export default (async () => {
     }
   }
 
+  // Validate the generated settings.json webtransport keys so typos or stale
+  // legacy schemas can't silently fall back to defaults.
+  try {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const settingsPath = path.join(import.meta.dir, "../config/settings.json");
+    const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as any;
+
+    if (!settings?.webtransport) {
+      startUpWarnings.push(
+        "settings.json is missing the 'webtransport' section. WebTransport will fall back to defaults. Run `bun create-config` to regenerate."
+      );
+    } else {
+      const wt = settings.webtransport;
+      if (typeof wt.maxSessions !== "number" || wt.maxSessions <= 0) {
+        startUpWarnings.push(
+          "settings.json 'webtransport.maxSessions' is missing or invalid. Defaulting to 2000."
+        );
+      }
+      if (typeof wt.maxDatagramSize !== "number" || wt.maxDatagramSize <= 0) {
+        startUpWarnings.push(
+          "settings.json 'webtransport.maxDatagramSize' is missing or invalid. Defaulting to 1200."
+        );
+      }
+      if (!wt.rateLimits) {
+        startUpWarnings.push(
+          "settings.json 'webtransport.rateLimits' is missing. WebTransport rate limits will fall back to defaults."
+        );
+      }
+    }
+
+    if (!settings?.packetRatelimit) {
+      startUpWarnings.push(
+        "settings.json is missing the 'packetRatelimit' section. Packet rate limiting will be disabled. Run `bun create-config` to regenerate."
+      );
+    }
+  } catch {
+    startUpWarnings.push(
+      "settings.json could not be loaded. Run `bun create-config` to regenerate the configuration."
+    );
+  }
+
   if (startUpWarnings.length > 0) {
     for (const warning of startUpWarnings) {
       log.warn(warning);
