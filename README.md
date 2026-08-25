@@ -835,8 +835,8 @@ The `engine` object passed to `register()` provides these methods:
 | `engine.addPacketTypes(types: string[])` | Register custom packet type constants |
 | `engine.addPacketBuilders(builders: Record<string, Function>)` | Register packet builder functions |
 | `engine.registerHandlers(handlers: Record<string, Function>)` | Register packet handlers |
-| `engine.onWarpCollision(fn)` | Push a warp collision interceptor. Receives `(warp, ws, player, sendPacket)`. Return `true` to suppress engine handling, `false` to let engine proceed. |
-| `engine.onPacket(fn)` | Push a packet interceptor. Receives `(type, data, ws, player)`. Return `true` to suppress engine handling. |
+| `engine.onWarpCollision(fn)` | Push a warp collision interceptor. Receives `(warp, wt, player, sendPacket)`. Return `true` to suppress engine handling, `false` to let engine proceed. |
+| `engine.onPacket(fn)` | Push a packet interceptor. Receives `(type, data, wt, player)`. Return `true` to suppress engine handling. |
 | `engine.addHttpRoute(method, path, handler)` | Register an HTTP route. `handler` receives `(req: Request)` and returns `Response`. |
 | `engine.teleportPlayer(playerObj, mapName, x, y)` | Teleport a player to a map position. |
 | `engine.registerSpell(spell)` | Register a spell into the asset cache at runtime. Duplicate names are skipped. Spells are not persisted to the database. |
