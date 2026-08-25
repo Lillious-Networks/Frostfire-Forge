@@ -363,7 +363,9 @@ export async function updatePlayerAOI(
     }
 
     player.aoi.playersInAOI = newAOISet;
-    player.aoi.revision = (player.aoi.revision || 0) + 1;
+    if (enteredAOI.length > 0 || exitedAOI.length > 0) {
+      player.aoi.revision = (player.aoi.revision || 0) + 1;
+    }
     player.aoi.lastAOIUpdatePosition = { x: currentPos.x, y: currentPos.y };
     player.aoi.gridX = Math.floor(currentPos.x / AOI_CONFIG.GRID_CELL_SIZE);
     player.aoi.gridY = Math.floor(currentPos.y / AOI_CONFIG.GRID_CELL_SIZE);

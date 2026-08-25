@@ -45,10 +45,10 @@ class GatewayClient {
           host: this.config.host,
           publicHost: this.config.publicHost || this.config.host,
           port: this.config.port,
-          wtPort: this.config.wtPort,
+          wtPort: this.config.wtPort ?? this.config.port,
           wtEnabled: this.config.wtEnabled !== false,
           // Legacy field: older gateway versions require wsPort during registration
-          wsPort: this.config.wtPort,
+          wsPort: this.config.wtPort ?? this.config.port,
           useSSL: useSSL,
           maxConnections: this.config.maxConnections,
           authKey: process.env.GATEWAY_AUTH_KEY,

@@ -8,7 +8,7 @@ export interface WorkerFlushRequest {
   receiverIds: string[];
   receiverInfo: Record<string, ReceiverInfo>;
   diffs: Array<{ playerId: string; add: string[]; remove: string[] }>;
-  onBatches: (batches: any[]) => void;
+  onBatches: (batches: any[], updatedSeqs?: Record<string, number>) => void;
 }
 
 interface PooledWorker {
@@ -26,6 +26,12 @@ interface PooledWorker {
 // counts.
 const pool = new Map<string, PooledWorker>();
 
+let onWorkerRetiredCallback: ((layerId: string) => void) | null = null;
+
+export function setOnWorkerRetired(callback: (layerId: string) => void): void {
+  onWorkerRetiredCallback = callback;
+}
+
 function getPooledWorker(layerId: string): PooledWorker {
   const existing = pool.get(layerId);
   if (existing) return existing;
@@ -41,7 +47,7 @@ function getPooledWorker(layerId: string): PooledWorker {
 
   worker.on("message", (message: any) => {
     if (message.type === "flushResult") {
-      finishFlush(pooled, message.batches);
+      finishFlush(pooled, message.batches, message.updatedSeqs);
     } else if (message.type === "flushError") {
       log.warn(`[MOVEMENT WORKER] ${message.error}`);
       finishFlush(pooled, []);
@@ -49,19 +55,24 @@ function getPooledWorker(layerId: string): PooledWorker {
   });
   worker.on("error", (error: Error) => {
     log.error(`[MOVEMENT WORKER] ${error.message}`);
+    finishFlush(pooled, []);
+    pool.delete(layerId);
+    if (onWorkerRetiredCallback) {
+      onWorkerRetiredCallback(layerId);
+    }
   });
 
   pool.set(layerId, pooled);
   return pooled;
 }
 
-function finishFlush(pooled: PooledWorker, batches: any[]): void {
+function finishFlush(pooled: PooledWorker, batches: any[], updatedSeqs?: Record<string, number>): void {
   const request = pooled.currentFlushRequest;
   pooled.currentFlushRequest = null;
   pooled.flushInFlight = false;
 
   if (request) {
-    request.onBatches(batches);
+    request.onBatches(batches, updatedSeqs);
   }
 
   const next = pooled.pendingFlushRequest;
@@ -124,6 +135,9 @@ setInterval(() => {
         // Ignore termination races
       }
       pool.delete(layerId);
+      if (onWorkerRetiredCallback) {
+        onWorkerRetiredCallback(layerId);
+      }
       log.debug(`[MOVEMENT WORKER] Terminated idle worker for layer ${layerId}`);
     }
   }

@@ -34,7 +34,9 @@ export function encodeFrame(payload: Uint8Array): Uint8Array {
 }
 
 export class FrameDecoder {
-  private buffer: Uint8Array = new Uint8Array(0);
+  private buffer: Uint8Array = new Uint8Array(8192);
+  private readOffset: number = 0;
+  private writeOffset: number = 0;
   private maxFrameSize: number;
   private overflowed: boolean = false;
 
@@ -47,29 +49,61 @@ export class FrameDecoder {
       return [];
     }
 
-    const combined = new Uint8Array(this.buffer.length + chunk.length);
-    combined.set(this.buffer, 0);
-    combined.set(chunk, this.buffer.length);
-    this.buffer = combined;
+    const unreadBytes = this.writeOffset - this.readOffset;
+    const neededCapacity = unreadBytes + chunk.length;
+
+    if (neededCapacity > this.buffer.length) {
+      if (neededCapacity > this.maxFrameSize + HEADER_BYTES) {
+        this.overflowed = true;
+        this.buffer = new Uint8Array(0);
+        this.readOffset = 0;
+        this.writeOffset = 0;
+        return [];
+      }
+
+      if (this.readOffset > 0) {
+        this.buffer.copyWithin(0, this.readOffset, this.writeOffset);
+        this.writeOffset = unreadBytes;
+        this.readOffset = 0;
+      }
+
+      if (neededCapacity > this.buffer.length) {
+        const newSize = Math.max(this.buffer.length * 2, neededCapacity);
+        const newBuffer = new Uint8Array(newSize);
+        newBuffer.set(new Uint8Array(this.buffer.buffer, this.buffer.byteOffset, this.writeOffset));
+        this.buffer = newBuffer;
+      }
+    }
+
+    this.buffer.set(chunk, this.writeOffset);
+    this.writeOffset += chunk.length;
 
     const frames: Uint8Array[] = [];
 
-    while (this.buffer.length >= HEADER_BYTES) {
-      const view = new DataView(this.buffer.buffer, this.buffer.byteOffset, HEADER_BYTES);
+    while (this.writeOffset - this.readOffset >= HEADER_BYTES) {
+      const view = new DataView(this.buffer.buffer, this.buffer.byteOffset + this.readOffset, HEADER_BYTES);
       const length = view.getUint32(0, true);
 
       if (length > this.maxFrameSize) {
         this.overflowed = true;
         this.buffer = new Uint8Array(0);
+        this.readOffset = 0;
+        this.writeOffset = 0;
         break;
       }
 
-      if (this.buffer.length < HEADER_BYTES + length) {
+      if (this.writeOffset - this.readOffset < HEADER_BYTES + length) {
         break;
       }
 
-      frames.push(this.buffer.slice(HEADER_BYTES, HEADER_BYTES + length));
-      this.buffer = this.buffer.slice(HEADER_BYTES + length);
+      const frameStart = this.readOffset + HEADER_BYTES;
+      frames.push(this.buffer.slice(frameStart, frameStart + length));
+      this.readOffset = frameStart + length;
+    }
+
+    if (this.readOffset > 0 && this.readOffset === this.writeOffset) {
+      this.readOffset = 0;
+      this.writeOffset = 0;
     }
 
     return frames;

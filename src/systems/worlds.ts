@@ -56,8 +56,30 @@ const worlds = {
   async adjustPlayerCount(mapName: string, delta: number): Promise<number | null> {
     return withWorldsLock(async () => {
       const worldsList = await readWorldsCache();
-      const world = worldsList.find((w) => w.name === mapName.replace(".json", ""));
+      const worldName = mapName.replace(".json", "");
+      const world = worldsList.find((w) => w.name === worldName);
       if (!world) return null;
+
+      // Use Redis HINCRBY for atomic cross-process counter updates
+      try {
+        const redisKey = "world:player_counts";
+        const redisClient = (assetCache as any).client;
+        if (redisClient && typeof redisClient.hincrby === 'function') {
+          let newCount = await redisClient.hincrby(redisKey, worldName, delta);
+          // Ensure non-negative
+          if (newCount < 0) {
+            await redisClient.hset(redisKey, worldName, 0);
+            newCount = 0;
+          }
+          world.players = newCount;
+          await assetCache.set("worlds", JSON.stringify(worldsList));
+          return newCount;
+        }
+      } catch (e) {
+        // Fallback to existing logic if Redis atomic operation fails
+      }
+
+      // Fallback: non-atomic update
       world.players = Math.max(0, (world.players || 0) + delta);
       await assetCache.set("worlds", JSON.stringify(worldsList));
       return world.players;

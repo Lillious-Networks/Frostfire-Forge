@@ -374,12 +374,6 @@ function onTransportMessage(connection: TransportConnection, message: string) {
     const parsedMessage = JSON.parse(message);
     const packetType = parsedMessage?.type;
 
-    const processImmediately = ["TIME_SYNC", "MOVEXY", "STATS", "SERVER_TIME", "ANIMATION"];
-    if (processImmediately.includes(packetType)) {
-      packetReceiver(null, connection, message);
-      return;
-    }
-
     if (settings?.packetRatelimit?.enabled) {
       const client = ClientRateLimit.get(connection.data.id);
       if (client) {
@@ -399,22 +393,27 @@ function onTransportMessage(connection: TransportConnection, message: string) {
         }
       }
     }
+
+    const processImmediately = ["TIME_SYNC", "MOVEXY", "STATS", "SERVER_TIME", "ANIMATION"];
+    if (processImmediately.includes(packetType)) {
+      packetReceiver(null, connection, message);
+      return;
+    }
+
     handleBackpressure(connection as any, () => packetReceiver(null, connection, message));
   } catch (e) {
     log.error(e as string);
   }
 }
 
-const NO_RATE_LIMIT = Number.MAX_SAFE_INTEGER;
-
 const webTransportRateLimits = {
-  handshakesPerSec: (settings as any)?.webtransport?.rateLimits?.handshakesPerSec ?? NO_RATE_LIMIT,
-  handshakesBurst: (settings as any)?.webtransport?.rateLimits?.handshakesBurst ?? NO_RATE_LIMIT,
-  handshakesBurstPerPrefix: (settings as any)?.webtransport?.rateLimits?.handshakesBurstPerPrefix ?? NO_RATE_LIMIT,
-  streamsPerSec: (settings as any)?.webtransport?.rateLimits?.streamsPerSec || 2000,
-  streamsBurst: (settings as any)?.webtransport?.rateLimits?.streamsBurst || 4000,
-  datagramsPerSec: (settings as any)?.webtransport?.rateLimits?.datagramsPerSec || 500000,
-  datagramsBurst: (settings as any)?.webtransport?.rateLimits?.datagramsBurst || 200000,
+  handshakesPerSec: (settings as any)?.webtransport?.rateLimits?.handshakesPerSec ?? 100,
+  handshakesBurst: (settings as any)?.webtransport?.rateLimits?.handshakesBurst ?? 200,
+  handshakesBurstPerPrefix: (settings as any)?.webtransport?.rateLimits?.handshakesBurstPerPrefix ?? 50,
+  streamsPerSec: (settings as any)?.webtransport?.rateLimits?.streamsPerSec ?? 2000,
+  streamsBurst: (settings as any)?.webtransport?.rateLimits?.streamsBurst ?? 4000,
+  datagramsPerSec: (settings as any)?.webtransport?.rateLimits?.datagramsPerSec ?? 500000,
+  datagramsBurst: (settings as any)?.webtransport?.rateLimits?.datagramsBurst ?? 200000,
 };
 
 const webTransportServer = startWebTransportServer({

@@ -385,7 +385,19 @@ async function writeGeneratedCertificate(
 
   fs.mkdirSync(path.dirname(certPath), { recursive: true });
   fs.writeFileSync(certPath, generated.certPem);
-  fs.writeFileSync(keyPath, generated.keyPem);
+
+  if (fs.existsSync(keyPath)) {
+    fs.unlinkSync(keyPath);
+  }
+  fs.writeFileSync(keyPath, generated.keyPem, { mode: 0o600 });
+  if (process.platform !== 'win32') {
+    try {
+      fs.chmodSync(keyPath, 0o600);
+    } catch (e) {
+      // Ignore chmod errors on platforms that don't support it
+    }
+  }
+
   if (caPath) {
     fs.writeFileSync(caPath, "");
   }

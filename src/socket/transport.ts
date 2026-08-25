@@ -7,6 +7,8 @@ import log from "../modules/logger.ts";
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
+const activeConnectionIds = new Set<string>();
+
 function isSessionClosedError(error: any): boolean {
   if (!error) return false;
   const code = String(error?.code || "");
@@ -468,7 +470,18 @@ function tryAuthenticate(
 
   if (authTimer) clearTimeout(authTimer);
 
-  const id = parseInt(crypto.randomBytes(4).toString("hex"), 16);
+  let id: string;
+  let attempts = 0;
+  do {
+    id = parseInt(crypto.randomBytes(4).toString("hex"), 16).toString();
+    attempts++;
+    if (attempts > 100) {
+      log.error("[WebTransport] Failed to allocate unique connection ID after 100 attempts");
+      return false;
+    }
+  } while (activeConnectionIds.has(id));
+
+  activeConnectionIds.add(id);
 
   connection.data = {
     id,
@@ -492,6 +505,7 @@ function finishClose(connection: TransportConnection, options: TransportServerOp
   topicBus.clear(connection);
 
   if (connection.data?.id != null) {
+    activeConnectionIds.delete(connection.data.id);
     options.handlers.onClose(connection);
   }
 }

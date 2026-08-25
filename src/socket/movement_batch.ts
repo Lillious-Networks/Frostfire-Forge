@@ -24,6 +24,7 @@ export interface ReceiverInfo {
   y: number;
   isAdmin: boolean;
   username: string;
+  seq?: number;
 }
 
 export function collectReceiverEntries(

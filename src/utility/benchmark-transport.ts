@@ -168,7 +168,11 @@ export class BenchmarkConnection {
     })));
 
     await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Authentication timeout")), 15000);
+      const timeout = setTimeout(() => {
+        connection.offMessage(handler);
+        connection.close(1008, "Authentication timeout");
+        reject(new Error("Authentication timeout"));
+      }, 15000);
 
       const handler = (message: string) => {
         let parsed: any;
@@ -183,6 +187,11 @@ export class BenchmarkConnection {
           connection.offMessage(handler);
           connection.state = 1;
           resolve();
+        } else if (parsed.type === "AUTH_CONNECT_FAILED" || parsed.type === "UNAUTHORIZED") {
+          clearTimeout(timeout);
+          connection.offMessage(handler);
+          connection.close(1008, "Authentication failed");
+          reject(new Error("Authentication rejected"));
         }
       };
 

@@ -687,8 +687,6 @@ async function createClients(amount: number, host: string, clientUrl: string, co
     const loggedInClients: any[] = [];
 
     const availableServers = await getAvailableServers(host, config.gatewayEnabled, config.gatewayUrl, config.realmId, config.quiet);
-
-    return new Promise(async (resolve) => {
         let openedCount = 0;
         let loggedInCount = 0;
         let loginTimeout: any = null;
@@ -731,7 +729,6 @@ async function createClients(amount: number, host: string, clientUrl: string, co
                     });
 
                     log(`${loggedInCount}/${amount} clients logged in - proceeding`, 'info');
-                    resolve(loggedInClients);
                 }
             }, 30000);
         };
@@ -844,7 +841,6 @@ async function createClients(amount: number, host: string, clientUrl: string, co
                                     process.stdout.write(`\r  ${chalk.bold.green('Logging in:')} [${finalBar}] ${chalk.bold('100%')} ${chalk.white(amount)}${chalk.gray('/')}${chalk.white(amount)} clients\n`);
                                     log(`All ${amount} clients logged in and moving`, 'success');
                                 }
-                                resolve(loggedInClients);
                             }
                         }
                     } catch (e: any) {
@@ -885,8 +881,9 @@ async function createClients(amount: number, host: string, clientUrl: string, co
             clientPromises.push(clientPromise);
         }
 
-        await Promise.all(clientPromises);
-    });
+        await Promise.allSettled(clientPromises);
+
+        return loggedInClients;
 }
 
 function getLatencyStats() {
@@ -1012,7 +1009,7 @@ function attachSimulationHandlers(client: any) {
     });
 }
 
-function connectWave(count: number, config: ReturnType<typeof parseArgs>) {
+async function connectWave(count: number, config: ReturnType<typeof parseArgs>): Promise<void> {
     if (count <= 0 || stopped) return;
 
     pendingConnects += count;
@@ -1038,13 +1035,13 @@ function connectWave(count: number, config: ReturnType<typeof parseArgs>) {
         },
     };
 
-    createClients(count, waveConfig.host, waveConfig.transportUrl, waveConfig)
-        .then(() => {
-            while (settled < count) settleOne();
-        })
-        .catch(() => {
-            while (settled < count) settleOne();
-        });
+    try {
+        await createClients(count, waveConfig.host, waveConfig.transportUrl, waveConfig);
+    } catch (error) {
+        // Ignore errors, settle remaining connections
+    } finally {
+        while (settled < count) settleOne();
+    }
 }
 
 function disconnectRandomClients(count: number): void {

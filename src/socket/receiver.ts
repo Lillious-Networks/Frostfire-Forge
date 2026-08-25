@@ -7,7 +7,7 @@ import { getAuthWorker } from "./authentication_pool.ts";
 import { listener } from "../modules/event_bus";
 import { Events, setPlayerPvp } from "../systems/events";
 import { collectReceiverEntries, encodeBatch, MoverSnapshot, ReceiverInfo } from "./movement_batch.ts";
-import { queueLayerWorkerFlush, postToAllWorkers } from "./movement_worker_pool.ts";
+import { queueLayerWorkerFlush, postToAllWorkers, setOnWorkerRetired } from "./movement_worker_pool.ts";
 const authentication_queue = new Set<string>();
 const authentication_session_queue = new Set<string>();
 
@@ -50,6 +50,7 @@ import inventory from "../systems/inventory";
 import particles from "../systems/particles";
 import worlds from "../systems/worlds";
 import npcSystem from "../systems/npcs";
+import os from "os";
 import entitySystem from "../systems/entities";
 import entityAI from "../systems/entityAI";
 import spellEffects, { registerSpellEffect, spellHasHostileEffects, cancelEffect, setStunsForPlayer, setSlowsForPlayer } from "../systems/spelleffects";
@@ -157,6 +158,10 @@ const movementProbeSeqs = new Map<string, number>();
 // Per-layer worker pool: keeps the movement batch encoding off the main event
 // loop (which the [LAG] diagnostics showed was saturated at high player counts).
 const workerLayerSynced = new Set<string>();
+
+setOnWorkerRetired((layerId: string) => {
+  workerLayerSynced.delete(layerId);
+});
 
 const MAX_BUFFER_BACKPRESSURE = 1024 * 32; // 32KB - aggressive at high loads
 // Spawn payloads are much larger than movement frames; gate them with a
@@ -270,6 +275,7 @@ function getAdaptiveBatchInterval(): number {
 let lastCpuSample = process.cpuUsage();
 let lastCpuSampleTime = Date.now();
 let currentCpuBusy = 0;
+const cpuCount = os.cpus().length;
 
 setInterval(() => {
   const now = Date.now();
@@ -280,7 +286,7 @@ setInterval(() => {
 
   if (elapsed > 0) {
     const busyMs = (cpu.user + cpu.system) / 1000;
-    currentCpuBusy = busyMs / elapsed;
+    currentCpuBusy = (busyMs / cpuCount) / elapsed;
   }
 }, 1000);
 
@@ -429,6 +435,7 @@ async function flushMovementBatches() {
         y: receiver.location?.position?.y ?? 0,
         isAdmin: !!receiver.isAdmin,
         username: receiver.username || "",
+        seq: movementProbeSeqs.get(receiverId) ?? 0,
       };
     }
 
@@ -443,7 +450,12 @@ async function flushMovementBatches() {
           receiverIds: selectedReceiverIds,
           receiverInfo,
           diffs: workerDiffs,
-          onBatches: (batches) => {
+          onBatches: (batches, updatedSeqs) => {
+            if (updatedSeqs) {
+              for (const [receiverId, seq] of Object.entries(updatedSeqs)) {
+                movementProbeSeqs.set(receiverId, seq);
+              }
+            }
             for (const batch of batches) {
               const receiver = allPlayersRef[batch.receiverId];
               if (!receiver?.ws || receiver.ws.readyState !== 1) continue;
@@ -567,7 +579,7 @@ async function flushSpawnBatches() {
             !!fullPlayer.casting
           );
 
-          const spriteCacheKey = `${queuedPlayer.id}:${animationName}`;
+          const spriteCacheKey = `${queuedPlayer.id}:${animationName}:${fullPlayer.equipmentRevision || 0}`;
           let playerSpriteData = spriteDataCache.get(spriteCacheKey);
           if (playerSpriteData === undefined) {
             playerSpriteData = await getPlayerSpriteSheetData(animationName, fullPlayer.equipment || null);
@@ -624,7 +636,9 @@ async function flushSpawnBatches() {
           spawnedPlayer.casting || false
         );
 
-        const animCacheKey = `${spawnData.id}:${animationName}`;
+        const fullPlayer = allPlayers[spawnData.id];
+        const equipRev = fullPlayer?.equipmentRevision || 0;
+        const animCacheKey = `${spawnData.id}:${animationName}:${equipRev}`;
         let animData = animationDataCache.get(animCacheKey);
         if (animData === undefined) {
           animData = await getAnimationData(animationName, spawnData.id);
@@ -991,6 +1005,17 @@ export function clearBatchQueuesForPlayer(playerId: string) {
 
   spawnBatchQueue.delete(playerId);
 
+  for (const key of spriteDataCache.keys()) {
+    if (key.startsWith(`${playerId}:`)) {
+      spriteDataCache.delete(key);
+    }
+  }
+  for (const key of animationDataCache.keys()) {
+    if (key.startsWith(`${playerId}:`)) {
+      animationDataCache.delete(key);
+    }
+  }
+
   let clearedSpawnsFrom = 0;
   for (const [receivingPlayerId, spawnedPlayers] of spawnBatchQueue.entries()) {
     if (spawnedPlayers.has(playerId)) {
@@ -1281,6 +1306,7 @@ authWorker.on("message", async (result: any) => {
       learnedSpells: limitedLearnedSpells,
       inventory: limitedInventory,
       equipment: playerData.equipment || {},
+      equipmentRevision: 0,
     });
 
     const _pcache = playerCache.get(ws.data.id);
@@ -9181,6 +9207,8 @@ export default async function packetReceiver(
               packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer))
             );
 
+            currentPlayer.equipmentRevision = (currentPlayer.equipmentRevision || 0) + 1;
+
             const currentAnimationName = getAnimationNameForDirection(
               currentPlayer.location.position?.direction || "down",
               !!currentPlayer.moving,
@@ -9304,6 +9332,8 @@ export default async function packetReceiver(
               ws,
               packetManager.equipment(currentPlayer.equipment)
             );
+
+            currentPlayer.equipmentRevision = (currentPlayer.equipmentRevision || 0) + 1;
 
             const currentAnimationName = getAnimationNameForDirection(
               currentPlayer.location.position?.direction || "down",

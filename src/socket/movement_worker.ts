@@ -48,6 +48,8 @@ parentPort?.on("message", (message: any) => {
 
       const tierDistance = receiverIds.length > 800 ? 400 : 0;
 
+      const updatedSeqs: Record<string, number> = {};
+
       for (const receiverId of receiverIds) {
         const set = receiverSets.get(receiverId);
         if (!set || set.size === 0) continue;
@@ -58,14 +60,16 @@ parentPort?.on("message", (message: any) => {
         const entries = collectReceiverEntries(set, movers, receiver, tick, tierDistance);
         if (entries.length === 0) continue;
 
-        const receiverProbeSeq = probeSeqs.get(receiverId) ?? 0;
+        const receiverProbeSeq = receiver.seq ?? probeSeqs.get(receiverId) ?? 0;
         const { data, offsets } = encodeBatch(entries, { seq: receiverProbeSeq, serverSendTime: Date.now() });
-        probeSeqs.set(receiverId, receiverProbeSeq + (offsets.length - 1));
+        const newSeq = receiverProbeSeq + (offsets.length - 1);
+        probeSeqs.set(receiverId, newSeq);
+        updatedSeqs[receiverId] = newSeq;
         batches.push({ receiverId, offsets, data });
         buffers.push(data.buffer as ArrayBuffer);
       }
 
-      parentPort?.postMessage({ type: "flushResult", tick, batches }, buffers);
+      parentPort?.postMessage({ type: "flushResult", tick, batches, updatedSeqs }, buffers);
     }
   } catch (error: any) {
     parentPort?.postMessage({ type: "flushError", error: error?.message || String(error) });
