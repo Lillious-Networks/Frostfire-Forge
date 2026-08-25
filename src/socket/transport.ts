@@ -326,8 +326,6 @@ export function startWebTransportServer(options: TransportServerOptions): any {
       if (event.level !== "warn" && event.level !== "error") return;
 
       const msg = String(event?.msg || "");
-      // The library redacts some internal messages ("native warning (redacted)")
-      // which spam the console during benchmarks without any actionable info.
       if (!msg || msg.includes("(redacted)")) return;
 
       // Throttle repeated identical warnings to once per 10 seconds.

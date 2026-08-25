@@ -21,9 +21,7 @@ interface PooledWorker {
 
 // One worker thread per map layer. Layers are capped at MAX_PLAYERS_PER_LAYER
 // (default 50), so each worker's per-flush work is small - but spreading the
-// flush across worker threads keeps the main event loop free, which the
-// [LAG] diagnostics showed was saturated by inline encoding at high player
-// counts.
+// flush across worker threads keeps the main event loop free.
 const pool = new Map<string, PooledWorker>();
 
 let onWorkerRetiredCallback: ((layerId: string) => void) | null = null;
@@ -126,8 +124,9 @@ export function postToAllWorkers(message: any): void {
   }
 }
 
-// Workers for emptied layers are reaped after a period of inactivity.
-const WORKER_IDLE_TIMEOUT_MS = 120000;
+// Workers for emptied layers are reaped after a period of inactivity. Kept
+// short: at benchmark scale dozens of idle workers hold hundreds of MB of RSS.
+const WORKER_IDLE_TIMEOUT_MS = 30000;
 setInterval(() => {
   const now = Date.now();
   for (const [layerId, entry] of pool.entries()) {
@@ -144,4 +143,4 @@ setInterval(() => {
       log.debug(`[MOVEMENT WORKER] Terminated idle worker for layer ${layerId}`);
     }
   }
-}, 30000);
+}, 10000);

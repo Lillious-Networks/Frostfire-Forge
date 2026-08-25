@@ -25,6 +25,21 @@ export interface PlayerAOIState {
   layerId: string | null;
 }
 
+// Chunk loadPlayers frames: a single frame with many sprite-laden players can
+// exceed the transport's per-stream queue limit (~256KB) and destroy the
+// stream. Splitting keeps each frame below that ceiling.
+export function sendLoadPlayersChunked(
+  sendPacket: (ws: any, packets: any) => void,
+  ws: any,
+  players: any[],
+  snapshotRevision: number | null,
+  chunkSize = 8
+): void {
+  for (let i = 0; i < players.length; i += chunkSize) {
+    sendPacket(ws, packetManager.loadPlayers({ players: players.slice(i, i + chunkSize), snapshotRevision }));
+  }
+}
+
 export async function initializePlayerAOI(player: any): Promise<void> {
   const pos = player.location.position;
   const mapName = player.location.map.replaceAll(".json", "");
@@ -668,7 +683,7 @@ export async function syncPartyLayers(
         const spawnsArray = Array.from(spawnsMap.values());
         if (spawnsArray.length > 0) {
           totalSpawns += spawnsArray.length;
-          sendPacket(player.ws, packetManager.loadPlayers({ players: spawnsArray, snapshotRevision: null }));
+          sendLoadPlayersChunked(sendPacket, player.ws, spawnsArray, null);
 
           for (const spawnData of spawnsArray) {
             const spawnedPlayer = playerCache.get(spawnData.id);
@@ -905,7 +920,7 @@ export function startAutoLayerCondensation(
             if (player && player.ws) {
               const spawnsArray = Array.from(spawnsMap.values());
               if (spawnsArray.length > 0) {
-                sendPacket(player.ws, packetManager.loadPlayers({ players: spawnsArray, snapshotRevision: null }));
+                sendLoadPlayersChunked(sendPacket, player.ws, spawnsArray, null);
 
                 for (const spawnData of spawnsArray) {
                   const spawnedPlayer = playerCache.get(spawnData.id);

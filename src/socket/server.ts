@@ -448,6 +448,11 @@ const webTransportServer = startWebTransportServer({
   },
 });
 
+log.info(
+  `[WebTransport] maxSessions=${(settings as any)?.webtransport?.maxSessions || 2000} | ` +
+  `handshakeLimitsDisabled=${handshakeLimitsDisabled} | handshakesPerSec=${webTransportRateLimits.handshakesPerSec} | handshakesBurst=${webTransportRateLimits.handshakesBurst} | handshakesBurstPerPrefix=${webTransportRateLimits.handshakesBurstPerPrefix}`
+);
+
 const webTransportPort = gamePort;
 
 // Startup probe TLS handling. Defaults to skipping verification (the probe

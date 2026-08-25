@@ -49,22 +49,20 @@ export class FrameDecoder {
       return [];
     }
 
-    const unreadBytes = this.writeOffset - this.readOffset;
-    const neededCapacity = unreadBytes + chunk.length;
-
-    if (neededCapacity > this.buffer.length) {
-      // Overflow detection happens on the declared frame length below (line
-      // 87), not on the buffered capacity: pipelined data can legally hold the
-      // tail of one max-size frame plus the start of the next, so a capacity
-      // check here would reject valid streams.
+    // Capacity must be checked against the uncompacted write offset: frames
+    // pipelined in the buffer can legally hold the tail of one max-size frame
+    // plus the start of the next, and the tail of the buffer behind readOffset
+    // is not usable until compaction. Checking the compacted size would let
+    // set() write past the end of the buffer.
+    if (this.writeOffset + chunk.length > this.buffer.length) {
       if (this.readOffset > 0) {
         this.buffer.copyWithin(0, this.readOffset, this.writeOffset);
-        this.writeOffset = unreadBytes;
+        this.writeOffset -= this.readOffset;
         this.readOffset = 0;
       }
 
-      if (neededCapacity > this.buffer.length) {
-        const newSize = Math.max(this.buffer.length * 2, neededCapacity);
+      if (this.writeOffset + chunk.length > this.buffer.length) {
+        const newSize = Math.max(this.buffer.length * 2, this.writeOffset + chunk.length);
         const newBuffer = new Uint8Array(newSize);
         newBuffer.set(new Uint8Array(this.buffer.buffer, this.buffer.byteOffset, this.writeOffset));
         this.buffer = newBuffer;

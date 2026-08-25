@@ -98,9 +98,11 @@ export class BenchmarkConnection {
     })();
 
     (async () => {
+      let loopError: string | null = null;
       try {
         for await (const chunk of stream) {
-          const frames = this.decoder.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+          const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+          const frames = this.decoder.push(bytes);
           for (const frame of frames) {
             const message = textDecoder.decode(frame);
             for (const handler of [...this.messageHandlers]) {
@@ -112,13 +114,22 @@ export class BenchmarkConnection {
             }
           }
         }
-      } catch {
-        // Expected on session close
+      } catch (error: any) {
+        loopError = String(error?.message || error);
       }
 
       if (this.state !== 3) {
         this.state = 3;
-        this.emitClose(0, "");
+        // The stream ended while the session was still open (e.g. the server
+        // reset it after a queue-full). Close the session immediately so it
+        // doesn't linger until the server's idle timeout kills it.
+        const reason = loopError ? `stream-ended:${loopError}` : "stream-ended:clean-fin";
+        try {
+          this.session.close({ code: 1, reason });
+        } catch {
+          // Session may already be unusable
+        }
+        this.emitClose(1, reason);
       }
     })();
 

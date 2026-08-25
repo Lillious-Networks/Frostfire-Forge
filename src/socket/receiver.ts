@@ -71,7 +71,7 @@ import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks, saveMapProperties, applyChunksWithRebase } from "../modules/assetloader";
 import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers, getEntitySpriteLayers } from "../modules/spriteSheetManager";
-import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate } from "./aoi";
+import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate, sendLoadPlayersChunked } from "./aoi";
 import { realmWhitelist, isWhitelistEnabled } from "./server.ts";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
@@ -156,7 +156,7 @@ let flushTick = 0;
 const movementProbeSeqs = new Map<string, number>();
 
 // Per-layer worker pool: keeps the movement batch encoding off the main event
-// loop (which the [LAG] diagnostics showed was saturated at high player counts).
+// loop.
 const workerLayerSynced = new Set<string>();
 
 setOnWorkerRetired((layerId: string) => {
@@ -165,8 +165,9 @@ setOnWorkerRetired((layerId: string) => {
 
 const MAX_BUFFER_BACKPRESSURE = 1024 * 32; // 32KB - aggressive at high loads
 // Spawn payloads are much larger than movement frames; gate them with a
-// higher threshold so churn bursts don't pile past the transport queue limit.
-const SPAWN_BACKPRESSURE_THRESHOLD = 1024 * 512; // 512KB
+// higher threshold - but keep it BELOW the transport's per-stream queue limit
+// (~256KB) so bursty spawn batches can never destroy the stream.
+const SPAWN_BACKPRESSURE_THRESHOLD = 1024 * 128; // 128KB
 
 // Track recent flush latencies for adaptive batch scheduling
 const LATENCY_HISTORY_SIZE = 5; // Keep last 5 flushes for fast recovery
@@ -559,7 +560,7 @@ async function flushSpawnBatches() {
     const spawnsForThisPlayer = Array.from(spawnedPlayers.values());
 
     if (spawnsForThisPlayer.length > 0) {
-      const MAX_SPAWNS_PER_FLUSH = 20;
+      const MAX_SPAWNS_PER_FLUSH = 10;
       const batchToSend = spawnsForThisPlayer.slice(0, MAX_SPAWNS_PER_FLUSH);
       const remaining = spawnsForThisPlayer.slice(MAX_SPAWNS_PER_FLUSH);
 
@@ -614,13 +615,7 @@ async function flushSpawnBatches() {
         })
       );
 
-      const loadPlayersData = {
-        players: playersWithSprites,
-        snapshotRevision: globalStateRevision
-      };
-
-      const packets = packetManager.loadPlayers(loadPlayersData);
-      sendPacket(receivingPlayer.ws, packets);
+      sendLoadPlayersChunked(sendPacket, receivingPlayer.ws, playersWithSprites, globalStateRevision);
 
       const animationPromises = playersWithSprites.map(async (spawnData) => {
         const spawnedPlayer = allPlayers[spawnData.id];
@@ -1455,12 +1450,10 @@ authWorker.on("message", async (result: any) => {
         playerDataForLoad.push(loadPlayerData);
       }
 
-      const loadPlayersData = {
-        players: playerDataForLoad,
-        snapshotRevision: snapshotRevision
-      };
-
-      sendPacket(ws, packetManager.loadPlayers(loadPlayersData));
+      // Chunk the initial player snapshot: a single frame with 50 sprite-laden
+      // players can exceed the transport's per-stream queue limit (~256KB) and
+      // destroy the stream during login.
+      sendLoadPlayersChunked(sendPacket, ws, playerDataForLoad, snapshotRevision);
 
       // Batch animation data for all existing players into one packet for the new player
       if (playerDataForLoad.length > 0) {
@@ -1476,8 +1469,10 @@ authWorker.on("message", async (result: any) => {
             });
           }
         }
-        if (animationDataArray.length > 0) {
-          sendPacket(ws, packetManager.batchSpriteSheetAnimation(animationDataArray));
+        // Chunked for the same queue-limit reason
+        const ANIMATION_CHUNK_SIZE = 25;
+        for (let i = 0; i < animationDataArray.length; i += ANIMATION_CHUNK_SIZE) {
+          sendPacket(ws, packetManager.batchSpriteSheetAnimation(animationDataArray.slice(i, i + ANIMATION_CHUNK_SIZE)));
         }
       }
 

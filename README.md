@@ -206,7 +206,7 @@ The realm will display a "whitelist" badge in the realm selection UI when `WHITE
 
 **Option 1: Use prebuilt Docker image:**
 ```bash
-docker run -d --name frostfire-forge-dev -p 3000:3000 -p 3000:3000/udp ghcr.io/lillious-networks/frostfire-forge-dev:latest
+docker run -d --name frostfire-forge-dev -p 3000:3000 -p 3000:3000/udp --ulimit nofile=1048576:1048576 ghcr.io/lillious-networks/frostfire-forge-dev:latest
 ```
 
 **Option 2: Build and run from source:**

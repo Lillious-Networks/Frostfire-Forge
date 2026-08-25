@@ -278,6 +278,10 @@ function recordTimeSyncReply(client: any, message: any): void {
 
 const movementStats = { starts: 0, aborts: 0, logouts: 0, abruptDisconnects: 0 };
 
+// Base session lifetime for simulated clients, set to the simulation span by
+// runSimulation (see the sessionUntil comment in startMovementSimulation).
+let simulationLifetimeBaseMs = 300000;
+
 const clientIntervals = new Map<any, { timeSync: any }>();
 
 const pendingTimeouts = new Map<any, Set<any>>();
@@ -486,7 +490,10 @@ function startMovementSimulation(client: any, initialDelay: number = 0) {
         position: null as { x: number; y: number } | null,
         home: null as { x: number; y: number } | null,
         state: 'idle' as string,
-        sessionUntil: Date.now() + (60000 + Math.random() * 240000),
+        // Session lifetimes scale with the simulation span (1-3x the duration).
+        // Short fixed lifetimes churn the population faster than the connection
+        // rate can replenish it, capping max concurrency below the target.
+        sessionUntil: Date.now() + (simulationLifetimeBaseMs + Math.random() * simulationLifetimeBaseMs * 2),
     };
 
     // Track own position from 0x02 MOVEXY echo datagrams (server echoes mover
@@ -983,8 +990,9 @@ const SIMULATION_SEGMENTS: Array<{ start: number; end: number; from: number; to:
     { start: 0.10, end: 0.20, from: 0.20, to: 0.15, label: 'Mid-morning dip' },
     { start: 0.20, end: 0.40, from: 0.15, to: 0.70, label: 'Lunch ramp' },
     { start: 0.40, end: 0.50, from: 0.70, to: 1.00, label: 'Peak buildup' },
-    { start: 0.50, end: 0.65, from: 1.00, to: 0.85, label: 'Peak hours' },
-    { start: 0.65, end: 0.85, from: 0.85, to: 0.30, label: 'Evening decline' },
+    // The peak is HELD at 100% for the full peak phase, then declines.
+    { start: 0.50, end: 0.70, from: 1.00, to: 1.00, label: 'Peak hours' },
+    { start: 0.70, end: 0.85, from: 1.00, to: 0.30, label: 'Evening decline' },
     { start: 0.85, end: 1.00, from: 0.30, to: 0.10, label: 'Late night' },
 ];
 
@@ -1099,15 +1107,34 @@ async function runSimulation(config: ReturnType<typeof parseArgs>) {
     // rate itself never scales with the total required.
     const connectionRate = config.rate > 0 ? config.rate : 25;
 
-    // The steepest curve segment (peak buildup: 30% of the peak over 10% of
-    // the span) dictates the required connection rate. When the configured
-    // rate can't sustain the peak, stretch the duration instead of raising
-    // the rate.
-    const MAX_SEGMENT_SLOPE = 3.0;
-    const minDurationForRate = Math.ceil((peakClients * MAX_SEGMENT_SLOPE) / connectionRate);
-    const requestedDuration = config.durationSet ? config.duration : 300;
-    const duration = Math.max(requestedDuration, minDurationForRate);
-    const durationStretched = duration > requestedDuration;
+    // The connection rate must cover three demands at the peak:
+    // 1. the curve's steepest segment (peak buildup: 30% of the peak over 10%
+    //    of the span -> 3.0 * peak / duration)
+    // 2. natural session expiry (avg lifetime = 2x the duration -> 0.5 *
+    //    peak / duration)
+    // 3. churn (0.2%/s of the active population)
+    // A 15% margin is applied so the demand never sits exactly at the cap
+    // (any pipeline hiccup then causes a shortfall that never recovers).
+    const MAX_SEGMENT_SLOPE = 3.5;
+    const CHURN_PER_SEC_FRACTION = 0.002;
+    const RATE_MARGIN = 0.85;
+    const sustainableRate = connectionRate * RATE_MARGIN - CHURN_PER_SEC_FRACTION * peakClients;
+    let duration: number;
+    let durationStretched = false;
+
+    if (sustainableRate <= 0) {
+        // Even churn alone exceeds the configured rate; the peak is unreachable
+        // at any duration.
+        duration = config.durationSet ? config.duration : 300;
+        log(`Warning: churn (${CHURN_PER_SEC_FRACTION * peakClients}/s) alone exceeds the connection rate (${connectionRate}/s) - the peak will not be reached`, 'warn');
+    } else {
+        const minDurationForRate = Math.ceil((peakClients * MAX_SEGMENT_SLOPE) / sustainableRate);
+        const requestedDuration = config.durationSet ? config.duration : 300;
+        duration = Math.max(requestedDuration, minDurationForRate);
+        durationStretched = duration > requestedDuration;
+    }
+
+    simulationLifetimeBaseMs = duration * 1000;
 
     console.log('\n' + chalk.bold.cyan('-'.repeat(60)));
     console.log(chalk.bold.cyan('  Frostfire Forge CLI Benchmark - Simulation Mode'));
@@ -1138,32 +1165,66 @@ async function runSimulation(config: ReturnType<typeof parseArgs>) {
     connectWave(initialWave, config);
 
     let lastProgressDraw = 0;
+    let lastTickAt = Date.now();
+    let lastTargetFraction = 0;
 
     const tick = () => {
         if (stopped) return;
 
-        const elapsed = (Date.now() - startTime) / 1000;
+        const now = Date.now();
+        // Compensate for event-loop lag in the benchmark process itself: at
+        // thousands of sessions the 1s timer can fire late, and a lagged tick
+        // would otherwise spawn just one wave instead of one per missed second.
+        const secondsSinceLastTick = Math.min(Math.max((now - lastTickAt) / 1000, 1), 5);
+        lastTickAt = now;
+
+        const elapsed = (now - startTime) / 1000;
         const t = Math.min(elapsed / duration, 1);
         const { fraction } = simulateTargetFraction(t);
         const target = Math.max(0, Math.round(peakClients * fraction));
 
+        // The peak must be MAINTAINED for the whole peak phase: while the
+        // curve is at 100% (flat peak) or still rising, never tear down active
+        // clients - pending logins will settle into the gap on their own.
+        // Disconnects are only used to follow genuine curve declines.
+        const isPeakPhase = fraction === 1;
+        const isDeclining = fraction < lastTargetFraction;
+        lastTargetFraction = fraction;
+
         const active = countActiveConnections();
         if (active > maxConcurrent) maxConcurrent = active;
 
-        const churn = Math.max(1, Math.round(active * 0.002));
-        disconnectRandomClients(Math.floor(Math.random() * (churn + 1)));
-        const churnReconnects = Math.floor(Math.random() * (churn + 1));
-        if (churnReconnects > 0) connectWave(Math.min(churnReconnects, Math.max(1, Math.floor(connectionRate / 2))), config);
-
-        const delta = target - countActiveConnections() - pendingConnects;
-
-        if (delta > 0) {
-            connectWave(Math.min(delta, connectionRate), config);
-        } else if (delta < 0) {
-            disconnectRandomClients(Math.min(-delta, countActiveConnections()));
+        if (!isPeakPhase) {
+            // Churn is a fixed 0.2%/s of the population - do NOT scale it by
+            // the tick lag (lag compensation is for the wave cap only).
+            const churn = Math.max(1, Math.round(active * 0.002));
+            disconnectRandomClients(Math.floor(Math.random() * (churn + 1)));
+            const churnReconnects = Math.floor(Math.random() * (churn + 1));
+            if (churnReconnects > 0) connectWave(Math.min(churnReconnects, Math.max(1, Math.floor(connectionRate / 2) * secondsSinceLastTick)), config);
         }
 
-        const now = Date.now();
+        // Keep the login pipeline SATURATED without overshooting the target:
+        // in-flight logins (pendingConnects) count toward the target, so demand
+        // is the gap above active AND pending. Overshooting the peak was
+        // caused by requesting the full active-gap while logins were already
+        // in flight.
+        const MAX_PENDING_CONNECTS = Math.max(connectionRate * 30, 300);
+        const want = target - countActiveConnections() - pendingConnects;
+        const roomInPipeline = Math.max(0, MAX_PENDING_CONNECTS - pendingConnects);
+        const waveCap = Math.max(1, Math.round(connectionRate * secondsSinceLastTick));
+
+        if (want > 0 && roomInPipeline > 0) {
+            connectWave(Math.min(want, roomInPipeline, waveCap), config);
+        } else if (isDeclining || isPeakPhase) {
+            // Trim only the excess above the target (in-flight included) so
+            // the population settles exactly on the curve - including the
+            // flat peak, which must hold the target without overshoot.
+            const excess = countActiveConnections() + pendingConnects - target;
+            if (excess > 0) {
+                disconnectRandomClients(excess);
+            }
+        }
+
         if (now - lastProgressDraw >= 1000) {
             lastProgressDraw = now;
             process.stdout.write('\x1b[2K\r');
