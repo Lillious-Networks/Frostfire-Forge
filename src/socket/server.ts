@@ -456,12 +456,20 @@ const webTransportPort = gamePort;
 // own certificate instead.
 const probeInsecureSkipVerify = process.env.TLS_INSECURE_SKIP_VERIFY !== "false";
 
+// The probe URL must match the certificate's SANs when verification is
+// enabled - 127.0.0.1 is only valid while skipping verification.
+const probeHost = probeInsecureSkipVerify
+  ? "127.0.0.1"
+  : (process.env.PUBLIC_HOST || process.env.SERVER_HOST || "localhost")
+      .replace(/^https?:\/\//, "")
+      .replace(/:\d+$/, "");
+
 async function verifyWebTransportListener(port: number): Promise<void> {
   try {
     const tlsOptions = probeInsecureSkipVerify
       ? { insecureSkipVerify: true }
       : { caPem: webTransportTls!.certPem };
-    const probe = await connect(`https://127.0.0.1:${port}`, { tls: tlsOptions });
+    const probe = await connect(`https://${probeHost}:${port}`, { tls: tlsOptions });
     try {
       probe.close({ code: 0, reason: "startup-probe" });
     } catch (error: any) {
