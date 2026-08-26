@@ -19,29 +19,30 @@ networks:
     driver_opts:
       com.docker.network.driver.mtu: "1450"
 
-# Shared env for the three game servers (prod values come from env_file; the
-# quoted values are re-declared unquoted because compose env_file passes quotes
-# through verbatim).
+# Shared env for the three game servers. All values default to the existing
+# production setup; override per host by exporting shell variables before
+# `docker compose up` (compose interpolates ${VAR:-default} from the shell) or
+# by placing a .env file next to this compose file.
 x-game-env: &game-env
   MESH_ENABLED: "true"
-  MESH_CLUSTER: "overworld"
-  MESH_SECRET: "frostfire-mesh-test-secret"
+  MESH_CLUSTER: "${MESH_CLUSTER:-overworld}"
+  MESH_SECRET: "${MESH_SECRET:-frostfire-mesh-test-secret}"
   MESH_HOST: "0.0.0.0"
   MESH_PORT: "3001"
-  PUBLIC_HOST: localhost
+  PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
   DATABASE_ENGINE: mysql
-  DATABASE_HOST: host.docker.internal
-  DATABASE_NAME: Mystika
-  DATABASE_USER: root
-  DATABASE_PASSWORD: 'Cookes99?!'
+  DATABASE_HOST: ${DATABASE_HOST:-host.docker.internal}
+  DATABASE_NAME: ${DATABASE_NAME:-Mystika}
+  DATABASE_USER: ${DATABASE_USER:-root}
+  DATABASE_PASSWORD: '${DATABASE_PASSWORD:-Cookes99?!}'
   DATABASE_PORT: "3306"
   SQL_SSL_MODE: DISABLED
-  GATEWAY_URL: https://host.docker.internal:9443
-  GATEWAY_AUTH_KEY: 27b4770d-5ca1-4065-98d0-33ebc64e807c
-  GATEWAY_GAME_SERVER_SECRET: 8bc13ecb-3b4d-4f10-bee9-c929458d527c
-  ASSET_SERVER_URL: https://host.docker.internal:8443
-  ASSET_SERVER_PUBLIC_URL: https://localhost:8443
-  ASSET_SERVER_AUTH_KEY: 8bc13ecb-3b4d-4f10-bee9-c929458d527c
+  GATEWAY_URL: ${GATEWAY_URL:-https://host.docker.internal:9443}
+  GATEWAY_AUTH_KEY: ${GATEWAY_AUTH_KEY:-27b4770d-5ca1-4065-98d0-33ebc64e807c}
+  GATEWAY_GAME_SERVER_SECRET: ${GATEWAY_GAME_SERVER_SECRET:-8bc13ecb-3b4d-4f10-bee9-c929458d527c}
+  ASSET_SERVER_URL: ${ASSET_SERVER_URL:-https://host.docker.internal:8443}
+  ASSET_SERVER_PUBLIC_URL: ${ASSET_SERVER_PUBLIC_URL:-https://localhost:8443}
+  ASSET_SERVER_AUTH_KEY: ${ASSET_SERVER_AUTH_KEY:-8bc13ecb-3b4d-4f10-bee9-c929458d527c}
   GAME_NAME: Mystika
   LOG_LEVEL: debug
   HTTP_USE_SSL: "true"
@@ -56,6 +57,8 @@ x-game-service: &game-service
   image: frostfire-forge-swarm:latest
   env_file:
     - ../../.env.production
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
   networks:
     - forge-mesh-bridge
   volumes:
