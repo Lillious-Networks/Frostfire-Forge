@@ -32,6 +32,14 @@ GATEWAY_GAME_SERVER_SECRET=""
 SERVER_ID="server-1"
 SERVER_HOST="localhost"
 PUBLIC_HOST="localhost"
+MESH_ENABLED=false
+MESH_HOST="0.0.0.0"
+MESH_PORT=3001
+MESH_ADVERTISE_HOST="localhost"
+MESH_CLUSTER=""
+MESH_SECRET=""
+MESH_SERVER_INDEX=0
+MESH_PEERS=""
 `;
 
 const production_environment_variables = `DATABASE_ENGINE=""
@@ -61,6 +69,14 @@ PUBLIC_HOST=""
 GATEWAY_URL=""
 GATEWAY_AUTH_KEY=""
 GATEWAY_GAME_SERVER_SECRET=""
+MESH_ENABLED=false
+MESH_HOST="0.0.0.0"
+MESH_PORT=3001
+MESH_ADVERTISE_HOST=""
+MESH_CLUSTER=""
+MESH_SECRET=""
+MESH_SERVER_INDEX=0
+MESH_PEERS=""
 
 CACHE=""
 REDIS_URL=""
@@ -146,6 +162,13 @@ if (!fs.existsSync(path.join(configPath, "settings.json"))) {
       rateLimits: settings.webtransport.rateLimits,
     };
     console.log(`Migrated 'websocket' to 'webtransport'`);
+  }
+
+  // Oversized datagrams (8192) break browser WebTransport (RFC 9221: a QUIC
+  // datagram must fit one QUIC packet). Clamp migrated configs back down.
+  if (existing.webtransport && Number(existing.webtransport.maxDatagramSize) > 1200) {
+    existing.webtransport.maxDatagramSize = 1200;
+    console.log(`Migrated 'webtransport.maxDatagramSize' back to 1200 (browser-safe)`);
   }
 
   if (existing.websocketRatelimit || existing.websocket) {

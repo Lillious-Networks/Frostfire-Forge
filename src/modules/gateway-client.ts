@@ -58,7 +58,13 @@ class GatewayClient {
           useSSL: resolveUseSSL(),
           maxConnections: this.config.maxConnections,
           authKey: process.env.GATEWAY_AUTH_KEY,
-          whitelisted: process.env.WHITELIST === 'true'
+          whitelisted: process.env.WHITELIST === 'true',
+          // Mesh fields: ignored by gateways without mesh support
+          meshEnabled: this.config.meshEnabled === true,
+          meshPort: this.config.meshPort ?? null,
+          meshAdvertiseHost: this.config.meshAdvertiseHost ?? null,
+          meshCluster: this.config.meshCluster ?? null,
+          meshServerIndex: this.config.meshServerIndex ?? null,
         })
       });
 
@@ -79,6 +85,20 @@ class GatewayClient {
           clearTimeout(this.reconnectTimer);
           this.reconnectTimer = undefined;
         }
+
+        // Mesh servers get a coordinated index from the gateway. Adopt it as
+        // the id-band seed when the operator hasn't pinned one explicitly.
+        const assignedIndex = parseInt(result?.serverIndex, 10);
+        if (
+          Number.isInteger(assignedIndex) &&
+          assignedIndex >= 1 &&
+          assignedIndex <= 254 &&
+          !process.env.MESH_SERVER_INDEX
+        ) {
+          process.env.MESH_SERVER_INDEX = String(assignedIndex);
+          log.info(`[Mesh] Gateway assigned server index ${assignedIndex}`);
+        }
+
         log.success(`Successfully registered with gateway as ${this.config.serverId}`);
         await this.sendHeartbeat();
         this.startHeartbeat();

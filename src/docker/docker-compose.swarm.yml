@@ -1,0 +1,124 @@
+# Frostfire Forge mesh swarm (production environment).
+#
+# Three meshed game servers running the production configuration
+# (.env.production). The mesh is enabled through per-service overrides below;
+# everything else (DB, gateway, asset server, TLS) comes from .env.production.
+#
+# Deploy:
+#   docker swarm init
+#   docker stack deploy -c src/docker/docker-compose.swarm.yml forge-mesh
+# Watch:
+#   docker service logs -f forge-mesh_server-1
+# Tear down:
+#   docker stack rm forge-mesh
+
+networks:
+  forge-mesh:
+    driver: overlay
+
+# Shared env for the three game servers. The prod env_file values are quoted
+# ("root" etc.) which compose env_file passes through verbatim, so the
+# functional values are re-declared here unquoted (same prod values, same host
+# services, reachable via host.docker.internal).
+x-game-env: &game-env
+  MESH_ENABLED: "true"
+  MESH_CLUSTER: "overworld"
+  MESH_SECRET: "frostfire-mesh-test-secret"
+  MESH_HOST: "0.0.0.0"
+  MESH_PORT: "3001"
+  PUBLIC_HOST: localhost
+  DATABASE_ENGINE: mysql
+  DATABASE_HOST: host.docker.internal
+  DATABASE_NAME: Mystika
+  DATABASE_USER: root
+  DATABASE_PASSWORD: 'Cookes99?!'
+  DATABASE_PORT: "3306"
+  SQL_SSL_MODE: DISABLED
+  GATEWAY_URL: https://host.docker.internal:9443
+  GATEWAY_AUTH_KEY: 27b4770d-5ca1-4065-98d0-33ebc64e807c
+  GATEWAY_GAME_SERVER_SECRET: 8bc13ecb-3b4d-4f10-bee9-c929458d527c
+  ASSET_SERVER_URL: https://host.docker.internal:8443
+  ASSET_SERVER_PUBLIC_URL: https://localhost:8443
+  ASSET_SERVER_AUTH_KEY: 8bc13ecb-3b4d-4f10-bee9-c929458d527c
+  GAME_NAME: Mystika
+  LOG_LEVEL: debug
+  HTTP_USE_SSL: "true"
+  TLS_CERT_PATH: ./src/certs/cert.pem
+  TLS_KEY_PATH: ./src/certs/key.pem
+  TLS_CA_PATH: ./src/certs/cert.ca-bundle
+  CORS_ALLOWED_ORIGINS: "*"
+  WHITELIST: "false"
+  WT_HANDSHAKE_RATE_LIMIT_DISABLED: "true"
+
+x-game-service: &game-service
+  image: frostfire-forge-swarm:latest
+  env_file:
+    - ../../.env.production
+  networks:
+    - forge-mesh
+  volumes:
+    - ../../src/certs:/app/src/certs:ro
+  healthcheck:
+    test: ["CMD", "bun", "-e", "process.env.NODE_TLS_REJECT_UNAUTHORIZED='0'; const p=process.env.GAME_PORT||3000; const s=process.env.HTTP_USE_SSL==='true'?'https':'http'; const r=await fetch(s+'://localhost:'+p+'/status').catch(()=>null); process.exit(r&&r.ok?0:1)"]
+    interval: 10s
+    timeout: 5s
+    retries: 30
+    start_period: 20s
+  deploy:
+    replicas: 1
+    resources:
+      limits:
+        memory: 4G
+      reservations:
+        memory: 1G
+        cpus: "1.0"
+    restart_policy:
+      condition: any
+      delay: 5s
+      window: 30s
+
+services:
+  server-1:
+    <<: *game-service
+    environment:
+      <<: *game-env
+      SERVER_ID: "server-1"
+      SERVER_DESCRIPTION: "Mesh prod server 1"
+      SERVER_HOST: "server-1"
+      MESH_ADVERTISE_HOST: "server-1"
+      MESH_SERVER_INDEX: "1"
+      MESH_PEERS: "server-2=server-2:3001,server-3=server-3:3001"
+      GAME_PORT: "3000"
+    ports:
+      - "3000:3000"
+      - "3000:3000/udp"
+
+  server-2:
+    <<: *game-service
+    environment:
+      <<: *game-env
+      SERVER_ID: "server-2"
+      SERVER_DESCRIPTION: "Mesh prod server 2"
+      SERVER_HOST: "server-2"
+      MESH_ADVERTISE_HOST: "server-2"
+      MESH_SERVER_INDEX: "2"
+      MESH_PEERS: "server-1=server-1:3001,server-3=server-3:3001"
+      GAME_PORT: "3010"
+    ports:
+      - "3010:3010"
+      - "3010:3010/udp"
+
+  server-3:
+    <<: *game-service
+    environment:
+      <<: *game-env
+      SERVER_ID: "server-3"
+      SERVER_DESCRIPTION: "Mesh prod server 3"
+      SERVER_HOST: "server-3"
+      MESH_ADVERTISE_HOST: "server-3"
+      MESH_SERVER_INDEX: "3"
+      MESH_PEERS: "server-1=server-1:3001,server-2=server-2:3001"
+      GAME_PORT: "3020"
+    ports:
+      - "3020:3020"
+      - "3020:3020/udp"

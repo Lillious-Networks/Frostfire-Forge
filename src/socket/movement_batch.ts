@@ -1,4 +1,7 @@
 export const BATCH_HEADER = 0x01;
+// Hard cap: QUIC datagrams must fit a single QUIC packet (RFC 9221) or
+// browsers silently drop them. ~1200 bytes is the safe ceiling; larger values
+// break Chrome's WebTransport receive path entirely (movement freezes).
 export const MAX_DATAGRAM_SIZE = 1200;
 const ENTRY_BYTES = 9;
 const PROBE_BYTES = 10; // [u32 seq][u32 seconds][u16 ms]

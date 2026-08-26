@@ -517,6 +517,11 @@ declare interface ServerRegistrationConfig {
   wtEnabled?: boolean;
   maxConnections: number;
   heartbeatInterval: number;
+  meshEnabled?: boolean;
+  meshPort?: Nullable<number>;
+  meshAdvertiseHost?: Nullable<string>;
+  meshCluster?: Nullable<string>;
+  meshServerIndex?: Nullable<number>;
 }
 
 declare interface Entity {

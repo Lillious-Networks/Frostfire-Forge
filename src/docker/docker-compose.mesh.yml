@@ -1,0 +1,134 @@
+# Frostfire Forge mesh stack (plain compose, NOT swarm).
+#
+# Docker Desktop's swarm-mode UDP ingress drops/hangs browser QUIC handshakes
+# on Windows (Bun's QUIC client tolerates it, Chrome's does not - connections
+# to published ports other than the first one intermittently never complete).
+# Plain bridge networking uses the standard Docker port forwarding, which the
+# browser has no problem with.
+#
+# Deploy:
+#   docker compose -f src/docker/docker-compose.mesh.yml up -d
+# Watch:
+#   docker compose -f src/docker/docker-compose.mesh.yml logs -f server-1
+# Tear down:
+#   docker compose -f src/docker/docker-compose.mesh.yml down
+
+networks:
+  forge-mesh-bridge:
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: "1450"
+
+# Shared env for the three game servers (prod values come from env_file; the
+# quoted values are re-declared unquoted because compose env_file passes quotes
+# through verbatim).
+x-game-env: &game-env
+  MESH_ENABLED: "true"
+  MESH_CLUSTER: "overworld"
+  MESH_SECRET: "frostfire-mesh-test-secret"
+  MESH_HOST: "0.0.0.0"
+  MESH_PORT: "3001"
+  PUBLIC_HOST: localhost
+  DATABASE_ENGINE: mysql
+  DATABASE_HOST: host.docker.internal
+  DATABASE_NAME: Mystika
+  DATABASE_USER: root
+  DATABASE_PASSWORD: 'Cookes99?!'
+  DATABASE_PORT: "3306"
+  SQL_SSL_MODE: DISABLED
+  GATEWAY_URL: https://host.docker.internal:9443
+  GATEWAY_AUTH_KEY: 27b4770d-5ca1-4065-98d0-33ebc64e807c
+  GATEWAY_GAME_SERVER_SECRET: 8bc13ecb-3b4d-4f10-bee9-c929458d527c
+  ASSET_SERVER_URL: https://host.docker.internal:8443
+  ASSET_SERVER_PUBLIC_URL: https://localhost:8443
+  ASSET_SERVER_AUTH_KEY: 8bc13ecb-3b4d-4f10-bee9-c929458d527c
+  GAME_NAME: Mystika
+  LOG_LEVEL: debug
+  HTTP_USE_SSL: "true"
+  TLS_CERT_PATH: ./src/certs/cert.pem
+  TLS_KEY_PATH: ./src/certs/key.pem
+  TLS_CA_PATH: ./src/certs/cert.ca-bundle
+  CORS_ALLOWED_ORIGINS: "*"
+  WHITELIST: "false"
+  WT_HANDSHAKE_RATE_LIMIT_DISABLED: "true"
+
+x-game-service: &game-service
+  image: frostfire-forge-swarm:latest
+  env_file:
+    - ../../.env.production
+  networks:
+    - forge-mesh-bridge
+  volumes:
+    - ../../src/certs:/app/src/certs:ro
+  restart: unless-stopped
+  mem_limit: 4g
+  healthcheck:
+    test: ["CMD", "bun", "-e", "process.env.NODE_TLS_REJECT_UNAUTHORIZED='0'; const p=process.env.GAME_PORT||3000; const s=process.env.HTTP_USE_SSL==='true'?'https':'http'; const r=await fetch(s+'://localhost:'+p+'/status').catch(()=>null); process.exit(r&&r.ok?0:1)"]
+    interval: 10s
+    timeout: 5s
+    retries: 30
+    start_period: 20s
+
+services:
+  server-1:
+    <<: *game-service
+    environment:
+      <<: *game-env
+      SERVER_ID: "server-1"
+      SERVER_DESCRIPTION: "Mesh server 1"
+      SERVER_HOST: "server-1"
+      MESH_ADVERTISE_HOST: "server-1"
+      MESH_SERVER_INDEX: "1"
+      MESH_PEERS: "server-2=server-2:3001,server-3=server-3:3001"
+      GAME_PORT: "3000"
+    ports:
+      - target: 3000
+        published: 3000
+        mode: host
+        protocol: tcp
+      - target: 3000
+        published: 3000
+        mode: host
+        protocol: udp
+
+  server-2:
+    <<: *game-service
+    environment:
+      <<: *game-env
+      SERVER_ID: "server-2"
+      SERVER_DESCRIPTION: "Mesh server 2"
+      SERVER_HOST: "server-2"
+      MESH_ADVERTISE_HOST: "server-2"
+      MESH_SERVER_INDEX: "2"
+      MESH_PEERS: "server-1=server-1:3001,server-3=server-3:3001"
+      GAME_PORT: "3010"
+    ports:
+      - target: 3010
+        published: 3010
+        mode: host
+        protocol: tcp
+      - target: 3010
+        published: 3010
+        mode: host
+        protocol: udp
+
+  server-3:
+    <<: *game-service
+    environment:
+      <<: *game-env
+      SERVER_ID: "server-3"
+      SERVER_DESCRIPTION: "Mesh server 3"
+      SERVER_HOST: "server-3"
+      MESH_ADVERTISE_HOST: "server-3"
+      MESH_SERVER_INDEX: "3"
+      MESH_PEERS: "server-1=server-1:3001,server-2=server-2:3001"
+      GAME_PORT: "3020"
+    ports:
+      - target: 3020
+        published: 3020
+        mode: host
+        protocol: tcp
+      - target: 3020
+        published: 3020
+        mode: host
+        protocol: udp

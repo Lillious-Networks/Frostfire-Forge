@@ -6,6 +6,8 @@ import mapIndex from "../services/mapindex";
 import parties from "../systems/parties";
 import { packetManager } from "./packet_manager";
 import spatialGrid from "../services/spatialgrid";
+import * as meshReplication from "../mesh/replication";
+import { getAoiExitRadiusMultiplier } from "../mesh/config";
 
 export interface PlayerAOIState {
 
@@ -44,9 +46,12 @@ export async function initializePlayerAOI(player: any): Promise<void> {
   const pos = player.location.position;
   const mapName = player.location.map.replaceAll(".json", "");
 
-  let layerId: string;
+  let layerId: string | null = null;
 
-  if (player.party_id) {
+  // Meshed maps bypass the in-process layer cap entirely: visibility is bound
+  // by the AOI radius only, and remote players arrive as replicated ghosts.
+  if (!meshReplication.isMeshEnabled()) {
+    if (player.party_id) {
     const partyId = player.party_id;
     const partyLeader = await parties.getPartyLeader(partyId);
     const partyMembers = await parties.getPartyMembers(partyId);
@@ -118,6 +123,7 @@ export async function initializePlayerAOI(player: any): Promise<void> {
 
     layerId = layerManager.assignPlayerToLayer(player.id, mapName);
   }
+  }
 
   if (player.aoi) return;
 
@@ -145,7 +151,7 @@ function filterPlayersByDistance(
 ): any[] {
   const radiusSquared = radius * radius;
   const sourcePos = sourcePlayer.location.position;
-  const sourceLayerId = sourcePlayer.aoi?.layerId;
+  const sourceLayerId = sourcePlayer.aoi?.layerId ?? null;
   const sourceMap = map.replaceAll(".json", "");
   const result: any[] = [];
 
@@ -164,7 +170,7 @@ function filterPlayersByDistance(
 
       if (player.id === sourcePlayer.id) continue;
 
-      const playerLayerId = player.aoi?.layerId;
+      const playerLayerId = player.aoi?.layerId ?? null;
       if (playerLayerId !== sourceLayerId) continue;
 
       const dx = player.location.position.x - sourcePos.x;
@@ -187,7 +193,7 @@ function filterPlayersByDistance(
       const playerMap = player.location.map.replaceAll(".json", "");
       if (playerMap !== sourceMap) continue;
 
-      const playerLayerId = player.aoi?.layerId;
+      const playerLayerId = player.aoi?.layerId ?? null;
       if (playerLayerId !== sourceLayerId) continue;
 
       const dx = player.location.position.x - sourcePos.x;
@@ -196,6 +202,22 @@ function filterPlayersByDistance(
 
       if (distSquared <= radiusSquared) {
         result.push(player);
+      }
+    }
+  }
+
+  // Meshed maps: remote players (ghosts) are AOI candidates like locals. The
+  // visibility cap becomes the AOI radius itself instead of the 50-player layer.
+  if (meshReplication.isMeshEnabled()) {
+    for (const ghost of meshReplication.getGhostsOnMap(sourceMap)) {
+      if (ghost.id === sourcePlayer.id) continue;
+
+      const dx = ghost.position.x - sourcePos.x;
+      const dy = ghost.position.y - sourcePos.y;
+      const distSquared = dx * dx + dy * dy;
+
+      if (distSquared <= radiusSquared) {
+        result.push(ghost);
       }
     }
   }
@@ -288,6 +310,15 @@ export async function updatePlayerAOI(
       currentMap
     );
 
+    // Hysteresis: entities enter at the AOI radius but only leave at the
+    // expanded exit radius. Without it, players wandering along a boundary
+    // trigger spawn/despawn floods every update (mesh benchmarks hit this
+    // constantly with random-walk bots).
+    const exitRadius = Math.round(aoiRadius * getAoiExitRadiusMultiplier());
+    const playersInExitRange = exitRadius > aoiRadius
+      ? new Set(filterPlayersByDistance(player, exitRadius, currentMap).map((p: any) => p.id))
+      : null;
+
     if (AOI_CONFIG.USE_SPATIAL_GRID) {
       spatialGrid.updatePlayer(player.id, currentPos.x, currentPos.y, currentMap);
     }
@@ -300,10 +331,14 @@ export async function updatePlayerAOI(
     const oldAOISet = player.aoi.playersInAOI;
 
     const enteredAOI: string[] = [...newAOISet].filter(id => !oldAOISet.has(id));
-    const exitedAOI: string[] = [...oldAOISet].filter(id => !newAOISet.has(id));
+    const exitedAOI: string[] = [...oldAOISet].filter(id =>
+      playersInExitRange ? !playersInExitRange.has(id) : !newAOISet.has(id)
+    );
 
     for (const enteredPlayerId of enteredAOI) {
-      const enteredPlayer = playerCache.get(enteredPlayerId);
+      const localPlayer = playerCache.get(enteredPlayerId);
+      const ghost = localPlayer ? null : meshReplication.getGhost(enteredPlayerId);
+      const enteredPlayer = localPlayer || ghost;
       if (!enteredPlayer) {
         continue;
       }
@@ -314,7 +349,21 @@ export async function updatePlayerAOI(
       const canSeePlayer = !player.isStealth && !player.isVanished || enteredPlayer.isAdmin || enteredPlayerForceSeePlayer || enteredPlayer.party?.includes(player.username);
 
       if (canSeeEntered && spawnBatchQueue) {
-        const spawnData = queueSpawnPlayerPacket(enteredPlayer);
+        let spawnData = localPlayer ? queueSpawnPlayerPacket(enteredPlayer) : null;
+        if (ghost && ghost.spawnData) {
+          // Rebuild the spawn payload with the ghost's latest position.
+          spawnData = {
+            ...ghost.spawnData,
+            location: {
+              ...(ghost.spawnData.location || {}),
+              map: ghost.map,
+              x: Math.round(ghost.position.x),
+              y: Math.round(ghost.position.y),
+              direction: ghost.position.direction || "down",
+              moving: false,
+            },
+          };
+        }
         if (spawnData) {
           if (!spawnBatchQueue.has(player.id)) {
             spawnBatchQueue.set(player.id, new Map());
@@ -323,7 +372,7 @@ export async function updatePlayerAOI(
         }
       }
 
-      if (canSeePlayer && spawnBatchQueue) {
+      if (canSeePlayer && spawnBatchQueue && localPlayer) {
         const spawnData = queueSpawnPlayerPacket(player);
         if (spawnData) {
           if (!spawnBatchQueue.has(enteredPlayer.id)) {
@@ -333,13 +382,16 @@ export async function updatePlayerAOI(
         }
       }
 
-      if (!enteredPlayer.aoi) {
-        await initializePlayerAOI(enteredPlayer);
+      // Ghosts have no local AOI state - only the viewer's interest set
+      // changes. The reverse direction is handled on the ghost's authority.
+      if (localPlayer) {
+        if (!enteredPlayer.aoi) {
+          await initializePlayerAOI(enteredPlayer);
+        }
+        enteredPlayer.aoi.playersInAOI.add(player.id);
+        enteredPlayer.aoi.revision = (enteredPlayer.aoi.revision || 0) + 1;
+        playerCache.set(enteredPlayer.id, enteredPlayer);
       }
-      enteredPlayer.aoi.playersInAOI.add(player.id);
-      enteredPlayer.aoi.revision = (enteredPlayer.aoi.revision || 0) + 1;
-      playerCache.set(enteredPlayer.id, enteredPlayer);
-
     }
 
     for (const exitedPlayerId of exitedAOI) {
@@ -521,8 +573,12 @@ export async function handleMapChangeAOI(
 
       despawnPlayerFromAllAOI(player, "map_change", undefined);
 
-      const newLayerId = layerManager.assignPlayerToLayer(player.id, newMap);
-      player.aoi.layerId = newLayerId;
+      if (meshReplication.isMeshEnabled()) {
+        player.aoi.layerId = null;
+      } else {
+        const newLayerId = layerManager.assignPlayerToLayer(player.id, newMap);
+        player.aoi.layerId = newLayerId;
+      }
 
       if (AOI_CONFIG.USE_SPATIAL_GRID) {
         spatialGrid.removePlayer(player.id);

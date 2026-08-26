@@ -1,4 +1,13 @@
-const assetServerUrl = process.env.ASSET_SERVER_URL || 'http://localhost:8000';
+// Asset URLs embedded in client-bound packets (spawn data, LOAD_MAP metadata,
+// inventory icons) must be reachable by the CLIENT. When the game server
+// reaches the asset server through an internal address (host.docker.internal
+// in containerized/meshed deployments), ASSET_SERVER_PUBLIC_URL provides the
+// client-facing base instead.
+export function getClientAssetServerUrl(): string {
+  return process.env.ASSET_SERVER_PUBLIC_URL || process.env.ASSET_SERVER_URL || 'http://localhost:8000';
+}
+
+const assetServerUrl = getClientAssetServerUrl();
 
 export interface SpriteUrl {
   name: string;

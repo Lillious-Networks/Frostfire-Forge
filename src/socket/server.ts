@@ -6,7 +6,7 @@ import "../utility/validate_config.ts";
 import crypto from "crypto";
 import { packetManager } from "./packet_manager.ts";
 import { packetTypes } from "./types.ts";
-import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady, teleportPlayerWrapper, removePlayerFromCleanupMaps, removeFromAuthenticationQueues } from "./receiver.ts";
+import packetReceiver, { despawnBatchQueue, spawnBatchQueue, movementBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady, teleportPlayerWrapper, removePlayerFromCleanupMaps, removeFromAuthenticationQueues } from "./receiver.ts";
 import eventEmitter from "node:events";
 import { listener } from "../modules/event_bus.ts";
 import { Events, setPlayerPvp } from "../systems/events";
@@ -21,7 +21,7 @@ import packet from "../modules/packet.ts";
 import fs from "node:fs";
 import query from "../controllers/sqldatabase";
 import { generateKeyPair } from "../modules/cipher.ts";
-import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondensation, findPlayersWithTargetInAOI } from "./aoi.ts";
+import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondensation, findPlayersWithTargetInAOI, updatePlayerAOI } from "./aoi.ts";
 import { loadPlugins, registerAllPlugins, mergePluginSpellsIntoCache } from "../modules/plugin_loader.ts";
 import { pluginHandlers, warpInterceptors, packetInterceptors } from "./receiver.ts";
 import { startWebTransportServer, TransportConnection } from "./transport.ts";
@@ -40,6 +40,15 @@ import effectManager from "../services/effectmanager";
 import { GatewayClient } from "../modules/gateway-client.ts";
 import loot from "../systems/loot";
 import cooldownManager from "../services/cooldownmanager";
+import { MeshLinks } from "../mesh/links.ts";
+import { loadMeshConfig, loadMeshStaticPeers, meshAdvertiseHost, getMeshServerIndex, assertEntityIdSpace } from "../mesh/config.ts";
+import * as meshReplication from "../mesh/replication.ts";
+import * as meshHandoff from "../mesh/handoff.ts";
+import * as meshDelivery from "../mesh/delivery.ts";
+import * as regions from "../mesh/regions.ts";
+import { MeshMessageType } from "../mesh/protocol.ts";
+import { sendToPlayer, sendBestEffortToPlayer } from "../mesh/delivery.ts";
+import { dispatchRemoteAvatarInput, dispatchRemoteAvatarPacket, buildMeshSpawnPayload } from "./receiver.ts";
 
 const _cert = process.env.TLS_CERT_PATH;
 const _key = process.env.TLS_KEY_PATH;
@@ -181,6 +190,26 @@ Bun.serve<Packet, any>({
       return new Response(JSON.stringify({ status: "ok" }));
     }
 
+    if (url.pathname === "/mesh-status" && req.method === "GET") {
+      const players = Object.values(playerCache.list());
+      const remoteSimPlayers = players.filter((p: any) => p.remoteSim);
+      const avatars = players.filter((p: any) => p.remoteAvatar);
+
+      return new Response(JSON.stringify({
+        enabled: meshConfig.enabled,
+        serverId,
+        meshServerIndex: getMeshServerIndex(),
+        connections: connections.size,
+        peers: meshLinks.getConnectedServerIds(),
+        peerCounts: meshReplication.getPeerCounts(),
+        ghosts: meshReplication.getGhostCount(),
+        ghostMaps: meshReplication.getGhostMaps(),
+        roster: regions.getRoster(),
+        remoteSimPlayers: remoteSimPlayers.map((p: any) => ({ id: p.id, username: p.username, authority: p.remoteAuthority, map: p.location?.map })),
+        avatars: avatars.map((p: any) => ({ id: p.id, username: p.username, presence: p.remotePresence, map: p.location?.map })),
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+
     if (req.method === "OPTIONS") {
       const corsHeaders = getCORSHeaders(requestOrigin);
 
@@ -273,7 +302,7 @@ function validateConnectionToken(
     return false;
   }
 
-  if (ALLOWED_ORIGINS.length > 0) {
+  if (ALLOWED_ORIGINS.length > 0 && !ALLOWED_ORIGINS.includes("*")) {
     if (!origin || !ALLOWED_ORIGINS.some(o => o.trim() === origin)) {
       log.warn(`Connection attempt with disallowed origin: ${origin}`);
       return false;
@@ -328,7 +357,10 @@ function broadcastConnectionCount() {
     "CONNECTION_COUNT",
     packet.encode(JSON.stringify({
       type: "CONNECTION_COUNT",
-      data: connections.size,
+      data: {
+        count: connections.size + meshReplication.getPeerConnectionCount(),
+        serverId,
+      },
     }))
   );
 }
@@ -514,6 +546,10 @@ const serverId = process.env.SERVER_ID || `server-${crypto.randomBytes(8).toStri
 const serverHost = process.env.SERVER_HOST || "localhost";
 const publicHost = process.env.PUBLIC_HOST || serverHost;
 
+const meshConfig = loadMeshConfig();
+const meshLinks = new MeshLinks(meshConfig);
+const meshPort = meshConfig.enabled ? meshConfig.port : null;
+
 gatewayClient = new GatewayClient({
   gatewayUrl: process.env.GATEWAY_URL || "http://localhost:9999",
   serverId,
@@ -526,16 +562,113 @@ gatewayClient = new GatewayClient({
   maxConnections: (settings as any)?.webtransport?.maxSessions || 2000,
   heartbeatInterval: settings?.gateway?.heartbeatInterval || 5000,
   assetServerUrl: process.env.ASSET_SERVER_URL || "http://localhost:8000",
+  meshEnabled: meshConfig.enabled,
+  meshPort,
+  meshAdvertiseHost: meshConfig.enabled ? meshAdvertiseHost() : null,
+  meshCluster: meshConfig.enabled ? meshConfig.cluster : null,
+  meshServerIndex: meshConfig.enabled ? getMeshServerIndex() || null : null,
 });
 
-await gatewayClient.registerWithRetry();
+// Start the mesh before gateway registration: the mesh does not depend on the
+// gateway (peer lists come from static config or later gateway endpoints), and
+// registerWithRetry loops forever while the gateway is unreachable.
+if (meshConfig.enabled) {
+  try {
+    await assertEntityIdSpace(query);
+    meshReplication.attachMeshLinks(meshLinks);
+    meshDelivery.attachMeshLinks(meshLinks);
+    meshHandoff.attachMeshLinks(meshLinks);
+    meshHandoff.initHandoff(serverId);
+    regions.initRegions(serverId, getMeshServerIndex());
+    meshReplication.attachHooks({
+      updatePlayerAOI: (p) => updatePlayerAOI(p, spawnBatchQueue, despawnBatchQueue),
+      queueDespawn: (receiverId, entityId) => {
+        if (!despawnBatchQueue.has(receiverId)) {
+          despawnBatchQueue.set(receiverId, new Set());
+        }
+        despawnBatchQueue.get(receiverId)!.add(entityId);
+      },
+      ensureMovementGroup: (mapName) => {
+        if (!movementBatchQueue.has(mapName)) {
+          movementBatchQueue.set(mapName, new Map());
+        }
+      },
+      queueLocalMover: (playerId, movementData) => {
+        const mover = playerCache.get(playerId);
+        if (!mover) return;
+        const groupKey = mover.aoi?.layerId || mover.location?.map;
+        if (!movementBatchQueue.has(groupKey)) {
+          movementBatchQueue.set(groupKey, new Map());
+        }
+        movementBatchQueue.get(groupKey)!.set(playerId, movementData);
+      },
+      handleRemoteInput: (playerId, directionIndex) =>
+        dispatchRemoteAvatarInput(playerId, directionIndex),
+      handleRemotePacket: (playerId, packetJson) =>
+        dispatchRemoteAvatarPacket(playerId, packetJson),
+      handleHandoffRequest: (peerServerId, payload) =>
+        meshHandoff.handleHandoffRequest(peerServerId, payload),
+      handleHandoffAccept: (payload) => meshHandoff.handleHandoffAccept(payload),
+      handleHandoffComplete: (payload) => meshHandoff.handleHandoffComplete(payload),
+      handleHandoffAbort: (payload) => meshHandoff.handleHandoffAbort(payload),
+      handleAuthorityDespawn: (peerServerId, playerId) =>
+        meshHandoff.handleAuthorityDespawn(peerServerId, playerId),
+      handleAuthorityDown: (peerServerId) => meshHandoff.handleAuthorityDown(peerServerId),
+    });
+    meshHandoff.attachHandoffHooks({
+      updatePlayerAOI: (p) => updatePlayerAOI(p, spawnBatchQueue, despawnBatchQueue),
+      buildSpawnData: (p) => buildMeshSpawnPayload(p),
+    });
+    meshLinks.setPeerList(loadMeshStaticPeers());
+    meshLinks.onMessage((peerServerId, type, payload) => {
+      meshReplication.handleMeshMessage(peerServerId, type, payload);
+    });
+    meshLinks.onPeerDown((peerServerId) => {
+      meshReplication.removeGhostsFromServer(peerServerId);
+    });
+    await meshLinks.start();
+
+    // Count propagation gets its own lightweight interval: the SERVER_TICK
+    // handler is the heaviest loop on the server and would delay both the
+    // peer exchange and the client-facing global total under load.
+    setInterval(() => {
+      meshLinks.broadcast(
+        MeshMessageType.CONNECTION_COUNT,
+        new TextEncoder().encode(JSON.stringify({ count: connections.size })),
+        false
+      );
+      broadcastConnectionCount();
+    }, 1000);
+
+    // Periodically refresh AOI for local players whose ghost sets changed
+    // (ghost spawns/despawns/teleports arriving from mesh peers).
+    setInterval(() => {
+      meshReplication.flushAoIRefreshQueue();
+    }, 250);
+
+    log.success(`[Mesh] Mesh links listening on UDP ${process.env.MESH_HOST || "0.0.0.0"}:${process.env.MESH_PORT || "3001"} (cluster "${meshConfig.cluster}")`);
+  } catch (error: any) {
+    log.error(`[Mesh] Failed to start mesh links: ${error?.message || error}`);
+  }
+}
+
+// Registration retries in the background: the game loop and mesh must boot
+// even while the gateway is unreachable. In production registration succeeds
+// within the first attempt, so this is equivalent to the old blocking await.
+gatewayClient.registerWithRetry().catch((error: any) => {
+  log.error(`Gateway registration loop failed: ${error?.message || error}`);
+});
 
 listener.emit(Events.AWAKE);
 listener.emit(Events.START);
 
 gameLoop.start();
-startAutoPartyLayerSync(sendAnimationTo);
-startAutoLayerCondensation(sendAnimationTo);
+if (!meshConfig.enabled) {
+  // Layer maintenance only applies when layers bound visibility. Meshed maps
+  // bypass layers entirely (AOI radius is the only cap).
+  startAutoPartyLayerSync(sendAnimationTo);
+  startAutoLayerCondensation(sendAnimationTo);
+}
 
 try {
   await loadPlugins(listener);
@@ -675,8 +808,8 @@ listener.on(Events.SERVER_TICK, async () => {
         ? PROCESS_STARTED_AT + rawLU
         : nowEpoch;
 
-    const wsClosed = !p.ws || p.ws.readyState !== 1;
-    const tooIdle = (nowEpoch - lastUpdatedEpoch) > 30000;
+    const wsClosed = p.remoteAvatar ? false : (!p.ws || p.ws.readyState !== 1);
+    const tooIdle = p.remoteAvatar ? false : (nowEpoch - lastUpdatedEpoch) > 30000;
 
     if (wsClosed || tooIdle) {
       inactiveSet.set(p.id, "inactive");
@@ -726,11 +859,11 @@ listener.on(Events.SERVER_TICK, async () => {
   }
 
   for (const playerData of players) {
-    if (!playerData || inactiveSet.has(playerData.id) || !playerData.ws) continue;
+    if (!playerData || inactiveSet.has(playerData.id) || (!playerData.ws && !playerData.remoteAvatar)) continue;
 
     // SERVER_TIME is sent every second to every player; deliver it as an
     // unreliable datagram so it never queues behind the reliable stream.
-    playerData.ws.sendBestEffort(packetManager.serverTime()[0]);
+    sendBestEffortToPlayer(playerData, packetManager.serverTime()[0]);
 
     const rawLA = typeof playerData.last_attack === "number" ? playerData.last_attack : 0;
     const lastAttackEpoch =
@@ -768,7 +901,7 @@ listener.on(Events.SERVER_TICK, async () => {
     };
 
     handleBackpressure(playerData.ws, () =>
-      playerData.ws.send(packetManager.updateStats(updateStatsData)[0])
+      sendToPlayer(playerData, packetManager.updateStats(updateStatsData)[0])
     );
 
     const observers = findPlayersWithTargetInAOI(playerData.id);
@@ -780,7 +913,7 @@ listener.on(Events.SERVER_TICK, async () => {
         other.ws.readyState === 1
       ) {
         handleBackpressure(other.ws, () =>
-          other.ws.send(packetManager.updateStats(updateStatsData)[0])
+          sendToPlayer(other, packetManager.updateStats(updateStatsData)[0])
         );
       }
     }
@@ -802,15 +935,12 @@ listener.on(Events.SERVER_TICK, async () => {
       if (!stillConnected) continue;
 
       if (reason === "session_stolen" && stillInCache.ws?.readyState === 1) {
-        try {
-          stillInCache.ws.send(
-            packetManager.notify({
-              message: "You have been logged in from another location.",
-            })
-          );
-        } catch {
-          console.error(`Failed to send session stolen notification to player ${id}`);
-        }
+        sendToPlayer(
+          stillInCache,
+          packetManager.notify({
+            message: "You have been logged in from another location.",
+          })
+        );
         packetQueue.delete(id);
         ClientRateLimit.delete(id);
         try {
@@ -863,15 +993,12 @@ listener.on("onDisconnect", async (data) => {
     if (!playerData) return;
 
     if (data.reason === "session_stolen" && playerData.ws?.readyState === 1) {
-      try {
-        playerData.ws.send(
-          packetManager.notify({
-            message: "You have been logged in from another location.",
-          })
-        );
-      } catch (err) {
-        console.error(`Failed to send session stolen notification to player ${data.id}`);
-      }
+      sendToPlayer(
+        playerData,
+        packetManager.notify({
+          message: "You have been logged in from another location.",
+        })
+      );
       try {
         playerData.ws.close(1000, "Logged in from another location");
       } catch (err) {
@@ -889,6 +1016,10 @@ listener.on("onDisconnect", async (data) => {
       }
 
       loot.scheduleCleanup(playerData.username);
+    }
+
+    if (meshReplication.isMeshEnabled() && playerData.location?.map) {
+      meshReplication.publishPlayerDespawn(playerData.id, playerData.location.map);
     }
 
     cleanupPlayerState(playerData);
@@ -940,9 +1071,7 @@ listener.on("onDisconnect", async (data) => {
       for (const friendUsername of playerData.friends) {
         const onlineFriend = usernameIndex.get(friendUsername.toLowerCase());
         if (onlineFriend?.ws?.readyState === 1) {
-          try {
-            onlineFriend.ws.send(packetManager.updateOnlineStatus({ online: false, username: playerData.username })[0]);
-          } catch (e) { /* ignore */ }
+          sendToPlayer(onlineFriend, packetManager.updateOnlineStatus({ online: false, username: playerData.username })[0]);
         }
       }
     }
@@ -996,6 +1125,7 @@ listener.on(Events.SAVE, async () => {
     if (!row) return { success: false, playerId, reason: "no_row" };
     if (row.isGuest) return { success: true, playerId, reason: "guest_skipped" };
     if (row.saveLocked) return { success: true, playerId, reason: "save_locked" };
+    if (row.remoteSim) return { success: true, playerId, reason: "remote_sim_skipped" };
     if (sessionInvalidSet.has(playerId)) {
       cleanupPlayerState(row);
       return { success: false, playerId, reason: "session_stolen" };
@@ -1057,7 +1187,14 @@ function handleBackpressure(ws: any, action: () => void, retryCount = 0) {
     return;
   }
 
-  if (!ws || ws.readyState !== 1) {
+  if (!ws) {
+    // Remote avatar: no local connection queue - deliver immediately (the
+    // mesh relay applies its own flow control).
+    action();
+    return;
+  }
+
+  if (ws.readyState !== 1) {
     log.warn("Connection is not open. Action cannot proceed.");
     return;
   }
@@ -1090,6 +1227,8 @@ async function gracefulShutdown(signal: string) {
   log.info(`Received ${signal}, shutting down gracefully...`);
 
   gameLoop.stop();
+
+  meshLinks.stop();
 
   if (gatewayClient) {
     await gatewayClient.unregister();

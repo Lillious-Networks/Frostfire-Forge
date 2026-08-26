@@ -50,7 +50,6 @@ import inventory from "../systems/inventory";
 import particles from "../systems/particles";
 import worlds from "../systems/worlds";
 import npcSystem from "../systems/npcs";
-import os from "os";
 import entitySystem from "../systems/entities";
 import entityAI from "../systems/entityAI";
 import spellEffects, { registerSpellEffect, spellHasHostileEffects, cancelEffect, setStunsForPlayer, setSlowsForPlayer } from "../systems/spelleffects";
@@ -70,8 +69,12 @@ import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks, saveMapProperties, applyChunksWithRebase } from "../modules/assetloader";
-import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers, getEntitySpriteLayers } from "../modules/spriteSheetManager";
+import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers, getEntitySpriteLayers, getClientAssetServerUrl } from "../modules/spriteSheetManager";
 import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate, sendLoadPlayersChunked } from "./aoi";
+import * as meshReplication from "../mesh/replication";
+import * as meshHandoff from "../mesh/handoff";
+import { DIRECTION_NAMES } from "../mesh/protocol";
+import { sendToPlayer } from "../mesh/delivery";
 import { realmWhitelist, isWhitelistEnabled } from "./server.ts";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
@@ -138,6 +141,17 @@ let restartTimers: ReturnType<typeof setTimeout>[];
 let globalStateRevision: number = 0;
 
 export const pluginHandlers = new Map<string, PluginHandlerFn>();
+
+// Client packets that must execute on the avatar's authority server while a
+// player is remotely simulated. Everything else stays local to the presence.
+const AUTHORITY_ROUTED_PACKETS = new Set<string>([
+  "MOVEXY",
+  "ATTACK",
+  "CAST_SPELL",
+  "PROJECTILE",
+  "MOUNT",
+  "ANIMATION",
+]);
 
 export const warpInterceptors: Array<(warp: { map: string; x: number; y: number }, wt: any, player: any, sendPacket: (wt: any, packets: any[]) => void) => Promise<boolean>> = [];
 
@@ -246,37 +260,53 @@ async function getInventorySlots(player: any): Promise<number> {
 function getAdaptiveBatchInterval(): number {
   const avgLatency = getAverageFlushLatency();
 
+  // Bun's event loop is effectively single-threaded: throttle on the fraction
+  // of ONE core the process is burning, not the share of the whole host
+  // (os.cpus() inside a container reports every host core, which made the old
+  // threshold unreachable on multicore machines).
   if (currentCpuBusy > 0.85) {
     return 100;
   }
   if (currentCpuBusy > 0.7) {
     return 80;
   }
+  if (currentCpuBusy > 0.5) {
+    return 60;
+  }
+
+  // Work-based floor: each flush encodes receiverCount x moverCount entries.
+  // Big maps get a lower frame rate instead of saturating the UDP relay with
+  // per-receiver datagram bursts.
+  const work = lastFlushWork;
+  const workFloor = work > 20000 ? 120 : work > 10000 ? 90 : work > 4000 ? 60 : 0;
 
   // Thresholds based on flush latency (in milliseconds)
+  let latencyInterval: number;
   if (avgLatency < 5) {
-    return 25; // <5ms: 40 Hz - very responsive
+    latencyInterval = 25; // <5ms: 40 Hz - very responsive
   } else if (avgLatency < 10) {
-    return 30; // 5-10ms: 33 Hz - responsive
+    latencyInterval = 30; // 5-10ms: 33 Hz - responsive
   } else if (avgLatency < 15) {
-    return 35; // 10-15ms: 28 Hz - good balance
+    latencyInterval = 35; // 10-15ms: 28 Hz - good balance
   } else if (avgLatency < 20) {
-    return 45; // 15-20ms: 22 Hz - starting to reduce
+    latencyInterval = 45; // 15-20ms: 22 Hz - starting to reduce
   } else if (avgLatency < 30) {
-    return 70; // 20-30ms: 14 Hz - moderate throttling
+    latencyInterval = 70; // 20-30ms: 14 Hz - moderate throttling
   } else if (avgLatency < 40) {
-    return 100; // 30-40ms: 10 Hz - aggressive throttling
+    latencyInterval = 100; // 30-40ms: 10 Hz - aggressive throttling
   } else if (avgLatency < 50) {
-    return 80; // 40-50ms: 12 Hz - aggressive throttling
+    latencyInterval = 80; // 40-50ms: 12 Hz - aggressive throttling
   } else {
-    return 100; // 50+ms: 10 Hz - maximum stability
+    latencyInterval = 100; // 50+ms: 10 Hz - maximum stability
   }
+
+  return Math.max(latencyInterval, workFloor);
 }
 
 let lastCpuSample = process.cpuUsage();
 let lastCpuSampleTime = Date.now();
 let currentCpuBusy = 0;
-const cpuCount = os.cpus().length;
+let lastFlushWork = 0;
 
 setInterval(() => {
   const now = Date.now();
@@ -287,7 +317,8 @@ setInterval(() => {
 
   if (elapsed > 0) {
     const busyMs = (cpu.user + cpu.system) / 1000;
-    currentCpuBusy = (busyMs / cpuCount) / elapsed;
+    // Fraction of a single core (busy time / wall time), not host-wide share.
+    currentCpuBusy = busyMs / elapsed;
   }
 }, 1000);
 
@@ -311,7 +342,10 @@ async function flushMovementBatches() {
   }
 
   for (const [groupKey, playerMovements] of movementBatchQueue.entries()) {
-    if (playerMovements.size === 0) continue;
+    const meshMapName = groupKey.includes(":layer_")
+      ? groupKey.slice(0, groupKey.indexOf(":layer_"))
+      : groupKey;
+    if (playerMovements.size === 0 && !meshReplication.hasGhostsOnMap(meshMapName)) continue;
 
     const allPlayers = playerCache.list();
     const groupPlayerIds = groupKey.includes(":layer_")
@@ -371,6 +405,26 @@ async function flushMovementBatches() {
         party: movingPlayer.party || [],
       });
     }
+
+    // Publish LOCAL movers to the mesh before ghosts are merged in - ghosts
+    // must never echo back to their own authority.
+    if (meshReplication.isMeshEnabled() && movers.length > 0) {
+      meshReplication.publishMoverBatch(meshMapName, movers);
+    }
+
+    // Merge replicated remote movers into this group's broadcast. Only ghosts
+    // some local receiver actually has in AOI are appended.
+    if (meshReplication.isMeshEnabled() && meshReplication.hasGhostsOnMap(meshMapName)) {
+      const interestedIds = new Set<string>();
+      for (const [, receivers] of receiverSets) {
+        for (const id of receivers) interestedIds.add(id);
+      }
+      movers.push(...meshReplication.getGhostMovers(meshMapName, interestedIds));
+    }
+
+    // Work estimate for the adaptive batch interval: receiver x mover entry
+    // checks per flush.
+    lastFlushWork = receiverSets.size * movers.length;
 
     let sentCount = 0;
     let processedReceivers = 0;
@@ -569,7 +623,10 @@ async function flushSpawnBatches() {
 
           const fullPlayer = allPlayers[queuedPlayer.id];
           if (!fullPlayer) {
-            return { ...queuedPlayer, spriteData: null };
+            // Remote players (mesh ghosts) are not in the local cache: their
+            // spawn payload already carries sprite data baked by the
+            // authority - keep it, don't null it out.
+            return queuedPlayer;
           }
 
           const animationName = getAnimationNameForDirection(
@@ -725,7 +782,7 @@ function constructMapMetadata(
   const normalizedName = mapName.replace(".json", "");
   const map = maps.find((m: MapData) => m.name === `${normalizedName}.json` || m.name === normalizedName);
   const mapProps = mapPropertiesCache.find((m: any) => m.name === `${normalizedName}.json`);
-  const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
+  const assetServerUrl = getClientAssetServerUrl();
 
   const worldsArr: WorldData[] = Array.isArray(worldsCache) ? worldsCache : (typeof worldsCache === "string" ? JSON.parse(worldsCache) : []);
 
@@ -760,6 +817,47 @@ function constructMapMetadata(
   return metadata;
 }
 
+export async function buildMeshSpawnPayload(player: any): Promise<any> {
+  const spawnData = queueSpawnPlayerPacket(player);
+  if (!spawnData) return null;
+
+  spawnData.isVanished = !!player.isVanished;
+  spawnData.party = player.party || [];
+
+  try {
+    const animationName = getAnimationNameForDirection(
+      player.location.position?.direction || "down",
+      false,
+      false,
+      undefined,
+      false
+    );
+    const playerSpriteData = await getPlayerSpriteSheetData(animationName, player.equipment || null);
+    const mountSprite = player.mount_type ? getMountSpriteUrl(player.mount_type) : null;
+
+    if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite || mountSprite) {
+      spawnData.spriteData = {
+        mountSprite,
+        bodySprite: playerSpriteData.bodySprite || null,
+        headSprite: playerSpriteData.headSprite || null,
+        armorHelmetSprite: playerSpriteData.armorHelmetSprite || null,
+        armorShoulderguardsSprite: playerSpriteData.armorShoulderguardsSprite || null,
+        armorNeckSprite: playerSpriteData.armorNeckSprite || null,
+        armorHandsSprite: playerSpriteData.armorHandsSprite || null,
+        armorChestSprite: playerSpriteData.armorChestSprite || null,
+        armorFeetSprite: playerSpriteData.armorFeetSprite || null,
+        armorLegsSprite: playerSpriteData.armorLegsSprite || null,
+        armorWeaponSprite: playerSpriteData.armorWeaponSprite || null,
+        animationState: playerSpriteData.animationState,
+      };
+    }
+  } catch {
+    // Sprite data is best-effort for mesh replication.
+  }
+
+  return spawnData;
+}
+
 async function transitionPlayerToMap(
   player: any,
   newMapName: string,
@@ -769,6 +867,8 @@ async function transitionPlayerToMap(
   despawnBatchQueue: Map<string, Set<string>>
 ): Promise<void> {
   loot.cancelCleanup(player.username);
+
+  const oldMapName = (player.location.map || "").replaceAll(".json", "");
 
   await handleMapChangeAOI(player, newMapName, { x: newPosition.x, y: newPosition.y }, spawnBatchQueue, despawnBatchQueue);
 
@@ -782,6 +882,19 @@ async function transitionPlayerToMap(
   const direction = newPosition.direction || updatedPlayer.location.position?.direction || "down";
   const mapMetadata = constructMapMetadata(newMapName, newPosition.x, newPosition.y, direction, maps, mapPropertiesCache);
   sendPacket(ws, packetManager.loadMap(mapMetadata));
+
+  // Replicate the map change across the mesh: peers despawn the old ghost and
+  // spawn the new one on the destination map.
+  if (meshReplication.isMeshEnabled() && oldMapName !== newMapName.replaceAll(".json", "")) {
+    meshReplication.publishPlayerDespawn(player.id, oldMapName);
+    const meshSpawnData = await buildMeshSpawnPayload(updatedPlayer);
+    if (meshSpawnData) {
+      meshReplication.publishPlayerSpawn(updatedPlayer, meshSpawnData);
+    }
+  }
+
+  // The destination region may be owned by a mesh peer.
+  void meshHandoff.checkAndHandoff(updatedPlayer);
 
   setImmediate(async () => {
     try {
@@ -1133,7 +1246,7 @@ authWorker.on("message", async (result: any) => {
       return;
     }
 
-    const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
+    const assetServerUrl = getClientAssetServerUrl();
 
     if (!playerData.isAdmin && playerData.isNoclip) {
       player.toggleNoclip(playerData.username).catch(err =>
@@ -1153,7 +1266,7 @@ authWorker.on("message", async (result: any) => {
         log.info(`Kicking existing session for ${playerData.username} (duplicate login)`);
 
         if (p.ws && p.ws.readyState === 1) {
-          p.ws.send(packetManager.notify({
+          sendToPlayer(p, packetManager.notify({
             message: "You have been logged in from another location."
           }));
         }
@@ -1162,7 +1275,7 @@ authWorker.on("message", async (result: any) => {
         if (map) {
           for (const [, other] of Object.entries(playerCache.list()) as [string, any][]) {
             if (other.location?.map === map && other.id !== p.id && other.ws?.readyState === 1) {
-              other.ws.send(packetManager.disconnect(p.id));
+              sendToPlayer(other, packetManager.disconnect(p.id));
             }
           }
         }
@@ -1389,6 +1502,11 @@ authWorker.on("message", async (result: any) => {
       };
       sendPacket(ws, packetManager.spawnPlayer(spawnDataForAll));
 
+      meshReplication.publishPlayerSpawn(currentPlayer, spawnDataForAll);
+
+      // If the spawn region is owned by a mesh peer, hand the avatar over.
+      void meshHandoff.checkAndHandoff(currentPlayer);
+
       const snapshotRevision = globalStateRevision;
 
       const playerDataForLoad: any[] = [];
@@ -1448,6 +1566,26 @@ authWorker.on("message", async (result: any) => {
           effects: spellEffects.getEffectsPayload(p),
         }
         playerDataForLoad.push(loadPlayerData);
+      }
+
+      // Include replicated remote players (ghosts) in the initial snapshot.
+      if (meshReplication.isMeshEnabled()) {
+        for (const aoiId of currentPlayer.aoi.playersInAOI) {
+          if (playerCache.get(aoiId as string)) continue;
+          const ghost = meshReplication.getGhost(aoiId as string);
+          if (!ghost || !ghost.spawnData) continue;
+          playerDataForLoad.push({
+            ...ghost.spawnData,
+            location: {
+              ...(ghost.spawnData.location || {}),
+              map: ghost.map,
+              x: Math.round(ghost.position.x),
+              y: Math.round(ghost.position.y),
+              direction: ghost.position.direction || "down",
+              moving: false,
+            },
+          });
+        }
       }
 
       // Chunk the initial player snapshot: a single frame with 50 sprite-laden
@@ -1730,6 +1868,26 @@ export default async function packetReceiver(
     }
 
     const currentPlayer = playerCache.get(ws.data.id) || null;
+
+    // Remote simulation: the avatar lives on the region owner. Movement input
+    // goes over the unreliable binary channel; everything the authority must
+    // see (combat, casts, mounts, animations) goes as a verbatim reliable
+    // packet. Keepalives and local-only packets (TIME_SYNC, PING, AUTH, ...)
+    // stay on the presence server.
+    if (currentPlayer?.remoteSim && currentPlayer.remoteAuthority && !ws.isAvatarConnection) {
+      if (type === "MOVEXY") {
+        const direction = String(data ?? "").toLowerCase();
+        const directionIndex = direction === "abort" ? 0x0f : DIRECTION_NAMES.indexOf(direction);
+        if (directionIndex >= 0 || direction === "abort") {
+          meshReplication.forwardMoveInput(currentPlayer, directionIndex);
+        }
+        return;
+      }
+      if (AUTHORITY_ROUTED_PACKETS.has(type)) {
+        meshReplication.forwardPacketInput(currentPlayer, message);
+        return;
+      }
+    }
 
     for (const interceptor of packetInterceptors) {
       if (interceptor(type, data, ws, currentPlayer)) {
@@ -2301,6 +2459,18 @@ export default async function packetReceiver(
             }
             movementBatchQueue.get(groupKey)!.set(currentPlayer.id, movementData);
           }
+
+          // Boundary handoff: when the player crossed into a peer-owned
+          // region, migrate simulation authority (throttled to every 30th
+          // tick to keep the region lookup cheap).
+          if (
+            meshReplication.isMeshEnabled() &&
+            !currentPlayer.remoteSim &&
+            !currentPlayer.handoffPending &&
+            aoiUpdateCounter % 30 === 0
+          ) {
+            void meshHandoff.checkAndHandoff(currentPlayer);
+          }
         };
 
         gameLoop.registerMovingPlayer(currentPlayer.id, movePlayer);
@@ -2340,6 +2510,15 @@ export default async function packetReceiver(
           s: currentPlayer.isStealth ? 1 : 0
         };
         broadcastToAOI(currentPlayer, packetManager.moveXY(movementData), true);
+
+        if (meshReplication.isMeshEnabled()) {
+          const meshSpawnData = await buildMeshSpawnPayload(currentPlayer);
+          if (meshSpawnData) {
+            meshReplication.publishPlayerSpawn(currentPlayer, meshSpawnData);
+          }
+        }
+
+        void meshHandoff.checkAndHandoff(currentPlayer);
         break;
       }
       case "CHAT": {
@@ -10066,6 +10245,18 @@ async function sendAnimation(ws: any, name: string, playerId?: string, revision?
   }
 
   await sendSpriteSheetAnimation(ws, name, playerId, revision);
+
+  // Replicate the animation across the mesh so ghost viewers on other
+  // servers can swap sprite states (walk/idle) for this player. Coalesced:
+  // only state CHANGES cross the mesh, not repeated direction re-asserts.
+  if (meshReplication.isMeshEnabled()) {
+    if (currentPlayer._lastMeshAnimation === name) return;
+    currentPlayer._lastMeshAnimation = name;
+    const animationData = await getAnimationData(name, currentPlayer.id, revision);
+    if (animationData) {
+      meshReplication.publishPlayerAnimation(currentPlayer, animationData);
+    }
+  }
 }
 
 function getAnimationNameForDirection(
@@ -10252,3 +10443,54 @@ function scheduleWeatherCycle() {
 
 scheduleWeatherCycle();
 
+
+
+// ---------------------------------------------------------------------------
+// Remote avatar dispatch (mesh Phase 2.2)
+//
+// When a player's avatar is simulated here without a connection, its input
+// arrives as INPUT_FORWARD / INPUT_PACKET mesh messages. A synthetic
+// connection object is handed to packetReceiver so the entire existing
+// handler pipeline (validation, collision, warps, batch queueing) runs
+// unchanged. Movement frames are dropped at the connection boundary - they
+// flow back to the presence through the MOVER_BATCH stream - while everything
+// else routes through sendToPlayer's OUTPUT_FORWARD relay.
+
+export function createAvatarConnection(avatar: any): any {
+  const connection: any = {
+    readyState: 1,
+    isAvatarConnection: true,
+    data: { id: avatar.id, useragent: "remote-avatar" },
+    lastFrameReadAt: Date.now(),
+    bufferedAmount: 0,
+    getFreshQueuedBytes: () => 0,
+    send(payload: Uint8Array) {
+      const first = payload?.[0];
+      if (first === 0x01 || first === 0x02 || first === 0x03) return;
+      sendToPlayer(avatar, payload);
+    },
+    sendBestEffort() {},
+    close() {},
+    subscribe() {},
+    unsubscribe() {},
+  };
+  return connection;
+}
+
+export function dispatchRemoteAvatarInput(playerId: string, directionIndex: number): void {
+  const avatar = playerCache.get(playerId);
+  if (!avatar || !avatar.remoteAvatar) return;
+  avatar.lastUpdated = performance.now();
+  // 0x0f is the abort sentinel from the presence's INPUT_FORWARD stream.
+  const direction = directionIndex === 0x0f ? "abort" : (DIRECTION_NAMES[directionIndex] ?? "down");
+  const connection = createAvatarConnection(avatar);
+  packetReceiver(null, connection, JSON.stringify({ type: "MOVEXY", data: direction })).catch(() => {});
+}
+
+export function dispatchRemoteAvatarPacket(playerId: string, packetJson: string): void {
+  const avatar = playerCache.get(playerId);
+  if (!avatar || !avatar.remoteAvatar) return;
+  avatar.lastUpdated = performance.now();
+  const connection = createAvatarConnection(avatar);
+  packetReceiver(null, connection, packetJson).catch(() => {});
+}

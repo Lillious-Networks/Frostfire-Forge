@@ -4,6 +4,7 @@ import mapIndex from "../services/mapindex";
 import entityAI from "./entityAI";
 import { consumeBarrier, broadcastEffectsUpdate, applySpellEffects, cancelEffect, getVanishedEffectId } from "./spelleffects";
 import { packetManager } from "../socket/packet_manager";
+import { sendToPlayer } from "../mesh/delivery";
 import log from "../modules/logger";
 import { setPlayerPvp, listener, Events } from "./events";
 
@@ -50,10 +51,10 @@ function broadcastToMap(map: string, packets: any[]) {
       for (const p of packets) {
         if (Array.isArray(p)) {
           for (const sub of p) {
-            player.ws.send(sub);
+            sendToPlayer(player, sub);
           }
         } else {
-          player.ws.send(p);
+          sendToPlayer(player, p);
         }
       }
     }

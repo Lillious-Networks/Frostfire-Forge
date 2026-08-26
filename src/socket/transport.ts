@@ -2,6 +2,7 @@ import { createServer } from "@webtransport-bun/webtransport";
 import crypto from "crypto";
 import { FrameDecoder, encodeFrame, encodeCloseReason, decodeCloseReason } from "./framing.ts";
 import { topicBus } from "./topics.ts";
+import { getMeshServerIndex } from "../mesh/config.ts";
 import log from "../modules/logger.ts";
 
 const textEncoder = new TextEncoder();
@@ -11,6 +12,38 @@ let lastNativeLogMsg = "";
 let lastNativeLogAt = 0;
 
 const activeConnectionIds = new Set<string>();
+
+let meshSessionIdCounter = 0;
+
+/**
+ * Allocates a connection (session) id unique across the mesh.
+ *
+ * When MESH_SERVER_INDEX is set, ids come from the server's coordinated band:
+ * ((0x80 + serverIndex) << 24) | localCounter. This keeps ids globally unique
+ * across up to 254 servers without changing the u32 wire format. Entity DB ids
+ * (raw auto-increment) must stay below 2^24 - verified by assertEntityIdSpace.
+ * Without MESH_SERVER_INDEX the legacy random allocation is used.
+ */
+export function allocateSessionId(activeIds: Set<string> = activeConnectionIds): string | null {
+  const serverIndex = getMeshServerIndex();
+  if (serverIndex > 0) {
+    const base = (0x80 + serverIndex) * 0x1000000;
+    for (let attempts = 0; attempts < 0x1000000; attempts++) {
+      meshSessionIdCounter = (meshSessionIdCounter + 1) & 0xffffff;
+      const id = (base + meshSessionIdCounter).toString();
+      if (!activeIds.has(id)) return id;
+    }
+    log.error("[WebTransport] Failed to allocate unique session ID (mesh counter exhausted)");
+    return null;
+  }
+
+  for (let attempts = 0; attempts < 100; attempts++) {
+    const id = parseInt(crypto.randomBytes(4).toString("hex"), 16).toString();
+    if (!activeIds.has(id)) return id;
+  }
+  log.error("[WebTransport] Failed to allocate unique connection ID after 100 attempts");
+  return null;
+}
 
 function isSessionClosedError(error: any): boolean {
   if (!error) return false;
@@ -482,16 +515,10 @@ function tryAuthenticate(
 
   if (authTimer) clearTimeout(authTimer);
 
-  let id: string;
-  let attempts = 0;
-  do {
-    id = parseInt(crypto.randomBytes(4).toString("hex"), 16).toString();
-    attempts++;
-    if (attempts > 100) {
-      log.error("[WebTransport] Failed to allocate unique connection ID after 100 attempts");
-      return false;
-    }
-  } while (activeConnectionIds.has(id));
+  const id = allocateSessionId();
+  if (id === null) {
+    return false;
+  }
 
   activeConnectionIds.add(id);
 
