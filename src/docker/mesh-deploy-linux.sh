@@ -43,10 +43,10 @@ if [ ! -f .env.production ]; then
   echo "== Created .env.production from example - edit it with this box's DB/gateway values =="
 fi
 
-echo "== Starting mesh stack =="
-docker compose -f src/docker/docker-compose.mesh.yml up -d
+echo "== Starting mesh stack (host networking) =="
+docker compose -f src/docker/docker-compose.mesh.linux.yml up -d
 
 echo ""
-echo "Check status:   docker compose -f src/docker/docker-compose.mesh.yml ps"
-echo "Watch logs:     docker compose -f src/docker/docker-compose.mesh.yml logs -f server-1"
+echo "Check status:   docker compose -f src/docker/docker-compose.mesh.linux.yml ps"
+echo "Watch logs:     docker compose -f src/docker/docker-compose.mesh.linux.yml logs -f server-1"
 echo "Mesh status:    curl -k https://localhost:3000/mesh-status"

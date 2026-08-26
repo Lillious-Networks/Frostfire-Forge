@@ -1,0 +1,98 @@
+# Frostfire Forge mesh stack - LINUX host (native host networking).
+#
+# The game servers share the host network namespace, exactly like the original
+# single-server production setup (docker-compose.prod.yml), so DATABASE_HOST=
+# localhost and the gateway/asset URLs on the host work without any docker
+# networking magic. Server-to-server mesh links use distinct UDP ports on
+# 127.0.0.1.
+#
+# Deploy:
+#   sh src/docker/mesh-deploy-linux.sh
+#   (or: docker compose -f src/docker/docker-compose.mesh.linux.yml up -d)
+#
+# Overrides via shell env or a .env next to this file (same names as the
+# Windows compose): PUBLIC_HOST, DATABASE_HOST, DATABASE_NAME, DATABASE_USER,
+# DATABASE_PASSWORD, GATEWAY_URL, GATEWAY_AUTH_KEY, GATEWAY_GAME_SERVER_SECRET,
+# ASSET_SERVER_URL, ASSET_SERVER_PUBLIC_URL, ASSET_SERVER_AUTH_KEY,
+# MESH_CLUSTER, MESH_SECRET.
+
+x-game-env: &game-env
+  MESH_ENABLED: "true"
+  MESH_CLUSTER: "${MESH_CLUSTER:-overworld}"
+  MESH_SECRET: "${MESH_SECRET:-frostfire-mesh-test-secret}"
+  MESH_HOST: "127.0.0.1"
+  PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
+  DATABASE_ENGINE: mysql
+  DATABASE_HOST: ${DATABASE_HOST:-localhost}
+  DATABASE_NAME: ${DATABASE_NAME:-Mystika}
+  DATABASE_USER: ${DATABASE_USER:-root}
+  DATABASE_PASSWORD: '${DATABASE_PASSWORD:-Cookes99?!}'
+  DATABASE_PORT: "3306"
+  SQL_SSL_MODE: DISABLED
+  GATEWAY_URL: ${GATEWAY_URL:-https://localhost:9443}
+  GATEWAY_AUTH_KEY: ${GATEWAY_AUTH_KEY:-27b4770d-5ca1-4065-98d0-33ebc64e807c}
+  GATEWAY_GAME_SERVER_SECRET: ${GATEWAY_GAME_SERVER_SECRET:-8bc13ecb-3b4d-4f10-bee9-c929458d527c}
+  ASSET_SERVER_URL: ${ASSET_SERVER_URL:-https://localhost:8443}
+  ASSET_SERVER_PUBLIC_URL: ${ASSET_SERVER_PUBLIC_URL:-https://localhost:8443}
+  ASSET_SERVER_AUTH_KEY: ${ASSET_SERVER_AUTH_KEY:-8bc13ecb-3b4d-4f10-bee9-c929458d527c}
+  GAME_NAME: Mystika
+  LOG_LEVEL: debug
+  HTTP_USE_SSL: "true"
+  TLS_CERT_PATH: ./src/certs/cert.pem
+  TLS_KEY_PATH: ./src/certs/key.pem
+  TLS_CA_PATH: ./src/certs/cert.ca-bundle
+  CORS_ALLOWED_ORIGINS: "*"
+  WHITELIST: "false"
+  WT_HANDSHAKE_RATE_LIMIT_DISABLED: "true"
+
+x-game-service: &game-service
+  image: frostfire-forge-swarm:latest
+  env_file:
+    - ../../.env.production
+  network_mode: host
+  volumes:
+    - ../../src/certs:/app/src/certs:ro
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "bun", "-e", "process.env.NODE_TLS_REJECT_UNAUTHORIZED='0'; const p=process.env.GAME_PORT||3000; const s=process.env.HTTP_USE_SSL==='true'?'https':'http'; const r=await fetch(s+'://localhost:'+p+'/status').catch(()=>null); process.exit(r&&r.ok?0:1)"]
+    interval: 10s
+    timeout: 5s
+    retries: 30
+    start_period: 20s
+
+services:
+  server-1:
+    <<: *game-service
+    environment:
+      <<: *game-env
+      SERVER_ID: "server-1"
+      SERVER_DESCRIPTION: "Mesh server 1"
+      MESH_ADVERTISE_HOST: "127.0.0.1"
+      MESH_SERVER_INDEX: "1"
+      MESH_PORT: "3001"
+      MESH_PEERS: "server-2=127.0.0.1:3002,server-3=127.0.0.1:3003"
+      GAME_PORT: "3000"
+
+  server-2:
+    <<: *game-service
+    environment:
+      <<: *game-env
+      SERVER_ID: "server-2"
+      SERVER_DESCRIPTION: "Mesh server 2"
+      MESH_ADVERTISE_HOST: "127.0.0.1"
+      MESH_SERVER_INDEX: "2"
+      MESH_PORT: "3002"
+      MESH_PEERS: "server-1=127.0.0.1:3001,server-3=127.0.0.1:3003"
+      GAME_PORT: "3010"
+
+  server-3:
+    <<: *game-service
+    environment:
+      <<: *game-env
+      SERVER_ID: "server-3"
+      SERVER_DESCRIPTION: "Mesh server 3"
+      MESH_ADVERTISE_HOST: "127.0.0.1"
+      MESH_SERVER_INDEX: "3"
+      MESH_PORT: "3003"
+      MESH_PEERS: "server-1=127.0.0.1:3001,server-2=127.0.0.1:3002"
+      GAME_PORT: "3020"

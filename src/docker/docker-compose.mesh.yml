@@ -57,8 +57,10 @@ x-game-service: &game-service
   image: frostfire-forge-swarm:latest
   env_file:
     - ../../.env.production
-  extra_hosts:
-    - "host.docker.internal:host-gateway"
+  # NOTE: no extra_hosts here - Docker Desktop provides host.docker.internal
+  # natively, and overriding it with host-gateway BREAKS Windows hosts. Linux
+  # hosts add the override file (docker-compose.mesh.linux.yml) which supplies
+  # extra_hosts via `docker compose -f ... -f ... up`.
   networks:
     - forge-mesh-bridge
   volumes:
