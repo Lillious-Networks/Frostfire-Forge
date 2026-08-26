@@ -43,6 +43,18 @@ if [ ! -f .env.production ]; then
   echo "== Created .env.production from example - edit it with this box's DB/gateway values =="
 fi
 
+# Source the real production values so compose interpolation (${VAR:-default})
+# uses THIS host's credentials instead of the built-in defaults.
+set -a
+. ./.env.production
+set +a
+
+if [ -z "$DATABASE_PASSWORD" ] || [ "$DATABASE_PASSWORD" = "your_secure_password" ]; then
+  echo "ERROR: DATABASE_PASSWORD in .env.production is still the placeholder."
+  echo "Edit .env.production with this host's real MySQL credentials and rerun."
+  exit 1
+fi
+
 echo "== Starting mesh stack (host networking) =="
 docker compose -f src/docker/docker-compose.mesh.linux.yml up -d
 
