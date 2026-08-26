@@ -632,6 +632,7 @@ if (meshConfig.enabled) {
     // handler is the heaviest loop on the server and would delay both the
     // peer exchange and the client-facing global total under load.
     setInterval(() => {
+      meshHandoff.setLocalConnectionCount(connections.size);
       meshLinks.broadcast(
         MeshMessageType.CONNECTION_COUNT,
         new TextEncoder().encode(JSON.stringify({ count: connections.size })),

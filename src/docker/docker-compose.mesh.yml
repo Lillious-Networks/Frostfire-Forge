@@ -29,6 +29,8 @@ x-game-env: &game-env
   MESH_SECRET: "${MESH_SECRET:-frostfire-mesh-test-secret}"
   MESH_HOST: "0.0.0.0"
   MESH_PORT: "3001"
+  MESH_MAX_VISIBLE_PLAYERS: "${MESH_MAX_VISIBLE_PLAYERS:-250}"
+  AOI_EXIT_RADIUS_MULTIPLIER: "${AOI_EXIT_RADIUS_MULTIPLIER:-1.25}"
   PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
   DATABASE_ENGINE: mysql
   DATABASE_HOST: ${DATABASE_HOST:-host.docker.internal}

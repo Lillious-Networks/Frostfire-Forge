@@ -7,7 +7,7 @@ import parties from "../systems/parties";
 import { packetManager } from "./packet_manager";
 import spatialGrid from "../services/spatialgrid";
 import * as meshReplication from "../mesh/replication";
-import { getAoiExitRadiusMultiplier } from "../mesh/config";
+import { getAoiExitRadiusMultiplier, getMeshMaxVisiblePlayers } from "../mesh/config";
 
 export interface PlayerAOIState {
 
@@ -207,7 +207,8 @@ function filterPlayersByDistance(
   }
 
   // Meshed maps: remote players (ghosts) are AOI candidates like locals. The
-  // visibility cap becomes the AOI radius itself instead of the 50-player layer.
+  // visibility bound is the raised mesh cap (MESH_MAX_VISIBLE_PLAYERS), not
+  // the old 50-player layer.
   if (meshReplication.isMeshEnabled()) {
     for (const ghost of meshReplication.getGhostsOnMap(sourceMap)) {
       if (ghost.id === sourcePlayer.id) continue;
@@ -219,6 +220,21 @@ function filterPlayersByDistance(
       if (distSquared <= radiusSquared) {
         result.push(ghost);
       }
+    }
+
+    // Cap total visible players (locals + ghosts), nearest first.
+    const maxVisible = getMeshMaxVisiblePlayers();
+    if (maxVisible > 0 && result.length > maxVisible) {
+      const sx = sourcePos.x;
+      const sy = sourcePos.y;
+      result.sort((a: any, b: any) => {
+        const ax = a.position?.x ?? a.location?.position?.x ?? 0;
+        const ay = a.position?.y ?? a.location?.position?.y ?? 0;
+        const bx = b.position?.x ?? b.location?.position?.x ?? 0;
+        const by = b.position?.y ?? b.location?.position?.y ?? 0;
+        return (ax - sx) * (ax - sx) + (ay - sy) * (ay - sy) - ((bx - sx) * (bx - sx) + (by - sy) * (by - sy));
+      });
+      result.length = maxVisible;
     }
   }
 

@@ -78,6 +78,16 @@ export function getAoiExitRadiusMultiplier(env: Record<string, string | undefine
 }
 
 /**
+ * Visibility cap on meshed maps: the number of other players a client can see
+ * at once (locals + cross-server ghosts combined), nearest first. Replaces the
+ * old 50-player per-layer cap with a larger, configurable one. 0 = unlimited.
+ */
+export function getMeshMaxVisiblePlayers(env: Record<string, string | undefined> = process.env): number {
+  const value = parseInt(env.MESH_MAX_VISIBLE_PLAYERS || "250", 10);
+  return Number.isInteger(value) && value >= 0 ? value : 250;
+}
+
+/**
  * Mesh session ids occupy [(0x80+serverIndex)<<24, ...), so raw entity DB ids
  * must stay below that band. Verify at startup; warn (not abort) so a partial
  * schema can't take the whole server down.

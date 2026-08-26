@@ -20,7 +20,7 @@ import spatialGrid from "../services/spatialgrid.ts";
 import gameLoop from "../services/gameloop.ts";
 import log from "../modules/logger.ts";
 import { MeshMessageType } from "./protocol.ts";
-import { getRegionOwner, isRemoteRegion } from "./regions.ts";
+import * as regions from "./regions.ts";
 import type { MeshLinks } from "./links.ts";
 import * as replication from "./replication.ts";
 import { initializePlayerAOI, despawnPlayerFromAllAOI } from "../socket/aoi.ts";
@@ -80,16 +80,52 @@ export function attachHandoffHooks(partial: Partial<HandoffHooks>): void {
 // ---------------------------------------------------------------------------
 // Presence side
 
+const HANDOFF_COOLDOWN_MS = 30000;
+const HANDOFF_IMBALANCE_THRESHOLD = 10;
+
+let localConnectionCount = 0;
+
+export function setLocalConnectionCount(count: number): void {
+  localConnectionCount = count;
+}
+
+/**
+ * Load-aware authority assignment: a player's avatar migrates to the
+ * least-loaded peer (by the connection counts exchanged over the mesh) when
+ * the local server is meaningfully busier. Static region ownership was
+ * replaced by this because real player distributions cluster (everyone spawns
+ * in one region), which pinned the whole load on whichever server happened to
+ * own the spawn region.
+ */
 export async function checkAndHandoff(player: any): Promise<void> {
   if (!meshLinks || !meshLinks.enabled) return;
   if (!player || player.remoteSim || player.handoffPending || player.remoteAvatar) return;
   if (!player.location?.position) return;
 
-  const desired = meshLinks.getDesiredServerIds();
-  const owner = getRegionOwner(player.location.map, player.location.position.x, player.location.position.y, desired);
-  if (!isRemoteRegion(owner)) return;
+  const now = Date.now();
+  if (player._lastHandoffAt && now - player._lastHandoffAt < HANDOFF_COOLDOWN_MS) return;
 
-  await initiateHandoff(player, owner);
+  const desired = meshLinks.getDesiredServerIds();
+  if (!regions.isRosterComplete(desired)) return;
+
+  const counts = replication.getPeerCounts();
+  let bestServerId: string | null = null;
+  let bestCount = Infinity;
+  for (const serverId of desired) {
+    const count = counts[serverId];
+    if (typeof count !== "number") continue;
+    if (count < bestCount) {
+      bestCount = count;
+      bestServerId = serverId;
+    }
+  }
+  if (!bestServerId) return;
+
+  const threshold = Math.max(HANDOFF_IMBALANCE_THRESHOLD, Math.floor(localConnectionCount * 0.15));
+  if (localConnectionCount <= bestCount + threshold) return;
+
+  player._lastHandoffAt = now;
+  await initiateHandoff(player, bestServerId);
 }
 
 async function initiateHandoff(player: any, ownerServerId: string): Promise<void> {
