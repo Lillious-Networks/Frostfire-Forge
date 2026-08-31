@@ -125,6 +125,22 @@ export class TransportConnection {
     return queuedBytes;
   }
 
+  /**
+   * Sampled queue reading for the per-frame write path. metricsSnapshot() is
+   * a native call; sampling it on EVERY reliable frame (spawns, chat, topic
+   * broadcasts - tens of thousands per second at 1000+ players) was a
+   * measurable cost. Refresh at most once per maxAgeMs; between samples the
+   * estimate is kept conservative by pendingWriteBytes accounting. The 48MB
+   * tripwire sits 16MB below the hard 64MB limit, which absorbs the staleness.
+   */
+  private getSampledQueuedBytes(maxAgeMs: number = 100): number {
+    const now = Date.now();
+    if (now - this.lastMetricsAt >= maxAgeMs) {
+      this.getFreshQueuedBytes();
+    }
+    return this.lastQueuedBytes;
+  }
+
   isOpen(): boolean {
     return this.readyState === 1;
   }
@@ -231,7 +247,9 @@ export class TransportConnection {
     // hard limit (64MB), the client is hopelessly behind - skip the write
     // instead of letting the transport reject it with E_QUEUE_FULL. The client
     // either recovers or its own watchdog reconnects.
-    const queuedBytes = this.getFreshQueuedBytes();
+    // Uses the sampled reading (see getSampledQueuedBytes) - a native snapshot
+    // per frame is far too expensive at scale.
+    const queuedBytes = this.getSampledQueuedBytes(100) + this.pendingWriteBytes;
     if (queuedBytes > MAX_SAFE_QUEUE_BYTES) {
       const now = Date.now();
       if (now - this.lastQueueFullLogAt > 10000) {

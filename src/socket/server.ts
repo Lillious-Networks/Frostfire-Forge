@@ -324,7 +324,10 @@ function broadcastConnectionCount() {
   lastConnectionCountBroadcast = now;
   connectionCountDirty = false;
 
-  topicBus.publish(
+  // Loss-tolerant status fan-out: a datagram, not a reliable frame - at 1000+
+  // connections the per-second broadcast to every player would otherwise
+  // contend for each connection's ordered stream queue.
+  topicBus.publishBestEffort(
     "CONNECTION_COUNT",
     packet.encode(JSON.stringify({
       type: "CONNECTION_COUNT",
@@ -337,6 +340,35 @@ setInterval(() => {
   if (!connectionCountDirty) return;
   broadcastConnectionCount();
 }, 1000);
+
+// Low-cost reliable-stream queue health sampling: surfaces connections whose
+// stream queue is backing up. bufferedAmount caches its native metrics
+// snapshot per connection for 250ms, so this stays cheap at 1000+ players.
+let lastStreamQueueLogAt = 0;
+setInterval(() => {
+  const backedUp: Array<{ id: string; kb: number }> = [];
+  let maxBytes = 0;
+  for (const playerData of Object.values(playerCache.list())) {
+    const ws = playerData.ws;
+    if (!ws || ws.readyState !== 1) continue;
+    const bytes = ws.bufferedAmount;
+    if (bytes > 256 * 1024) {
+      backedUp.push({ id: playerData.id, kb: Math.round(bytes / 1024) });
+      if (bytes > maxBytes) maxBytes = bytes;
+    }
+  }
+  if (backedUp.length > 0) {
+    const now = Date.now();
+    if (now - lastStreamQueueLogAt > 60000) {
+      lastStreamQueueLogAt = now;
+      backedUp.sort((a, b) => b.kb - a.kb);
+      log.warn(
+        `[StreamQueue] ${backedUp.length} connection(s) with backed-up stream queues (max ${Math.round(maxBytes / 1024)}KB): ` +
+        backedUp.slice(0, 5).map((p) => `${p.id}=${p.kb}KB`).join(", ")
+      );
+    }
+  }
+}, 10000);
 
 function onTransportClose(connection: TransportConnection) {
   const id = connection.data.id;
@@ -414,15 +446,18 @@ const NO_RATE_LIMIT = Number.MAX_SAFE_INTEGER;
 const handshakeLimitsDisabled = process.env.WT_HANDSHAKE_RATE_LIMIT_DISABLED === "true";
 
 const webTransportRateLimits = {
+  // Handshake caps are DoS guards, but the old defaults (100/s, 200 burst)
+  // throttled legitimate 1000+ player login waves to ~10s of handshake time.
+  // Raised defaults keep bursts cheap while still bounding per-prefix abuse.
   handshakesPerSec: handshakeLimitsDisabled
     ? NO_RATE_LIMIT
-    : (settings as any)?.webtransport?.rateLimits?.handshakesPerSec ?? 100,
+    : (settings as any)?.webtransport?.rateLimits?.handshakesPerSec ?? 1000,
   handshakesBurst: handshakeLimitsDisabled
     ? NO_RATE_LIMIT
-    : (settings as any)?.webtransport?.rateLimits?.handshakesBurst ?? 200,
+    : (settings as any)?.webtransport?.rateLimits?.handshakesBurst ?? 2000,
   handshakesBurstPerPrefix: handshakeLimitsDisabled
     ? NO_RATE_LIMIT
-    : (settings as any)?.webtransport?.rateLimits?.handshakesBurstPerPrefix ?? 50,
+    : (settings as any)?.webtransport?.rateLimits?.handshakesBurstPerPrefix ?? 500,
   streamsPerSec: (settings as any)?.webtransport?.rateLimits?.streamsPerSec ?? 2000,
   streamsBurst: (settings as any)?.webtransport?.rateLimits?.streamsBurst ?? 4000,
   datagramsPerSec: (settings as any)?.webtransport?.rateLimits?.datagramsPerSec ?? 500000,
@@ -767,9 +802,8 @@ listener.on(Events.SERVER_TICK, async () => {
       stats,
     };
 
-    handleBackpressure(playerData.ws, () =>
-      playerData.ws.send(packetManager.updateStats(updateStatsData)[0])
-    );
+    // Latest-wins absolute stats - loss-tolerant datagrams (repeats every tick).
+    playerData.ws.sendBestEffort(packetManager.updateStats(updateStatsData)[0]);
 
     const observers = findPlayersWithTargetInAOI(playerData.id);
     for (const other of observers) {
@@ -779,9 +813,7 @@ listener.on(Events.SERVER_TICK, async () => {
         other.ws &&
         other.ws.readyState === 1
       ) {
-        handleBackpressure(other.ws, () =>
-          other.ws.send(packetManager.updateStats(updateStatsData)[0])
-        );
+        other.ws.sendBestEffort(packetManager.updateStats(updateStatsData)[0]);
       }
     }
   }

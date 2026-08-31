@@ -6,6 +6,7 @@ import { consumeBarrier, broadcastEffectsUpdate, applySpellEffects, cancelEffect
 import { packetManager } from "../socket/packet_manager";
 import log from "../modules/logger";
 import { setPlayerPvp, listener, Events } from "./events";
+import { broadcastToAOIBestEffort, broadcastToAOIBestEffortAtPosition } from "../socket/aoi";
 
 export interface GroundAoeZone {
   id: string;
@@ -327,14 +328,19 @@ async function processZoneTicks(): Promise<void> {
           }
 
           if (tickDamage !== 0) {
-            broadcastToMap(mapName, packetManager.updateStats({
-              id: zone.casterId,
-              target: entity.id,
-              stats: { health: entity.health, total_max_health: entity.max_health },
-              isCrit: false,
-              damage: tickDamage,
-              entity: true,
-            }));
+            broadcastToAOIBestEffortAtPosition(
+              zone.position.x,
+              zone.position.y,
+              mapName,
+              packetManager.updateStats({
+                id: zone.casterId,
+                target: entity.id,
+                stats: { health: entity.health, total_max_health: entity.max_health },
+                isCrit: false,
+                damage: tickDamage,
+                entity: true,
+              })
+            );
           }
 
           if (entity.health <= 0 && entity.id != null) {
@@ -400,7 +406,7 @@ async function processZoneTicks(): Promise<void> {
           }
 
           if (tickDamage !== 0) {
-            broadcastToMap(mapName, packetManager.updateStats({
+            broadcastToAOIBestEffort(player, packetManager.updateStats({
               id: zone.casterId,
               target: player.id,
               stats: player.stats,

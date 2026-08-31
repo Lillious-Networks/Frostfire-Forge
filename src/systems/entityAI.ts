@@ -1,4 +1,4 @@
-import { broadcastToAOI } from "../socket/aoi";
+import { broadcastToAOI, broadcastToAOIBestEffort } from "../socket/aoi";
 import entitySystem from "./entities";
 import entityCache from "../services/entityCache.ts";
 import playerCache from "../services/playermanager";
@@ -472,7 +472,7 @@ async function processCombat(entity: any, aiState: EntityAIState): Promise<void>
             damage: damageAmount,
           });
 
-          broadcastToAOI(playersOnMap[0], projectilePacket, true);
+          broadcastToAOIBestEffort(playersOnMap[0], projectilePacket, true);
         }
 
         setTimeout(async () => {
@@ -583,7 +583,7 @@ async function processCombat(entity: any, aiState: EntityAIState): Promise<void>
                 damage: damageAmount,
                 entity: false,
               });
-              broadcastToAOI(playersOnMap[0], updateStatsPacket, true);
+              broadcastToAOIBestEffort(playersOnMap[0], updateStatsPacket, true);
             }
           }
         }, projectileTime);
@@ -683,7 +683,7 @@ async function moveTowardsSpawn(entity: any, aiState?: EntityAIState): Promise<v
 
       if (playersOnMap.length > 0) {
         const healthPacket = packetManager.updateEntityHealth(entity.id, entity.health, entity.max_health);
-        broadcastToAOI(playersOnMap[0], healthPacket, true);
+        broadcastToAOIBestEffort(playersOnMap[0], healthPacket, true);
       }
     }
     return;
@@ -729,7 +729,7 @@ async function moveTowardsSpawn(entity: any, aiState?: EntityAIState): Promise<v
     const playersOnMap = allPlayers.filter((p: any) => p && p.location && p.location.map === entity.map && p.ws);
     if (playersOnMap.length > 0) {
       const healthPacket = packetManager.updateEntityHealth(entity.id, entity.health, entity.max_health);
-      broadcastToAOI(playersOnMap[0], healthPacket, true);
+      broadcastToAOIBestEffort(playersOnMap[0], healthPacket, true);
     }
   }
 

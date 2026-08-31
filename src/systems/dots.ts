@@ -8,6 +8,7 @@ import { getSpriteUrl } from "../modules/spriteSheetManager";
 import { listener } from "../modules/event_bus";
 import { Events, setPlayerPvp } from "./events";
 import log from "../modules/logger";
+import { broadcastToAOIBestEffort, broadcastToAOIBestEffortAtPosition } from "../socket/aoi";
 
 export interface DotInstance {
   id: string;
@@ -181,7 +182,7 @@ async function tickPlayerDot(targetKey: string, dot: DotInstance): Promise<boole
   if (isHeal) {
     target.stats.health = Math.round(Math.min(target.stats.health + amount, target.stats.total_max_health));
     listener.emit(Events.PLAYER_HEALED, { caster: caster || target, target, amount, source: dot.spell } as any);
-    broadcastToMap(target.location?.map, packetManager.updateStats({
+    broadcastToAOIBestEffort(target, packetManager.updateStats({
       id: dot.casterId,
       target: target.id,
       stats: target.stats,
@@ -241,7 +242,7 @@ async function tickPlayerDot(targetKey: string, dot: DotInstance): Promise<boole
     return false;
   }
 
-  broadcastToMap(target.location?.map, packetManager.updateStats({
+  broadcastToAOIBestEffort(target, packetManager.updateStats({
     id: dot.casterId,
     target: target.id,
     stats: target.stats,
@@ -270,14 +271,19 @@ function tickEntityDot(entityKey: string | number, dot: DotInstance): boolean {
   if (entity.health < 0) entity.health = 0;
   entityCache.updateHealth(entity.id, entity.health);
 
-  broadcastToMap(entity.map, packetManager.updateStats({
-    id: dot.casterId,
-    target: entity.id,
-    stats: { health: entity.health, total_max_health: entity.max_health },
-    isCrit: false,
-    damage,
-    entity: true,
-  }));
+  broadcastToAOIBestEffortAtPosition(
+    entity.position.x,
+    entity.position.y,
+    entity.map,
+    packetManager.updateStats({
+      id: dot.casterId,
+      target: entity.id,
+      stats: { health: entity.health, total_max_health: entity.max_health },
+      isCrit: false,
+      damage,
+      entity: true,
+    })
+  );
 
   if (entity.health <= 0) {
     const respawnTime = 30;

@@ -258,10 +258,13 @@ export function broadcastPlayerUpdate(player: any): void {
   const spawnData = queueSpawnPlayerPacket(player);
   if (!spawnData) return;
 
+  // Encode once - the frame is byte-identical for every viewer.
+  const spawnFrames = packetManager.spawnPlayer(spawnData);
+
   const viewers = findPlayersWithTargetInAOI(player.id);
   for (const viewer of viewers) {
     if (viewer.ws) {
-      sendPacket(viewer.ws, packetManager.spawnPlayer(spawnData));
+      sendPacket(viewer.ws, spawnFrames);
     }
   }
 }
@@ -438,6 +441,118 @@ export function broadcastToAOI(
     }
   } catch (error) {
     // Silently ignore broadcast errors
+  }
+}
+
+function sendPacketBestEffort(ws: any, packetData: any[]) {
+  if (!ws || typeof ws.sendBestEffort !== "function" || ws.readyState !== 1) return;
+  try {
+    packetData.forEach((packet) => {
+      ws.sendBestEffort(packet);
+    });
+  } catch (error) {
+    // Silently ignore best-effort send errors
+  }
+}
+
+/**
+ * Like broadcastToAOI but delivered as unreliable datagrams (loss-tolerant
+ * packets: stats, cast bars, animations, etc.). Datagrams bypass the stream
+ * backpressure queue, so callers must only send latest-wins payloads.
+ */
+export function broadcastToAOIBestEffort(
+  sourcePlayer: any,
+  packetData: any[],
+  includeSelf: boolean = true
+): void {
+  if (!sourcePlayer || !sourcePlayer.aoi) {
+    return;
+  }
+
+  try {
+    const receivers = new Set<any>();
+
+    if (includeSelf && sourcePlayer.ws) {
+      receivers.add(sourcePlayer);
+    }
+
+    const playersInAOI = Array.from(sourcePlayer.aoi.playersInAOI)
+      .map((id) => playerCache.get(id as string))
+      .filter((p) => p && p.ws);
+
+    const visibleTo = sourcePlayer.isStealth || sourcePlayer.isVanished
+      ? playersInAOI.filter((p) => p.isAdmin || p.party?.includes(sourcePlayer.username))
+      : playersInAOI;
+
+    for (const player of visibleTo) {
+      receivers.add(player);
+    }
+
+    for (const player of receivers) {
+      sendPacketBestEffort(player.ws, packetData);
+    }
+  } catch (error) {
+    // Silently ignore broadcast errors
+  }
+}
+
+/**
+ * Broadcast a stats update (UPDATESTATS) as datagrams to the union of the
+ * target's and caster's AOI sets, deduplicated. Replaces map-wide broadcasts:
+ * observers who can see either combatant get the damage popup and fresh
+ * absolute stats, everyone else self-corrects via the 1Hz regen tick.
+ */
+export function broadcastStatsUpdateToAOI(
+  target: any,
+  caster: any,
+  packetData: any[]
+): void {
+  const receivers = new Map<string, any>();
+
+  const collect = (source: any) => {
+    if (!source || !source.aoi) return;
+    if (source.ws) receivers.set(String(source.id), source);
+    for (const id of source.aoi.playersInAOI) {
+      const p = playerCache.get(id as string);
+      if (p && p.ws) receivers.set(String(id), p);
+    }
+  };
+
+  try {
+    collect(target);
+    collect(caster);
+    for (const player of receivers.values()) {
+      sendPacketBestEffort(player.ws, packetData);
+    }
+  } catch (error) {
+    // Silently ignore broadcast errors
+  }
+}
+
+/**
+ * Broadcast a packet as datagrams to players on a map whose AOI radius covers
+ * the given position. Used for entity-targeted stats broadcasts (entities are
+ * not tracked in playersInAOI, so position distance stands in for visibility).
+ */
+export function broadcastToAOIBestEffortAtPosition(
+  x: number,
+  y: number,
+  map: string,
+  packetData: any[]
+): void {
+  if (!map) return;
+
+  const playerIds = mapIndex.getPlayersOnMap(map);
+  for (const playerId of playerIds) {
+    const p = playerCache.get(playerId);
+    if (!p || !p.ws || p.ws.readyState !== 1) continue;
+    const pos = p.location?.position;
+    if (!pos || typeof pos.x !== "number" || typeof pos.y !== "number") continue;
+    const radius = p.aoi?.aoiRadius || AOI_CONFIG.DEFAULT_RADIUS;
+    const dx = pos.x - x;
+    const dy = pos.y - y;
+    if (dx * dx + dy * dy > radius * radius) continue;
+    sendPacketBestEffort(p.ws, packetData);
   }
 }
 

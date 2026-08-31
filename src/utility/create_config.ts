@@ -87,6 +87,9 @@ const settings = {
     "maxDatagramSize": 1200,
     "authTimeoutMs": 10000,
     "rateLimits": {
+      "handshakesPerSec": 1000,
+      "handshakesBurst": 2000,
+      "handshakesBurstPerPrefix": 500,
       "streamsPerSec": 2000,
       "streamsBurst": 4000,
       "datagramsPerSec": 500000,

@@ -329,6 +329,17 @@ export const packetManager = {
       )
     ] as any[];
   },
+  // Composes a LOAD_PLAYERS frame from PRE-serialized player JSON strings.
+  // The spawn fan-out broadcasts the same player snapshots to hundreds of
+  // receivers; stringifying the deep sprite-laden objects once per player per
+  // flush instead of once per receiver is what keeps login waves cheap.
+  loadPlayersJson: (playersJson: string[], snapshotRevision: number | null) => {
+    return [
+      packet.encode(
+        `{"type":"LOAD_PLAYERS","data":{"players":[${playersJson.join(",")}],"snapshotRevision":${JSON.stringify(snapshotRevision)}}}`
+      )
+    ] as any[];
+  },
   moveXY: (data: any) => {
     const HEADER_BYTE = 0x02;
     const DIRECTION_MAP: Record<string, number> = {
@@ -546,6 +557,13 @@ export const packetManager = {
   batchSpriteSheetAnimation: (animations: any[]) => {
     return [
       packet.encode(JSON.stringify({ type: "BATCH_SPRITE_SHEET_ANIMATION", data: animations })),
+    ] as any[];
+  },
+  // Like batchSpriteSheetAnimation but takes pre-serialized animation JSON
+  // strings (see loadPlayersJson for the rationale).
+  batchSpriteSheetAnimationJson: (animationsJson: string[]) => {
+    return [
+      packet.encode(`{"type":"BATCH_SPRITE_SHEET_ANIMATION","data":[${animationsJson.join(",")}]}`),
     ] as any[];
   },
   updateFriends: (data: any) => {

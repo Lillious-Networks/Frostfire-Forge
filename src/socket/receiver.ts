@@ -71,7 +71,7 @@ import * as settings from "../config/settings.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks, saveMapProperties, applyChunksWithRebase } from "../modules/assetloader";
 import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers, getEntitySpriteLayers } from "../modules/spriteSheetManager";
-import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate, sendLoadPlayersChunked } from "./aoi";
+import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, broadcastToAOIBestEffort, broadcastStatsUpdateToAOI, broadcastToAOIBestEffortAtPosition, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate, sendLoadPlayersChunked } from "./aoi";
 import { realmWhitelist, isWhitelistEnabled } from "./server.ts";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
@@ -419,15 +419,12 @@ async function flushMovementBatches() {
       const receiver = allPlayers[receiverId];
       if (!receiver || !receiver.ws || receiver.ws.readyState !== 1) continue;
 
-      const bufferedAmount = receiver.ws.bufferedAmount;
-
-      // Dynamic backpressure threshold based on latency
-      const backpressureThreshold = avgLatency > 35 ? 1024 * 16 : (avgLatency > 20 ? 1024 * 24 : MAX_BUFFER_BACKPRESSURE);
-
-      if (bufferedAmount > backpressureThreshold) {
-        skippedDueToLoad++;
-        continue;
-      }
+      // No stream-queue backpressure gate here: movement batches are delivered
+      // as DATAGRAMS, which never touch the reliable stream's queue. Skipping
+      // receivers with a busy stream queue (e.g. mid spawn-burst) froze their
+      // view of other players - the exact clients that need updates most. QUIC
+      // datagram flow control drops datagrams itself when a receiver can't
+      // keep up, so this costs nothing.
 
       selectedReceiverIds.push(receiverId);
       selectedSets.set(receiverId, receiversForPlayer);
@@ -518,12 +515,15 @@ const spriteDataCache = new Map<string, any>();
 const animationDataCache = new Map<string, any>();
 
 function queueSpawnForReceivers(spawnedPlayer: any, receivers: any[], spriteData: any = null) {
+  // Build the snapshot ONCE per call - the same player object is identical for
+  // every receiver, and rebuilding it per receiver was O(N^2) work per wave.
+  const spawnData = queueSpawnPlayerPacket(spawnedPlayer);
+  if (!spawnData) return;
+  if (spriteData) spawnData.spriteData = spriteData;
+
   for (const receiver of receivers) {
     if (!receiver || !receiver.ws || receiver.id === spawnedPlayer.id) continue;
     if (!spawnBatchQueue.has(receiver.id)) spawnBatchQueue.set(receiver.id, new Map());
-    const spawnData = queueSpawnPlayerPacket(spawnedPlayer);
-    if (!spawnData) continue;
-    if (spriteData) spawnData.spriteData = spriteData;
     spawnBatchQueue.get(receiver.id)!.set(spawnedPlayer.id, spawnData);
   }
 }
@@ -532,6 +532,12 @@ async function flushSpawnBatches() {
   if (spawnBatchQueue.size === 0) return;
 
   const allPlayers = playerCache.list();
+
+  // Pre-serialized spawn/animation JSON, shared across receivers within this
+  // flush: every receiver sees the same snapshots, so each player's deep
+  // sprite-laden object is stringified once instead of once per receiver.
+  const spawnJsonCache = new Map<string, string>();
+  const animJsonCache = new Map<string, string>();
 
   for (const [receivingPlayerId, spawnedPlayers] of spawnBatchQueue.entries()) {
     if (spawnedPlayers.size === 0) {
@@ -615,7 +621,22 @@ async function flushSpawnBatches() {
         })
       );
 
-      sendLoadPlayersChunked(sendPacket, receivingPlayer.ws, playersWithSprites, globalStateRevision);
+      const playerJsonParts = playersWithSprites.map((spawnData) => {
+        let json = spawnJsonCache.get(spawnData.id);
+        if (json === undefined) {
+          json = JSON.stringify(spawnData);
+          spawnJsonCache.set(spawnData.id, json);
+        }
+        return json;
+      });
+
+      const SPAWN_CHUNK_SIZE = 8;
+      for (let i = 0; i < playerJsonParts.length; i += SPAWN_CHUNK_SIZE) {
+        sendPacket(receivingPlayer.ws, packetManager.loadPlayersJson(
+          playerJsonParts.slice(i, i + SPAWN_CHUNK_SIZE),
+          globalStateRevision
+        ));
+      }
 
       const animationPromises = playersWithSprites.map(async (spawnData) => {
         const spawnedPlayer = allPlayers[spawnData.id];
@@ -645,7 +666,16 @@ async function flushSpawnBatches() {
       const animationDataArray = (await Promise.all(animationPromises)).filter(a => a !== null);
 
       if (animationDataArray.length > 0) {
-        sendPacket(receivingPlayer.ws, packetManager.batchSpriteSheetAnimation(animationDataArray));
+        const animJsonParts = animationDataArray.map((animData) => {
+          const key = String(animData.id);
+          let json = animJsonCache.get(key);
+          if (json === undefined) {
+            json = JSON.stringify(animData);
+            animJsonCache.set(key, json);
+          }
+          return json;
+        });
+        sendPacket(receivingPlayer.ws, packetManager.batchSpriteSheetAnimationJson(animJsonParts));
       }
 
       // Re-queue remaining spawns for the next flush
@@ -2455,7 +2485,7 @@ export default async function packetReceiver(
           playersInMap = playersInMap.filter((p) => p.isAdmin);
         }
         playersInMap.forEach((player) => {
-          sendPacket(player.ws, packetManager.typing(typingData));
+          sendPacketBestEffort(player.ws, packetManager.typing(typingData));
         });
         break;
       }
@@ -3123,12 +3153,11 @@ export default async function packetReceiver(
         if (!spell?.can_move && currentPlayer.moving) {
 
           const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-          playersInMap.forEach((player) => {
-            sendPacket(
-              player.ws,
-              packetManager.castSpell({ id: currentPlayer.id, spell: 'interrupted', time: 1 })
-            );
-          });
+          broadcastCastToMap(
+            playersInMap,
+            currentPlayer.id,
+            packetManager.castSpell({ id: currentPlayer.id, spell: 'interrupted', time: 1 })
+          );
           currentPlayer.lastInterruptTime = performance.now();
 
           listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "moving" } as any);
@@ -3192,9 +3221,11 @@ export default async function packetReceiver(
           await sendPositionAnimation(ws, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, true);
 
           const aoePlayersInMap = filterPlayersByMap(currentPlayer.location.map);
-          aoePlayersInMap.forEach((p) => {
-            sendPacket(p.ws, packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: spell.cast_time }));
-          });
+          broadcastCastToMap(
+            aoePlayersInMap,
+            currentPlayer.id,
+            packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: spell.cast_time })
+          );
 
           await new Promise((resolve) => setTimeout(resolve, spell.cast_time * 1000));
 
@@ -3253,7 +3284,7 @@ export default async function packetReceiver(
 
           // Send a projectile packet from caster to self as a visual indicator
           aoePlayersInMap.forEach((p) => {
-            sendPacket(p.ws, packetManager.projectile({
+            sendPacketBestEffort(p.ws, packetManager.projectile({
               id: currentPlayer.id, time: 0.3, target_id: currentPlayer.id,
               spell: spell.name, icon: getIconUrl(spell.icon), entity: false
             }));
@@ -3318,9 +3349,12 @@ export default async function packetReceiver(
               if (st.health < 0) st.health = 0;
               entityCache.updateHealth(st.id, st.health);
               if (spell_damage !== 0) {
-              aoePlayersInMap.forEach((pp) => {
-                sendPacket(pp.ws, packetManager.updateStats({ id: ws.data.id, target: st.id, stats: { health: st.health, total_max_health: st.max_health }, isCrit: false, damage: splashDmg, entity: true }));
-              });
+              broadcastToAOIBestEffortAtPosition(
+                st.position.x,
+                st.position.y,
+                currentPlayer.location.map,
+                packetManager.updateStats({ id: ws.data.id, target: st.id, stats: { health: st.health, total_max_health: st.max_health }, isCrit: false, damage: splashDmg, entity: true })
+              );
               }
               if (st.health <= 0) {
                 aoePlayersInMap.forEach((pp) => sendPacket(pp.ws, packetManager.despawnEntity(st.id, 30)));
@@ -3354,7 +3388,11 @@ export default async function packetReceiver(
                 );
                 }
                 if (spell_damage !== 0) {
-                aoePlayersInMap.forEach((pp) => sendPacket(pp.ws, packetManager.updateStats({ id: ws.data.id, target: st.id, stats: st.stats, isCrit: false, damage: splashDmg })));
+                broadcastStatsUpdateToAOI(
+                  st,
+                  currentPlayer,
+                  packetManager.updateStats({ id: ws.data.id, target: st.id, stats: st.stats, isCrit: false, damage: splashDmg })
+                );
                 }
               }
 
@@ -3384,7 +3422,7 @@ export default async function packetReceiver(
           const syncedStats = await player.synchronizeStats(currentPlayer.username);
           if (syncedStats) currentPlayer.stats = syncedStats;
           playerCache.set(currentPlayer.id, currentPlayer);
-          aoePlayersInMap.forEach((pp) => sendPacket(pp.ws, packetManager.updateStats({ id: currentPlayer.id, target: currentPlayer.id, stats: currentPlayer.stats })));
+          broadcastToAOIBestEffort(currentPlayer, packetManager.updateStats({ id: currentPlayer.id, target: currentPlayer.id, stats: currentPlayer.stats }));
 
           currentPlayer.last_attack = performance.now();
           listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target: currentPlayer, isEntityTarget: false });
@@ -3430,10 +3468,16 @@ export default async function packetReceiver(
           await sendPositionAnimation(ws, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, true);
 
           const groundPlayersInMap = filterPlayersByMap(currentPlayer.location.map);
-          groundPlayersInMap.forEach((p) => {
-            sendPacket(p.ws, packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: spell.cast_time, groundX, groundY, groundRadius: groundAoERadius }));
-            sendPacket(p.ws, packetManager.groundAoeCasting({ id: currentPlayer.id, spell: spell.name, casterId: currentPlayer.id, x: groundX, y: groundY, radius: groundAoERadius, castTime: spell.cast_time }));
-          });
+          broadcastCastToMap(
+            groundPlayersInMap,
+            currentPlayer.id,
+            packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: spell.cast_time, groundX, groundY, groundRadius: groundAoERadius })
+          );
+          broadcastCastToMap(
+            groundPlayersInMap,
+            currentPlayer.id,
+            packetManager.groundAoeCasting({ id: currentPlayer.id, spell: spell.name, casterId: currentPlayer.id, x: groundX, y: groundY, radius: groundAoERadius, castTime: spell.cast_time })
+          );
 
           await new Promise((resolve) => setTimeout(resolve, spell.cast_time * 1000));
 
@@ -3514,7 +3558,7 @@ export default async function packetReceiver(
             const travelTime = Math.max(0.4, Math.min(throwDist / throwSpeed, 2.5));
 
             groundPlayersInMap.forEach((p) => {
-              sendPacket(p.ws, packetManager.projectile({
+              sendPacketBestEffort(p.ws, packetManager.projectile({
                 id: currentPlayer.id,
                 time: travelTime,
                 target_id: currentPlayer.id,
@@ -3608,9 +3652,12 @@ export default async function packetReceiver(
                 if (st.health < 0) st.health = 0;
                 entityCache.updateHealth(st.id, st.health);
                 if (spell_damage !== 0) {
-                  groundPlayersInMap.forEach((pp) => {
-                    sendPacket(pp.ws, packetManager.updateStats({ id: ws.data.id, target: st.id, stats: { health: st.health, total_max_health: st.max_health }, isCrit: false, damage: splashDmg, entity: true }));
-                  });
+                  broadcastToAOIBestEffortAtPosition(
+                    st.position.x,
+                    st.position.y,
+                    currentPlayer.location.map,
+                    packetManager.updateStats({ id: ws.data.id, target: st.id, stats: { health: st.health, total_max_health: st.max_health }, isCrit: false, damage: splashDmg, entity: true })
+                  );
                 }
                 if (st.health <= 0) {
                   groundPlayersInMap.forEach((pp) => sendPacket(pp.ws, packetManager.despawnEntity(st.id, 30)));
@@ -3644,7 +3691,11 @@ export default async function packetReceiver(
                     );
                   }
                   if (spell_damage !== 0) {
-                    groundPlayersInMap.forEach((pp) => sendPacket(pp.ws, packetManager.updateStats({ id: ws.data.id, target: st.id, stats: st.stats, isCrit: false, damage: splashDmg })));
+                    broadcastStatsUpdateToAOI(
+                      st,
+                      currentPlayer,
+                      packetManager.updateStats({ id: ws.data.id, target: st.id, stats: st.stats, isCrit: false, damage: splashDmg })
+                    );
                   }
                 }
 
@@ -3672,7 +3723,7 @@ export default async function packetReceiver(
 
             // Visual projectile from caster to ground position
             groundPlayersInMap.forEach((p) => {
-              sendPacket(p.ws, packetManager.projectile({
+              sendPacketBestEffort(p.ws, packetManager.projectile({
                 id: currentPlayer.id, time: 0.3, target_id: currentPlayer.id,
                 spell: spell.name, icon: getIconUrl(spell.icon), entity: false
               }));
@@ -3683,7 +3734,7 @@ export default async function packetReceiver(
           const syncedStats = await player.synchronizeStats(currentPlayer.username);
           if (syncedStats) currentPlayer.stats = syncedStats;
           playerCache.set(currentPlayer.id, currentPlayer);
-          groundPlayersInMap.forEach((pp) => sendPacket(pp.ws, packetManager.updateStats({ id: currentPlayer.id, target: currentPlayer.id, stats: currentPlayer.stats })));
+          broadcastToAOIBestEffort(currentPlayer, packetManager.updateStats({ id: currentPlayer.id, target: currentPlayer.id, stats: currentPlayer.stats }));
 
           currentPlayer.last_attack = performance.now();
           listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target: currentPlayer, isEntityTarget: false });
@@ -3885,9 +3936,11 @@ export default async function packetReceiver(
 
           await sendPositionAnimation(ws, newDir, false, false, "", undefined, globalStateRevision, false);
 
-          playersInMap.forEach((p) => {
-            sendPacket(p.ws, packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: 0 }));
-          });
+          broadcastCastToMap(
+            playersInMap,
+            currentPlayer.id,
+            packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: 0 })
+          );
 
           currentPlayer.last_attack = performance.now();
           if (currentPlayer.isVanished) {
@@ -3961,9 +4014,11 @@ export default async function packetReceiver(
 
           await sendPositionAnimation(ws, offset.face, false, false, "", undefined, globalStateRevision, false);
 
-          playersInMap.forEach((p) => {
-            sendPacket(p.ws, packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: 0 }));
-          });
+          broadcastCastToMap(
+            playersInMap,
+            currentPlayer.id,
+            packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: 0 })
+          );
 
           currentPlayer.last_attack = performance.now();
           if (currentPlayer.isVanished) {
@@ -4022,12 +4077,11 @@ export default async function packetReceiver(
           true
         );
 
-        playersInMap.forEach((player) => {
-          sendPacket(
-            player.ws,
-            packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: spell.cast_time })
-          );
-        });
+        broadcastCastToMap(
+          playersInMap,
+          currentPlayer.id,
+          packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: spell.cast_time })
+        );
         await new Promise((resolve) => setTimeout(resolve, spell.cast_time * 1000));
 
         // Abort if this cast was superseded by a new cast (e.g. interrupted then recast)
@@ -4119,12 +4173,11 @@ export default async function packetReceiver(
         }
 
         if (canAttack2?.reason == "nopvp") {
-          playersInMap.forEach((player) => {
-            sendPacket(
-              player.ws,
-              packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
-            );
-          });
+          broadcastCastToMap(
+            playersInMap,
+            currentPlayer.id,
+            packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
+          );
 
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
@@ -4137,12 +4190,11 @@ export default async function packetReceiver(
         }
 
         if (canAttack2?.reason == "path_blocked") {
-          playersInMap.forEach((player) => {
-            sendPacket(
-              player.ws,
-              packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
-            );
-          });
+          broadcastCastToMap(
+            playersInMap,
+            currentPlayer.id,
+            packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
+          );
 
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
@@ -4155,12 +4207,11 @@ export default async function packetReceiver(
         }
 
         if (canAttack2?.reason == "range") {
-          playersInMap.forEach((player) => {
-            sendPacket(
-              player.ws,
-              packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
-            );
-          });
+          broadcastCastToMap(
+            playersInMap,
+            currentPlayer.id,
+            packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
+          );
 
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
@@ -4173,12 +4224,11 @@ export default async function packetReceiver(
         }
 
         if (canAttack2?.reason == "direction") {
-          playersInMap.forEach((player) => {
-            sendPacket(
-              player.ws,
-              packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
-            );
-          });
+          broadcastCastToMap(
+            playersInMap,
+            currentPlayer.id,
+            packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
+          );
 
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
@@ -4191,12 +4241,11 @@ export default async function packetReceiver(
         }
 
         if (canAttack2?.reason == "entity_returning") {
-          playersInMap.forEach((player) => {
-            sendPacket(
-              player.ws,
-              packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
-            );
-          });
+          broadcastCastToMap(
+            playersInMap,
+            currentPlayer.id,
+            packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
+          );
 
           const resetPlayer = playerCache.get(currentPlayer.id);
           if (resetPlayer && resetPlayer.spellCooldowns) {
@@ -4224,7 +4273,7 @@ export default async function packetReceiver(
           const liveParticleCache = await assetCache.get("particles") as Particle[] | null;
           const resolvedParticles = resolveSpellParticles(spell, liveParticleCache);
           playersInMap.forEach((player) => {
-            sendPacket(
+            sendPacketBestEffort(
               player.ws,
               packetManager.projectile({
                 id: currentPlayer.id,
@@ -4313,22 +4362,22 @@ export default async function packetReceiver(
           // Update entity health in cache only (not database - database is only updated on respawn/init)
           entityCache.updateHealth(target.id, target.health);
 
-          // Broadcast entity damage to all players on the map
+          // Broadcast entity damage to players whose AOI covers the entity
           const playersInMap = filterPlayersByMap(currentPlayer.location.map);
           log.debug(`[ATTACK] Broadcasting damage to ${playersInMap.length} players on map`);
-          playersInMap.forEach((player) => {
-            sendPacket(
-              player.ws,
-              packetManager.updateStats({
-                id: ws.data.id,
-                target: target.id,
-                stats: { health: target.health, total_max_health: target.max_health },
-                isCrit: isCrit,
-                damage: finalDamage,
-                entity: true,
-              })
-            );
-          });
+          broadcastToAOIBestEffortAtPosition(
+            target.position.x,
+            target.position.y,
+            currentPlayer.location.map,
+            packetManager.updateStats({
+              id: ws.data.id,
+              target: target.id,
+              stats: { health: target.health, total_max_health: target.max_health },
+              isCrit: isCrit,
+              damage: finalDamage,
+              entity: true,
+            })
+          );
 
           // If entity died, broadcast despawn and remove from cache
           if (target.health <= 0) {
@@ -4408,32 +4457,29 @@ export default async function packetReceiver(
 
           // Utility spells (damage=0) don't show damage numbers
           if (spell_damage !== 0) {
-          playersInMap.forEach((player) => {
-            sendPacket(
-              player.ws,
-              packetManager.updateStats({
-                id: ws.data.id,
-                target: target.id,
-                stats: target.stats,
-                isCrit: isCrit,
-                damage: finalDamage,
-                absorb: effectResult.absorb || 0,
-              })
-            );
-          });
+          broadcastStatsUpdateToAOI(
+            target,
+            currentPlayer,
+            packetManager.updateStats({
+              id: ws.data.id,
+              target: target.id,
+              stats: target.stats,
+              isCrit: isCrit,
+              damage: finalDamage,
+              absorb: effectResult.absorb || 0,
+            })
+          );
           }
 
           // Always send caster's stats (mana change)
-          playersInMap.forEach((player) => {
-            sendPacket(
-              player.ws,
-              packetManager.updateStats({
-                id: currentPlayer.id,
-                target: currentPlayer.id,
-                stats: currentPlayer.stats,
-              })
-            );
-          });
+          broadcastToAOIBestEffort(
+            currentPlayer,
+            packetManager.updateStats({
+              id: currentPlayer.id,
+              target: currentPlayer.id,
+              stats: currentPlayer.stats,
+            })
+          );
 
           sendStatsToPartyMembers(target.username, target.id, target.stats);
           sendStatsToPartyMembers(currentPlayer.username, currentPlayer.id, currentPlayer.stats);
@@ -4528,16 +4574,19 @@ export default async function packetReceiver(
               if (splashTarget.health < 0) splashTarget.health = 0;
               entityCache.updateHealth(splashTarget.id, splashTarget.health);
 
-              playersInMap.forEach((p) => {
-                sendPacket(p.ws, packetManager.updateStats({
+              broadcastToAOIBestEffortAtPosition(
+                splashTarget.position.x,
+                splashTarget.position.y,
+                currentPlayer.location.map,
+                packetManager.updateStats({
                   id: ws.data.id,
                   target: splashTarget.id,
                   stats: { health: splashTarget.health, total_max_health: splashTarget.max_health },
                   isCrit: false,
                   damage: splashDmg,
                   entity: true,
-                }));
-              });
+                })
+              );
 
               if (splashTarget.health <= 0) {
                 playersInMap.forEach((p) => {
@@ -4569,15 +4618,17 @@ export default async function packetReceiver(
                   (p: any) => spellEffects.broadcastEffectsUpdate(p)
                 );
 
-                playersInMap.forEach((p) => {
-                  sendPacket(p.ws, packetManager.updateStats({
+                broadcastStatsUpdateToAOI(
+                  splashTarget,
+                  currentPlayer,
+                  packetManager.updateStats({
                     id: ws.data.id,
                     target: splashTarget.id,
                     stats: splashTarget.stats,
                     isCrit: false,
                     damage: splashDmg,
-                  }));
-                });
+                  })
+                );
               }
 
               if (!isInParty) {
@@ -4599,11 +4650,12 @@ export default async function packetReceiver(
 
         // Treat ESC cancel as spell interruption
         const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+        broadcastCastToMap(
+          playersInMap,
+          currentPlayer.id,
+          packetManager.castSpell({ id: currentPlayer.id, spell: 'interrupted', time: 1 })
+        );
         playersInMap.forEach((player) => {
-          sendPacket(
-            player.ws,
-            packetManager.castSpell({ id: currentPlayer.id, spell: 'interrupted', time: 1 })
-          );
           sendPacket(
             player.ws,
             packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" })
@@ -4658,10 +4710,10 @@ export default async function packetReceiver(
         const removed = spellEffects.cancelEffect(currentPlayer, effectId);
         if (removed) {
           spellEffects.broadcastEffectsUpdate(currentPlayer);
-          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-          playersInMap.forEach((p) => {
-            sendPacket(p.ws, packetManager.updateStats({ id: currentPlayer.id, target: currentPlayer.id, stats: currentPlayer.stats }));
-          });
+          broadcastToAOIBestEffort(
+            currentPlayer,
+            packetManager.updateStats({ id: currentPlayer.id, target: currentPlayer.id, stats: currentPlayer.stats })
+          );
         }
         break;
       }
@@ -4681,7 +4733,7 @@ export default async function packetReceiver(
           playersInMap = playersInMap.filter((p) => p.isAdmin);
         }
         playersInMap.forEach((player) => {
-          sendPacket(player.ws, packetManager.stopTyping(stopTypingData));
+          sendPacketBestEffort(player.ws, packetManager.stopTyping(stopTypingData));
         });
         break;
       }
@@ -9193,17 +9245,13 @@ export default async function packetReceiver(
               currentPlayer.stats
             );
 
-            const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-
-            playersInMap.forEach((player) => {
-              sendPacket(
-                player.ws,
-                packetManager.updateStats({
-                  target: currentPlayer.id,
-                  stats: currentPlayer.stats,
-                })
-              );
-            });
+            broadcastToAOIBestEffort(
+              currentPlayer,
+              packetManager.updateStats({
+                target: currentPlayer.id,
+                stats: currentPlayer.stats,
+              })
+            );
 
             if (slotIndex !== undefined) {
               sendPacket(
@@ -9326,17 +9374,13 @@ export default async function packetReceiver(
               currentPlayer.stats
             );
 
-            const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-
-            playersInMap.forEach((player) => {
-              sendPacket(
-                player.ws,
-                packetManager.updateStats({
-                  target: currentPlayer.id,
-                  stats: currentPlayer.stats,
-                })
-              );
-            });
+            broadcastToAOIBestEffort(
+              currentPlayer,
+              packetManager.updateStats({
+                target: currentPlayer.id,
+                stats: currentPlayer.stats,
+              })
+            );
 
             sendPacket(
               ws,
@@ -9711,11 +9755,12 @@ async function interruptPlayerCast(target: any) {
   }
 
   const playersInMap = filterPlayersByMap(target.location.map);
+  broadcastCastToMap(
+    playersInMap,
+    target.id,
+    packetManager.castSpell({ id: target.id, spell: 'interrupted', time: 1 })
+  );
   playersInMap.forEach((p) => {
-    sendPacket(
-      p.ws,
-      packetManager.castSpell({ id: target.id, spell: 'interrupted', time: 1 })
-    );
     sendPacket(
       p.ws,
       packetManager.groundAoeDespawn({ id: target.id + "_casting" })
@@ -9981,6 +10026,36 @@ function sendPacket(ws: any, packets: any[]) {
   }
 }
 
+function sendPacketBestEffort(ws: any, packets: any[]) {
+  if (!ws || typeof ws.sendBestEffort !== "function" || ws.readyState !== 1) {
+    return;
+  }
+  try {
+    packets.forEach((packet) => {
+      ws.sendBestEffort(packet);
+    });
+  } catch (error) {
+    log.debug(`Best-effort packet send failed: ${error}`);
+  }
+}
+
+/**
+ * Broadcast a cosmetic cast-state packet (CAST_SPELL variants) to a map's
+ * players with split delivery: the caster's own copy stays on the reliable
+ * stream (their cast bar / cooldown UI must not lose the "interrupted"
+ * packet), while every observer gets it as a loss-tolerant datagram.
+ */
+function broadcastCastToMap(playersInMap: any[], casterId: string, packets: any[]) {
+  for (const player of playersInMap) {
+    if (!player?.ws || player.ws.readyState !== 1) continue;
+    if (player.id === casterId) {
+      sendPacket(player.ws, packets);
+    } else {
+      sendPacketBestEffort(player.ws, packets);
+    }
+  }
+}
+
 loot.setOnDespawn((lootItem) => {
   const playerIds = mapIndex.getPlayersOnMap(lootItem.map);
   for (const playerId of playerIds) {
@@ -10005,7 +10080,7 @@ async function sendStatsToPartyMembers(playerUsername: string, playerId: string,
     const partyMember = sessionId && playerCache.get(sessionId);
 
     if (partyMember && partyMember.ws) {
-      sendPacket(
+      sendPacketBestEffort(
         partyMember.ws,
         packetManager.updateStats({
           target: playerId,
@@ -10048,7 +10123,13 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
     revision: revision,
   };
 
-  broadcastToAOI(currentPlayer, packetManager.spriteSheetAnimation(spriteSheetPacketData), true);
+  // Split delivery: the player's own copy rides the reliable stream (their
+  // sprite state must never desync), while AOI observers get loss-tolerant
+  // datagrams - a lost copy is corrected by the next state-change animation.
+  if (currentPlayer.ws) {
+    sendPacket(currentPlayer.ws, packetManager.spriteSheetAnimation(spriteSheetPacketData));
+  }
+  broadcastToAOIBestEffort(currentPlayer, packetManager.spriteSheetAnimation(spriteSheetPacketData), false);
 }
 
 async function sendAnimation(ws: any, name: string, playerId?: string, revision?: number) {
@@ -10205,7 +10286,7 @@ function scheduleLightning() {
         const strikeX = player.location.position.x + (Math.random() * 600 - 300);
         const strikeY = player.location.position.y + (Math.random() * 400 - 200);
 
-        broadcastToAOI(
+        broadcastToAOIBestEffort(
           player,
           packetManager.lightning({ x: Math.round(strikeX), y: Math.round(strikeY), map: world.name }),
           true
