@@ -38,6 +38,9 @@ function parseArgs() {
         quiet: false,
         onClientLoggedIn: undefined as ((client: any) => void) | undefined,
         onClientFailed: undefined as (() => void) | undefined,
+        shardIndex: 1,
+        shardCount: 1,
+        processes: 1,
         help: false
     };
 
@@ -84,10 +87,40 @@ function parseArgs() {
             case '--realm':
                 config.realmId = args[++i];
                 break;
+            case '--processes':
+            case '--procs': {
+                // Fork the benchmark into N child processes, each driving an
+                // equal slice of <player count>. One Bun process tops out
+                // around a few thousand WT clients (its own event loop becomes
+                // the bottleneck, not the server); spreading the load across
+                // processes removes the client-side ceiling.
+                config.processes = Math.max(1, Math.min(32, parseInt(args[++i]) || 1));
+                break;
+            }
+            case '--shard': {
+                // "M/N": this instance is shard M of N. Splits `clients` evenly
+                // so several benchmark processes (or machines) can drive one
+                // server without any single Bun process being the client-side
+                // bottleneck. Each shard provisions and runs only its slice.
+                const spec = args[++i] || "1/1";
+                const [mStr, nStr] = spec.split("/");
+                const n = Math.max(1, parseInt(nStr) || 1);
+                const m = Math.min(n, Math.max(1, parseInt(mStr) || 1));
+                config.shardIndex = m;
+                config.shardCount = n;
+                break;
+            }
             case '--help':
                 config.help = true;
                 break;
         }
+    }
+
+    if (config.shardCount > 1) {
+        const base = Math.floor(config.clients / config.shardCount);
+        const remainder = config.clients % config.shardCount;
+        // First `remainder` shards get one extra client.
+        config.clients = base + (config.shardIndex <= remainder ? 1 : 0);
     }
 
     return config;
@@ -114,6 +147,11 @@ Options:
   --gateway           Enable gateway load balancer routing
   --gateway-url <url> Gateway HTTP URL (default from GATEWAY_URL env or http://localhost:9999)
   --realm <id>        Specific realm/server ID to benchmark (optional)
+  --processes <N>     Fork the benchmark into N child processes, each driving an equal
+                      slice of <player count>, and print an aggregate summary. Use this
+                      to get past the single-process client-side ceiling (~few thousand
+                      WT clients per Bun process). e.g. --processes 4
+  --shard <M/N>       (used internally by --processes) run as shard M of N
   --simulation        Simulate a realistic 5-minute daily login curve (slow times, peaks,
                       logins and logouts) instead of a fixed client count
   --duration <number> Override simulation span in seconds (default: 300)
@@ -138,37 +176,27 @@ const packet = {
 };
 
 interface LatencyStats {
-    samples: number[];
-    oneWaySamples: number[];
-    serverProcSamples: number[];
-    jitterSamples: number[];
+    // Server -> client one-way delivery, measured from server timestamps
+    // piggybacked on movement datagrams. There is no client reply anywhere in
+    // the latency path: TIME_SYNC was removed, and how fast a client answers
+    // is not something we measure.
     udpOneWaySamples: number[];
-    lastSyncTimes: Map<any, { seq: number; clientSendTime: number }>;
-    lastSeqs: Map<any, number>;
-    lastRtts: Map<any, number>;
+    jitterSamples: number[];
     offsets: Map<any, number>;
     offsetCounts: Map<any, number>;
     lastUdpSeqs: Map<any, number>;
-    lostPackets: number;
-    expectedPackets: number;
+    lastUdpOneWay: Map<any, number>;
     udpLostFrames: number;
     udpExpectedFrames: number;
 }
 
 const latencyStats: LatencyStats = {
-    samples: [],
-    oneWaySamples: [],
-    serverProcSamples: [],
-    jitterSamples: [],
     udpOneWaySamples: [],
-    lastSyncTimes: new Map(),
-    lastSeqs: new Map(),
-    lastRtts: new Map(),
+    jitterSamples: [],
     offsets: new Map(),
     offsetCounts: new Map(),
     lastUdpSeqs: new Map(),
-    lostPackets: 0,
-    expectedPackets: 0,
+    lastUdpOneWay: new Map(),
     udpLostFrames: 0,
     udpExpectedFrames: 0,
 };
@@ -179,13 +207,42 @@ const latencyStats: LatencyStats = {
 const LATENCY_WARMUP_MS = 10000;
 let latencyWarmupUntil = 0;
 
-// One-way UDP latency measured from server timestamps piggybacked on movement
-// datagrams. Uses the per-client clock offset estimated from TIME_SYNC replies,
-// so no request/response is needed on the UDP path. Samples are only recorded
-// once the offset estimate has stabilized (a handful of TIME_SYNC replies).
+// One-way latency measured from the server timestamps piggybacked on movement
+// datagrams. Nothing here requires the client to answer the server.
+//
+// The clock offset is self-calibrated from those same datagrams rather than
+// from SERVER_TIME, which is now sent only once at login and so cannot track
+// clock skew over a long run.
+//
+// The offset is a floor estimate: it assumes the single fastest observed
+// delivery was ~instant, so reported times are relative to the best observed
+// path. True absolute one-way time needs a round trip, which we deliberately
+// no longer do; what load testing needs is how delivery degrades under load,
+// and that is exactly what this captures.
 const MIN_OFFSET_SAMPLES_FOR_UDP = 5;
 
+// Feed a server timestamp into the per-client clock-offset estimate.
+function recordClockOffset(client: any, serverSendTime: number): void {
+    const clientRecvTime = Date.now();
+    // raw offset = client clock - server clock, inflated by network delay
+    const rawOffset = clientRecvTime - serverSendTime;
+
+    const previous = latencyStats.offsets.get(client);
+    // Keep the MINIMUM observed offset: the sample with the least network delay
+    // is closest to true clock skew. A rolling mean would drift upward under
+    // load, masking the very latency we are trying to measure.
+    const offset = previous === undefined ? rawOffset : Math.min(previous, rawOffset);
+
+    latencyStats.offsets.set(client, offset);
+    latencyStats.offsetCounts.set(client, (latencyStats.offsetCounts.get(client) ?? 0) + 1);
+}
+
 function recordUdpLatency(client: any, serverSendTime: number): void {
+    // Every movement datagram also refines the clock offset. This must happen
+    // before the warm-up gate so the estimate is already settled by the time
+    // samples start being recorded.
+    recordClockOffset(client, serverSendTime);
+
     // Skip connection warm-up like the stream metrics do
     if (Date.now() < latencyWarmupUntil) return;
 
@@ -199,6 +256,17 @@ function recordUdpLatency(client: any, serverSendTime: number): void {
     if (latencyStats.udpOneWaySamples.length > 200000) {
         latencyStats.udpOneWaySamples.shift();
     }
+
+    // Jitter: absolute change in one-way delivery between consecutive samples
+    // for the same client (previously derived from TIME_SYNC RTT).
+    const prevOneWay = latencyStats.lastUdpOneWay.get(client);
+    if (prevOneWay !== undefined) {
+        latencyStats.jitterSamples.push(Math.abs(oneWay - prevOneWay));
+        if (latencyStats.jitterSamples.length > 200000) {
+            latencyStats.jitterSamples.shift();
+        }
+    }
+    latencyStats.lastUdpOneWay.set(client, oneWay);
 }
 
 function recordUdpBatchLatency(client: any, seq: number, serverSendTime: number): void {
@@ -217,72 +285,12 @@ function recordUdpBatchLatency(client: any, seq: number, serverSendTime: number)
     latencyStats.udpExpectedFrames++;
 }
 
-function recordTimeSyncReply(client: any, message: any): void {
-    // Skip connection warm-up: handshakes, DB writes and map loads spike
-    // latency during ramp-up and would skew the steady-state statistics.
-    if (Date.now() < latencyWarmupUntil) return;
-
-    const sent = latencyStats.lastSyncTimes.get(client);
-    if (!sent) return;
-
-    const clientRecvTime = Date.now();
-    const rtt = clientRecvTime - sent.clientSendTime;
-    latencyStats.samples.push(rtt);
-    if (latencyStats.samples.length > 200000) {
-        latencyStats.samples.shift();
-    }
-
-    // Packet loss: gaps in the TIME_SYNC sequence number mean lost replies
-    const prevSeq = latencyStats.lastSeqs.get(client);
-    if (prevSeq !== undefined && sent.seq > prevSeq + 1) {
-        const lost = sent.seq - prevSeq - 1;
-        latencyStats.lostPackets += lost;
-        latencyStats.expectedPackets += lost;
-    }
-    latencyStats.lastSeqs.set(client, sent.seq);
-    latencyStats.expectedPackets++;
-
-    // Jitter: absolute RTT change between consecutive replies
-    const prevRtt = latencyStats.lastRtts.get(client);
-    if (prevRtt !== undefined) {
-        latencyStats.jitterSamples.push(Math.abs(rtt - prevRtt));
-    }
-    latencyStats.lastRtts.set(client, rtt);
-
-    const serverRecvTime = message?.serverRecvTime;
-    const serverSendTime = message?.serverSendTime;
-
-    if (typeof serverRecvTime === 'number' && typeof serverSendTime === 'number') {
-        // One-way latency via NTP-style clock offset estimation (EMA-smoothed
-        // per client), which removes the client/server clock skew without
-        // needing synchronized clocks.
-        const offset = ((serverRecvTime - sent.clientSendTime) - (clientRecvTime - serverSendTime)) / 2;
-        const previousOffset = latencyStats.offsets.get(client);
-        const smoothedOffset = previousOffset === undefined ? offset : previousOffset * 0.8 + offset * 0.2;
-        latencyStats.offsets.set(client, smoothedOffset);
-        latencyStats.offsetCounts.set(client, (latencyStats.offsetCounts.get(client) ?? 0) + 1);
-
-        const oneWay = Math.max(0, serverRecvTime - sent.clientSendTime - smoothedOffset);
-        latencyStats.oneWaySamples.push(oneWay);
-        if (latencyStats.oneWaySamples.length > 200000) {
-            latencyStats.oneWaySamples.shift();
-        }
-
-        const serverProc = Math.max(0, serverSendTime - serverRecvTime);
-        latencyStats.serverProcSamples.push(serverProc);
-        if (latencyStats.serverProcSamples.length > 200000) {
-            latencyStats.serverProcSamples.shift();
-        }
-    }
-}
-
 const movementStats = { starts: 0, aborts: 0, logouts: 0, abruptDisconnects: 0 };
 
 // Base session lifetime for simulated clients, set to the simulation span by
 // runSimulation (see the sessionUntil comment in startMovementSimulation).
 let simulationLifetimeBaseMs = 300000;
 
-const clientIntervals = new Map<any, { timeSync: any }>();
 
 const pendingTimeouts = new Map<any, Set<any>>();
 
@@ -380,31 +388,9 @@ function drawProgress(current: number, total: number, activeConnections: number,
     process.stdout.write(`\r  ${chalk.bold('Progress:')} [${bar}] ${chalk.bold(percentage + '%')} ${timeDisplay} │ Clients: ${connectionStatus}${latencyDisplay}`);
 }
 
-function startKeepAlive(client: any) {
-    const sendTimeSync = () => {
-        if (stopped || client.readyState !== 1) return;
-
-        const sendTime = Date.now();
-        const previous = latencyStats.lastSyncTimes.get(client);
-        const seq = (previous?.seq ?? 0) + 1;
-        latencyStats.lastSyncTimes.set(client, { seq, clientSendTime: sendTime });
-
-        client.send(packet.encode(JSON.stringify({
-            type: "TIME_SYNC",
-            data: { seq, clientSendTime: sendTime }
-        })));
-
-        const nextTimer = setTimeout(sendTimeSync, 3000 + Math.random() * 4000);
-        const intervals = clientIntervals.get(client) || { timeSync: null };
-        intervals.timeSync = nextTimer;
-        clientIntervals.set(client, intervals);
-    };
-
-    const initialTimer = setTimeout(sendTimeSync, 1000 + Math.random() * 4000);
-    const intervals = clientIntervals.get(client) || { timeSync: null };
-    intervals.timeSync = initialTimer;
-    clientIntervals.set(client, intervals);
-}
+// No keep-alive is sent. TIME_SYNC is gone, and the server treats an open QUIC
+// session as proof of life, so clients need not send anything to stay
+// connected. Latency comes entirely from server-pushed timestamps.
 
 const packetMixStats = { select: 0, target: 0, inspect: 0, chat: 0, mount: 0 };
 
@@ -499,8 +485,7 @@ function startMovementSimulation(client: any, initialDelay: number = 0) {
     // Track own position from 0x02 MOVEXY echo datagrams (server echoes mover
     // position every tick) and one-way UDP latency from the trailing server
     // timestamps piggybacked on movement frames (0x02 echoes and 0x01 batches).
-    // TIME_SYNC replies also arrive as datagrams (best-effort) and are parsed
-    // here for RTT/offset statistics.
+    // SERVER_TIME also arrives as a datagram and supplies the clock offset.
     client.onDatagram((bytes: Uint8Array) => {
         if (bytes.length < 11) return;
 
@@ -532,12 +517,14 @@ function startMovementSimulation(client: any, initialDelay: number = 0) {
             return;
         }
 
-        // JSON datagram (e.g. TIME_SYNC reply)
+        // JSON datagram. SERVER_TIME is a 1Hz one-way push carrying the
+        // server's Date.now(); it is the clock reference for the one-way
+        // latency math, and needs no reply from us.
         if (bytes[0] === 0x7B) {
             try {
                 const message = JSON.parse(new TextDecoder().decode(bytes));
-                if (message.type === 'TIME_SYNC') {
-                    recordTimeSyncReply(client, message);
+                if (message.type === 'SERVER_TIME' && typeof message.data === 'number') {
+                    recordClockOffset(client, message.data);
                 }
             } catch {
                 // Not JSON after all - ignore
@@ -699,6 +686,65 @@ async function getAvailableServers(host: string, gatewayEnabled: boolean, gatewa
     return await cachedAvailableServers;
 }
 
+// Provision guest accounts up front via the gateway's bulk endpoint instead of
+// one /guest-login (≈15 serialised SQL round-trips) per client. At multi-thousand
+// client counts the per-request path saturates the gateway DB worker pool and
+// clients time out during login (1000 close). The bulk endpoint batches the
+// whole set into a handful of multi-row INSERTs; we request in chunks so a
+// single response stays a reasonable size.
+async function provisionGuestTokens(amount: number, host: string): Promise<string[]> {
+    const secret = process.env.GATEWAY_GAME_SERVER_SECRET;
+    if (!secret) {
+        log('GATEWAY_GAME_SERVER_SECRET environment variable is not set', 'error');
+        return [];
+    }
+
+    const CHUNK = 500;
+    const tokens: string[] = [];
+    let logged = false;
+
+    for (let offset = 0; offset < amount; offset += CHUNK) {
+        const count = Math.min(CHUNK, amount - offset);
+        try {
+            const response = await fetch(`${host}/guest-bulk`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Benchmark-Secret': secret,
+                    'User-Agent': 'Frostfire-Forge-Benchmark-CLI/1.0',
+                },
+                body: JSON.stringify({ count }),
+                signal: AbortSignal.timeout(60000),
+            });
+
+            const text = await response.text();
+            if (response.status !== 200) {
+                let msg = text.substring(0, 200);
+                try { msg = JSON.parse(text).message || msg; } catch { /* raw */ }
+                log(`Bulk guest provisioning failed (${response.status}): ${msg}`, 'error');
+                return tokens;
+            }
+
+            const body = JSON.parse(text);
+            if (!Array.isArray(body.tokens)) {
+                log('Bulk guest provisioning returned no tokens', 'error');
+                return tokens;
+            }
+            tokens.push(...body.tokens);
+
+            if (!logged) {
+                log(`Provisioning ${amount} guest accounts (bulk, ${CHUNK}/request)...`, 'info');
+                logged = true;
+            }
+        } catch (error: any) {
+            log(`Bulk guest provisioning error: ${error.message}`, 'error');
+            return tokens;
+        }
+    }
+
+    return tokens;
+}
+
 async function createClients(amount: number, host: string, clientUrl: string, config: ReturnType<typeof parseArgs>): Promise<any[]> {
     const allClients: any[] = [];
     const loggedInClients: any[] = [];
@@ -711,6 +757,16 @@ async function createClients(amount: number, host: string, clientUrl: string, co
     const loginCompletion = new Promise<any[]>((resolve) => { resolveLoggedIn = resolve; });
 
     const availableServers = await getAvailableServers(host, config.gatewayEnabled, config.gatewayUrl, config.realmId, config.quiet);
+
+        const guestTokens = await provisionGuestTokens(amount, host);
+        if (guestTokens.length < amount) {
+            log(`Only provisioned ${guestTokens.length}/${amount} guest tokens - continuing with what we have`, 'warn');
+        }
+        if (guestTokens.length === 0) {
+            resolveLoggedIn([]);
+            return await loginCompletion;
+        }
+
         let openedCount = 0;
         let loggedInCount = 0;
         let settledCount = 0;
@@ -774,6 +830,10 @@ async function createClients(amount: number, host: string, clientUrl: string, co
         const batchSize = 1;
         const batchDelay = config.rate > 0 ? Math.round(1000 / config.rate) : 300;
 
+        // Only as many clients as we have tokens for. All the settle/progress
+        // bookkeeping below is keyed off `amount`, so narrow it here.
+        amount = Math.min(amount, guestTokens.length);
+
         for (let i = 0; i < amount; i++) {
             const clientPromise = (async () => {
 
@@ -783,41 +843,7 @@ async function createClients(amount: number, host: string, clientUrl: string, co
                 }
 
                 try {
-                const guestLoginUrl = `${host}/guest-login`;
-                const response = await fetch(guestLoginUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'User-Agent': 'Frostfire-Forge-Benchmark-CLI/1.0'
-                    },
-                    signal: AbortSignal.timeout(15000)
-                });
-
-                const responseText = await response.text();
-
-                if (response.status !== 301) {
-                    try {
-                        const body = JSON.parse(responseText);
-                        log(`Failed to create guest account (${response.status}): ${body.message || 'Unknown error'}`, 'error');
-                    } catch (parseError) {
-                        log(`Failed to create guest account (${response.status}): ${responseText.substring(0, 100)}`, 'error');
-                    }
-                    return;
-                }
-
-                let body;
-                try {
-                    body = JSON.parse(responseText);
-                } catch (parseError) {
-                    log(`Failed to parse guest login response: ${responseText.substring(0, 100)}`, 'error');
-                    return;
-                }
-
-                const token = body.token;
-                if (!token) {
-                    log('No token received from guest login', 'error');
-                    return;
-                }
+                const token = guestTokens[i];
 
                 let finalTransportUrl = clientUrl;
                 if (availableServers.length > 0) {
@@ -867,8 +893,6 @@ async function createClients(amount: number, host: string, clientUrl: string, co
 
                             settleClient(i);
 
-                            startKeepAlive(client);
-
                             const randomDelay = Math.floor(Math.random() * 10000);
                             startMovementSimulation(client, randomDelay);
 
@@ -906,11 +930,7 @@ async function createClients(amount: number, host: string, clientUrl: string, co
                     if (config.onClientFailed) {
                         config.onClientFailed();
                     }
-                    if (error.name === 'AbortError' || error.name === 'TimeoutError') {
-                        log(`Guest account creation timed out after 15s (possible database contention)`, 'error');
-                    } else {
-                        log(`Error creating guest account: ${error.message}`, 'error');
-                    }
+                    log(`Error connecting client: ${error.message}`, 'error');
                     settleClient(i);
                 }
             })();
@@ -923,48 +943,46 @@ async function createClients(amount: number, host: string, clientUrl: string, co
         return await loginCompletion;
 }
 
+// All latency figures describe SERVER -> CLIENT delivery. There is no RTT: the
+// engine no longer round-trips anything with the client, and how quickly a
+// client answers is not a property of server performance.
 function getLatencyStats() {
-    const stats: any = { avg: 0, min: 0, max: 0, p95: 0, p99: 0, count: latencyStats.samples.length, oneWayAvg: 0, serverProcAvg: 0, jitterAvg: 0, udpOneWayAvg: 0, lostPackets: latencyStats.lostPackets, expectedPackets: latencyStats.expectedPackets, udpLostFrames: latencyStats.udpLostFrames, udpExpectedFrames: latencyStats.udpExpectedFrames };
-    if (latencyStats.samples.length > 0) {
-        stats.avg = Math.round(latencyStats.samples.reduce((a, b) => a + b, 0) / latencyStats.samples.length);
-        stats.min = Math.round(Math.min(...latencyStats.samples));
-        stats.max = Math.round(Math.max(...latencyStats.samples));
-        const sorted = [...latencyStats.samples].sort((a, b) => a - b);
+    const samples = latencyStats.udpOneWaySamples;
+    const stats: any = {
+        avg: 0, min: 0, max: 0, p95: 0, p99: 0,
+        count: samples.length,
+        jitterAvg: 0,
+        udpLostFrames: latencyStats.udpLostFrames,
+        udpExpectedFrames: latencyStats.udpExpectedFrames,
+    };
+
+    if (samples.length > 0) {
+        stats.avg = Math.round(samples.reduce((a, b) => a + b, 0) / samples.length);
+        stats.min = Math.round(Math.min(...samples));
+        stats.max = Math.round(Math.max(...samples));
+        const sorted = [...samples].sort((a, b) => a - b);
         stats.p95 = Math.round(sorted[Math.floor(sorted.length * 0.95)]);
         stats.p99 = Math.round(sorted[Math.floor(sorted.length * 0.99)]);
     }
-    if (latencyStats.oneWaySamples.length > 0) {
-        stats.oneWayAvg = Math.round(latencyStats.oneWaySamples.reduce((a, b) => a + b, 0) / latencyStats.oneWaySamples.length);
-    }
-    if (latencyStats.serverProcSamples.length > 0) {
-        stats.serverProcAvg = Math.round(latencyStats.serverProcSamples.reduce((a, b) => a + b, 0) / latencyStats.serverProcSamples.length);
-    }
+
     if (latencyStats.jitterSamples.length > 0) {
         stats.jitterAvg = Math.round(latencyStats.jitterSamples.reduce((a, b) => a + b, 0) / latencyStats.jitterSamples.length);
     }
-    if (latencyStats.udpOneWaySamples.length > 0) {
-        stats.udpOneWayAvg = Math.round(latencyStats.udpOneWaySamples.reduce((a, b) => a + b, 0) / latencyStats.udpOneWaySamples.length);
-    }
+
     return stats;
 }
 
 function cleanupClient(client: any) {
-    const intervals = clientIntervals.get(client);
-    if (intervals?.timeSync) clearInterval(intervals.timeSync);
-    clientIntervals.delete(client);
-
     const timeouts = pendingTimeouts.get(client);
     if (timeouts) {
         timeouts.forEach(timeoutId => clearTimeout(timeoutId));
         pendingTimeouts.delete(client);
     }
 
-    latencyStats.lastSyncTimes.delete(client);
-    latencyStats.lastSeqs.delete(client);
-    latencyStats.lastRtts.delete(client);
     latencyStats.offsets.delete(client);
     latencyStats.offsetCounts.delete(client);
     latencyStats.lastUdpSeqs.delete(client);
+    latencyStats.lastUdpOneWay.delete(client);
 
     if (client.readyState === 1) {
         client.close();
@@ -1029,8 +1047,8 @@ function attachSimulationHandlers(client: any) {
 
             const message = JSON.parse(rawMessage);
 
-            if (message.type === 'TIME_SYNC') {
-                recordTimeSyncReply(client, message);
+            if (message.type === 'SERVER_TIME' && typeof message.data === 'number') {
+                recordClockOffset(client, message.data);
             }
         } catch (e: any) {
             if (!(e instanceof SyntaxError) && !quietMode) {
@@ -1274,41 +1292,27 @@ function printLatencySummary(latency: any) {
         return;
     }
 
-    console.log(`\n  ${chalk.bold('Latency Statistics:')} ${chalk.gray(`(first ${LATENCY_WARMUP_MS / 1000}s excluded as connection warm-up)`)}`);
+    console.log(`\n  ${chalk.bold('Latency Statistics:')}`);
 
     let avgColor = chalk.green;
     if (latency.avg > 100) avgColor = chalk.yellow;
     if (latency.avg > 200) avgColor = chalk.red;
 
-    console.log(`    ${chalk.bold('RTT Average:')} ${avgColor(latency.avg + 'ms')}`);
-    console.log(`    ${chalk.bold('RTT Minimum:')} ${chalk.green(latency.min + 'ms')}`);
+    console.log(`    ${chalk.bold('One-way Average:')} ${avgColor(latency.avg + 'ms')}`);
+    console.log(`    ${chalk.bold('One-way Minimum:')} ${chalk.green(latency.min + 'ms')}`);
 
     let maxColor = chalk.green;
     if (latency.max > 200) maxColor = chalk.yellow;
     if (latency.max > 500) maxColor = chalk.red;
 
-    console.log(`    ${chalk.bold('RTT Maximum:')} ${maxColor(latency.max + 'ms')}`);
+    console.log(`    ${chalk.bold('One-way Maximum:')} ${maxColor(latency.max + 'ms')}`);
     if (latency.p95 > 0) {
-        console.log(`    ${chalk.bold('RTT p95:')} ${chalk.white(latency.p95 + 'ms')} ${chalk.dim('|')} ${chalk.bold('p99:')} ${chalk.white(latency.p99 + 'ms')}`);
+        console.log(`    ${chalk.bold('One-way p95:')} ${chalk.white(latency.p95 + 'ms')} ${chalk.dim('|')} ${chalk.bold('p99:')} ${chalk.white(latency.p99 + 'ms')}`);
     }
     console.log(`    ${chalk.bold('Samples:')}     ${chalk.white(latency.count.toLocaleString())}`);
 
-    if (latency.oneWayAvg > 0) {
-        console.log(`    ${chalk.bold('One-way (client→server):')} ${chalk.white(latency.oneWayAvg + 'ms')}`);
-    }
-    if (latency.udpOneWayAvg > 0) {
-        console.log(`    ${chalk.bold('One-way UDP (movement datagrams):')} ${chalk.white(latency.udpOneWayAvg + 'ms')}`);
-    }
-    if (latency.serverProcAvg > 0) {
-        console.log(`    ${chalk.bold('Server processing:')} ${chalk.white(latency.serverProcAvg + 'ms')}`);
-    }
     if (latency.jitterAvg > 0) {
-        console.log(`    ${chalk.bold('Jitter (mean |ΔRTT|):')} ${chalk.white(latency.jitterAvg + 'ms')}`);
-    }
-    if (latency.expectedPackets > 0) {
-        const lossPercent = ((latency.lostPackets / latency.expectedPackets) * 100).toFixed(2);
-        const lossColor = latency.lostPackets === 0 ? chalk.green : chalk.yellow;
-        console.log(`    ${chalk.bold('TIME_SYNC packet loss:')} ${lossColor(`${latency.lostPackets}/${latency.expectedPackets} (${lossPercent}%)`)}`);
+        console.log(`    ${chalk.bold('Jitter (mean |Δone-way|):')} ${chalk.white(latency.jitterAvg + 'ms')}`);
     }
     if (latency.udpExpectedFrames > 0) {
         const udpLossPercent = ((latency.udpLostFrames / latency.udpExpectedFrames) * 100).toFixed(2);
@@ -1327,7 +1331,7 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
     console.log(chalk.bold.cyan('  Frostfire Forge CLI Benchmark'));
     console.log(chalk.bold.cyan('-'.repeat(60)) + '\n');
 
-    console.log(`  ${chalk.bold('Clients:')}  ${chalk.white(config.clients)}`);
+    console.log(`  ${chalk.bold('Clients:')}  ${chalk.white(config.clients)}${config.shardCount > 1 ? chalk.gray(`  (shard ${config.shardIndex}/${config.shardCount})`) : ''}`);
     console.log(`  ${chalk.bold('Duration:')} ${chalk.white(config.duration + 's')}`);
     console.log(`  ${chalk.bold('TLS:')}      ${chalk.green('Required (WebTransport)')}`);
     console.log(`  ${chalk.bold('Rate:')}     ${config.rate > 0 ? chalk.white(config.rate + '/sec') : chalk.gray('default (3/sec)')}`);
@@ -1382,8 +1386,8 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
 
                 const message = JSON.parse(rawMessage);
 
-                if (message.type === 'TIME_SYNC') {
-                    recordTimeSyncReply(client, message);
+                if (message.type === 'SERVER_TIME' && typeof message.data === 'number') {
+                    recordClockOffset(client, message.data);
                 }
             } catch (e: any) {
                 if (e instanceof SyntaxError) {
@@ -1468,6 +1472,7 @@ async function runBenchmark(config: ReturnType<typeof parseArgs>) {
     }
 
     printLatencySummary(finalLatency);
+    emitShardResult(finalLatency, actualClientCount, finalActiveConnections);
 
     console.log('\n' + chalk.gray('-'.repeat(60)) + '\n');
 }
@@ -1479,15 +1484,146 @@ if (config.help) {
     process.exit(0);
 }
 
-process.on('SIGINT', () => {
-    console.log('\n\n' + chalk.yellow('⚠ Benchmark interrupted by user') + '\n');
-    closeAllClients();
-    setTimeout(() => process.exit(0), 500);
-});
+const RESULT_MARKER = '##BENCHRESULT##';
 
-runBenchmark(config).then(() => {
-    setTimeout(() => process.exit(0), 500);
-}).catch((error) => {
-    log(`Benchmark failed: ${error.message}`, 'error');
-    process.exit(1);
-});
+// Child (sharded) processes emit their raw stats on one line for the parent
+// orchestrator to aggregate. Only when actually running as a shard-of-many.
+function emitShardResult(latency: any, startedClients: number, connectedAtEnd: number) {
+    if (config.shardCount <= 1) return;
+    console.log(RESULT_MARKER + ' ' + JSON.stringify({
+        shard: config.shardIndex,
+        oneWaySamples: latencyStats.udpOneWaySamples,
+        jitterSamples: latencyStats.jitterSamples,
+        udpLostFrames: latency.udpLostFrames,
+        udpExpectedFrames: latency.udpExpectedFrames,
+        startedClients,
+        connectedAtEnd,
+    }));
+}
+
+async function runOrchestrator() {
+    const n = config.processes;
+    const passthroughArgs = process.argv.slice(2).filter((a, i, arr) => {
+        if (a === '--processes' || a === '--procs') return false;
+        if ((arr[i - 1] === '--processes' || arr[i - 1] === '--procs')) return false;
+        return true;
+    });
+
+    console.log('\n' + chalk.bold.cyan('-'.repeat(60)));
+    console.log(chalk.bold.cyan(`  Frostfire Forge CLI Benchmark  ${chalk.gray(`(${n} processes)`)}`));
+    console.log(chalk.bold.cyan('-'.repeat(60)) + '\n');
+    console.log(`  ${chalk.bold('Total clients:')} ${chalk.white(config.clients)}  ${chalk.gray(`≈ ${Math.floor(config.clients / n)}/process`)}`);
+    console.log(`  ${chalk.bold('Processes:')}     ${chalk.white(n)}\n`);
+
+    const colors = [chalk.cyan, chalk.magenta, chalk.yellow, chalk.green, chalk.blue, chalk.red, chalk.white, chalk.gray];
+    const results: any[] = [];
+    const children: any[] = [];
+
+    const spawns = [];
+    for (let i = 1; i <= n; i++) {
+        const color = colors[(i - 1) % colors.length];
+        const tag = color(`[p${i}]`);
+        const childArgs = [import.meta.path, ...passthroughArgs, '--shard', `${i}/${n}`];
+        const proc = Bun.spawn(['bun', ...childArgs], {
+            stdout: 'pipe',
+            stderr: 'pipe',
+            env: { ...process.env, FORCE_COLOR: '1' },
+        });
+        children.push(proc);
+
+        const pump = async (stream: ReadableStream<Uint8Array>) => {
+            const reader = stream.getReader();
+            const decoder = new TextDecoder();
+            let buf = '';
+            for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buf += decoder.decode(value, { stream: true });
+                let nl;
+                while ((nl = buf.indexOf('\n')) !== -1) {
+                    const line = buf.slice(0, nl);
+                    buf = buf.slice(nl + 1);
+                    const marker = line.indexOf(RESULT_MARKER);
+                    if (marker !== -1) {
+                        try { results.push(JSON.parse(line.slice(marker + RESULT_MARKER.length))); } catch { /* ignore */ }
+                        continue;
+                    }
+                    console.log(`${tag} ${line}`);
+                }
+            }
+        };
+
+        spawns.push((async () => {
+            await Promise.all([pump(proc.stdout as any), pump(proc.stderr as any)]);
+            await proc.exited;
+        })());
+    }
+
+    process.on('SIGINT', () => {
+        console.log('\n\n' + chalk.yellow('⚠ Interrupted - terminating child processes') + '\n');
+        for (const c of children) { try { c.kill(); } catch { /* ignore */ } }
+        setTimeout(() => process.exit(0), 500);
+    });
+
+    await Promise.all(spawns);
+
+    // Aggregate
+    const allOneWay: number[] = [];
+    const allJitter: number[] = [];
+    let lost = 0, expected = 0, started = 0, connected = 0;
+    for (const r of results) {
+        allOneWay.push(...(r.oneWaySamples || []));
+        allJitter.push(...(r.jitterSamples || []));
+        lost += r.udpLostFrames || 0;
+        expected += r.udpExpectedFrames || 0;
+        started += r.startedClients || 0;
+        connected += r.connectedAtEnd || 0;
+    }
+
+    console.log('\n' + chalk.bold.cyan('-'.repeat(60)));
+    console.log(chalk.bold.cyan(`  Aggregate Results  ${chalk.gray(`(${results.length}/${n} processes reported)`)}`));
+    console.log(chalk.bold.cyan('-'.repeat(60)) + '\n');
+
+    if (allOneWay.length === 0) {
+        console.log(chalk.yellow('  No latency samples collected across processes.'));
+    } else {
+        const sorted = [...allOneWay].sort((a, b) => a - b);
+        const avg = Math.round(allOneWay.reduce((a, b) => a + b, 0) / allOneWay.length);
+        const jitterAvg = allJitter.length
+            ? Math.round(allJitter.reduce((a, b) => a + b, 0) / allJitter.length) : 0;
+        const lossPct = expected > 0 ? ((lost / expected) * 100).toFixed(2) : '0.00';
+        console.log(`    ${chalk.bold('Clients started:')}   ${chalk.white(started)}`);
+        console.log(`    ${chalk.bold('Connected at end:')}  ${chalk.white(connected)}`);
+        console.log(`    ${chalk.bold('One-way Average:')}   ${chalk.white(avg + 'ms')}`);
+        console.log(`    ${chalk.bold('One-way Minimum:')}   ${chalk.white(sorted[0] + 'ms')}`);
+        console.log(`    ${chalk.bold('One-way Maximum:')}   ${chalk.white(sorted[sorted.length - 1] + 'ms')}`);
+        console.log(`    ${chalk.bold('One-way p95:')}       ${chalk.white(sorted[Math.floor(sorted.length * 0.95)] + 'ms')} ${chalk.dim('|')} ${chalk.bold('p99:')} ${chalk.white(sorted[Math.floor(sorted.length * 0.99)] + 'ms')}`);
+        console.log(`    ${chalk.bold('Samples:')}           ${chalk.white(allOneWay.length.toLocaleString())}`);
+        console.log(`    ${chalk.bold('Jitter:')}            ${chalk.white(jitterAvg + 'ms')}`);
+        const lossColor = lost === 0 ? chalk.green : (parseFloat(lossPct) > 2 ? chalk.red : chalk.yellow);
+        console.log(`    ${chalk.bold('Movement datagram loss:')} ${lossColor(`${lost}/${expected} (${lossPct}%)`)}`);
+    }
+    console.log('\n' + chalk.gray('-'.repeat(60)) + '\n');
+    process.exit(0);
+}
+
+if (config.processes > 1 && config.shardCount <= 1) {
+    // Orchestrator mode: fork N children, each a --shard of the total.
+    await runOrchestrator().catch((e) => {
+        log(`Orchestrator failed: ${e.message}`, 'error');
+        process.exit(1);
+    });
+} else {
+    process.on('SIGINT', () => {
+        console.log('\n\n' + chalk.yellow('⚠ Benchmark interrupted by user') + '\n');
+        closeAllClients();
+        setTimeout(() => process.exit(0), 500);
+    });
+
+    runBenchmark(config).then(() => {
+        setTimeout(() => process.exit(0), 500);
+    }).catch((error) => {
+        log(`Benchmark failed: ${error.message}`, 'error');
+        process.exit(1);
+    });
+}

@@ -1,4 +1,4 @@
-import { connect } from "@webtransport-bun/webtransport";
+import { connect } from "@lillious-networks/webtransport";
 import crypto from "crypto";
 import fs from "node:fs";
 import path from "node:path";

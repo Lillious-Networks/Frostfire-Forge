@@ -2,6 +2,7 @@ import { broadcastToAOI, broadcastToAOIBestEffort } from "../socket/aoi";
 import entitySystem from "./entities";
 import entityCache from "../services/entityCache.ts";
 import playerCache from "../services/playermanager";
+import mapIndex from "../services/mapindex";
 import log from "../modules/logger";
 import { packetManager } from "../socket/packet_manager";
 import spellEffects from "./spelleffects";
@@ -111,14 +112,29 @@ function clearPathState(aiState: EntityAIState): void {
   clearPathStateImpl(aiState);
 }
 
+/**
+ * Players on a map, via the map index (O(players-on-map)) instead of scanning
+ * the whole player cache. The AI loop ticks at 60Hz per entity, so the old
+ * `Object.values(playerCache.list()).filter(...)` cost O(entities x all players)
+ * per tick and dominated CPU at high player counts.
+ */
+function getPlayersOnMap(map: string, requireSocket: boolean = false): any[] {
+  const result: any[] = [];
+  for (const playerId of mapIndex.getPlayersOnMap(map)) {
+    const player = playerCache.get(playerId);
+    if (!player || !player.location) continue;
+    if (requireSocket && !player.ws) continue;
+    result.push(player);
+  }
+  return result;
+}
+
 async function findNearestPlayer(entity: any, aggroRange: number, requireLineOfSight: boolean = true): Promise<{ player: any; distance: number } | null> {
   let nearest = null;
   let nearestDistance = aggroRange;
 
-  const allPlayers = Object.values(playerCache.list()) as any[];
+  const allPlayers = getPlayersOnMap(entity.map);
   for (const player of allPlayers) {
-    if (player.location.map !== entity.map) continue;
-
     // Never aggro on stealthed admins
     if (player.isStealth && player.isAdmin) {
       continue;
@@ -458,8 +474,7 @@ async function processCombat(entity: any, aiState: EntityAIState): Promise<void>
       if (distance <= aiState.attackRange && distance <= desiredCombatDistance && hasLOS) {
         const damageAmount = aiState.damage + Math.floor(Math.random() * 5) - 2;
 
-        const allPlayers = Object.values(playerCache.list()) as any[];
-        const playersOnMap = allPlayers.filter((p: any) => p && p.location && p.location.map === entity.map);
+        const playersOnMap = getPlayersOnMap(entity.map);
 
         if (playersOnMap.length > 0) {
           const projectilePacket = packetManager.projectile({
@@ -487,8 +502,7 @@ async function processCombat(entity: any, aiState: EntityAIState): Promise<void>
             }
             freshTarget.stats.health = Math.max(0, freshTarget.stats.health - dmg);
 
-            const allPlayers = Object.values(playerCache.list()) as any[];
-            const playersOnMap = allPlayers.filter((p: any) => p && p.location && p.location.map === entity.map);
+            const playersOnMap = getPlayersOnMap(entity.map);
 
             if (freshTarget.stats.health <= 0) {
               freshTarget.stats.health = 0;
@@ -657,8 +671,7 @@ async function moveTowardsSpawn(entity: any, aiState?: EntityAIState): Promise<v
     clearPathState(aiState);
 
     // Broadcast entity state reset to all players
-    const allPlayers = Object.values(playerCache.list()) as any[];
-    const playersOnMap = allPlayers.filter((p: any) => p && p.location && p.location.map === entity.map && p.ws);
+    const playersOnMap = getPlayersOnMap(entity.map, true);
 
     if (playersOnMap.length > 0) {
       // Send entity update with direction and idle combat state
@@ -690,8 +703,7 @@ async function moveTowardsSpawn(entity: any, aiState?: EntityAIState): Promise<v
   }
 
   // Check if there are any players in AOI
-  const allPlayers = Object.values(playerCache.list()) as any[];
-  const playersOnMap = allPlayers.filter((p: any) => p && p.location && p.location.map === entity.map);
+  const playersOnMap = getPlayersOnMap(entity.map);
 
   // If no players on map, teleport back to spawn
   if (playersOnMap.length === 0) {
@@ -725,8 +737,7 @@ async function moveTowardsSpawn(entity: any, aiState?: EntityAIState): Promise<v
     entityCache.resetHealth(entity.id);
 
     // Broadcast health update to players
-    const allPlayers = Object.values(playerCache.list()) as any[];
-    const playersOnMap = allPlayers.filter((p: any) => p && p.location && p.location.map === entity.map && p.ws);
+    const playersOnMap = getPlayersOnMap(entity.map, true);
     if (playersOnMap.length > 0) {
       const healthPacket = packetManager.updateEntityHealth(entity.id, entity.health, entity.max_health);
       broadcastToAOIBestEffort(playersOnMap[0], healthPacket, true);
@@ -1013,8 +1024,7 @@ function broadcastEntityStateToAOI(entity: Entity): void {
   const entityKey = String(entity.id);
   const aiState = entityAIStates.get(entityKey);
 
-  const allPlayers = Object.values(playerCache.list()) as any[];
-  const playersOnMap = allPlayers.filter((p: any) => p && p.location && p.location.map === entity.map && p.ws);
+  const playersOnMap = getPlayersOnMap(entity.map, true);
 
   if (playersOnMap.length === 0) return;
 
@@ -1109,9 +1119,7 @@ async function respawnEntity(entityId: string | number): Promise<void> {
 
       const spawnPacket = packetManager.spawnEntity(spawnPacketData);
 
-      const playerCacheData = playerCache.list();
-      const allPlayers = Object.values(playerCacheData) as any[];
-      const playerOnMap = allPlayers.find((p: any) => p && p.location && p.location.map === entityFromDb.map);
+      const playerOnMap = getPlayersOnMap(entityFromDb.map).find((p: any) => p.aoi);
 
       if (playerOnMap && playerOnMap.aoi) {
         broadcastToAOI(playerOnMap, spawnPacket, true);
@@ -1153,8 +1161,7 @@ async function handleEntityDeath(entity: any): Promise<void> {
 
     if (entity.entity_type === 'boss' && entity.loot_table_id) {
       const chestId = lootChest.spawn(entity.map, entity.position.x, entity.position.y, entity.loot_table_id, undefined, "entity_death");
-      const allPlayers = Object.values(playerCache.list()) as any[];
-      const playersOnMap = allPlayers.filter((p: any) => p && p.location && p.location.map === entity.map && p.ws);
+      const playersOnMap = getPlayersOnMap(entity.map, true);
       if (playersOnMap.length > 0) {
         broadcastToAOI(playersOnMap[0], packetManager.lootChestSpawn({
           id: chestId, x: entity.position.x, y: entity.position.y,

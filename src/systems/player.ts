@@ -911,14 +911,21 @@ const player = {
 
     const mapProperties = await assetCache.get("mapProperties") as MapProperties[];
     const mapData = mapProperties.find((m: any) => m.name.replace(".json", "") === mapKey);
-    if (!mapData) return;
+    if (!mapData) {
+      log.warn(`[preloadMapCollision] no mapProperties entry for "${mapKey}" - movement will be blocked (no_map_data)`);
+      return;
+    }
 
     let collisionData: any;
     try {
       const fetched = await assetCache.getNested(mapKey, "collision");
       collisionData = fetched !== undefined ? fetched : (await assetCache.get(mapKey))?.collision;
-      if (!collisionData || !Array.isArray(collisionData)) return;
-    } catch {
+      if (!collisionData || !Array.isArray(collisionData)) {
+        log.warn(`[preloadMapCollision] collision data for "${mapKey}" missing/not-array (${typeof collisionData}) - movement will be blocked`);
+        return;
+      }
+    } catch (e) {
+      log.warn(`[preloadMapCollision] fetch failed for "${mapKey}": ${e} - movement will be blocked`);
       return;
     }
 

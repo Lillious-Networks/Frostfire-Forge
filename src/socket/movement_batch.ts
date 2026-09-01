@@ -1,4 +1,8 @@
 export const BATCH_HEADER = 0x01;
+// Keep in sync with settings.webtransport.maxDatagramSize (server.ts passes
+// that value to the transport). 1200 is the conservative QUIC-safe default:
+// raising it risks PMTU black-holing, which shows up as intermittent movement
+// loss rather than a clean error.
 export const MAX_DATAGRAM_SIZE = 1200;
 const ENTRY_BYTES = 9;
 const PROBE_BYTES = 10; // [u32 seq][u32 seconds][u16 ms]

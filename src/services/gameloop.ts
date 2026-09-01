@@ -1,4 +1,4 @@
-
+import log from "../modules/logger";
 
 interface MovingPlayer {
   playerId: string;
@@ -8,14 +8,32 @@ interface MovingPlayer {
   running: boolean;
 }
 
+const GL_PROFILE = process.env.BENCHMARK_PROFILE === "1" || process.env.BENCHMARK_PROFILE === "true";
+
 class GameLoop {
   private movingPlayers: Map<string, MovingPlayer>;
   private loopInterval: ReturnType<typeof setInterval> | null;
   private readonly FRAME_TIME = 1000 / 30;
 
+  // Profiling: ticks that overlapped (fired while the previous one was still
+  // awaiting), total wall time spent inside tick(), and the max single tick.
+  private prof = { ticks: 0, overlaps: 0, tickMs: 0, maxTickMs: 0, running: false };
+
   constructor() {
     this.movingPlayers = new Map();
     this.loopInterval = null;
+
+    if (GL_PROFILE) {
+      setInterval(() => {
+        const p = this.prof;
+        log.info(
+          `[profile:gameloop] ${p.ticks} ticks/5s, ${p.overlaps} overlaps, ` +
+          `${p.tickMs.toFixed(0)}ms total, ${p.maxTickMs.toFixed(0)}ms max, ` +
+          `${this.movingPlayers.size} movers, rss=${(process.memoryUsage().rss / 1048576).toFixed(0)}MB`
+        );
+        p.ticks = p.overlaps = p.tickMs = p.maxTickMs = 0;
+      }, 5000).unref();
+    }
   }
 
   start(): void {
@@ -34,6 +52,13 @@ class GameLoop {
   private async tick(): Promise<void> {
     if (this.movingPlayers.size === 0) return;
 
+    if (GL_PROFILE) {
+      if (this.prof.running) this.prof.overlaps++;
+      this.prof.running = true;
+      this.prof.ticks++;
+    }
+    const _t0 = GL_PROFILE ? performance.now() : 0;
+
     const tickPromises: Promise<void>[] = [];
 
     for (const [playerId, playerState] of this.movingPlayers.entries()) {
@@ -45,6 +70,13 @@ class GameLoop {
 
     if (tickPromises.length > 0) {
       await Promise.all(tickPromises);
+    }
+
+    if (GL_PROFILE) {
+      const dt = performance.now() - _t0;
+      this.prof.tickMs += dt;
+      if (dt > this.prof.maxTickMs) this.prof.maxTickMs = dt;
+      this.prof.running = false;
     }
   }
 

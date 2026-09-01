@@ -1,5 +1,16 @@
 const PROCESS_STARTED_AT = Date.now() - performance.now();
 let lastSessionValidationTime = 0;
+// Backpressure gate for deferred packet handling.
+//
+// NOTE: this is deliberately set above the transport's own drop threshold so
+// the gate never trips. Lowering it (tried: 16MB) makes handleBackpressure's
+// retry path reachable, and that path is buggy - it BOTH queues the action and
+// schedules a retry of the same action, so a packet can be handled twice. For
+// AUTH that means a duplicate login, which the server rejects with
+// "Authentication already in progress" and closes the connection. At 2000
+// clients this broke logins outright.
+//
+// Fix the double-dispatch in handleBackpressure before lowering this.
 const MAX_BUFFER_SIZE = 1024 * 1024 * 1024;
 const packetQueue = new Map<string, (() => void)[]>();
 import "../utility/validate_config.ts";
@@ -26,7 +37,7 @@ import { loadPlugins, registerAllPlugins, mergePluginSpellsIntoCache } from "../
 import { pluginHandlers, warpInterceptors, packetInterceptors } from "./receiver.ts";
 import { startWebTransportServer, TransportConnection } from "./transport.ts";
 import { topicBus } from "./topics.ts";
-import { connect } from "@webtransport-bun/webtransport";
+import { connect } from "@lillious-networks/webtransport";
 import { ensureLocalCertificate, computeCertificateHash, certificateSupportsPinning } from "../utility/local_cert.ts";
 
 const httpRouteHandlers = new Map<string, (req: Request) => Promise<Response>>();
@@ -399,12 +410,33 @@ function onTransportClose(connection: TransportConnection) {
   }
 }
 
+// Latency-sensitive packets that bypass the backpressure queue. Hoisted to a
+// module-level Set: this was an array literal rebuilt and linearly scanned on
+// every single inbound packet.
+const PROCESS_IMMEDIATELY = new Set(["MOVEXY", "STATS", "SERVER_TIME", "ANIMATION"]);
+
+const MSG_PROFILE = process.env.BENCHMARK_PROFILE === "1" || process.env.BENCHMARK_PROFILE === "true";
+const msgProf: Record<string, { n: number; ms: number }> = {};
+if (MSG_PROFILE) {
+  setInterval(() => {
+    const parts = Object.entries(msgProf)
+      .sort((a, b) => b[1].ms - a[1].ms)
+      .map(([t, v]) => `${t}=${v.n}/${v.ms.toFixed(0)}ms`)
+      .join(" ");
+    log.info(`[profile:inbound] ${parts || "(none)"}`);
+    for (const k of Object.keys(msgProf)) delete msgProf[k];
+  }, 5000).unref();
+}
+
 function onTransportMessage(connection: TransportConnection, message: string) {
+  const _mp0 = MSG_PROFILE ? performance.now() : 0;
+  let _mpType = "?";
   try {
     if (!connection.data?.id || !message) return;
 
     const parsedMessage = JSON.parse(message);
     const packetType = parsedMessage?.type;
+    _mpType = packetType || "?";
 
     if (settings?.packetRatelimit?.enabled) {
       const client = ClientRateLimit.get(connection.data.id);
@@ -426,15 +458,32 @@ function onTransportMessage(connection: TransportConnection, message: string) {
       }
     }
 
-    const processImmediately = ["TIME_SYNC", "MOVEXY", "STATS", "SERVER_TIME", "ANIMATION"];
-    if (processImmediately.includes(packetType)) {
-      packetReceiver(null, connection, message);
+    // Liveness: any inbound packet proves the client is alive, so refresh the
+    // idle timestamp here rather than relying on a dedicated TIME_SYNC.
+    // Movement alone is not enough - a player can legitimately stand still
+    // while chatting, casting, trading or managing inventory - so every packet
+    // type counts. This is the single funnel all inbound packets pass through.
+    const activePlayer = playerCache.get(connection.data.id);
+    if (activePlayer) {
+      activePlayer.lastUpdated = performance.now();
+    }
+
+    // Hand the already-parsed object down so packetReceiver doesn't parse the
+    // same JSON a second time.
+    if (PROCESS_IMMEDIATELY.has(packetType)) {
+      packetReceiver(null, connection, message, parsedMessage);
       return;
     }
 
-    handleBackpressure(connection as any, () => packetReceiver(null, connection, message));
+    handleBackpressure(connection as any, () => packetReceiver(null, connection, message, parsedMessage));
   } catch (e) {
     log.error(e as string);
+  } finally {
+    if (MSG_PROFILE) {
+      const rec = msgProf[_mpType] ?? (msgProf[_mpType] = { n: 0, ms: 0 });
+      rec.n++;
+      rec.ms += performance.now() - _mp0;
+    }
   }
 }
 
@@ -702,18 +751,15 @@ listener.on(Events.SERVER_TICK, async () => {
 
     if (typeof p.created === "number" && p.created > 0 && (nowEpoch - (PROCESS_STARTED_AT + p.created)) < 5000) continue;
 
-    const rawLU = typeof p.lastUpdated === "number" ? p.lastUpdated : 0;
-    const lastUpdatedEpoch =
-      rawLU > 1e11
-        ? rawLU
-        : rawLU > 0
-        ? PROCESS_STARTED_AT + rawLU
-        : nowEpoch;
-
     const wsClosed = !p.ws || p.ws.readyState !== 1;
-    const tooIdle = (nowEpoch - lastUpdatedEpoch) > 30000;
 
-    if (wsClosed || tooIdle) {
+    // The client no longer sends a periodic TIME_SYNC heartbeat, so a genuinely
+    // AFK player can sit for minutes without sending anything. An open QUIC
+    // session is itself proof of life (WebTransport's own idle timeout, default
+    // 120s, tears down dead sessions and flips readyState), so only sweep
+    // players whose socket is gone. `lastUpdated` still tracks real activity
+    // and is refreshed by any inbound packet in onTransportMessage.
+    if (wsClosed) {
       inactiveSet.set(p.id, "inactive");
     }
   }
@@ -763,9 +809,10 @@ listener.on(Events.SERVER_TICK, async () => {
   for (const playerData of players) {
     if (!playerData || inactiveSet.has(playerData.id) || !playerData.ws) continue;
 
-    // SERVER_TIME is sent every second to every player; deliver it as an
-    // unreliable datagram so it never queues behind the reliable stream.
-    playerData.ws.sendBestEffort(packetManager.serverTime()[0]);
+    // SERVER_TIME is no longer pushed on this 1Hz loop. The client anchors the
+    // clock once at login and advances it locally; browser clock drift is
+    // seconds-per-day, far below the per-minute resolution the time-of-day
+    // system reacts to. At 2000 players this removed 2000 datagrams/sec.
 
     const rawLA = typeof playerData.last_attack === "number" ? playerData.last_attack : 0;
     const lastAttackEpoch =
@@ -802,18 +849,21 @@ listener.on(Events.SERVER_TICK, async () => {
       stats,
     };
 
-    // Latest-wins absolute stats - loss-tolerant datagrams (repeats every tick).
-    playerData.ws.sendBestEffort(packetManager.updateStats(updateStatsData)[0]);
+    // Encode once - the frame is byte-identical for the player and every
+    // observer. Latest-wins absolute stats delivered as loss-tolerant
+    // datagrams (this repeats every tick, so a dropped one self-heals).
+    const statsFrame = packetManager.updateStats(updateStatsData)[0];
+    playerData.ws.sendBestEffort(statsFrame);
 
-    const observers = findPlayersWithTargetInAOI(playerData.id);
-    for (const other of observers) {
+    // O(observers) via the AOI reverse index - was an O(all players) cache
+    // scan per regenerating player, i.e. O(n^2) per tick.
+    for (const other of findPlayersWithTargetInAOI(playerData.id)) {
       if (
-        other &&
         !inactiveSet.has(other.id) &&
         other.ws &&
         other.ws.readyState === 1
       ) {
-        other.ws.sendBestEffort(packetManager.updateStats(updateStatsData)[0]);
+        other.ws.sendBestEffort(statsFrame);
       }
     }
   }

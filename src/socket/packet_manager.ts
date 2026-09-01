@@ -24,29 +24,15 @@ export const packetManager = {
     ] as any[];
   },
   ping: (data: any) => {
+    // PONG only. This previously also pushed an unsolicited TIME_SYNC frame,
+    // which the client never consumed - time of day comes from SERVER_TIME.
     return [
       packet.encode(JSON.stringify({ type: "PONG", data: data })),
-      packet.encode(
-        JSON.stringify({
-          type: "TIME_SYNC",
-          data: Date.now(),
-        })
-      ),
     ] as any[];
   },
   pong: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "PONG", data: data })),
-    ] as any[];
-  },
-  timeSync: (data: any, serverTiming?: { serverRecvTime: number; serverSendTime: number }) => {
-    return [
-      packet.encode(JSON.stringify({
-        type: "TIME_SYNC",
-        data: data,
-        serverRecvTime: serverTiming?.serverRecvTime,
-        serverSendTime: serverTiming?.serverSendTime,
-      })),
     ] as any[];
   },
   benchmark: (data: any) => {
@@ -369,6 +355,19 @@ export const packetManager = {
     view.setUint16(15, serverSendTime % 1000, true);
 
     return [packetData];
+  },
+  // JSON MOVEXY. The binary moveXY (0x02) is force-routed onto the unreliable
+  // datagram path by the transport (movement headers 0x01-0x03). For the
+  // mover's OWN self-echo we want guaranteed, ordered delivery on the reliable
+  // stream - the client hard-snaps its predicted position to each echo, so a
+  // lost one causes rubberbanding. A JSON frame stays on the reliable stream.
+  moveXYReliable: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({
+        type: "MOVEXY",
+        data: { i: data.i, d: data.d, r: data.r ?? 0, s: data.s ?? 0 },
+      })),
+    ] as any[];
   },
   batchMoveXY: (movements: any[]) => {
     const HEADER_BYTE = 0x01;

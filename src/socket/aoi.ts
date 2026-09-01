@@ -1,4 +1,5 @@
 import AOI_CONFIG from "../config/aoi.json";
+import log from "../modules/logger";
 import playerCache from "../services/playermanager";
 import layerManager from "../services/layermanager";
 import { getEffectsPayload } from "../systems/spelleffects";
@@ -6,6 +7,13 @@ import mapIndex from "../services/mapindex";
 import parties from "../systems/parties";
 import { packetManager } from "./packet_manager";
 import spatialGrid from "../services/spatialgrid";
+import * as aoiReverse from "../services/aoiReverseIndex";
+
+// A player is only removed from an AOI once they are this many times the AOI
+// radius away - not the instant they cross it. Prevents despawn/respawn packet
+// churn for players lingering near the boundary. Enter still uses the plain
+// radius, so the band between 1.0x and this value is "sticky, don't re-add".
+const AOI_EXIT_HYSTERESIS = (AOI_CONFIG as any).EXIT_HYSTERESIS ?? 1.25;
 
 export interface PlayerAOIState {
 
@@ -149,54 +157,46 @@ function filterPlayersByDistance(
   const sourceMap = map.replaceAll(".json", "");
   const result: any[] = [];
 
-  if (AOI_CONFIG.USE_SPATIAL_GRID) {
-
-    const candidateIds = spatialGrid.getPlayersInRadius(
-      sourcePos.x,
-      sourcePos.y,
-      radius,
-      sourceMap
-    );
-
-    for (const playerId of candidateIds) {
+  // AOI candidates are always same-layer (players on other layers are separate
+  // instances). Iterate the layer's membership - capped at
+  // MAX_PLAYERS_PER_LAYER (~50) - rather than a spatial-grid radius query.
+  //
+  // With the DEFAULT_RADIUS of 1000 and a 512px grid cell, a radius query pulls
+  // a 5x5 cell block; at a spawn hotspot with thousands of players clustered
+  // that block holds thousands of candidates, nearly all on other layers. The
+  // old code scanned every one of them (playerCache.get + layer check + dist)
+  // just to arrive at a <=50-entry result. That was ~57ms per AOI update at
+  // high pop and it ran per moving player per throttle window - the loop fell
+  // ~10x behind budget.
+  if (sourceLayerId) {
+    for (const playerId of layerManager.getPlayersInLayer(sourceLayerId)) {
+      if (playerId === sourcePlayer.id) continue;
       const player = playerCache.get(playerId);
-      if (!player) continue;
-
-      if (player.id === sourcePlayer.id) continue;
-
-      const playerLayerId = player.aoi?.layerId;
-      if (playerLayerId !== sourceLayerId) continue;
+      if (!player || !player.location) continue;
 
       const dx = player.location.position.x - sourcePos.x;
       const dy = player.location.position.y - sourcePos.y;
-      const distSquared = dx * dx + dy * dy;
-
-      if (distSquared <= radiusSquared) {
+      if (dx * dx + dy * dy <= radiusSquared) {
         result.push(player);
       }
     }
-  } else {
+    return result;
+  }
 
-    const players = playerCache.list();
+  // No layer assigned (shouldn't normally happen): fall back to a map scan.
+  const players = playerCache.list();
+  for (const playerId in players) {
+    const player = players[playerId];
+    if (player.id === sourcePlayer.id) continue;
 
-    for (const playerId in players) {
-      const player = players[playerId];
+    const playerMap = player.location.map.replaceAll(".json", "");
+    if (playerMap !== sourceMap) continue;
+    if (player.aoi?.layerId) continue;
 
-      if (player.id === sourcePlayer.id) continue;
-
-      const playerMap = player.location.map.replaceAll(".json", "");
-      if (playerMap !== sourceMap) continue;
-
-      const playerLayerId = player.aoi?.layerId;
-      if (playerLayerId !== sourceLayerId) continue;
-
-      const dx = player.location.position.x - sourcePos.x;
-      const dy = player.location.position.y - sourcePos.y;
-      const distSquared = dx * dx + dy * dy;
-
-      if (distSquared <= radiusSquared) {
-        result.push(player);
-      }
+    const dx = player.location.position.x - sourcePos.x;
+    const dy = player.location.position.y - sourcePos.y;
+    if (dx * dx + dy * dy <= radiusSquared) {
+      result.push(player);
     }
   }
 
@@ -269,6 +269,20 @@ export function broadcastPlayerUpdate(player: any): void {
   }
 }
 
+export const aoiProf = {
+  calls: 0,
+  filterMs: 0,
+  enteredLoopMs: 0,
+  exitedLoopMs: 0,
+  tailMs: 0,
+  candidateTotal: 0,
+  enteredTotal: 0,
+  exitedTotal: 0,
+  maxCandidates: 0,
+};
+const AOI_PROFILE =
+  process.env.BENCHMARK_PROFILE === "1" || process.env.BENCHMARK_PROFILE === "true";
+
 export async function updatePlayerAOI(
   player: any,
   spawnBatchQueue?: Map<string, Map<string, any>>,
@@ -284,12 +298,15 @@ export async function updatePlayerAOI(
   const currentSequence = player.aoi.mapChangeSequence;
 
   try {
+    const _p0 = AOI_PROFILE ? performance.now() : 0;
 
     const playersInRange = filterPlayersByDistance(
       player,
       aoiRadius,
       currentMap
     );
+
+    const _p1 = AOI_PROFILE ? performance.now() : 0;
 
     if (AOI_CONFIG.USE_SPATIAL_GRID) {
       spatialGrid.updatePlayer(player.id, currentPos.x, currentPos.y, currentMap);
@@ -303,7 +320,40 @@ export async function updatePlayerAOI(
     const oldAOISet = player.aoi.playersInAOI;
 
     const enteredAOI: string[] = [...newAOISet].filter(id => !oldAOISet.has(id));
-    const exitedAOI: string[] = [...oldAOISet].filter(id => !newAOISet.has(id));
+
+    // Exit hysteresis: a player who has merely crossed the AOI radius is NOT
+    // dropped until they are past radius * AOI_EXIT_HYSTERESIS. Without this, a
+    // player jittering back and forth across the boundary (very common - normal
+    // wandering near another player) generates a despawn + re-spawn packet pair
+    // on every AOI update. At scale that was ~19k exit events per 5s, each an
+    // encode + send + reverse-index mutation, and it dominated the AOI cost.
+    //
+    // Skipped entirely when the visible set changed wholesale (a warp / map
+    // change - oldAOISet is from the old map, none of it is "near the boundary"
+    // in any meaningful sense; treating it as sticky just makes a big pointless
+    // loop and keeps stale cross-map viewers around for a frame).
+    const wholesaleChange =
+      oldAOISet.size > 0 && enteredAOI.length === newAOISet.size;
+    const exitRadiusSq = aoiRadius * aoiRadius * (AOI_EXIT_HYSTERESIS * AOI_EXIT_HYSTERESIS);
+    const exitedAOI: string[] = [];
+    for (const id of oldAOISet) {
+      if (newAOISet.has(id)) continue;
+      if (!wholesaleChange) {
+        const other = playerCache.get(id as string);
+        if (other && other.location && other.aoi?.layerId === player.aoi.layerId) {
+          const ex = other.location.position.x - currentPos.x;
+          const ey = other.location.position.y - currentPos.y;
+          if (ex * ex + ey * ey <= exitRadiusSq) {
+            // Still within the hysteresis band - keep them visible.
+            newAOISet.add(id as string);
+            continue;
+          }
+        }
+      }
+      exitedAOI.push(id as string);
+    }
+
+    const _p2 = AOI_PROFILE ? performance.now() : 0;
 
     for (const enteredPlayerId of enteredAOI) {
       const enteredPlayer = playerCache.get(enteredPlayerId);
@@ -340,9 +390,23 @@ export async function updatePlayerAOI(
         await initializePlayerAOI(enteredPlayer);
       }
       enteredPlayer.aoi.playersInAOI.add(player.id);
+      // enteredPlayer can now see `player`.
+      aoiReverse.addViewer(player.id, enteredPlayer.id);
       enteredPlayer.aoi.revision = (enteredPlayer.aoi.revision || 0) + 1;
       playerCache.set(enteredPlayer.id, enteredPlayer);
 
+    }
+
+    const _p3 = AOI_PROFILE ? performance.now() : 0;
+    if (AOI_PROFILE) {
+      const c = playersInRange.length;
+      aoiProf.calls++;
+      aoiProf.filterMs += _p1 - _p0;
+      aoiProf.enteredLoopMs += _p3 - _p2;
+      aoiProf.candidateTotal += c;
+      aoiProf.enteredTotal += enteredAOI.length;
+      aoiProf.exitedTotal += exitedAOI.length;
+      if (c > aoiProf.maxCandidates) aoiProf.maxCandidates = c;
     }
 
     for (const exitedPlayerId of exitedAOI) {
@@ -374,12 +438,17 @@ export async function updatePlayerAOI(
 
         if (exitedPlayer.aoi) {
           exitedPlayer.aoi.playersInAOI.delete(player.id);
+          // exitedPlayer can no longer see `player`.
+          aoiReverse.removeViewer(player.id, exitedPlayer.id);
           exitedPlayer.aoi.revision = (exitedPlayer.aoi.revision || 0) + 1;
           playerCache.set(exitedPlayer.id, exitedPlayer);
         }
       }
     }
 
+    // `player`'s own visible set is being replaced wholesale; reindex the diff
+    // so the reverse index reflects who `player` can now see.
+    aoiReverse.replaceVisibleSet(player.id, oldAOISet, newAOISet);
     player.aoi.playersInAOI = newAOISet;
     if (enteredAOI.length > 0 || exitedAOI.length > 0) {
       player.aoi.revision = (player.aoi.revision || 0) + 1;
@@ -389,6 +458,12 @@ export async function updatePlayerAOI(
     player.aoi.gridY = Math.floor(currentPos.y / AOI_CONFIG.GRID_CELL_SIZE);
 
     playerCache.set(player.id, player);
+
+    if (AOI_PROFILE) {
+      const now = performance.now();
+      aoiProf.exitedLoopMs += now - _p3;
+      // tailMs: replaceVisibleSet + assignments after the exited loop.
+    }
   } catch (error) {
     // Silently ignore AOI update errors
   }
@@ -557,10 +632,18 @@ export function broadcastToAOIBestEffortAtPosition(
 }
 
 export function findPlayersWithTargetInAOI(targetId: number | string): any[] {
-  const allPlayers = Object.values(playerCache.list());
-  return allPlayers.filter(
-    (player) => player.aoi && player.aoi.playersInAOI.has(targetId)
-  );
+  // O(viewers) via the reverse index instead of an O(all players) cache scan.
+  // The index is the source of truth (it normalises ids to strings, which the
+  // raw `playersInAOI.has()` check did not); we only re-validate that the
+  // viewer still exists and is a live AOI participant.
+  const result: any[] = [];
+  for (const viewerId of aoiReverse.getViewers(targetId)) {
+    const player = playerCache.get(viewerId);
+    if (player && player.aoi) {
+      result.push(player);
+    }
+  }
+  return result;
 }
 
 export function despawnPlayerFromAllAOI(
@@ -591,10 +674,20 @@ export function despawnPlayerFromAllAOI(
 
       if (player.aoi) {
         player.aoi.playersInAOI.delete(departingPlayer.id);
+        // `player` can no longer see the departing player.
+        aoiReverse.removeViewer(departingPlayer.id, player.id);
         player.aoi.revision = (player.aoi.revision || 0) + 1;
         playerCache.set(player.id, player);
       }
     });
+
+    // Nobody sees the departing player any more, on either map. Also drop the
+    // departing player as a viewer of everyone else: on disconnect its forward
+    // set is cleared below; on map_change it keeps a stale set that the
+    // follow-up updatePlayerAOI would otherwise diff against, but clearing here
+    // keeps the reverse index tight regardless.
+    aoiReverse.clearViewed(departingPlayer.id);
+    aoiReverse.clearViewer(departingPlayer.id);
 
     if (reason === "disconnect") {
       departingPlayer.aoi.playersInAOI.clear();
@@ -658,7 +751,14 @@ export async function handleMapChangeAOI(
     player.aoi.lastAOIUpdatePosition = { x: newPosition.x, y: newPosition.y };
     playerCache.set(player.id, player);
 
+    const _mcStart = AOI_PROFILE ? performance.now() : 0;
     await updatePlayerAOI(player, spawnBatchQueue, despawnBatchQueue);
+    if (AOI_PROFILE) {
+      const dt = performance.now() - _mcStart;
+      if (dt > 20) {
+        log.info(`[profile:mapchange] updatePlayerAOI ${oldMap}->${newMap} took ${dt.toFixed(0)}ms`);
+      }
+    }
   } catch (error) {
     // Silently ignore map change errors
   }
