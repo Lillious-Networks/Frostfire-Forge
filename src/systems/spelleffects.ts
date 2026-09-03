@@ -260,6 +260,24 @@ function getStuns(player: any) {
   return playerStuns.get(key)!;
 }
 
+// Pure predicate: is this player currently under a hard stun?
+// `stunnedUntil` is an epoch timestamp (Date.now()-based), so it must be
+// compared against Date.now(), never performance.now().
+export function isStunned(player: any, now: number = Date.now()): boolean {
+  return !!player?.stunnedUntil && player.stunnedUntil > now;
+}
+
+// Injected by the socket layer: force a moving player to stop server-side.
+// Stuns block *new* movement packets, but a player already registered in the
+// game loop keeps moving until an ABORT arrives from the client - which never
+// happens if the client doesn't know it's stunned. Calling this on stun makes
+// the server authoritative about halting in-progress movement.
+type StunMovementHandler = (target: any) => void | Promise<void>;
+let stunMovementHandler: StunMovementHandler | null = null;
+export function setStunMovementHandler(fn: StunMovementHandler) {
+  stunMovementHandler = fn;
+}
+
 registerSpellEffect("stun", async ({ caster, target, spell, effect, broadcastEffects }) => {
   if (!target?.stats) return;
   const durationSec = effect.duration && effect.duration > 0 ? effect.duration : 0;
@@ -288,6 +306,15 @@ registerSpellEffect("stun", async ({ caster, target, spell, effect, broadcastEff
   target.stunnedUntil = Math.max(target.stunnedUntil || 0, maxExpiry);
 
   broadcastEffects(target);
+
+  // Force in-progress movement to stop server-side (don't wait for a client ABORT)
+  if (stunMovementHandler) {
+    try {
+      await stunMovementHandler(target);
+    } catch (e) {
+      log.error(`stunMovementHandler failed: ${e}`);
+    }
+  }
 
   listener.emit(Events.PLAYER_STUNNED, { caster: caster || target, target, spellName, duration: durationSec });
 
@@ -715,4 +742,4 @@ registerSpellEffect("absorbtion", ({ caster, target, spell, effect, broadcastSta
   return { absorb: value };
 });
 
-export default { registerSpellEffect, applySpellEffects, consumeBarrier, clearBarriers, clearStuns, clearSlows, clearVanishes, cancelEffect, setVanishRemovedHandler, getVanishedEffectId, getEffectsPayload, registerEffectsPayloadProvider, registerHostileEffectType, spellHasHostileEffects, broadcastEffectsUpdate };
+export default { registerSpellEffect, applySpellEffects, consumeBarrier, clearBarriers, clearStuns, clearSlows, clearVanishes, cancelEffect, setVanishRemovedHandler, getVanishedEffectId, getEffectsPayload, registerEffectsPayloadProvider, registerHostileEffectType, spellHasHostileEffects, broadcastEffectsUpdate, isStunned, setStunMovementHandler };

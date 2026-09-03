@@ -1505,6 +1505,13 @@ authWorker.on("message", async (result: any) => {
       interruptableSpell: false,
       castId: 0,
       stunnedUntil: 0,
+      // Monotonic MOVEXY generation. Every inbound MOVEXY (direction or "abort")
+      // bumps it; a handler that suspended on an await is stale once a newer
+      // MOVEXY has bumped past the value it captured, and must not register the
+      // player as moving. Prevents rapid start/stop taps from leaving a player
+      // stuck walking (an older direction packet's deferred registration landing
+      // after a newer "abort").
+      _moveSeq: 0,
       spellLockoutUntil: cooldownManager.getLockout(playerData.username),
       slowPercent: 0,
       slowMultiplier: 1,
@@ -2097,35 +2104,28 @@ export default async function packetReceiver(
       case "MOVEXY": {
         if (!currentPlayer) return;
 
+        // MOVEXY is dispatched fire-and-forget (PROCESS_IMMEDIATELY, no await in
+        // server.ts) so multiple handlers for one connection interleave across
+        // their await points. Stamp this invocation with a monotonic generation;
+        // a newer MOVEXY bumps past it, marking any suspended older handler stale
+        // so it won't (re)register the player as moving after a later "abort".
+        const moveSeq = ++currentPlayer._moveSeq;
+
         await player.preloadMapCollision(currentPlayer.location.map);
 
         const baseSpeed = 6;
         const mountSpeedMultiplier = 1.35;
-        const lastDirection =
-          currentPlayer.location.position?.direction || "down";
 
         const direction = data.toString().toLowerCase();
 
         if (direction === "abort") {
+          await forceStopPlayerMovement(currentPlayer);
+          return;
+        }
 
-          gameLoop.unregisterMovingPlayer(currentPlayer.id);
-          currentPlayer.moving = false;
-          // Clean up movement state
-          if (currentPlayer._movementState) {
-            currentPlayer._movementState = undefined;
-          }
-
-          globalStateRevision++;
-          await sendPositionAnimation(
-            ws,
-            lastDirection,
-            false,
-            currentPlayer.mounted,
-            currentPlayer.mount_type || "unicorn",
-            undefined,
-            globalStateRevision,
-            currentPlayer.casting || false
-          );
+        // A newer MOVEXY (another direction, or an "abort") arrived while this
+        // handler was awaiting above - it is now authoritative. Drop this one.
+        if (currentPlayer._moveSeq !== moveSeq) {
           return;
         }
 
@@ -2135,8 +2135,9 @@ export default async function packetReceiver(
 
         if (!VALID_DIRECTIONS.has(direction)) return;
 
-        // Stunned players cannot move
-        if (currentPlayer.stunnedUntil && currentPlayer.stunnedUntil > performance.now()) {
+        // Stunned players cannot move. stunnedUntil is an epoch timestamp
+        // (Date.now()-based), so it must be compared against Date.now().
+        if (currentPlayer.stunnedUntil && currentPlayer.stunnedUntil > Date.now()) {
           return;
         }
 
@@ -2173,6 +2174,22 @@ export default async function packetReceiver(
 
           if (!ws || ws.readyState !== 1) {
             gameLoop.unregisterMovingPlayer(currentPlayer.id);
+            return;
+          }
+
+          // A newer MOVEXY superseded the packet that registered this callback
+          // (e.g. an "abort" that raced past this handler). Stop rather than
+          // keep stepping - the client believes it has stopped.
+          if (currentPlayer._moveSeq !== moveSeq) {
+            await forceStopPlayerMovement(currentPlayer);
+            return;
+          }
+
+          // Safety net: if a stun landed mid-movement and the stun handler's
+          // force-stop somehow didn't unregister us, halt here rather than
+          // waiting for a client ABORT that may never arrive.
+          if (spellEffects.isStunned(currentPlayer)) {
+            await forceStopPlayerMovement(currentPlayer);
             return;
           }
 
@@ -2533,6 +2550,13 @@ export default async function packetReceiver(
 
           if (PROFILE) prof.moveCbCount++;
         };
+
+        // Final staleness check: if an "abort" (or newer direction) landed while
+        // we were building the callback, that newer handler owns the movement
+        // state now - don't (re)register from this stale one.
+        if (currentPlayer._moveSeq !== moveSeq) {
+          break;
+        }
 
         gameLoop.registerMovingPlayer(currentPlayer.id, movePlayer);
 
@@ -3249,8 +3273,9 @@ export default async function packetReceiver(
           return;
         }
 
-        // Stunned players cannot cast
-        if (freshPlayerForDelay?.stunnedUntil && freshPlayerForDelay.stunnedUntil > performance.now()) {
+        // Stunned players cannot cast. stunnedUntil is an epoch timestamp
+        // (Date.now()-based), so it must be compared against Date.now().
+        if (freshPlayerForDelay?.stunnedUntil && freshPlayerForDelay.stunnedUntil > Date.now()) {
           return;
         }
 
@@ -9943,6 +9968,40 @@ export default async function packetReceiver(
   }
 }
 
+// Force a player to stop moving server-side, independent of any client ABORT.
+// Used by the MOVEXY "abort" branch, on-collision, and when a stun lands on a
+// player who is mid-movement (the client may never send ABORT in that case).
+async function forceStopPlayerMovement(target: any) {
+  if (!target) return;
+
+  gameLoop.unregisterMovingPlayer(target.id);
+  target.moving = false;
+  if (target._movementState) {
+    target._movementState = undefined;
+  }
+
+  const cached = playerCache.get(target.id);
+  if (cached && cached !== target) {
+    cached.moving = false;
+    cached._movementState = undefined;
+  }
+
+  const ws = target.ws;
+  if (ws && ws.readyState === 1) {
+    globalStateRevision++;
+    await sendPositionAnimation(
+      ws,
+      target.location?.position?.direction || "down",
+      false,
+      target.mounted,
+      target.mount_type || "unicorn",
+      undefined,
+      globalStateRevision,
+      target.casting || false
+    );
+  }
+}
+
 // Interrupt a player's in-progress cast: aborts the pending cast promise via castId,
 // broadcasts the interrupted cast bar, and reverts the casting animation.
 async function interruptPlayerCast(target: any) {
@@ -10117,6 +10176,10 @@ export async function handlePlayerDeath(target: any, killer: any, info: { damage
 
 dots.setPlayerDeathHandler(handlePlayerDeath);
 setPlayerDeathHandler(handlePlayerDeath);
+
+// When a stun lands on a moving player, stop their movement server-side
+// immediately - the client may never send a MOVEXY "abort".
+spellEffects.setStunMovementHandler(forceStopPlayerMovement);
 
 spellEffects.setVanishRemovedHandler(async (player) => {
   const map = player.location?.map;
