@@ -1,16 +1,22 @@
 import { expect, test, describe } from "bun:test";
-import AOI_CONFIG from "../config/aoi.json";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
-// Tab-targeting (TARGETCLOSEST) selects a target within TARGETING_RANGE using a
-// facing cone. TARGETING_RANGE is now the AOI radius (config DEFAULT_RADIUS, was
-// a hardcoded 500) so you can target anyone you can see, even out of spell range
-// - the cast path enforces spell range separately.
+// Tab-targeting (TARGETCLOSEST in src/socket/receiver.ts) picks a target within
+// TARGETING_RANGE using a facing cone. TARGETING_RANGE was a hardcoded 500; it is
+// now the AOI radius (aoi.json DEFAULT_RADIUS) so you can target anyone you can
+// see even if no spell reaches them - the cast path enforces spell range on its
+// own.
 //
-// This replicates the range + cone filter from player.findPlayersInFacingCone /
-// getNextTargetInCone (which can't be imported directly - systems/player.ts pulls
-// in the DB worker pool at import time).
+// The real cone code lives on the `player` object in systems/player.ts, which
+// pulls in the DB worker pool and generated config at import time (and CI runs
+// `bun test` before any config is generated), so it can't be imported here. This
+// test uses mock fixtures for everything: a stand-in cone predicate that mirrors
+// player.findPlayersInFacingCone, driven by hand-built positions.
 
-const TARGETING_RANGE = (AOI_CONFIG as any).DEFAULT_RADIUS ?? 1000;
+// ---- fixtures (mock data, not read from real config) ----
+const OLD_TARGETING_RANGE = 500;
+const NEW_TARGETING_RANGE = 1000; // AOI DEFAULT_RADIUS
 const CONE_ANGLE = 90;
 
 const DIRECTION_ANGLES: Record<string, number> = {
@@ -18,16 +24,19 @@ const DIRECTION_ANGLES: Record<string, number> = {
   left: 180, upleft: -135, up: -90, upright: -45,
 };
 
-function inFacingCone(self: { x: number; y: number; direction: string }, tx: number, ty: number): boolean {
-  const dx = tx - self.x;
-  const dy = ty - self.y;
-  const distance = Math.sqrt(dx * dx + dy * dy);
-  if (distance > TARGETING_RANGE) return false;
+// Mirrors the range + cone test inside player.findPlayersInFacingCone.
+function inFacingCone(
+  self: { x: number; y: number; direction: string },
+  target: { x: number; y: number },
+  range: number,
+): boolean {
+  const dx = target.x - self.x;
+  const dy = target.y - self.y;
+  if (Math.sqrt(dx * dx + dy * dy) > range) return false;
 
   const facingAngle = DIRECTION_ANGLES[self.direction] ?? 90;
   const tolerance = CONE_ANGLE / 2;
   const angle = Math.atan2(dy, dx) * (180 / Math.PI);
-
   const minAngle = facingAngle - tolerance;
   const maxAngle = facingAngle + tolerance;
   if (minAngle < -180) return angle >= minAngle + 360 || angle <= maxAngle;
@@ -35,28 +44,43 @@ function inFacingCone(self: { x: number; y: number; direction: string }, tx: num
   return angle >= minAngle && angle <= maxAngle;
 }
 
-describe("tab-targeting range", () => {
-  test("TARGETING_RANGE follows the AOI radius, not the old 500", () => {
-    expect(TARGETING_RANGE).toBe(AOI_CONFIG.DEFAULT_RADIUS);
-    expect(TARGETING_RANGE).toBeGreaterThan(500);
+describe("tab-targeting cone + range", () => {
+  const self = { x: 0, y: 0, direction: "right" };
+
+  test("old range could not select a player at 800px; new range can", () => {
+    const target = { x: 800, y: 0 }; // dead ahead, past the old 500 cap
+    expect(inFacingCone(self, target, OLD_TARGETING_RANGE)).toBe(false);
+    expect(inFacingCone(self, target, NEW_TARGETING_RANGE)).toBe(true);
   });
 
-  test("targets a player past old 500 range but within AOI, in the facing cone", () => {
-    const self = { x: 0, y: 0, direction: "right" };
-    // 800px directly to the right - outside the old range, inside the new one.
-    expect(inFacingCone(self, 800, 0)).toBe(true);
+  test("still cuts off past the (new) range", () => {
+    expect(inFacingCone(self, { x: NEW_TARGETING_RANGE + 200, y: 0 }, NEW_TARGETING_RANGE)).toBe(false);
   });
 
-  test("does not target a player beyond the AOI radius", () => {
-    const self = { x: 0, y: 0, direction: "right" };
-    expect(inFacingCone(self, TARGETING_RANGE + 200, 0)).toBe(false);
+  test("longer range still respects the facing cone", () => {
+    // behind the player
+    expect(inFacingCone(self, { x: -800, y: 0 }, NEW_TARGETING_RANGE)).toBe(false);
+    // 90deg off-facing, outside the 90deg cone
+    expect(inFacingCone(self, { x: 0, y: 800 }, NEW_TARGETING_RANGE)).toBe(false);
+    // 30deg off-facing, inside the cone
+    expect(inFacingCone(self, { x: 700, y: 400 }, NEW_TARGETING_RANGE)).toBe(true);
   });
+});
 
-  test("still respects the facing cone at the longer range", () => {
-    const self = { x: 0, y: 0, direction: "right" };
-    // 800px away but directly behind (to the left) - out of the cone.
-    expect(inFacingCone(self, -800, 0)).toBe(false);
-    // 800px away at ~90deg off-facing - out of the 90deg cone.
-    expect(inFacingCone(self, 0, 800)).toBe(false);
+describe("TARGETCLOSEST handler wiring", () => {
+  // Guards against the constant regressing to a hardcoded value. Source scan
+  // only - no module import, no config dependency.
+  const src = readFileSync(
+    join(import.meta.dir, "..", "socket", "receiver.ts"),
+    "utf8",
+  );
+  const handler = src.slice(src.indexOf('case "TARGETCLOSEST"'));
+  const block = handler.slice(0, handler.indexOf("break;"));
+
+  test("TARGETING_RANGE is derived from the AOI radius, not a literal", () => {
+    const line = block.split("\n").find((l) => l.includes("TARGETING_RANGE ="));
+    expect(line).toBeDefined();
+    expect(line).toContain("DEFAULT_RADIUS");
+    expect(line).not.toMatch(/TARGETING_RANGE\s*=\s*\d/);
   });
 });
