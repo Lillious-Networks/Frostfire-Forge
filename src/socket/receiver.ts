@@ -67,6 +67,7 @@ const resolvedWeatherCache = new Map<string, { weather: string; weatherData: Wea
 import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
 
 import * as settings from "../config/settings.json";
+import AOI_CONFIG from "../config/aoi.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks, saveMapProperties, applyChunksWithRebase } from "../modules/assetloader";
 import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers, getEntitySpriteLayers } from "../modules/spriteSheetManager";
@@ -2838,7 +2839,11 @@ export default async function packetReceiver(
       case "TARGETCLOSEST": {
         if (!currentPlayer) return;
 
-        const TARGETING_RANGE = 500;
+        // Tab-target reach = AOI radius: you can target anyone you can actually
+        // see rendered, even if no spell can reach them. Spell range is enforced
+        // separately at cast time ("Target is out of range"), so a wider select
+        // range never lets you hit something you couldn't before.
+        const TARGETING_RANGE = (AOI_CONFIG as any).DEFAULT_RADIUS ?? 1000;
         const CONE_ANGLE = 90; // 90 degree cone (45 degrees on each side of facing direction)
 
         const _tcT0 = PROFILE ? performance.now() : 0;
