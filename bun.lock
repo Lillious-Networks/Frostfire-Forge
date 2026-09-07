@@ -5,7 +5,7 @@
     "": {
       "name": "frostfire-forge",
       "dependencies": {
-        "@lillious-networks/webtransport-bun": "^0.1.1",
+        "@lillious-networks/webtransport-bun": "^0.1.2",
         "node-forge": "^1.4.0",
         "openai": "^4.104.0",
         "typescript": "^5.9.3",
@@ -51,7 +51,7 @@
 
     "@humanwhocodes/retry": ["@humanwhocodes/retry@0.4.3", "", {}, "sha512-bV0Tgo9K4hfPCek+aMAn81RppFKv2ySDQeMoSZuvTASywNTnVJCArCZE2FWqpvIatKu7VMRLWlR1EazvVhDyhQ=="],
 
-    "@lillious-networks/webtransport-bun": ["@lillious-networks/webtransport-bun@0.1.1", "", {}, "sha512-4lIJBwn48KDL/L8+Xk+Vg5sJoSoSGhGtpVc8l7Qbnyc36y5+2p4TcluPcRMmtt/aRX67d6FdwXyLYgB/7rKtJw=="],
+    "@lillious-networks/webtransport-bun": ["@lillious-networks/webtransport-bun@0.1.2", "", {}, "sha512-AwCLtObNAXV57bdxUlwVJqx6L9CGyh6PChS7FDKfenNFII8YUxXcJ2pxeGRmqUPntyTG6MmxdMGDfZSbBzVKtg=="],
 
     "@types/bun": ["bun-types@1.4.3-canary.20260906T141138", "", { "dependencies": { "@types/node": "*" } }, "sha512-6XCChiO9tWE0izt4mibuICkR6ImW83W25igUA3f/0XAAA43a48PWCmthiL3ICu7wEoNH96sHJikWzw/TED3XEQ=="],
 
