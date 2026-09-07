@@ -11,6 +11,7 @@ import quest from "../systems/quests";
 
 import assetCache from "../services/assetCache";
 import zlib from "zlib";
+import { serverFetch } from "./https_servers.ts";
 import * as settings from "../config/settings.json";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 const mapDir = path.join('.', 'src', 'assets', 'maps');
@@ -90,7 +91,7 @@ log.success(`Loaded ${quests.length} quest(s) from the database in ${(performanc
 const mapProperties: MapProperties[] = [];
 
 async function syncMapsBeforeLoading(): Promise<void> {
-  const assetServerUrl = process.env.ASSET_SERVER_URL;
+  const assetServerUrl = process.env.ASSET_SERVER_INTERNAL_URL || process.env.ASSET_SERVER_URL;
   if (!assetServerUrl) {
     log.warn("ASSET_SERVER_URL not configured, skipping map sync");
     return;
@@ -105,7 +106,7 @@ async function syncMapsBeforeLoading(): Promise<void> {
   const localChecksums = calculateAllMapChecksums();
 
   try {
-    const response = await fetch(`${assetServerUrl}/map-checksums`, {
+    const response = await serverFetch(`${assetServerUrl}/map-checksums`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

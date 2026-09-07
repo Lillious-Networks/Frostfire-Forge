@@ -1,4 +1,5 @@
-import { connect } from "@lillious-networks/webtransport";
+import { WebTransport } from "@lillious-networks/webtransport-bun";
+import { computeCertificateHash } from "./local_cert.ts";
 import crypto from "crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -58,19 +59,12 @@ export function generateConnectionToken(serverSecret: string): ConnectionToken {
   return { token, timestamp, expiresAt, signature };
 }
 
-function isLocalHost(url: string): boolean {
-  try {
-    const hostname = new URL(url).hostname;
-    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
-  } catch {
-    return false;
-  }
-}
 
 export class BenchmarkConnection {
   readonly session: any;
   readonly stream: any;
   private decoder = new FrameDecoder(MAX_FRAME_SIZE);
+  private writer: any;
   private state: number = 0;
   private messageHandlers: Array<(message: string) => void> = [];
   private closeHandlers: Array<(code: number, reason: string) => void> = [];
@@ -79,10 +73,16 @@ export class BenchmarkConnection {
   private constructor(session: any, stream: any) {
     this.session = session;
     this.stream = stream;
+    // A bidirectional stream is a readable and a writable half, so sends go
+    // through a writer rather than a raw write().
+    this.writer = stream.writable.getWriter();
 
     (async () => {
       try {
-        for await (const datagram of session.incomingDatagrams()) {
+        const reader = session.datagrams.readable.getReader();
+        for (;;) {
+          const { value: datagram, done } = await reader.read();
+          if (done) break;
           const bytes = datagram instanceof Uint8Array ? datagram : new Uint8Array(datagram);
           for (const handler of [...this.datagramHandlers]) {
             try {
@@ -100,7 +100,10 @@ export class BenchmarkConnection {
     (async () => {
       let loopError: string | null = null;
       try {
-        for await (const chunk of stream) {
+        const reader = stream.readable.getReader();
+        for (;;) {
+          const { value: chunk, done } = await reader.read();
+          if (done) break;
           const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
           const frames = this.decoder.push(bytes);
           for (const frame of frames) {
@@ -152,20 +155,26 @@ export class BenchmarkConnection {
   }
 
   static async connect(url: string, serverSecret: string, useragent: string = "Frostfire-Forge-Benchmark/1.0", origin: string = "http://localhost"): Promise<BenchmarkConnection> {
+    // A local certificate is pinned by hash; anything else goes through the
+    // platform trust store. This transport has no CA-pem or skip-verify
+    // option: pinning covers the local case, and is stricter than either.
     const caPem = resolveLocalCertPem();
-    const skipVerifySetting = process.env.TLS_INSECURE_SKIP_VERIFY;
-    const session = caPem
-      ? await connect(url, { tls: { caPem } })
-      : skipVerifySetting === "true"
-        ? await connect(url, { tls: { insecureSkipVerify: true } })
-        : skipVerifySetting === "false"
-          ? await connect(url)
-          : isLocalHost(url)
-            ? await connect(url, { tls: { insecureSkipVerify: true } })
-            : await connect(url);
-    if (session.ready) {
-      await session.ready;
-    }
+    const session = new WebTransport(
+      url,
+      caPem
+        ? {
+            serverCertificateHashes: [
+              {
+                algorithm: "sha-256",
+                value: new Uint8Array(
+                  Buffer.from(computeCertificateHash(caPem), "base64")
+                ),
+              },
+            ],
+          }
+        : {}
+    );
+    await session.ready;
 
     const bidi = await session.createBidirectionalStream();
     const connection = new BenchmarkConnection(session, bidi);
@@ -260,18 +269,18 @@ export class BenchmarkConnection {
 
     const wtCode = code === 1000 ? 0 : 1;
     try {
-      this.session.close({ code: wtCode, reason: `${code}|${reason}` });
+      this.session.close({ closeCode: wtCode, reason: `${code}|${reason}` });
     } catch (error: any) {
       debug("Benchmark session close failed:", error);
     }
   }
 
   private writeRaw(bytes: Uint8Array): void {
-    try {
-      this.stream.write(Buffer.from(bytes));
-    } catch (error: any) {
+    // The write resolves once the transport accepts the bytes; the benchmark
+    // does not await it, so a failure is reported rather than thrown.
+    this.writer.write(bytes).catch((error: any) => {
       debug("Benchmark stream write failed:", error);
-    }
+    });
   }
 
   private emitClose(code: number, reason: string): void {

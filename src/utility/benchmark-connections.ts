@@ -15,7 +15,7 @@ function parseArgs(): BenchmarkConfig {
     const args = process.argv.slice(2);
 
     const host = process.env.PUBLIC_HOST || process.env.SERVER_HOST || 'localhost';
-    const port = process.env.GAME_PORT || '3000';    const serverSecret = process.env.GATEWAY_GAME_SERVER_SECRET;
+    const port = process.env.WEBSRV_PORTSSL || process.env.GAME_PORT || '3000';    const serverSecret = process.env.GATEWAY_GAME_SERVER_SECRET;
     if (!serverSecret) {
         console.error(chalk.red('Error: GATEWAY_GAME_SERVER_SECRET environment variable is not set'));
         process.exit(1);
@@ -68,7 +68,7 @@ ${chalk.bold('Options:')}
   --help                 Show this help message
 
 ${chalk.bold('Environment Variables:')}
-  GAME_PORT                    Game server port (TCP HTTP + UDP WebTransport, default: 3000)
+  WEBSRV_PORTSSL               Game server public port (TCP HTTP + UDP WebTransport, default: 3000)
   PUBLIC_HOST                  Public hostname for connections
   SERVER_HOST                  Server hostname (fallback if PUBLIC_HOST not set)
   GATEWAY_GAME_SERVER_SECRET   Shared secret for token signing

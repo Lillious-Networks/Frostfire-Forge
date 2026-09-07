@@ -39,6 +39,7 @@ import entityCache from "../services/entityCache.ts";
 import cooldownManager from "../services/cooldownmanager";
 import effectManager from "../services/effectmanager";
 import { reloadMap } from "../modules/assetloader";
+import { serverFetch } from "../modules/https_servers.ts";
 import language from "../systems/language";
 import quests from "../systems/quests";
 import friends from "../systems/friends";
@@ -5001,10 +5002,10 @@ export default async function packetReceiver(
           log.info(`Map save requested by ${currentPlayer.username} for map: ${saveData.mapName}, ${saveData.chunks.length} chunks modified`);
 
           // Forward chunks to asset server via HTTP
-          const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
+          const assetServerUrl = process.env.ASSET_SERVER_INTERNAL_URL || process.env.ASSET_SERVER_URL || "http://localhost:8081";
           const authKey = process.env.ASSET_SERVER_AUTH_KEY || process.env.GATEWAY_AUTH_KEY;
 
-          const response = await fetch(`${assetServerUrl}/save-map-chunks`, {
+          const response = await serverFetch(`${assetServerUrl}/save-map-chunks`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json"
@@ -5027,7 +5028,7 @@ export default async function packetReceiver(
           // Also sync graveyards and warps to asset server if present
           if (saveData.graveyards || saveData.warps) {
             try {
-              const syncResponse = await fetch(`${assetServerUrl}/save-map-properties`, {
+              const syncResponse = await serverFetch(`${assetServerUrl}/save-map-properties`, {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json"

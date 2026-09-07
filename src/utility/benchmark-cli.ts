@@ -2,11 +2,12 @@
 
 import chalk from 'chalk';
 import { BenchmarkConnection, normalizeHost, setBenchmarkQuiet } from './benchmark-transport.ts';
+import { serverFetch } from '../modules/https_servers.ts';
 
 function parseArgs() {
     const args = process.argv.slice(2);
 
-    const wtPort = process.env.GAME_PORT || '3000';
+    const wtPort = process.env.WEBSRV_PORTSSL || process.env.GAME_PORT || '3000';
     const gatewayEnabled = process.env.GATEWAY_ENABLED === 'true';
     const defaultGatewayUrl = process.env.GATEWAY_URL || 'http://localhost:9999';
 
@@ -318,7 +319,7 @@ async function fetchAvailableServers(host: string, quiet: boolean = false): Prom
 
         const endpoint = '/api/gateway/servers';
         const url = `${host}${endpoint}`;
-        const response = await fetch(url, {
+        const response = await serverFetch(url, {
             method: 'GET',
             headers: {
                 'Content-Type': 'application/json',
@@ -706,7 +707,7 @@ async function provisionGuestTokens(amount: number, host: string): Promise<strin
     for (let offset = 0; offset < amount; offset += CHUNK) {
         const count = Math.min(CHUNK, amount - offset);
         try {
-            const response = await fetch(`${host}/guest-bulk`, {
+            const response = await serverFetch(`${host}/guest-bulk`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -856,7 +857,7 @@ async function createClients(amount: number, host: string, clientUrl: string, co
                 } else if (config.gatewayEnabled) {
                     try {
                         const gwUrl = new URL(config.gatewayUrl);
-                        finalTransportUrl = `https://${gwUrl.hostname}:${process.env.GAME_PORT || '3000'}`;
+                        finalTransportUrl = `https://${gwUrl.hostname}:${process.env.WEBSRV_PORTSSL || process.env.GAME_PORT || '3000'}`;
                     } catch { /* keep default clientUrl */ }
                 }
 

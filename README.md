@@ -130,8 +130,13 @@ SESSION_KEY="your_session_secret_key"          # Session encryption key
 RSA_PASSPHRASE="your_rsa_passphrase"           # Passphrase for the chat encryption key
 
 # Application Settings
-GAME_PORT="3000"                            # Game server port - TCP (HTTP API) + UDP (WebTransport) share this port
-HTTP_USE_SSL="true"                         # Set to "false" to disable TLS for the HTTP server
+WEBSRV_PORT="8081"                          # Plain HTTP port (HTTP->HTTPS redirect when SSL is enabled)
+WEBSRV_PORTSSL="3000"                       # Public port - TCP (HTTP API via edge proxy) + UDP (WebTransport) share this port
+WEBSRV_INTERNAL_PORT="3002"                 # Internal plain-HTTP API port (127.0.0.1, behind the edge proxy)
+HTTP_USE_SSL="true"                         # Set to "false" to disable TLS for the public HTTP listener
+WEBSRV_HTTP1="true"                         # "false" disables HTTP/1.1 on the HTTP listeners
+WEBSRV_HTTP2="true"                         # "false" disables HTTP/2 on the HTTP listeners
+WEBSRV_HTTP3="false"                        # HTTP/3 is force-disabled for the game server (WebTransport owns the UDP port)
 TLS_CERT_PATH="./src/certs/cert.pem"        # TLS certificate (shared by HTTP + WebTransport)
 TLS_KEY_PATH="./src/certs/key.pem"
 TLS_CA_PATH="./src/certs/cert.ca-bundle"

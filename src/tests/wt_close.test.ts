@@ -23,7 +23,7 @@ test("WT session close fires onClose handler", async () => {
   let closeCount = 0;
   let openCount = 0;
 
-  const server = startWebTransportServer({
+  const server = await startWebTransportServer({
     port: 3999,
     certPem: generated.certPem,
     keyPem: generated.keyPem,
@@ -64,7 +64,7 @@ test("WT session close fires onClose handler", async () => {
     } else {
       process.env.TLS_CERT_PATH = previousCertEnv;
     }
-    try { server.close(); } catch { /* ignore */ }
+    try { server.stop(); } catch { /* ignore */ }
     try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 }, 20000);

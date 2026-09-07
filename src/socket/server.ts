@@ -37,8 +37,9 @@ import { loadPlugins, registerAllPlugins, mergePluginSpellsIntoCache } from "../
 import { pluginHandlers, warpInterceptors, packetInterceptors } from "./receiver.ts";
 import { startWebTransportServer, TransportConnection } from "./transport.ts";
 import { topicBus } from "./topics.ts";
-import { connect } from "@lillious-networks/webtransport";
+import { WebTransport } from "@lillious-networks/webtransport-bun";
 import { ensureLocalCertificate, computeCertificateHash, certificateSupportsPinning } from "../utility/local_cert.ts";
+import { startHttpsServers, getInternalServerOptions } from "../modules/https_servers.ts";
 
 const httpRouteHandlers = new Map<string, (req: Request) => Promise<Response>>();
 
@@ -60,8 +61,6 @@ if (_cert && _key) {
   await ensureLocalCertificate({ certPath: _cert, keyPath: _key, caPath: _ca });
 }
 
-const _https = process.env.HTTP_USE_SSL === "true" && !!_cert && !!_key && fs.existsSync(_cert) && fs.existsSync(_key);
-let options: Bun.TLSOptions | undefined = undefined;
 let webTransportTls: { certPem: string; keyPem: string } | null = null;
 
 if (_cert && _key && fs.existsSync(_cert) && fs.existsSync(_key)) {
@@ -75,14 +74,6 @@ if (_cert && _key && fs.existsSync(_cert) && fs.existsSync(_key)) {
       certPem: fullChain,
       keyPem: key,
     };
-
-    if (_https) {
-      options = {
-        key: key,
-        cert: fullChain,
-      };
-      log.success(`SSL enabled for HTTP server with certificate chain`);
-    }
   } catch (e) {
     log.error(e as string);
   }
@@ -177,12 +168,15 @@ function getCORSHeaders(requestOrigin: string | null): Record<string, string> {
   };
 }
 
-const gamePort = parseInt(process.env.GAME_PORT || "3000");
+const gamePort = parseInt(process.env.WEBSRV_PORTSSL || process.env.GAME_PORT || "3000");
+const httpInternalPort = parseInt(process.env.WEBSRV_INTERNAL_PORT || "3002");
 
-Bun.serve<Packet, any>({
-  port: gamePort,
-  reusePort: false,
+Bun.serve({
+  hostname: "127.0.0.1",
+  port: httpInternalPort,
+  reusePort: true,
   development: false,
+  ...getInternalServerOptions(_cert!, _key!, _ca),
   fetch(req) {
     const url = new URL(req.url, `http://${req.headers.get("host")}`);
     const requestOrigin = req.headers.get("origin");
@@ -249,7 +243,22 @@ Bun.serve<Packet, any>({
 
     return new Response("Not found", { status: 404 });
   },
-  tls: options,
+});
+
+const httpServers = startHttpsServers({
+  name: "Game Server",
+  sslEnabled: process.env.HTTP_USE_SSL === "true",
+  httpPort: parseInt(process.env.WEBSRV_PORT || "") || gamePort,
+  httpsPort: gamePort,
+  internalPort: httpInternalPort,
+  certPath: _cert,
+  keyPath: _key,
+  caPath: _ca,
+  // The WebTransport listener owns UDP on the public port (QUIC shares the
+  // port number with the HTTP API), so the edge proxy must not enable
+  // HTTP/3 - Bun.serve would try to bind the same UDP port.
+  http3: false,
+  log,
 });
 
 function validateConnectionToken(
@@ -513,7 +522,7 @@ const webTransportRateLimits = {
   datagramsBurst: (settings as any)?.webtransport?.rateLimits?.datagramsBurst ?? 200000,
 };
 
-const webTransportServer = startWebTransportServer({
+const webTransportServer = await startWebTransportServer({
   port: gamePort,
   certPem: webTransportTls!.certPem,
   keyPem: webTransportTls!.keyPem,
@@ -539,28 +548,35 @@ log.info(
 
 const webTransportPort = gamePort;
 
-// Startup probe TLS handling. Defaults to skipping verification (the probe
-// targets the server's own listener, whose certificate may be self-signed).
-// Set TLS_INSECURE_SKIP_VERIFY=false to verify the probe against the server's
-// own certificate instead.
-const probeInsecureSkipVerify = process.env.TLS_INSECURE_SKIP_VERIFY !== "false";
-
-// The probe URL must match the certificate's SANs when verification is
-// enabled - 127.0.0.1 is only valid while skipping verification.
-const probeHost = probeInsecureSkipVerify
-  ? "127.0.0.1"
-  : (process.env.PUBLIC_HOST || process.env.SERVER_HOST || "localhost")
-      .replace(/^https?:\/\//, "")
-      .replace(/:\d+$/, "");
+// The startup probe pins the server's own certificate by hash, so there is no
+// verification to skip: pinning bypasses name and chain checks by design and
+// accepts exactly this certificate. TLS_INSECURE_SKIP_VERIFY is therefore no
+// longer consulted.
+//
+// The host still has to reach our own listener. 127.0.0.1 always does, and
+// pinning does not require it to match a SAN.
+const probeHost = "127.0.0.1";
 
 async function verifyWebTransportListener(port: number): Promise<void> {
   try {
-    const tlsOptions = probeInsecureSkipVerify
-      ? { insecureSkipVerify: true }
-      : { caPem: webTransportTls!.certPem };
-    const probe = await connect(`https://${probeHost}:${port}`, { tls: tlsOptions });
+    // The probe targets our own listener, so it pins that certificate by hash
+    // rather than skipping verification or supplying a CA. This transport has
+    // no insecureSkipVerify, and pinning is the stricter check regardless: it
+    // accepts exactly this certificate and nothing else.
+    const probe = new WebTransport(`https://${probeHost}:${port}`, {
+      serverCertificateHashes: [
+        {
+          algorithm: "sha-256",
+          // computeCertificateHash returns base64; the option wants the bytes.
+          value: new Uint8Array(
+            Buffer.from(computeCertificateHash(webTransportTls!.certPem), "base64")
+          ),
+        },
+      ],
+    });
+    await probe.ready;
     try {
-      probe.close({ code: 0, reason: "startup-probe" });
+      probe.close({ closeCode: 0, reason: "startup-probe" });
     } catch (error: any) {
       log.debug(`[WebTransport] Startup probe close failed: ${error?.message || error}`);
     }
@@ -599,7 +615,7 @@ const serverHost = process.env.SERVER_HOST || "localhost";
 const publicHost = process.env.PUBLIC_HOST || serverHost;
 
 gatewayClient = new GatewayClient({
-  gatewayUrl: process.env.GATEWAY_URL || "http://localhost:9999",
+  gatewayUrl: process.env.GATEWAY_INTERNAL_URL || process.env.GATEWAY_URL || "http://localhost:9999",
   serverId,
   description: process.env.SERVER_DESCRIPTION || "",
   host: serverHost,
@@ -609,7 +625,7 @@ gatewayClient = new GatewayClient({
   wtEnabled: true,
   maxConnections: (settings as any)?.webtransport?.maxSessions || 2000,
   heartbeatInterval: settings?.gateway?.heartbeatInterval || 5000,
-  assetServerUrl: process.env.ASSET_SERVER_URL || "http://localhost:8000",
+  assetServerUrl: process.env.ASSET_SERVER_INTERNAL_URL || process.env.ASSET_SERVER_URL || "http://localhost:8000",
 });
 
 await gatewayClient.registerWithRetry();
@@ -1178,9 +1194,16 @@ async function gracefulShutdown(signal: string) {
   }
 
   try {
-    await webTransportServer.close();
+    webTransportServer.stop();
   } catch (error) {
     log.debug(`Failed to close WebTransport server: ${error}`);
+  }
+
+  try {
+    httpServers.proxy.stop();
+    httpServers.redirect?.stop();
+  } catch (error) {
+    log.debug(`Failed to close HTTP servers: ${error}`);
   }
 
   log.info("Shutdown complete");

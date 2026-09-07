@@ -56,11 +56,11 @@ export default (async () => {
     );
   }
 
-  if (!process.env.GAME_PORT) {
+  if (!process.env.WEBSRV_PORTSSL && !process.env.GAME_PORT) {
     startUpWarnings.push(
-      "No game port is set, defaulting to 3000. Please set the GAME_PORT environment variable to suppress this message."
+      "No game port is set, defaulting to 3000. Please set the WEBSRV_PORTSSL environment variable to suppress this message."
     );
-    process.env.GAME_PORT = "3000";
+    process.env.WEBSRV_PORTSSL = "3000";
   }
 
   if (process.env.SESSION_KEY) {

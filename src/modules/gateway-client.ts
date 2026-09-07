@@ -3,6 +3,7 @@
 import log from "./logger.ts";
 import os from "os";
 import fs from "node:fs";
+import { serverFetch } from "./https_servers.ts";
 
 // Evaluate the TLS state at registration time rather than at import time:
 // the local certificate provisioning (ensureLocalCertificate) runs after
@@ -42,7 +43,7 @@ class GatewayClient {
         log.info(`Attempting to register with gateway at ${gatewayUrl}/register`);
       }
 
-      const response = await fetch(`${gatewayUrl}/register`, {
+      const response = await serverFetch(`${gatewayUrl}/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -200,7 +201,7 @@ class GatewayClient {
       const sendTime = Date.now();
       const gatewayUrl = await this.getGatewayUrl();
 
-      const response = await fetch(`${gatewayUrl}/heartbeat`, {
+      const response = await serverFetch(`${gatewayUrl}/heartbeat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -251,14 +252,14 @@ class GatewayClient {
 
       const localChecksums = calculateAllMapChecksums();
 
-      const assetServerUrl = this.config.assetServerUrl || process.env.ASSET_SERVER_URL;
+      const assetServerUrl = this.config.assetServerUrl || process.env.ASSET_SERVER_INTERNAL_URL || process.env.ASSET_SERVER_URL;
       if (!assetServerUrl) {
         log.warn("Asset server URL not configured, skipping map sync");
         return;
       }
 
       try {
-        const response = await fetch(`${assetServerUrl}/map-checksums`, {
+        const response = await serverFetch(`${assetServerUrl}/map-checksums`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -313,12 +314,12 @@ class GatewayClient {
 
   async sendMapUpdateToGateway(mapName: string, mapData: any): Promise<boolean> {
     try {
-      const assetServerUrl = this.config.assetServerUrl || process.env.ASSET_SERVER_URL;
+      const assetServerUrl = this.config.assetServerUrl || process.env.ASSET_SERVER_INTERNAL_URL || process.env.ASSET_SERVER_URL;
       if (!assetServerUrl) {
         log.error("Asset server URL not configured, cannot send map update");
         return false;
       }
-      const response = await fetch(`${assetServerUrl}/update-map`, {
+      const response = await serverFetch(`${assetServerUrl}/update-map`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -363,7 +364,7 @@ class GatewayClient {
 
     try {
       const gatewayUrl = await this.getGatewayUrl();
-      await fetch(`${gatewayUrl}/unregister`, {
+      await serverFetch(`${gatewayUrl}/unregister`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

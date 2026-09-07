@@ -1,4 +1,4 @@
-import { createServer } from "@lillious-networks/webtransport";
+import { serve } from "@lillious-networks/webtransport-bun";
 import crypto from "crypto";
 import { FrameDecoder, encodeFrame, encodeCloseReason, decodeCloseReason } from "./framing.ts";
 import { topicBus } from "./topics.ts";
@@ -6,15 +6,6 @@ import log from "../modules/logger.ts";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
-
-// WEBTRANSPORT_DEBUG=1 turns off native log redaction so the real error
-// messages (E_HANDSHAKE_TIMEOUT causes, TLS failures, etc.) reach the JS log
-// callback instead of the bare "webtransport-native: [error]" stderr line.
-const NATIVE_DEBUG =
-  process.env.WEBTRANSPORT_DEBUG === "1" || process.env.WEBTRANSPORT_DEBUG === "true";
-
-let lastNativeLogMsg = "";
-let lastNativeLogAt = 0;
 
 const activeConnectionIds = new Set<string>();
 
@@ -118,9 +109,10 @@ export class TransportConnection {
 
     let queuedBytes = 0;
     try {
-      if (this.session?.metricsSnapshot) {
-        queuedBytes = this.session.metricsSnapshot().queuedBytes || 0;
-      }
+      // A cheap synchronous read of the session's send backlog, replacing the
+      // previous library's metricsSnapshot(). Still sampled rather than read
+      // per frame: see getSampledQueuedBytes.
+      queuedBytes = Number(this.session?.queuedBytes ?? 0n);
     } catch {
       queuedBytes = 0;
     }
@@ -231,17 +223,11 @@ export class TransportConnection {
     // does not block, so the Promise + tokio task hop of the async sendDatagram
     // is pure overhead - and at high player counts the server pushes tens of
     // thousands of movement datagrams per second through here.
-    const s: any = this.session;
-    if (typeof s.sendDatagramSync === "function") {
-      s.sendDatagramSync(payload);
-      return;
-    }
+    // sendSync skips the writer and promise a spec datagram write allocates.
+    // Datagrams are unreliable and the enqueue never blocks, so there is
+    // nothing to await, and this path carries tens of thousands per second.
     try {
-      s.sendDatagram(payload).catch((error: any) => {
-        if (this.readyState !== 3 && !isSessionClosedError(error)) {
-          log.debug(`Datagram send failed: ${error?.message || error}`);
-        }
-      });
+      this.session.datagrams.sendSync(payload);
     } catch (error) {
       if (this.readyState !== 3 && !isSessionClosedError(error)) {
         log.debug(`Datagram send failed: ${error}`);
@@ -252,16 +238,17 @@ export class TransportConnection {
   /**
    * Send several movement datagrams in a single native call. Each element must
    * already be datagram-sized (the movement encoder guarantees this). Falls
-   * back to per-datagram sends if the batched native API isn't present.
+   * one crossing into the transport.
    */
   sendMovementBatch(payloads: Uint8Array[]): void {
     if (this.readyState !== 1 || payloads.length === 0) return;
-    const s: any = this.session;
-    if (typeof s.sendDatagramsSync === "function") {
-      s.sendDatagramsSync(payloads);
-      return;
+    try {
+      this.session.datagrams.sendSyncBatch(payloads);
+    } catch (error) {
+      if (!isSessionClosedError(error)) {
+        log.debug(`Datagram batch send failed: ${error}`);
+      }
     }
-    for (const p of payloads) this.sendMovement(p);
   }
 
   private sendFrame(payload: Uint8Array): void {
@@ -304,17 +291,10 @@ export class TransportConnection {
         if (this.readyState === 3) return;
 
         const message = String(error?.message || error);
-        if (message.includes("E_QUEUE_FULL")) {
-          const now = Date.now();
-          if (now - this.lastQueueFullLogAt > 10000) {
-            this.lastQueueFullLogAt = now;
-            log.warn(
-              `[WebTransport] Stream queue full for connection ${this.data?.id} ` +
-              `(${this.data?.useragent || "unknown agent"}) - dropping stream frames (client is not keeping up)`
-            );
-          }
-          return;
-        }
+        // There is no queue-full error here: a write that outruns the peer
+        // waits on QUIC flow control, and the queuedBytes tripwire above sheds
+        // frames before a client gets that far behind.
+        if (isSessionClosedError(error)) return;
 
         log.debug(`Frame write failed: ${message}`);
       });
@@ -327,7 +307,7 @@ export class TransportConnection {
 
     const wtCode = code === 1000 ? CLOSE_NORMAL : CLOSE_ABNORMAL;
     try {
-      this.session.close({ code: wtCode, reason: encodeCloseReason(code, reason) });
+      this.session.close({ closeCode: wtCode, reason: encodeCloseReason(code, reason) });
     } catch (error: any) {
       log.debug(`[WebTransport] Session close failed: ${error?.message || error}`);
     }
@@ -350,71 +330,28 @@ export class TransportConnection {
   }
 }
 
-export function startWebTransportServer(options: TransportServerOptions): any {
-  return createServer({
-    host: "0.0.0.0",
+export function startWebTransportServer(options: TransportServerOptions): Promise<any> {
+  // The queue limits, rate limits and native log callback the previous library
+  // took as configuration have no equivalent here: this transport applies
+  // QUIC's own flow control, and sheds load itself via the queuedBytes
+  // tripwire in sendFrame(). See the notes on MAX_SAFE_QUEUE_BYTES.
+  return serve({
+    hostname: "0.0.0.0",
     port: options.port,
-    tls: {
-      certPem: options.certPem,
-      keyPem: options.keyPem,
-    },
-    limits: {
-      maxSessions: options.maxSessions,
-      maxDatagramSize: options.maxDatagramSize,
-      idleTimeoutMs: options.idleTimeoutMs,
-      maxHandshakesInFlight: 2000,
-      maxStreamsPerSessionBidi: 500,
-      maxStreamsPerSessionUni: 500,
-      // One reliable stream per connection carries every non-movement frame
-      // (spawns, despawns, chat, state). The library default of 256 KiB fills
-      // instantly during a spawn burst; with the bounded-backpressure patch a
-      // full queue now waits (up to backpressureTimeoutMs) for the client to
-      // drain instead of destroying the stream, but it still needs headroom to
-      // absorb the burst in the first place.
-      maxQueuedBytesPerStream: 8 * 1024 * 1024,
-      maxQueuedBytesPerSession: 64 * 1024 * 1024,
-      maxQueuedBytesGlobal: 4 * 1024 * 1024 * 1024,
-      handshakeTimeoutMs: 15000,
-      // How long write() waits on a full stream/session queue before failing
-      // with E_BACKPRESSURE_TIMEOUT. Kept short: a client that hasn't drained
-      // 8 MiB in 2s is not coming back, and the 48 MiB session-level tripwire
-      // in sendFrame() will have already started shedding frames for it.
-      backpressureTimeoutMs: 2000,
-    },
-    rateLimits: options.rateLimits,
-    debug: NATIVE_DEBUG,
-    log: (event: any) => {
-      if (NATIVE_DEBUG) {
-        const m = String(event?.msg || "");
-        if (m && !m.includes("session closed event dropped")) {
-          log.info(`[WebTransport:native ${event.level}] ${m}`);
-        }
-        return;
-      }
-
-      if (event.level !== "warn" && event.level !== "error") return;
-
-      const msg = String(event?.msg || "");
-      if (!msg || msg.includes("(redacted)")) return;
-
-      // Benign churn at scale: a session closing while an event for it is still
-      // queued. Nothing actionable, and it floods the log during load tests.
-      if (msg.includes("session closed event dropped")) return;
-
-      // Throttle repeated identical warnings to once per 10 seconds.
-      const now = Date.now();
-      if (msg === lastNativeLogMsg && now - lastNativeLogAt < 10000) return;
-      lastNativeLogMsg = msg;
-      lastNativeLogAt = now;
-
-      log.warn(`[WebTransport] ${msg}`);
-    },
-    onSession: (session: any) => {
+    cert: options.certPem,
+    key: options.keyPem,
+    maxSessions: options.maxSessions,
+    session: (session: any) => {
       handleSession(session, options).catch((error: any) => {
         if (!isSessionClosedError(error)) {
           log.debug(`[WebTransport] Session handler failed: ${error?.message || error}`);
         }
       });
+    },
+    error: (error: any) => {
+      if (!isSessionClosedError(error)) {
+        log.warn(`[WebTransport] ${error?.message || error}`);
+      }
     },
   });
 }
@@ -505,7 +442,12 @@ async function startStreamLoop(
 function startDatagramLoop(session: any, connection: TransportConnection, options: TransportServerOptions): void {
   (async () => {
     try {
-      for await (const datagram of session.incomingDatagrams()) {
+      // Datagrams arrive as a WHATWG ReadableStream rather than the async
+      // iterator the previous library exposed.
+      const reader = session.datagrams.readable.getReader();
+      for (;;) {
+        const { value: datagram, done } = await reader.read();
+        if (done) break;
         if (!connection.data.id) continue;
 
         try {
