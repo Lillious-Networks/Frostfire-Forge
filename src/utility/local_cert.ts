@@ -234,10 +234,11 @@ export function certificateSupportsPinning(certPem: string): boolean {
   try {
     const cert = new X509Certificate(certPem);
 
-    if (!cert.verify(cert.publicKey)) {
-      return false;
-    }
-
+    // Being self-signed is deliberately not required. serverCertificateHashes
+    // constrains the key and the validity period, not the issuer, so a
+    // short-lived certificate signed by a local CA is pinnable by Chromium
+    // *and* validates normally in Safari, which does not implement pinning at
+    // all and refuses a self-signed leaf. One certificate then serves both.
     const now = Date.now();
     if (now < Date.parse(cert.validFrom) || now > Date.parse(cert.validTo)) {
       return false;
@@ -254,6 +255,33 @@ export function certificateSupportsPinning(certPem: string): boolean {
 
     const san = cert.subjectAltName || "";
     return san.includes("localhost") && san.includes("127.0.0.1");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether `certPem` covers every name in `hostnames`.
+ *
+ * Regeneration otherwise keys only off expiry and pinning suitability, so
+ * adding a hostname (a LAN address, say) leaves the old certificate in place
+ * and the new name silently fails to validate. The comparison is textual
+ * against the SAN because that is the form Node exposes.
+ */
+/** Whether the certificate is its own issuer. */
+export function isSelfSigned(certPem: string): boolean {
+  try {
+    const cert = new X509Certificate(certPem);
+    return cert.verify(cert.publicKey);
+  } catch {
+    return false;
+  }
+}
+
+export function certificateCoversHostnames(certPem: string, hostnames: string[]): boolean {
+  try {
+    const san = new X509Certificate(certPem).subjectAltName || "";
+    return hostnames.every((host) => san.includes(host));
   } catch {
     return false;
   }
@@ -337,6 +365,14 @@ export async function ensureLocalCertificate(options: LocalCertificateOptions): 
   if (certExists && keyExists) {
     const certPem = fs.readFileSync(certPath, "utf8");
     let needsRegen = certificateNeedsRegeneration(certPem);
+    if (!needsRegen && options.hostnames?.length) {
+      const cert = new X509Certificate(certPem);
+      // Only self-signed certificates are ours to replace; a CA-signed one
+      // that omits a name is the operator's to reissue.
+      if (cert.verify(cert.publicKey) && !certificateCoversHostnames(certPem, options.hostnames)) {
+        needsRegen = true;
+      }
+    }
     if (!needsRegen) {
       // Only self-signed certificates are candidates for regeneration;
       // production CA-signed certificates are never touched.
@@ -359,7 +395,9 @@ export async function ensureLocalCertificate(options: LocalCertificateOptions): 
   }
 
   const certPem = fs.readFileSync(certPath, "utf8");
-  if (certificateSupportsPinning(certPem)) {
+  if (certificateSupportsPinning(certPem) && isSelfSigned(certPem)) {
+    // A CA-signed certificate is skipped: it already chains to a trusted
+    // root, and adding a leaf to the root store would be wrong.
     await trustLocalCertificate(certPath);
   }
 

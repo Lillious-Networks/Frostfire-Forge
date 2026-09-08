@@ -58,7 +58,24 @@ const _key = process.env.TLS_KEY_PATH;
 const _ca = process.env.TLS_CA_PATH;
 
 if (_cert && _key) {
-  await ensureLocalCertificate({ certPath: _cert, keyPath: _key, caPath: _ca });
+  // Chrome will not accept a system or locally installed root CA for
+  // WebTransport, only a publicly trusted one or a certificate pinned by
+  // hash, so this certificate has to stay self-signed and short lived. It
+  // must therefore carry every address a browser might dial, including the
+  // LAN one: a name missing from the SAN fails validation even when pinned.
+  const certHostnames = ["localhost", "127.0.0.1", "::1"];
+  for (const host of [process.env.PUBLIC_HOST, process.env.SERVER_HOST]) {
+    const trimmed = host?.trim();
+    if (trimmed && !certHostnames.includes(trimmed)) {
+      certHostnames.push(trimmed);
+    }
+  }
+  await ensureLocalCertificate({
+    certPath: _cert,
+    keyPath: _key,
+    caPath: _ca,
+    hostnames: certHostnames,
+  });
 }
 
 let webTransportTls: { certPem: string; keyPem: string } | null = null;
