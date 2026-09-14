@@ -3989,6 +3989,7 @@ export default async function packetReceiver(
         const isInParty = currentPlayer?.party?.includes(target?.username) || null;
 
         if (isInParty && (spell_damage > 0 || spellIsHostileEffect)) {
+          if (isSelf) return;
           sendPacket(
             ws,
             packetManager.notify({
