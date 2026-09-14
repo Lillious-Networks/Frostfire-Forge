@@ -10966,12 +10966,13 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
   };
 
   // Split delivery: the player's own copy rides the reliable stream (their
-  // sprite state must never desync), while AOI observers get loss-tolerant
-  // datagrams - a lost copy is corrected by the next state-change animation.
+  // sprite state must never desync). Observers also get the reliable stream:
+  // animation is state, not latest-wins data - a single lost walk/idle
+  // datagram would stick the wrong pose until the next direction change.
   if (currentPlayer.ws) {
     sendPacket(currentPlayer.ws, packetManager.spriteSheetAnimation(spriteSheetPacketData));
   }
-  broadcastToAOIBestEffort(currentPlayer, packetManager.spriteSheetAnimation(spriteSheetPacketData), false);
+  broadcastToAOI(currentPlayer, packetManager.spriteSheetAnimation(spriteSheetPacketData), false);
 }
 
 async function sendAnimation(ws: any, name: string, playerId?: string, revision?: number) {
