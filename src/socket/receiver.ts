@@ -61,6 +61,7 @@ import query from "../controllers/sqldatabase";
 import loot from "../systems/loot";
 import lootChest from "../systems/lootChest";
 import lootTable from "../systems/lootTable";
+import skeletons from "../systems/skeletons";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const mapPropertiesCache = await assetCache.get("mapProperties");
@@ -1123,6 +1124,17 @@ async function transitionPlayerToMap(
     }
 
     try {
+      const playerPos = newPosition || player.location?.position;
+      const playerRadius = player.aoi?.aoiRadius || AOI_CONFIG.DEFAULT_RADIUS;
+      const skeletonsInAOI = skeletons.getInRadius(newMapName, playerPos.x, playerPos.y, playerRadius);
+      if (skeletonsInAOI.length > 0) {
+        sendPacketBestEffort(ws, packetManager.loadSkeletons(skeletonsInAOI.map((s) => toSkeletonPacket(s))));
+      }
+    } catch (e) {
+      log.warn(`Failed to sync skeletons for ${newMapName}: ${e}`);
+    }
+
+    try {
       const chestsOnMap = lootChest.getOnMap(newMapName);
       if (chestsOnMap.length > 0) {
         const chestPackets = chestsOnMap.map((c: any) =>
@@ -1413,6 +1425,23 @@ authWorker.on("message", async (result: any) => {
       };
     }
 
+    // Dead players never resume at a spawn point: a corpse awaiting release
+    // resumes at the corpse, a ghost resumes where it logged out. Both stay
+    // at 0 HP/stamina until revived.
+    const loginDeadState = Number(playerData.isDead) || 0;
+    if (loginDeadState === 1 && playerData.corpse?.map) {
+      spawnLocation = {
+        map: `${playerData.corpse.map}.json`,
+        x: playerData.corpse.x,
+        y: playerData.corpse.y,
+        direction: "down",
+      };
+    }
+    if (loginDeadState !== 0 && playerData.stats) {
+      playerData.stats.health = 0;
+      playerData.stats.stamina = 0;
+    }
+
     listener.emit(Events.PLAYER_AUTH_COMPLETE, { username: playerData.username, spawnLocation, playerData });
 
     const map =
@@ -1518,6 +1547,10 @@ authWorker.on("message", async (result: any) => {
       slowPercent: 0,
       slowMultiplier: 1,
       isVanished: false,
+      isDead: loginDeadState === 1,
+      isGhost: loginDeadState === 2,
+      corpse: loginDeadState !== 0 ? playerData.corpse || null : null,
+      reviveOffered: false,
       learnedSpells: limitedLearnedSpells,
       inventory: limitedInventory,
       equipment: playerData.equipment || {},
@@ -1599,6 +1632,10 @@ authWorker.on("message", async (result: any) => {
         isGuest: playerData.isGuest,
         isStealth: playerData.isStealth,
         isNoclip: playerData.isNoclip,
+        isDead: currentPlayer.isDead || false,
+        isGhost: currentPlayer.isGhost || false,
+        ghostTeleportPending: currentPlayer.ghostTeleportPending || false,
+        corpse: currentPlayer.corpse || null,
         stats: currentPlayer.stats || {},
         animation: null,
         spriteData: spriteDataForSelf,
@@ -1671,6 +1708,10 @@ authWorker.on("message", async (result: any) => {
       isStealth: p.isStealth,
       isVanished: p.isVanished,
           isNoclip: p.isNoclip,
+          isDead: p.isDead || false,
+          isGhost: p.isGhost || false,
+          ghostTeleportPending: p.ghostTeleportPending || false,
+          corpse: p.corpse || null,
           stats: p.stats,
           animation: null,
           spriteData: spriteData,
@@ -1852,6 +1893,29 @@ authWorker.on("message", async (result: any) => {
       const lootOnMap = loot.getOnMap(mapName);
       if (lootOnMap.length) {
         sendPacket(ws, packetManager.loadLoot(lootOnMap));
+      }
+
+      // Death skeletons inside the player's AOI only.
+      const skeletonViewer = playerCache.get(ws.data.id);
+      const skeletonPos = skeletonViewer?.location?.position;
+      if (skeletonPos) {
+        const skeletonRadius = skeletonViewer.aoi?.aoiRadius || AOI_CONFIG.DEFAULT_RADIUS;
+        const skeletonsInAOI = skeletons.getInRadius(mapName, skeletonPos.x, skeletonPos.y, skeletonRadius);
+        if (skeletonsInAOI.length) {
+          sendPacketBestEffort(ws, packetManager.loadSkeletons(skeletonsInAOI.map((s) => toSkeletonPacket(s))));
+        }
+      }
+
+      // Relogging while dead: restore the phase. The corpse gets its popup
+      // back; the ghost is re-announced so others keep rendering it.
+      const relogPlayer = playerCache.get(ws.data.id);
+      if (relogPlayer?.isDead) {
+        sendPacket(ws, packetManager.playerDied({ id: relogPlayer.id }));
+      } else if (relogPlayer?.isGhost) {
+        const viewersInMap = filterPlayersByMap(relogPlayer.location.map);
+        viewersInMap.forEach((p) => {
+          sendPacket(p.ws, packetManager.playerGhost({ id: relogPlayer.id, ghost: true }));
+        });
       }
     }, 200);
 
@@ -2125,6 +2189,13 @@ export default async function packetReceiver(
           return;
         }
 
+        // Corpses awaiting release cannot move. Ghosts can (mounted speed),
+        // except during the release cinematic's pending teleport window.
+        if (currentPlayer.isDead || currentPlayer.ghostTeleportPending) {
+          await forceStopPlayerMovement(currentPlayer);
+          return;
+        }
+
         // A newer MOVEXY (another direction, or an "abort") arrived while this
         // handler was awaiting above - it is now authoritative. Drop this one.
         if (currentPlayer._moveSeq !== moveSeq) {
@@ -2199,7 +2270,7 @@ export default async function packetReceiver(
           const playerHeight = 40;
           const playerWidth = 24;
 
-          const speed = (currentPlayer.mounted ? baseSpeed * mountSpeedMultiplier : baseSpeed) * (currentPlayer.slowMultiplier || 1);
+          const speed = (currentPlayer.mounted || currentPlayer.isGhost ? baseSpeed * mountSpeedMultiplier : baseSpeed) * (currentPlayer.slowMultiplier || 1);
 
           // Offsets are derived from a shared static unit table (see
           // DIRECTION_UNIT_OFFSETS) rather than rebuilding a 9-object literal
@@ -2275,6 +2346,7 @@ export default async function packetReceiver(
           if (!isColliding || currentPlayer.isNoclip) {
             currentPlayer.location.position.x = Math.round(tempPosition.x);
             currentPlayer.location.position.y = Math.round(tempPosition.y);
+            checkGhostReviveProximity(currentPlayer);
           }
 
           if (isColliding && !currentPlayer.isNoclip) {
@@ -2307,6 +2379,10 @@ export default async function packetReceiver(
             }
 
             if (reason === "warp_collision" && collision?.warp) {
+              // Corpses and ghosts cannot use warps.
+              if (currentPlayer.isDead || currentPlayer.isGhost) {
+                return;
+              }
               // Players in combat cannot use warps (admin summons bypass this path entirely)
               if (currentPlayer.pvp) {
                 const nowTs = performance.now();
@@ -2601,6 +2677,16 @@ export default async function packetReceiver(
       }
       case "CHAT": {
         if (!currentPlayer) return;
+        // Corpses cannot talk. Ghosts cannot speak to the living (/s),
+        // except admins.
+        if (currentPlayer.isDead) return;
+        if (currentPlayer.isGhost && !currentPlayer.isAdmin) {
+          sendPacket(
+            ws,
+            packetManager.notify({ message: "Ghosts cannot speak to the living." })
+          );
+          return;
+        }
         if (currentPlayer.isGuest) {
           sendPacket(
             ws,
@@ -2704,6 +2790,7 @@ export default async function packetReceiver(
       }
       case "TYPING": {
         if (!currentPlayer || currentPlayer?.isGuest) return;
+        if (currentPlayer.isDead || currentPlayer.isGhost) return;
         const typingData = {
           id: ws.data.id,
         };
@@ -2820,6 +2907,17 @@ export default async function packetReceiver(
         );
 
         if (!selectedPlayer) break;
+        // Corpses cannot be targeted (despawned for observers). Ghosts can be
+        // targeted and interacted with, except while their graveyard teleport
+        // is still pending (not rendered anywhere yet).
+        if (selectedPlayer.isDead || (selectedPlayer.isGhost && selectedPlayer.ghostTeleportPending)) {
+          const selectPlayerData = {
+            id: ws.data.id,
+            data: null,
+          };
+          sendPacket(ws, packetManager.selectPlayer(selectPlayerData));
+          break;
+        }
         if (selectedPlayer.isStealth && !currentPlayer.isAdmin) {
           const selectPlayerData = {
             id: ws.data.id,
@@ -2854,7 +2952,7 @@ export default async function packetReceiver(
           ws,
           TARGETING_RANGE,
           currentPlayer.location.map
-        ).filter((p) => !p.isStealth && p.id !== currentPlayer.id);
+        ).filter((p) => !p.isStealth && !p.isDead && !(p.isGhost && p.ghostTeleportPending) && p.id !== currentPlayer.id);
 
         const _tcT1 = PROFILE ? performance.now() : 0;
 
@@ -3249,6 +3347,8 @@ export default async function packetReceiver(
       }
       case "HOTBAR": {
         if (!currentPlayer) return;
+        // Corpses and ghosts cannot cast.
+        if (currentPlayer.isDead || currentPlayer.isGhost) return;
         if (currentPlayer.isGuest) {
           sendPacket(
             ws,
@@ -3340,6 +3440,15 @@ export default async function packetReceiver(
           // Only default to self if no target was specified
           target = currentPlayer;
           log.debug(`[ATTACK] No target specified, defaulting to self`);
+        }
+
+        // Ghosts cannot be targeted or damaged.
+        if (target && !isEntityRequest && target.isGhost) {
+          sendPacket(
+            ws,
+            packetManager.notify({ message: "You cannot attack ghosts." })
+          );
+          return;
         }
 
         // AoE spells don't need a valid target - they hit everything around the caster
@@ -3540,6 +3649,8 @@ export default async function packetReceiver(
           for (const p of aoePlayersInMap) {
             if (p.id === currentPlayer.id && !aoeIsHeal) continue;
             if (p.isGuest) continue;
+            // Ghosts cannot be damaged or healed.
+            if (p.isGhost) continue;
             const inParty = currentPlayer?.party?.includes(p?.username) || false;
             if (aoeIsHeal) {
               // Healing AoE: only hit self and party members
@@ -4646,6 +4757,11 @@ export default async function packetReceiver(
           // Apply damage to player target
           // Add if negative damage (healing) to current health, subtract positive damage
           // Positive damage is first absorbed by absorbtion, remainder hits health
+          // Corpses awaiting release can neither be damaged further nor healed;
+          // only the release + revive flow changes their state.
+          if (target.isDead) {
+            return;
+          }
           let damageToHealth = finalDamage;
           if (finalDamage > 0) {
             const absorbed = spellEffects.consumeBarrier(target, finalDamage);
@@ -4767,6 +4883,8 @@ export default async function packetReceiver(
           for (const p of allMapPlayers) {
             if (p.id === target.id && !isEntityTarget) continue;
             if (p.isGuest) continue;
+            // Ghosts cannot be damaged or healed.
+            if (p.isGhost) continue;
             if (isInParty && currentPlayer?.party?.includes(p?.username)) continue;
             const pPos = p.location?.position;
             if (!pPos) continue;
@@ -5808,6 +5926,9 @@ export default async function packetReceiver(
       }
       case "COMMAND": {
         if (!currentPlayer) return;
+        // Corpses keep party/whisper/guild chat; the allowlist is enforced
+        // after parsing below. Ghosts keep all commands; only proximity say
+        // (/s, the CHAT packet) is barred for them.
         if (currentPlayer.isGuest) {
           sendPacket(
             ws,
@@ -5841,6 +5962,19 @@ export default async function packetReceiver(
 
         const commandParts = decryptedMessage.match(/[^\s"]+|"([^"]*)"/g) || [];
         const commandName = commandParts[0]?.toUpperCase();
+
+        // Corpses may use chat channels only: no admin, tool, or other
+        // commands while awaiting release.
+        if (
+          currentPlayer.isDead &&
+          !["P", "PARTY", "W", "WHISPER", "G", "GUILD"].includes(commandName || "")
+        ) {
+          sendPacket(
+            ws,
+            packetManager.notify({ message: "You cannot do that while dead." })
+          );
+          return;
+        }
 
         const args = commandParts
           .slice(1)
@@ -7405,7 +7539,23 @@ export default async function packetReceiver(
                 y: Math.round(centerY),
                 direction: "down",
               };
+              // Admin respawn releases any death state: corpse/ghost cleared,
+              // full health, position is the respawn point.
+              targetPlayer.isDead = false;
+              targetPlayer.isGhost = false;
+              targetPlayer.corpse = null;
+              targetPlayer.reviveOffered = false;
+              targetPlayer.ghostTeleportPending = false;
+              if (targetPlayer.stats) {
+                targetPlayer.stats.health = targetPlayer.stats.total_max_health;
+                targetPlayer.stats.stamina = targetPlayer.stats.total_max_stamina;
+              }
               playerCache.set(targetPlayer.id, targetPlayer);
+              try {
+                await player.setDeadState(targetPlayer.username, 0, null);
+              } catch (e: any) {
+                log.error(`Failed to clear death state for ${targetPlayer.username}: ${e?.message || e}`);
+              }
               const playersInMap = filterPlayersByMap(
                 targetPlayer.location.map
               );
@@ -7422,6 +7572,14 @@ export default async function packetReceiver(
                   s: targetPlayer.isStealth ? 1 : 0
                 };
                 sendPacket(player.ws, packetManager.moveXY(moveData));
+                sendPacket(player.ws, packetManager.playerGhost({ id: targetPlayer.id, ghost: false }));
+                if (targetPlayer.stats) {
+                  sendPacket(player.ws, packetManager.revive({
+                    id: targetPlayer.id,
+                    target: targetPlayer.id,
+                    stats: targetPlayer.stats,
+                  }));
+                }
               });
             }
 
@@ -7432,6 +7590,140 @@ export default async function packetReceiver(
             };
             sendPacket(ws, packetManager.notify(notifyData));
             listener.emit(Events.PLAYER_RESPAWN, { player: targetPlayer, mapName: targetPlayer.location.map, x: targetPlayer.location.position.x, y: targetPlayer.location.position.y });
+            break;
+          }
+
+          case "REVIVE": {
+
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "admin.revive" || p === "admin.*"
+              )
+            ) {
+              const notifyData = {
+                message: "You don't have permission to use this command",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            const reviveIdentifier = args[0]?.toLowerCase() || null;
+
+            let reviveTarget: any = null;
+            if (!reviveIdentifier) {
+              reviveTarget = currentPlayer;
+            } else {
+              const players = Object.values(playerCache.list());
+              if (isNaN(Number(reviveIdentifier))) {
+                reviveTarget = players.find(
+                  (p) => p.username.toLowerCase() === reviveIdentifier.toLowerCase()
+                );
+              } else {
+                reviveTarget = playerCache.get(reviveIdentifier);
+              }
+            }
+
+            const onlineTarget = reviveTarget ? playerCache.get(reviveTarget.id) : null;
+            if (!onlineTarget) {
+              sendPacket(ws, packetManager.notify({ message: "Player must be online to revive" }));
+              break;
+            }
+
+            if (!onlineTarget.isDead && !onlineTarget.isGhost) {
+              const notifyData = {
+                message: `${onlineTarget.username.charAt(0).toUpperCase() + onlineTarget.username.slice(1)} is not dead`,
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            // Revive in place at full health: clear corpse/ghost state.
+            onlineTarget.stats.health = onlineTarget.stats.total_max_health;
+            onlineTarget.stats.stamina = onlineTarget.stats.total_max_stamina;
+            onlineTarget.isDead = false;
+            onlineTarget.isGhost = false;
+            onlineTarget.corpse = null;
+            onlineTarget.reviveOffered = false;
+            onlineTarget.ghostTeleportPending = false;
+            playerCache.set(onlineTarget.id, onlineTarget);
+            try {
+              await player.setDeadState(onlineTarget.username, 0, null);
+            } catch (e: any) {
+              log.error(`Failed to clear death state for ${onlineTarget.username}: ${e?.message || e}`);
+            }
+
+            globalStateRevision++;
+            filterPlayersByMap(onlineTarget.location.map).forEach((player) => {
+              sendPacket(player.ws, packetManager.playerGhost({ id: onlineTarget.id, ghost: false }));
+              sendPacket(player.ws, packetManager.revive({
+                id: onlineTarget.id,
+                target: onlineTarget.id,
+                stats: onlineTarget.stats,
+              }));
+            });
+            sendStatsToPartyMembers(onlineTarget.username, onlineTarget.id, onlineTarget.stats);
+
+            sendPacket(ws, packetManager.notify({
+              message: `Revived ${onlineTarget.username.charAt(0).toUpperCase() + onlineTarget.username.slice(1)}`,
+            }));
+            listener.emit(Events.PLAYER_REVIVED, { player: onlineTarget });
+            break;
+          }
+
+          case "KILL": {
+
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "admin.kill" || p === "admin.*"
+              )
+            ) {
+              const notifyData = {
+                message: "You don't have permission to use this command",
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            const killIdentifier = args[0]?.toLowerCase() || null;
+
+            let killTarget: any = null;
+            if (!killIdentifier) {
+              killTarget = currentPlayer;
+            } else {
+              const players = Object.values(playerCache.list());
+              if (isNaN(Number(killIdentifier))) {
+                killTarget = players.find(
+                  (p) => p.username.toLowerCase() === killIdentifier.toLowerCase()
+                );
+              } else {
+                killTarget = playerCache.get(killIdentifier);
+              }
+            }
+
+            const onlineTarget = killTarget ? playerCache.get(killTarget.id) : null;
+            if (!onlineTarget) {
+              sendPacket(ws, packetManager.notify({ message: "Player must be online to kill" }));
+              break;
+            }
+
+            if (onlineTarget.isDead || onlineTarget.isGhost) {
+              const notifyData = {
+                message: `${onlineTarget.username.charAt(0).toUpperCase() + onlineTarget.username.slice(1)} is already dead`,
+              };
+              sendPacket(ws, packetManager.notify(notifyData));
+              break;
+            }
+
+            // Force the standard death flow: skeleton, corpse persistence,
+            // Release Spirit popup, full server-side locks.
+            await handlePlayerDeath(onlineTarget, currentPlayer, {
+              damage: onlineTarget.stats?.health || 0,
+              isCrit: false,
+            });
+
+            sendPacket(ws, packetManager.notify({
+              message: `Killed ${onlineTarget.username.charAt(0).toUpperCase() + onlineTarget.username.slice(1)}`,
+            }));
             break;
           }
 
@@ -9329,6 +9621,11 @@ export default async function packetReceiver(
           return;
         }
 
+        // Corpses and ghosts cannot mount.
+        if ((currentPlayer.isDead || currentPlayer.isGhost) && !dismounting) {
+          return;
+        }
+
         const canMount = player.canMount(currentPlayer);
         const mount = (data as any).mount;
         if (!mount) {
@@ -9393,6 +9690,139 @@ export default async function packetReceiver(
           await packetReceiver(server, ws, JSON.stringify({ type: "MOVEXY", data: moveDirection }));
         }
         listener.emit(Events.PLAYER_MOUNT, { player: currentPlayer, mounted: currentPlayer.mounted, mountType: currentPlayer.mount_type });
+        break;
+      }
+      case "RELEASE_SPIRIT": {
+        if (!currentPlayer) return;
+        // Only a corpse awaiting release can release. Ghosts are already out.
+        if (!currentPlayer.isDead || currentPlayer.isGhost || currentPlayer.ghostTeleportPending) return;
+
+        const spawn = findGraveyardSpawn(
+          currentPlayer.location.map,
+          currentPlayer.location.position.x,
+          currentPlayer.location.position.y
+        );
+        currentPlayer.stats.health = 0;
+        currentPlayer.stats.stamina = 0;
+        // Belt and braces: ghosts move at mounted speed with no lingering
+        // combat modifiers (death already resets these, keep them clean here).
+        currentPlayer.slowPercent = 0;
+        currentPlayer.slowMultiplier = 1;
+        currentPlayer.stunnedUntil = 0;
+        currentPlayer.isDead = false;
+        currentPlayer.isGhost = true;
+        currentPlayer.reviveOffered = false;
+        currentPlayer.ghostTeleportPending = true;
+        await forceStopPlayerMovement(currentPlayer);
+        // Server state moves now so SAVE/logout/disconnect all agree on the
+        // graveyard (relog lands there). Only the moveXY broadcast waits for
+        // the client's mid-black moment below.
+        currentPlayer.location.position = { x: spawn.x, y: spawn.y, direction: "down" };
+        playerCache.set(currentPlayer.id, currentPlayer);
+        try {
+          await player.setDeadState(currentPlayer.username, 2, currentPlayer.corpse);
+        } catch (e: any) {
+          log.error(`Failed to persist ghost state for ${currentPlayer.username}: ${e?.message || e}`);
+        }
+
+        // Announce ghost form immediately: it starts the client's ~5s release
+        // cinematic and carries the destination so graveyard chunks preload.
+        // pendingTeleport keeps observers from rendering the ghost at the
+        // corpse; the confirm at teleport time is their spawn signal.
+        globalStateRevision++;
+        const releaseMap = currentPlayer.location.map;
+        const releaseId = currentPlayer.id;
+        filterPlayersByMap(releaseMap).forEach((p) => {
+          sendPacket(
+            p.ws,
+            packetManager.playerGhost({ id: releaseId, ghost: true, x: spawn.x, y: spawn.y, map: releaseMap, pendingTeleport: true })
+          );
+        });
+        listener.emit(Events.PLAYER_GHOST_RELEASED, { player: currentPlayer });
+
+        setTimeout(() => {
+          const p = playerCache.get(releaseId);
+          if (!p || !p.isGhost || !p.ghostTeleportPending) return;
+          p.ghostTeleportPending = false;
+          playerCache.set(p.id, p);
+          globalStateRevision++;
+          filterPlayersByMap(p.location.map).forEach((v) => {
+            sendPacket(
+              v.ws,
+              packetManager.moveXY({
+                i: p.id,
+                d: { x: spawn.x, y: spawn.y, dr: "down" },
+                r: globalStateRevision,
+                s: p.isStealth ? 1 : 0
+              })
+            );
+            // Ghost spawn signal: render from here, at the graveyard.
+            sendPacket(
+              v.ws,
+              packetManager.playerGhost({ id: p.id, ghost: true, x: spawn.x, y: spawn.y, map: p.location.map })
+            );
+          });
+        }, GHOST_TELEPORT_DELAY_MS);
+        break;
+      }
+      case "CONFIRM_REVIVE": {
+        if (!currentPlayer) return;
+        // Rejecting a confirm revokes the offer client-side so a stale popup
+        // can never linger: it only hides on this verdict or on REVIVE.
+        const denyRevive = () => {
+          currentPlayer.reviveOffered = false;
+          if (currentPlayer.ws) {
+            sendPacket(currentPlayer.ws, packetManager.reviveOffer({ revoked: true }));
+          }
+        };
+        // Only a ghost standing at its own corpse can revive.
+        if (!currentPlayer.isGhost) return;
+        if (!currentPlayer.corpse) {
+          denyRevive();
+          return;
+        }
+        if (currentPlayer.corpse.map !== currentPlayer.location.map) {
+          denyRevive();
+          return;
+        }
+        const dx = currentPlayer.location.position.x - currentPlayer.corpse.x;
+        const dy = currentPlayer.location.position.y - currentPlayer.corpse.y;
+        if (dx * dx + dy * dy > REVIVE_OFFER_RADIUS * REVIVE_OFFER_RADIUS) {
+          denyRevive();
+          return;
+        }
+
+        currentPlayer.stats.health = Math.round(currentPlayer.stats.total_max_health * 0.5);
+        currentPlayer.stats.stamina = Math.round(currentPlayer.stats.total_max_stamina * 0.5);
+        currentPlayer.isDead = false;
+        currentPlayer.isGhost = false;
+        currentPlayer.corpse = null;
+        currentPlayer.reviveOffered = false;
+        playerCache.set(currentPlayer.id, currentPlayer);
+        try {
+          await player.setDeadState(currentPlayer.username, 0, null);
+        } catch (e: any) {
+          log.error(`Failed to clear death state for ${currentPlayer.username}: ${e?.message || e}`);
+        }
+
+        globalStateRevision++;
+        const playersInMap = filterPlayersByMap(currentPlayer.location.map);
+        playersInMap.forEach((p) => {
+          sendPacket(
+            p.ws,
+            packetManager.playerGhost({ id: currentPlayer.id, ghost: false })
+          );
+          sendPacket(
+            p.ws,
+            packetManager.revive({
+              id: currentPlayer.id,
+              target: currentPlayer.id,
+              stats: currentPlayer.stats,
+            })
+          );
+        });
+        sendStatsToPartyMembers(currentPlayer.username, currentPlayer.id, currentPlayer.stats);
+        listener.emit(Events.PLAYER_REVIVED, { player: currentPlayer });
         break;
       }
       case "EQUIP_ITEM": {
@@ -9822,6 +10252,8 @@ export default async function packetReceiver(
       }
       case "PICKUP_LOOT": {
         if (!currentPlayer) return;
+        // Corpses and ghosts cannot pick up loot.
+        if (currentPlayer.isDead || currentPlayer.isGhost) return;
         const lootId = (data as any)?.id;
         if (!lootId) return;
 
@@ -9855,6 +10287,8 @@ export default async function packetReceiver(
       }
       case "BATCH_PICKUP_LOOT": {
         if (!currentPlayer) return;
+        // Corpses and ghosts cannot pick up loot.
+        if (currentPlayer.isDead || currentPlayer.isGhost) return;
 
         const items = loot.pickupAllNearby(currentPlayer);
         if (items.length === 0) break;
@@ -9886,6 +10320,8 @@ export default async function packetReceiver(
       }
       case "OPEN_LOOT_CHEST": {
         if (!currentPlayer) return;
+        // Corpses and ghosts cannot open chests.
+        if (currentPlayer.isDead || currentPlayer.isGhost) return;
         const chestId = (data as any)?.chestId;
         if (!chestId) return;
         const chest = lootChest.getChest(chestId);
@@ -9903,6 +10339,8 @@ export default async function packetReceiver(
       }
       case "TAKE_CHEST_ITEMS": {
         if (!currentPlayer) return;
+        // Corpses and ghosts cannot take chest items.
+        if (currentPlayer.isDead || currentPlayer.isGhost) return;
         const chestId = (data as any)?.chestId;
         const indices = (data as any)?.indices;
         if (!chestId || !Array.isArray(indices) || indices.length === 0) return;
@@ -9922,6 +10360,8 @@ export default async function packetReceiver(
       }
       case "TAKE_ALL_CHEST_ITEMS": {
         if (!currentPlayer) return;
+        // Corpses and ghosts cannot take chest items.
+        if (currentPlayer.isDead || currentPlayer.isGhost) return;
         const chestId = (data as any)?.chestId;
         if (!chestId) return;
         const result = await lootChest.takeAllItems(chestId, String(currentPlayer.id), currentPlayer.username);
@@ -10062,61 +10502,113 @@ async function interruptPlayerCast(target: any) {
   }
 }
 
-// Shared player death handling: full heal, clear barriers/DoTs, respawn at the
-// nearest graveyard, and broadcast death/revive to the map. Used by direct spell
-// damage and damage-over-time ticks.
-export async function handlePlayerDeath(target: any, killer: any, info: { damage: number; isCrit: boolean }) {
-  const deathStats = { ...target.stats };
+// Shared player death handling: mark dead-awaiting-release at 0 HP, leave a
+// skeleton marker, and notify the victim (Release Spirit popup). The corpse
+// stays where it fell until release; the graveyard teleport happens in the
+// RELEASE_SPIRIT handler. Used by direct spell damage and DoT ticks.
+const REVIVE_OFFER_RADIUS = 100;
+// Release timing: the client plays a ~5s cinematic (orb + fade) on release.
+// The teleport lands mid-black at +3s so it is never seen.
+const GHOST_TELEPORT_DELAY_MS = 3000;
+// Hide band: wider than the offer radius so small client/server position
+// desync at the boundary can't flap the popup. Re-entry re-offers.
+const REVIVE_OFFER_HIDE_RADIUS = 120;
 
-  target.stats.health = target.stats.total_max_health;
-  target.stats.stamina = target.stats.total_max_stamina;
+function checkGhostReviveProximity(player: any): void {
+  if (!player.isGhost || !player.corpse) return;
+  if (player.corpse.map !== player.location.map) {
+    player.reviveOffered = false;
+    return;
+  }
+  const dx = player.location.position.x - player.corpse.x;
+  const dy = player.location.position.y - player.corpse.y;
+  const dist2 = dx * dx + dy * dy;
+  if (dist2 <= REVIVE_OFFER_RADIUS * REVIVE_OFFER_RADIUS) {
+    if (!player.reviveOffered && player.ws) {
+      player.reviveOffered = true;
+      sendPacket(player.ws, packetManager.reviveOffer({ x: player.corpse.x, y: player.corpse.y }));
+    }
+  } else if (dist2 > REVIVE_OFFER_HIDE_RADIUS * REVIVE_OFFER_HIDE_RADIUS) {
+    // Outside the hide band: re-arm so walking back in re-offers. The client
+    // hides its popup itself once past the same radius.
+    player.reviveOffered = false;
+  }
+  // Between offer and hide radius: sticky, neither offer nor re-arm.
+}
+
+function findGraveyardSpawn(mapName: string, x: number, y: number): { x: number; y: number } {
+  const mapProps = mapPropertiesCache.find((m: any) => m.name === `${mapName}.json`);
+  if (mapProps?.graveyards && Array.isArray(mapProps.graveyards) && mapProps.graveyards.length > 0) {
+    let closest = mapProps.graveyards[0];
+    let closestDistance = Math.sqrt(
+      Math.pow(x - closest.position.x, 2) + Math.pow(y - closest.position.y, 2)
+    );
+    for (const graveyard of mapProps.graveyards) {
+      const distance = Math.sqrt(
+        Math.pow(x - graveyard.position.x, 2) + Math.pow(y - graveyard.position.y, 2)
+      );
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closest = graveyard;
+      }
+    }
+    return { x: Math.round(closest.position.x), y: Math.round(closest.position.y) };
+  }
+  const defaultMapProps = mapPropertiesCache.find((m: any) => m.name === `${defaultMap}.json`);
+  return {
+    x: defaultMapProps ? Math.round((defaultMapProps.width * defaultMapProps.tileWidth) / 2) : 0,
+    y: defaultMapProps ? Math.round((defaultMapProps.height * defaultMapProps.tileHeight) / 2) : 0,
+  };
+}
+
+export async function handlePlayerDeath(target: any, killer: any, info: { damage: number; isCrit: boolean }) {
+  // Already dead or a ghost: damage-over-time ticks must not re-kill.
+  if (target.isDead || target.isGhost) return;
+
+  const deathMap = target.location.map;
+  const deathX = Math.round(target.location.position.x);
+  const deathY = Math.round(target.location.position.y);
+
+  // Leave a skeleton marker where the player died.
+  skeletons.spawn(deathMap, deathX, deathY, target.username);
+
+  // Dead-awaiting-release: no teleport, no revive yet. The corpse stays where
+  // it fell at 0 HP until the player releases their spirit.
+  target.stats.health = 0;
+  target.stats.stamina = 0;
+  target.mounted = false;
+  await forceStopPlayerMovement(target);
+  if (target.casting) {
+    await interruptPlayerCast(target);
+  }
   spellEffects.clearBarriers(target);
   dots.clearDots(target.id);
   spellEffects.clearStuns(target.id);
   spellEffects.clearSlows(target.id);
   spellEffects.clearVanishes(target.id);
+  // Death clears the effect lists, but the derived combat stats baked into
+  // the player object survive unless reset here. A lingering slow would
+  // otherwise shrink the ghost's movement speed forever.
+  target.slowPercent = 0;
+  target.slowMultiplier = 1;
+  target.stunnedUntil = 0;
   spellEffects.broadcastEffectsUpdate(target);
 
-  const currentMapName = target.location.map;
-  const respawnMapProps = mapPropertiesCache.find((m: any) => m.name === `${currentMapName}.json`);
-
-  let respawnX: number;
-  let respawnY: number;
-
-  if (respawnMapProps?.graveyards && Array.isArray(respawnMapProps.graveyards) && respawnMapProps.graveyards.length > 0) {
-
-    let closestGraveyard = respawnMapProps.graveyards[0];
-    let closestDistance = Math.sqrt(
-      Math.pow(target.location.position.x - closestGraveyard.position.x, 2) +
-      Math.pow(target.location.position.y - closestGraveyard.position.y, 2)
-    );
-
-    for (const graveyard of respawnMapProps.graveyards) {
-      const distance = Math.sqrt(
-        Math.pow(target.location.position.x - graveyard.position.x, 2) +
-        Math.pow(target.location.position.y - graveyard.position.y, 2)
-      );
-
-      if (distance < closestDistance) {
-        closestDistance = distance;
-        closestGraveyard = graveyard;
-      }
-    }
-
-    respawnX = closestGraveyard.position.x;
-    respawnY = closestGraveyard.position.y;
-  } else {
-
-    const defaultMapProps = mapPropertiesCache.find((m: any) => m.name === `${defaultMap}.json`);
-    respawnX = defaultMapProps
-      ? (defaultMapProps.width * defaultMapProps.tileWidth) / 2
-      : 0;
-    respawnY = defaultMapProps
-      ? (defaultMapProps.height * defaultMapProps.tileHeight) / 2
-      : 0;
+  target.isDead = true;
+  target.isGhost = false;
+  target.corpse = { map: deathMap, x: deathX, y: deathY };
+  target.reviveOffered = false;
+  playerCache.set(target.id, target);
+  // Persistence must never break the live death flow: if the accounts
+  // migration hasn't run, the session still works and only relog-restore
+  // degrades until the columns exist.
+  try {
+    await player.setDeadState(target.username, 1, target.corpse);
+  } catch (e: any) {
+    log.error(`Failed to persist death state for ${target.username}: ${e?.message || e}`);
   }
 
-  target.location.position = { x: Math.round(respawnX), y: Math.round(respawnY), direction: "down" };
+  const deathStats = { ...target.stats, health: 0, stamina: 0 };
 
   if (killer && killer.id !== target.id) {
     const syncedStats = await player.synchronizeStats(killer.username);
@@ -10149,30 +10641,14 @@ export async function handlePlayerDeath(target: any, killer: any, info: { damage
         damage: info.damage,
       })
     );
-
-    sendPacket(
-      p.ws,
-      packetManager.moveXY({
-        i: target.id,
-        d: {
-          x: Number(target.location.position.x),
-          y: Number(target.location.position.y),
-          dr: target.location.position.direction
-        },
-        r: globalStateRevision,
-        s: target.isStealth ? 1 : 0
-      })
-    );
-
-    sendPacket(
-      p.ws,
-      packetManager.revive({
-        id: target.id,
-        target: target.id,
-        stats: target.stats,
-      })
-    );
   });
+
+  // The victim stays a corpse at 0 HP until they release. No teleport, no
+  // revive yet — the client shows the Release Spirit popup from this.
+  // Corpse included so the client can mark it past skeleton expiry.
+  if (target.ws) {
+    sendPacket(target.ws, packetManager.playerDied({ id: target.id, corpse: target.corpse }));
+  }
 
   if (killer) {
     sendStatsToPartyMembers(killer.username, killer.id, killer.stats);
@@ -10379,6 +10855,39 @@ loot.setOnDespawn((lootItem) => {
       sendPacket(p.ws, packetManager.lootDespawn(lootItem.id));
     }
   }
+});
+
+function toSkeletonPacket(skeleton: any) {
+  return {
+    id: skeleton.id,
+    username: skeleton.username,
+    map: skeleton.map,
+    x: skeleton.x,
+    y: skeleton.y,
+    createdAt: skeleton.createdAt,
+    expiresAt: skeleton.expiresAt,
+  };
+}
+
+// Death skeletons are position-static, low importance markers, so both spawn
+// and expiry fan out as datagrams to exactly the players whose AOI radius
+// covers the marker.
+skeletons.setOnSpawn((skeleton) => {
+  broadcastToAOIBestEffortAtPosition(
+    skeleton.x,
+    skeleton.y,
+    skeleton.map,
+    packetManager.skeletonSpawn(toSkeletonPacket(skeleton))
+  );
+});
+
+skeletons.setOnDespawn((skeleton) => {
+  broadcastToAOIBestEffortAtPosition(
+    skeleton.x,
+    skeleton.y,
+    skeleton.map,
+    packetManager.skeletonDespawn(skeleton.id)
+  );
 });
 
 async function sendStatsToPartyMembers(playerUsername: string, playerId: string, stats: any) {

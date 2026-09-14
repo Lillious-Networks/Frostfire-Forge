@@ -329,6 +329,18 @@ const player = {
     );
     return response;
   },
+  setDeadState: async (
+    username: string,
+    isDead: number,
+    corpse: { map: string; x: number; y: number } | null
+  ) => {
+    if (!username) return;
+    const response = await query(
+      "UPDATE accounts SET is_dead = ?, corpse_map = ?, corpse_x = ?, corpse_y = ? WHERE username = ?",
+      [isDead, corpse?.map || null, corpse ? Math.round(corpse.x) : null, corpse ? Math.round(corpse.y) : null, username.toLowerCase()]
+    );
+    return response;
+  },
   setSessionId: async (
     token: string,
     sessionId: string
@@ -1438,7 +1450,8 @@ const player = {
 
     const accountQuery = `
       SELECT a.id, a.username, a.map, a.position, a.direction, a.role,
-             a.guest_mode, a.stealth, a.noclip, a.party_id, a.guild_id
+             a.guest_mode, a.stealth, a.noclip, a.party_id, a.guild_id,
+             a.is_dead, a.corpse_map, a.corpse_x, a.corpse_y
       FROM accounts a WHERE a.username = ?
     `;
 
@@ -1532,6 +1545,12 @@ const player = {
       isGuest: data.guest_mode === 1,
       isStealth: data.stealth === 1,
       isNoclip: data.noclip === 1,
+      isDead: Number(data.is_dead) || 0,
+      corpse: data.corpse_map ? {
+        map: data.corpse_map,
+        x: Number(data.corpse_x) || 0,
+        y: Number(data.corpse_y) || 0,
+      } : null,
       equipment: {
         head: equip.head,
         body: equip.body,

@@ -29,10 +29,33 @@ const createAccountsTable = async () => {
         noclip INTEGER DEFAULT 0 NOT NULL,
         party_id INTEGER DEFAULT NULL,
         guild_id INTEGER DEFAULT NULL,
-        guest_mode INTEGER DEFAULT 0 NOT NULL
+        guest_mode INTEGER DEFAULT 0 NOT NULL,
+        is_dead INTEGER DEFAULT 0 NOT NULL,
+        corpse_map TEXT DEFAULT NULL,
+        corpse_x INTEGER DEFAULT NULL,
+        corpse_y INTEGER DEFAULT NULL
       );
   `;
   await query(sql);
+};
+
+const addDeathColumns = async () => {
+  log.info("Adding death columns to accounts table...");
+  const rows = (await query(
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'`
+  )) as any[];
+  const ddl = String(rows[0]?.sql || "");
+  const columns = [
+    { name: "is_dead", type: "INTEGER DEFAULT 0 NOT NULL" },
+    { name: "corpse_map", type: "TEXT DEFAULT NULL" },
+    { name: "corpse_x", type: "INTEGER DEFAULT NULL" },
+    { name: "corpse_y", type: "INTEGER DEFAULT NULL" },
+  ];
+  for (const col of columns) {
+    if (!ddl.includes(col.name)) {
+      await query(`ALTER TABLE accounts ADD COLUMN ${col.name} ${col.type}`);
+    }
+  }
 };
 
 // Create allowed_ips table if it doesn't exist
@@ -254,6 +277,8 @@ const createPermissionTypesTable = async () => {
       ('admin.disconnect'),
       ('admin.permission'),
       ('admin.respawn'),
+      ('admin.revive'),
+      ('admin.kill'),
       ('admin.unban'),
       ('admin.warp'),
       ('admin.weather'),
@@ -715,6 +740,7 @@ const setupDatabase = async () => {
   // await createDatabase();
   // await useDatabase();
   await createAccountsTable();
+  await addDeathColumns();
   await createAllowedIpsTable();
   await createBlockedIpsTable();
   await createWhitelistTable();

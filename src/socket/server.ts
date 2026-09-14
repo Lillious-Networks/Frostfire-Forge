@@ -860,6 +860,14 @@ listener.on(Events.SERVER_TICK, async () => {
     const { stats } = playerData;
     if (!stats) continue;
 
+    // Corpses awaiting release and ghosts do not regenerate; pin them at 0
+    // so the death state can never be healed out from under the state flags.
+    if (playerData.isDead || playerData.isGhost) {
+      stats.health = 0;
+      stats.stamina = 0;
+      continue;
+    }
+
     let updated = false;
 
     if (stats.stamina < stats.total_max_stamina) {

@@ -435,6 +435,8 @@ declare interface PlayerData {
   isGuest: boolean;
   isStealth: boolean;
   isNoclip: boolean;
+  isDead: number;
+  corpse: { map: string; x: number; y: number } | null;
   inventory: any;
   party: string[];
   friends: string[];

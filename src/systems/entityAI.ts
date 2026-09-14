@@ -9,8 +9,9 @@ import spellEffects from "./spelleffects";
 import { setPlayerPvp } from "./events";
 import { getEntitySpriteLayers, getIconUrl } from "../modules/spriteSheetManager";
 import assetCache from "../services/assetCache";
-import * as settings from "../config/settings.json";
 import lootChest from "./lootChest";
+import skeletons from "./skeletons";
+import player from "./player";
 import {
   hasLineOfSight,
   getDistance,
@@ -18,8 +19,6 @@ import {
   steerTowards,
   type PathState,
 } from "./entityPathfinding";
-
-const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
 /**
  * Entity AI State - tracks combat and movement
@@ -137,6 +136,10 @@ async function findNearestPlayer(entity: any, aggroRange: number, requireLineOfS
   for (const player of allPlayers) {
     // Never aggro on stealthed admins
     if (player.isStealth && player.isAdmin) {
+      continue;
+    }
+    // Corpses and ghosts are not valid targets.
+    if (player.isDead || player.isGhost) {
       continue;
     }
 
@@ -432,6 +435,25 @@ async function processCombat(entity: any, aiState: EntityAIState): Promise<void>
     return;
   }
 
+  // Corpses and ghosts are not valid targets: drop them like a lost target
+  // so the mob returns instead of beating on the dead.
+  if (targetPlayer.isDead || targetPlayer.isGhost) {
+    const oldTargetId = aiState.target;
+    aiState.target = null;
+    aiState.combatState = 'idle';
+    aiState.threatTable.clear();
+    aiState.isCasting = false;
+    aiState.castingProgress = 0;
+    if (oldTargetId) {
+      aggroMap.get(oldTargetId)?.delete(String(entity.id));
+      if (!aggroMap.get(oldTargetId) || aggroMap.get(oldTargetId)!.size === 0) {
+        setPlayerPvp(targetPlayer, false);
+        aggroMap.delete(oldTargetId);
+      }
+    }
+    return;
+  }
+
   const targetPos = typeof targetPlayer.location.position === 'string'
     ? { x: Number(targetPlayer.location.position.split(',')[0]), y: Number(targetPlayer.location.position.split(',')[1]) }
     : targetPlayer.location.position;
@@ -505,10 +527,25 @@ async function processCombat(entity: any, aiState: EntityAIState): Promise<void>
             const playersOnMap = getPlayersOnMap(entity.map);
 
             if (freshTarget.stats.health <= 0) {
+              // Already dead or a ghost: never re-kill.
+              if (freshTarget.isDead || freshTarget.isGhost) {
+                return;
+              }
               freshTarget.stats.health = 0;
-              freshTarget.stats.health = freshTarget.stats.total_max_health;
-              freshTarget.stats.stamina = freshTarget.stats.total_max_stamina;
+              freshTarget.stats.stamina = 0;
+              freshTarget.mounted = false;
+              // Dead players cannot finish casting (receiver's interrupt helper
+              // would be a module cycle from here; flag-clearing is enough to
+              // invalidate the in-flight cast).
+              freshTarget.casting = false;
+              freshTarget.castId = (freshTarget.castId || 0) + 1;
               spellEffects.clearBarriers(freshTarget);
+              // Death must not leave derived combat stats on the player
+              // object: a lingering slow would shrink the ghost's speed
+              // forever (see handlePlayerDeath in receiver).
+              freshTarget.slowPercent = 0;
+              freshTarget.slowMultiplier = 1;
+              freshTarget.stunnedUntil = 0;
               spellEffects.broadcastEffectsUpdate(freshTarget);
 
               // Immediately untarget the player when killed
@@ -526,67 +563,44 @@ async function processCombat(entity: any, aiState: EntityAIState): Promise<void>
                 }
               }
 
+              // Dead-awaiting-release: the corpse stays where it fell at 0 HP
+              // until the player releases. No graveyard teleport, no revive.
               const currentMapName = freshTarget.location.map;
-              const mapPropertiesCache = await assetCache.get("mapProperties");
-              const mapProps = mapPropertiesCache.find((m: any) => m.name === `${currentMapName}.json`);
-
-              let respawnX: number;
-              let respawnY: number;
-
-              if (mapProps?.graveyards && Array.isArray(mapProps.graveyards) && mapProps.graveyards.length > 0) {
-                let closestGraveyard = mapProps.graveyards[0];
-                let closestDistance = Math.sqrt(
-                  Math.pow(freshTarget.location.position.x - closestGraveyard.position.x, 2) +
-                  Math.pow(freshTarget.location.position.y - closestGraveyard.position.y, 2)
-                );
-
-                for (const graveyard of mapProps.graveyards) {
-                  const distance = Math.sqrt(
-                    Math.pow(freshTarget.location.position.x - graveyard.position.x, 2) +
-                    Math.pow(freshTarget.location.position.y - graveyard.position.y, 2)
-                  );
-
-                  if (distance < closestDistance) {
-                    closestDistance = distance;
-                    closestGraveyard = graveyard;
-                  }
-                }
-
-                respawnX = closestGraveyard.position.x;
-                respawnY = closestGraveyard.position.y;
-              } else {
-                const defaultMapProps = mapPropertiesCache.find((m: any) => m.name === `${defaultMap}.json`);
-                respawnX = defaultMapProps
-                  ? (defaultMapProps.width * defaultMapProps.tileWidth) / 2
-                  : 0;
-                respawnY = defaultMapProps
-                  ? (defaultMapProps.height * defaultMapProps.tileHeight) / 2
-                  : 0;
-                log.warn(`No graveyards found on map ${currentMapName}, using default map center`);
+              const deathPosition = { ...freshTarget.location.position };
+              freshTarget.isDead = true;
+              freshTarget.isGhost = false;
+              freshTarget.corpse = {
+                map: currentMapName,
+                x: Math.round(deathPosition.x),
+                y: Math.round(deathPosition.y),
+              };
+              freshTarget.reviveOffered = false;
+              playerCache.set(freshTarget.id, freshTarget);
+              try {
+                await player.setDeadState(freshTarget.username, 1, freshTarget.corpse);
+              } catch (e: any) {
+                log.error(`Failed to persist death state for ${freshTarget.username}: ${e?.message || e}`);
               }
 
-              freshTarget.location.position = { x: Math.round(respawnX), y: Math.round(respawnY), direction: "down" };
-              playerCache.set(freshTarget.id, freshTarget);
+              // Leave a skeleton marker where the player died.
+              skeletons.spawn(
+                currentMapName,
+                Math.round(deathPosition.x),
+                Math.round(deathPosition.y),
+                freshTarget.username
+              );
 
               if (playersOnMap.length > 0) {
-                playersOnMap.forEach((player) => {
-                  broadcastToAOI(player, packetManager.moveXY({
-                    i: freshTarget.id,
-                    d: {
-                      x: Number(freshTarget.location.position.x),
-                      y: Number(freshTarget.location.position.y),
-                      dr: freshTarget.location.position.direction
-                    },
-                    r: 0,
-                    s: freshTarget.isStealth ? 1 : 0
-                  }), true);
-
-                  broadcastToAOI(player, packetManager.revive({
-                    id: freshTarget.id,
-                    target: freshTarget.id,
-                    stats: freshTarget.stats,
-                  }), true);
-                });
+                broadcastToAOIBestEffort(playersOnMap[0], packetManager.updateStats({
+                  id: entity.id,
+                  target: freshTarget.id,
+                  stats: { health: 0, total_max_health: freshTarget.stats.total_max_health, absorbtion: 0 },
+                  isCrit: false,
+                  damage: damageAmount,
+                  entity: false,
+                }), true);
+                // Victim included via includeSelf; other clients ignore it.
+                broadcastToAOI(freshTarget, packetManager.playerDied({ id: freshTarget.id, corpse: freshTarget.corpse }), true);
               }
             } else if (playersOnMap.length > 0) {
               const updateStatsPacket = packetManager.updateStats({

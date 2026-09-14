@@ -32,6 +32,8 @@ export const Events = {
     PLAYER_CHAT: "onPlayerChat",
     PLAYER_DEATH: "onPlayerDeath",
     PLAYER_RESPAWN: "onPlayerRespawn",
+    PLAYER_GHOST_RELEASED: "onPlayerGhostReleased",
+    PLAYER_REVIVED: "onPlayerRevived",
     GUILD_CHANGED: "onGuildChanged",
     ITEM_EQUIP: "onItemEquip",
     ITEM_UNEQUIP: "onItemUnequip",

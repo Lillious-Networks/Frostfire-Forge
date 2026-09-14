@@ -40,10 +40,33 @@ const createAccountsTable = async () => {
         noclip INT DEFAULT 0 NOT NULL,
         party_id INT DEFAULT NULL,
         guild_id INT DEFAULT NULL,
-        guest_mode INT DEFAULT 0 NOT NULL
+        guest_mode INT DEFAULT 0 NOT NULL,
+        is_dead TINYINT DEFAULT 0 NOT NULL,
+        corpse_map VARCHAR(64) DEFAULT NULL,
+        corpse_x INT DEFAULT NULL,
+        corpse_y INT DEFAULT NULL
       );
   `;
   await query(sql);
+};
+
+const addDeathColumns = async () => {
+  log.info("Adding death columns to accounts table...");
+  const columns = [
+    { name: "is_dead", type: "TINYINT DEFAULT 0 NOT NULL" },
+    { name: "corpse_map", type: "VARCHAR(64) DEFAULT NULL" },
+    { name: "corpse_x", type: "INT DEFAULT NULL" },
+    { name: "corpse_y", type: "INT DEFAULT NULL" },
+  ];
+  for (const col of columns) {
+    const exists = (await query(
+      `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'accounts' AND COLUMN_NAME = ?`,
+      [database, col.name]
+    )) as any[];
+    if (!exists[0] || Number(exists[0].count) === 0) {
+      await query(`ALTER TABLE accounts ADD COLUMN ${col.name} ${col.type}`);
+    }
+  }
 };
 
 const createInventoryTable = async () => {
@@ -291,6 +314,8 @@ const createPermissionTypesTable = async () => {
         ('admin.disconnect'),
         ('admin.permission'),
         ('admin.respawn'),
+        ('admin.revive'),
+        ('admin.kill'),
         ('admin.unban'),
         ('admin.warp'),
         ('admin.weather'),
@@ -318,6 +343,10 @@ const createPermissionTypesTable = async () => {
   } else {
     log.debug("Permission types already exist - skipping");
   }
+
+  // Self-healing for existing databases: later-added permissions.
+  await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.revive')`);
+  await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.kill')`);
 };
 
 const createNpcTable = async () => {
@@ -930,6 +959,7 @@ const setupDatabase = async () => {
   await createDatabase();
   await useDatabase();
   await createAccountsTable();
+  await addDeathColumns();
   await createInventoryTable();
   await createItemsTable();
   await createStatsTable();

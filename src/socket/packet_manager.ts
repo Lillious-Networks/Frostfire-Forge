@@ -290,6 +290,10 @@ export const packetManager = {
             isStealth: data.isStealth,
             isVanished: data.isVanished,
             isNoclip: data.isNoclip,
+            isDead: data.isDead || false,
+            isGhost: data.isGhost || false,
+            ghostTeleportPending: data.ghostTeleportPending || false,
+            corpse: data.corpse || null,
             stats: data.stats,
             sprite: data.sprite,
             mounted: data.mounted,
@@ -961,6 +965,36 @@ export const packetManager = {
   lootDespawn: (id: string) => {
     return [
       packet.encode(JSON.stringify({ type: "LOOT_DESPAWN", data: { id } })),
+    ] as any[];
+  },
+  skeletonSpawn: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "ADD_SKELETON", data })),
+    ] as any[];
+  },
+  loadSkeletons: (skeletonItems: any[]) => {
+    return [
+      packet.encode(JSON.stringify({ type: "LOAD_SKELETONS", data: { skeletons: skeletonItems } })),
+    ] as any[];
+  },
+  skeletonDespawn: (id: string) => {
+    return [
+      packet.encode(JSON.stringify({ type: "REMOVE_SKELETON", data: { id } })),
+    ] as any[];
+  },
+  playerDied: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "PLAYER_DIED", data })),
+    ] as any[];
+  },
+  playerGhost: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "PLAYER_GHOST", data })),
+    ] as any[];
+  },
+  reviveOffer: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "REVIVE_OFFER", data })),
     ] as any[];
   },
   lootChestSpawn: (data: any) => {

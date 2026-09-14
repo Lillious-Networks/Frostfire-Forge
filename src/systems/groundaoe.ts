@@ -269,6 +269,8 @@ async function processZoneTicks(): Promise<void> {
         for (const playerId of playerIds) {
           const player = playerCache.get(playerId);
           if (!player || player.isGuest) continue;
+          // Ghosts and corpses are unaffected by ground effects.
+          if (player.isGhost || player.isDead) continue;
           const pPos = player.location?.position;
           if (!pPos) continue;
           const dist = Math.sqrt((pPos.x - zone.position.x) ** 2 + (pPos.y - zone.position.y) ** 2);

@@ -361,6 +361,26 @@ bun setup-production
 </details>
 
 <details>
+<summary><strong>Revive Player</strong></summary>
+
+```bash
+/revive [username | id]
+```
+- **Permission**: `admin.revive` | `admin.*`
+- Revives a dead or ghost player in place at full health. Omitting the username revives yourself. Only works on online targets that are actually dead.
+</details>
+
+<details>
+<summary><strong>Kill Player</strong></summary>
+
+```bash
+/kill [username | id]
+```
+- **Permission**: `admin.kill` | `admin.*`
+- Kills an online player through the normal death flow (skeleton, corpse, Release Spirit popup). Omitting the username kills yourself. Fails if the target is already dead or a ghost.
+</details>
+
+<details>
 <summary><strong>Summon Player</strong></summary>
 
 ```bash
