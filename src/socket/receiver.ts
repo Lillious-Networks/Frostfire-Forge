@@ -2677,16 +2677,10 @@ export default async function packetReceiver(
       }
       case "CHAT": {
         if (!currentPlayer) return;
-        // Corpses cannot talk. Ghosts cannot speak to the living (/s),
-        // except admins.
+        // Corpses cannot talk. Ghost speech comes out as spirit-tongue
+        // (except admins, who speak normally). Applied after decryption below.
         if (currentPlayer.isDead) return;
-        if (currentPlayer.isGhost && !currentPlayer.isAdmin) {
-          sendPacket(
-            ws,
-            packetManager.notify({ message: "Ghosts cannot speak to the living." })
-          );
-          return;
-        }
+        const ghostSpeak = currentPlayer.isGhost && !currentPlayer.isAdmin;
         if (currentPlayer.isGuest) {
           sendPacket(
             ws,
@@ -2748,6 +2742,12 @@ export default async function packetReceiver(
             decryptRsa(encryptedMessage, decryptedPrivateKey) || "";
         } else {
           decryptedMessage = message;
+        }
+
+        // Ghosts (non-admin) speak only in spirit-tongue: random short
+        // O-words, deliberately unrelated to the real message's length.
+        if (ghostSpeak) {
+          decryptedMessage = generateGhostSpeak();
         }
 
         sendMessageToPlayer(ws, decryptedMessage as string);
@@ -10500,6 +10500,24 @@ async function interruptPlayerCast(target: any) {
       false
     );
   }
+}
+
+// Spirit-tongue for ghosts: random short O-words ("OooOoo ooOoo Oooo").
+// Word count and lengths are purely random so nothing leaks about the real
+// message's length.
+function generateGhostSpeak(): string {
+  const wordCount = 1 + Math.floor(Math.random() * 4);
+  const words: string[] = [];
+  for (let i = 0; i < wordCount; i++) {
+    const len = 2 + Math.floor(Math.random() * 5);
+    let word = "";
+    for (let j = 0; j < len; j++) {
+      word += Math.random() < 0.5 ? "o" : "O";
+    }
+    words.push(word);
+  }
+  const message = words.join(" ");
+  return message.charAt(0).toUpperCase() + message.slice(1);
 }
 
 // Shared player death handling: mark dead-awaiting-release at 0 HP, leave a
