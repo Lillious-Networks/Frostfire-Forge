@@ -19,6 +19,20 @@ mock.module("../controllers/sqldatabase", () => ({
   default: async (_sql: string, _params?: any[]) => [],
 }));
 
+// Generated at server start (`bun create-config`) and gitignored, so CI has
+// no copy on disk. Mock the values instead of requiring the file.
+mock.module("../config/aoi.json", () => ({
+  default: {
+    DEFAULT_RADIUS: 1000,
+    UPDATE_THRESHOLD: 100,
+    GRID_CELL_SIZE: 512,
+    USE_SPATIAL_GRID: true,
+    SPATIAL_GRID_THRESHOLD: 50,
+    MAX_PLAYERS_PER_LAYER: 50,
+    DEBUG: false,
+  },
+}));
+
 const playerCache = (await import("../services/playermanager")).default;
 const layerManager = (await import("../services/layermanager")).default;
 const mapIndex = (await import("../services/mapindex")).default;
