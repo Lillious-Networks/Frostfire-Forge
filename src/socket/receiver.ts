@@ -62,6 +62,7 @@ import loot from "../systems/loot";
 import lootChest from "../systems/lootChest";
 import lootTable from "../systems/lootTable";
 import skeletons from "../systems/skeletons";
+import * as resurrection from "../systems/resurrection";
 const maps = await assetCache.get("maps");
 const worldsCache = await assetCache.get("worlds") as WorldData[];
 const mapPropertiesCache = await assetCache.get("mapProperties");
@@ -1819,6 +1820,21 @@ authWorker.on("message", async (result: any) => {
           setSlowsForPlayer(String(currentPlayer.id), savedSlows);
           currentPlayer.slowPercent = Math.max(...savedSlows.map((s: any) => s.slowPercent));
           currentPlayer.slowMultiplier = 1 - currentPlayer.slowPercent / 100;
+        }
+
+        // Resurrection Sickness restores like any other debuff (in-memory
+        // handoff, so it survives relog but not a server restart). Totals
+        // were already synced above; push the scaled values to the client.
+        if (resurrection.restoreOnLogin(currentPlayer)) {
+          sendPacket(
+            ws,
+            packetManager.updateStats({
+              id: currentPlayer.id,
+              target: currentPlayer.id,
+              stats: currentPlayer.stats,
+            })
+          );
+          spellEffects.broadcastEffectsUpdate(currentPlayer);
         }
 
         effectManager.clearAll(effectUsername);
@@ -7546,6 +7562,11 @@ export default async function packetReceiver(
               targetPlayer.corpse = null;
               targetPlayer.reviveOffered = false;
               targetPlayer.ghostTeleportPending = false;
+              resurrection.clearSickness(targetPlayer);
+              const respawnSynced = await player.synchronizeStats(targetPlayer.username);
+              if (respawnSynced) {
+                targetPlayer.stats = respawnSynced;
+              }
               if (targetPlayer.stats) {
                 targetPlayer.stats.health = targetPlayer.stats.total_max_health;
                 targetPlayer.stats.stamina = targetPlayer.stats.total_max_stamina;
@@ -7581,6 +7602,7 @@ export default async function packetReceiver(
                   }));
                 }
               });
+              spellEffects.broadcastEffectsUpdate(targetPlayer);
             }
 
             const notifyData = {
@@ -7637,14 +7659,20 @@ export default async function packetReceiver(
               break;
             }
 
-            // Revive in place at full health: clear corpse/ghost state.
-            onlineTarget.stats.health = onlineTarget.stats.total_max_health;
-            onlineTarget.stats.stamina = onlineTarget.stats.total_max_stamina;
+            // Revive in place at full health: clear corpse/ghost state and any
+            // Resurrection Sickness, then recompute clean totals.
             onlineTarget.isDead = false;
             onlineTarget.isGhost = false;
             onlineTarget.corpse = null;
             onlineTarget.reviveOffered = false;
             onlineTarget.ghostTeleportPending = false;
+            resurrection.clearSickness(onlineTarget);
+            const reviveSynced = await player.synchronizeStats(onlineTarget.username);
+            if (reviveSynced) {
+              onlineTarget.stats = reviveSynced;
+            }
+            onlineTarget.stats.health = onlineTarget.stats.total_max_health;
+            onlineTarget.stats.stamina = onlineTarget.stats.total_max_stamina;
             playerCache.set(onlineTarget.id, onlineTarget);
             try {
               await player.setDeadState(onlineTarget.username, 0, null);
@@ -7661,6 +7689,7 @@ export default async function packetReceiver(
                 stats: onlineTarget.stats,
               }));
             });
+            spellEffects.broadcastEffectsUpdate(onlineTarget);
             sendStatsToPartyMembers(onlineTarget.username, onlineTarget.id, onlineTarget.stats);
 
             sendPacket(ws, packetManager.notify({
@@ -9825,6 +9854,56 @@ export default async function packetReceiver(
         listener.emit(Events.PLAYER_REVIVED, { player: currentPlayer });
         break;
       }
+      case "CONFIRM_GRAVEYARD_REVIVE": {
+        if (!currentPlayer) return;
+        // Only a ghost may resurrect at the graveyard. No distance check:
+        // skipping the corpse run is the point, Resurrection Sickness is
+        // the price (15 min: -20% health, -10% all other stats).
+        if (!currentPlayer.isGhost || currentPlayer.isDead) return;
+
+        resurrection.applySickness(currentPlayer);
+        const synced = await player.synchronizeStats(currentPlayer.username);
+        if (synced) {
+          currentPlayer.stats = synced;
+        }
+        currentPlayer.stats.health = Math.round(currentPlayer.stats.total_max_health * 0.5);
+        currentPlayer.stats.stamina = Math.round(currentPlayer.stats.total_max_stamina * 0.5);
+        currentPlayer.isDead = false;
+        currentPlayer.isGhost = false;
+        currentPlayer.corpse = null;
+        currentPlayer.reviveOffered = false;
+        currentPlayer.ghostTeleportPending = false;
+        playerCache.set(currentPlayer.id, currentPlayer);
+        try {
+          await player.setDeadState(currentPlayer.username, 0, null);
+        } catch (e: any) {
+          log.error(`Failed to clear death state for ${currentPlayer.username}: ${e?.message || e}`);
+        }
+
+        globalStateRevision++;
+        filterPlayersByMap(currentPlayer.location.map).forEach((p) => {
+          sendPacket(
+            p.ws,
+            packetManager.playerGhost({ id: currentPlayer.id, ghost: false })
+          );
+          sendPacket(
+            p.ws,
+            packetManager.revive({
+              id: currentPlayer.id,
+              target: currentPlayer.id,
+              stats: currentPlayer.stats,
+            })
+          );
+        });
+        spellEffects.broadcastEffectsUpdate(currentPlayer);
+        sendStatsToPartyMembers(currentPlayer.username, currentPlayer.id, currentPlayer.stats);
+        sendPacket(
+          currentPlayer.ws,
+          packetManager.notify({ message: "You have been resurrected with Resurrection Sickness (15 min)." })
+        );
+        listener.emit(Events.PLAYER_REVIVED, { player: currentPlayer });
+        break;
+      }
       case "EQUIP_ITEM": {
         if (!currentPlayer) return;
         const item = (data as any).item;
@@ -10906,6 +10985,24 @@ skeletons.setOnDespawn((skeleton) => {
     skeleton.map,
     packetManager.skeletonDespawn(skeleton.id)
   );
+});
+
+// When Resurrection Sickness wears off, recompute clean totals and push
+// fresh stats + effects to the player, their map, and their party.
+resurrection.setOnSicknessExpiry(async (p) => {
+  const synced = await player.synchronizeStats(p.username);
+  if (!synced) return;
+  p.stats = synced;
+  playerCache.set(p.id, p);
+  globalStateRevision++;
+  filterPlayersByMap(p.location.map).forEach((v) => {
+    sendPacket(
+      v.ws,
+      packetManager.updateStats({ id: p.id, target: p.id, stats: p.stats })
+    );
+  });
+  spellEffects.broadcastEffectsUpdate(p);
+  sendStatsToPartyMembers(p.username, p.id, p.stats);
 });
 
 async function sendStatsToPartyMembers(playerUsername: string, playerId: string, stats: any) {

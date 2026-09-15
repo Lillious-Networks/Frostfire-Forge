@@ -160,6 +160,7 @@ export function getDotsPayload(player: any) {
     .map((d) => ({
       id: `dot:${d.spell}`,
       spell: d.spell,
+      kind: "dot",
       icon: d.icon,
       duration: d.duration,
       remaining: Math.max(0, Math.ceil((d.expiresAt - now) / 1000)),

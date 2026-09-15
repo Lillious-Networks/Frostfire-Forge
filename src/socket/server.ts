@@ -48,6 +48,7 @@ import assetCache from "../services/assetCache.ts";
 import entityCache from "../services/entityCache.ts";
 import dots from "../systems/dots.ts";
 import spellEffects, { getStunsForPlayer, getSlowsForPlayer } from "../systems/spelleffects.ts";
+import { saveOnDisconnect as saveSicknessOnDisconnect } from "../systems/resurrection.ts";
 import effectManager from "../services/effectmanager";
 import { GatewayClient } from "../modules/gateway-client.ts";
 import loot from "../systems/loot";
@@ -1009,6 +1010,7 @@ listener.on("onDisconnect", async (data) => {
         effectManager.saveBarriers(username, playerData.barriers || []);
         effectManager.saveStuns(username, getStunsForPlayer(String(playerData.id)) || []);
         effectManager.saveSlows(username, getSlowsForPlayer(String(playerData.id)) || []);
+        saveSicknessOnDisconnect(playerData);
       }
 
       loot.scheduleCleanup(playerData.username);

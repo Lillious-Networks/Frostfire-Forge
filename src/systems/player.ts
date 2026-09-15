@@ -4,6 +4,7 @@ import log from "../modules/logger";
 import assetCache from "../services/assetCache";
 import * as settings from "../config/settings.json";
 import playerCache from "../services/playermanager.ts";
+import { isSick, applySicknessToStats } from "./resurrection";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 
 const TOKEN_EXPIRY_MS = 24 * 60 * 60 * 1000;
@@ -1393,6 +1394,12 @@ const player = {
         currentStats.stat_damage += itemData?.stat_damage || 0;
         currentStats.stat_avoidance += itemData?.stat_avoidance || 0;
       }
+    }
+
+    // Resurrection Sickness survives every recompute while its wall clock
+    // runs (totals are rebuilt from base + equipment each sync).
+    if (isSick(pcache)) {
+      applySicknessToStats(currentStats);
     }
 
     return currentStats;

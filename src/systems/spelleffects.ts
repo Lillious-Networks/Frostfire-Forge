@@ -108,8 +108,10 @@ export function getEffectsPayload(player: any) {
     .map((b) => ({
       id: b.id,
       spell: b.spell,
+      kind: "barrier",
       duration: b.duration,
       remaining: Math.max(0, Math.ceil((b.expiresAt - now) / 1000)),
+      amount: Math.max(0, Math.floor(b.amount)),
       icon: b.icon || null,
       particles: b.particles || null,
     })) as any[];
@@ -597,6 +599,7 @@ registerEffectsPayloadProvider((player: any) => {
     .map((s) => ({
       id: s.id,
       spell: s.spell,
+      kind: "slow",
       duration: s.duration,
       remaining: Math.max(0, Math.ceil((s.expiresAt - now) / 1000)),
       value: s.slowPercent,
