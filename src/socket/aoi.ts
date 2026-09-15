@@ -15,6 +15,7 @@ import * as aoiReverse from "../services/aoiReverseIndex";
 // radius, so the band between 1.0x and this value is "sticky, don't re-add".
 const AOI_EXIT_HYSTERESIS = (AOI_CONFIG as any).EXIT_HYSTERESIS ?? 1.25;
 
+
 export interface PlayerAOIState {
 
   playersInAOI: Set<string>;
@@ -647,6 +648,36 @@ export function findPlayersWithTargetInAOI(targetId: number | string): any[] {
     }
   }
   return result;
+}
+
+/**
+ * World-index cleanup for a session killed by a duplicate login (same user
+ * logging in again). The normal disconnect path does all of this in the
+ * server's onDisconnect handler, but that handler early-returns on the cache
+ * miss left behind by the kick - so without this the stale id lingers in
+ * viewers' AOI sets, the reverse index, its layer (leaking playerCount),
+ * the map index and the spatial grid.
+ *
+ * Deliberately does NOT touch username-keyed state (cooldowns, dots, friends
+ * presence): the same user is still online via the new session.
+ */
+export function cleanupKickedSession(
+  kickedPlayer: any,
+  despawnBatchQueue?: Map<string, Set<string>>
+): void {
+  if (!kickedPlayer) return;
+  try {
+    despawnPlayerFromAllAOI(kickedPlayer, "disconnect", despawnBatchQueue);
+    // despawnPlayerFromAllAOI early-returns without aoi (a session killed
+    // mid-login); the index removals below are safe no-ops when absent.
+    layerManager.removePlayerFromLayer(kickedPlayer.id);
+    mapIndex.removePlayer(kickedPlayer.id);
+    if (AOI_CONFIG.USE_SPATIAL_GRID) {
+      spatialGrid.removePlayer(kickedPlayer.id);
+    }
+  } catch {
+    // Hygiene must never break the login that triggered the kick.
+  }
 }
 
 export function despawnPlayerFromAllAOI(

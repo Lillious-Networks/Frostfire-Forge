@@ -8,6 +8,7 @@ import { listener } from "../modules/event_bus";
 import { Events, setPlayerPvp } from "../systems/events";
 import { collectReceiverEntries, encodeBatch, MoverSnapshot, ReceiverInfo } from "./movement_batch.ts";
 import { queueLayerWorkerFlush, postToAllWorkers, setOnWorkerRetired } from "./movement_worker_pool.ts";
+import { claimBatchEntry, requeueSpawnBatch, claimDespawnEntry, requeueDespawnEntry } from "./batch_queue_utils.ts";
 const authentication_queue = new Set<string>();
 const authentication_session_queue = new Set<string>();
 
@@ -74,7 +75,7 @@ import AOI_CONFIG from "../config/aoi.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks, saveMapProperties, applyChunksWithRebase } from "../modules/assetloader";
 import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers, getEntitySpriteLayers } from "../modules/spriteSheetManager";
-import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, broadcastToAOIBestEffort, broadcastStatsUpdateToAOI, broadcastToAOIBestEffortAtPosition, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate, sendLoadPlayersChunked, aoiProf } from "./aoi";
+import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, broadcastToAOIBestEffort, broadcastStatsUpdateToAOI, broadcastToAOIBestEffortAtPosition, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate, sendLoadPlayersChunked, cleanupKickedSession, aoiProf } from "./aoi";
 import { realmWhitelist, isWhitelistEnabled } from "./server.ts";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
@@ -703,154 +704,180 @@ async function flushSpawnBatches() {
   const spawnJsonCache = new Map<string, string>();
   const animJsonCache = new Map<string, string>();
 
-  for (const [receivingPlayerId, spawnedPlayers] of spawnBatchQueue.entries()) {
-    if (spawnedPlayers.size === 0) {
+  // Snapshot the receiver list up front: receivers that log in mid-flush are
+  // picked up by the next flush 50ms later.
+  for (const receivingPlayerId of Array.from(spawnBatchQueue.keys())) {
+    // Claim (detach) the entry BEFORE the first await below. Spawns queued by
+    // a player logging in while this flush is awaiting sprite data land in a
+    // fresh entry instead of the snapshot being processed; holding the live
+    // reference and deleting/clearing it afterwards silently dropped those
+    // arrivals, leaving the new player permanently invisible to this receiver
+    // (no spawn -> the client ignores all later movement/stats for them).
+    const claimed = claimBatchEntry(spawnBatchQueue, receivingPlayerId);
+    if (!claimed || claimed.size === 0) {
       continue;
     }
 
-    const receivingPlayer = allPlayers[receivingPlayerId];
-
-    // Receiver is gone / not connected: drop their queued spawns entirely.
-    // Previously this only `continue`d, leaving the entry in spawnBatchQueue
-    // forever - after a load test the map held thousands of dead receivers and
-    // the 50ms flush re-scanned all of them (~110ms/flush doing nothing).
-    if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) {
-      spawnBatchQueue.delete(receivingPlayerId);
-      continue;
+    try {
+      await flushOneSpawnBatch(receivingPlayerId, claimed, allPlayers, spawnJsonCache, animJsonCache);
+    } catch (error) {
+      // Never lose a claimed batch to an exception (bad sprite data, a
+      // mid-flush disconnect mutating player state, ...): restore everything
+      // we claimed so the next flush retries. The old live-reference code was
+      // accidentally immune here (the entry stayed queued); the claim
+      // protocol must restore explicitly.
+      requeueSpawnBatch(spawnBatchQueue, receivingPlayerId, claimed);
     }
+  }
+}
 
-    // Spawn batches are the largest stream payloads. Use a FRESH queue reading
-    // (not the 250ms cache) so a burst can't pile past the transport limit
-    // before the gate notices. Skipped spawns stay queued for a later flush.
-    if (receivingPlayer.ws.getFreshQueuedBytes() > SPAWN_BACKPRESSURE_THRESHOLD) {
-      continue;
-    }
+async function flushOneSpawnBatch(
+  receivingPlayerId: string,
+  claimed: Map<string, any>,
+  allPlayers: Record<string, any>,
+  spawnJsonCache: Map<string, string>,
+  animJsonCache: Map<string, string>
+): Promise<void> {
+  const receivingPlayer = allPlayers[receivingPlayerId];
 
-    const spawnsForThisPlayer = Array.from(spawnedPlayers.values());
+  // Receiver is gone / not connected: drop their queued spawns entirely.
+  // Previously this only `continue`d, leaving the entry in spawnBatchQueue
+  // forever - after a load test the map held thousands of dead receivers and
+  // the 50ms flush re-scanned all of them (~110ms/flush doing nothing).
+  if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) {
+    return;
+  }
 
-    if (spawnsForThisPlayer.length > 0) {
-      const MAX_SPAWNS_PER_FLUSH = 10;
-      const batchToSend = spawnsForThisPlayer.slice(0, MAX_SPAWNS_PER_FLUSH);
-      const remaining = spawnsForThisPlayer.slice(MAX_SPAWNS_PER_FLUSH);
+  const spawnsForThisPlayer = Array.from(claimed.values());
 
-      const playersWithSprites = await Promise.all(
-        batchToSend.map(async (queuedPlayer) => {
+  // Spawn batches are the largest stream payloads. Use a FRESH queue reading
+  // (not the 250ms cache) so a burst can't pile past the transport limit
+  // before the gate notices. Skipped spawns stay queued for a later flush.
+  if (receivingPlayer.ws.getFreshQueuedBytes() > SPAWN_BACKPRESSURE_THRESHOLD) {
+    requeueSpawnBatch(spawnBatchQueue, receivingPlayerId, claimed);
+    return;
+  }
 
-          const fullPlayer = allPlayers[queuedPlayer.id];
-          if (!fullPlayer) {
-            return { ...queuedPlayer, spriteData: null };
-          }
+  if (spawnsForThisPlayer.length > 0) {
+    const MAX_SPAWNS_PER_FLUSH = 10;
+    const batchToSend = spawnsForThisPlayer.slice(0, MAX_SPAWNS_PER_FLUSH);
+    const remaining = spawnsForThisPlayer.slice(MAX_SPAWNS_PER_FLUSH);
 
-          const animationName = getAnimationNameForDirection(
-            fullPlayer.location.position?.direction || "down",
-            !!fullPlayer.moving,
-            !!fullPlayer.mounted,
-            fullPlayer.mount_type,
-            !!fullPlayer.casting
-          );
-
-          const spriteCacheKey = `${queuedPlayer.id}:${animationName}:${fullPlayer.equipmentRevision || 0}`;
-          let playerSpriteData = spriteDataCache.get(spriteCacheKey);
-          if (playerSpriteData === undefined) {
-            playerSpriteData = await getPlayerSpriteSheetData(animationName, fullPlayer.equipment || null);
-            spriteDataCache.set(spriteCacheKey, playerSpriteData);
-          }
-
-          const mountSpriteForBatch = fullPlayer.mount_type ? getMountSpriteUrl(fullPlayer.mount_type) : null;
-
-          let spriteData = null;
-          if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite || mountSpriteForBatch) {
-            // Sprite URLs are now sent to the client, which fetches them from the asset server
-            spriteData = {
-              mountSprite: mountSpriteForBatch,
-              bodySprite: playerSpriteData.bodySprite || null,
-              headSprite: playerSpriteData.headSprite || null,
-              armorHelmetSprite: playerSpriteData.armorHelmetSprite || null,
-              armorShoulderguardsSprite: playerSpriteData.armorShoulderguardsSprite || null,
-              armorNeckSprite: playerSpriteData.armorNeckSprite || null,
-              armorHandsSprite: playerSpriteData.armorHandsSprite || null,
-              armorChestSprite: playerSpriteData.armorChestSprite || null,
-              armorFeetSprite: playerSpriteData.armorFeetSprite || null,
-              armorLegsSprite: playerSpriteData.armorLegsSprite || null,
-              armorWeaponSprite: playerSpriteData.armorWeaponSprite || null,
-              animationState: playerSpriteData.animationState,
-            };
-          }
-
-          return {
-            ...queuedPlayer,
-            spriteData: spriteData,
-          };
-        })
-      );
-
-      const playerJsonParts = playersWithSprites.map((spawnData) => {
-        let json = spawnJsonCache.get(spawnData.id);
-        if (json === undefined) {
-          json = JSON.stringify(spawnData);
-          spawnJsonCache.set(spawnData.id, json);
-        }
-        return json;
-      });
-
-      const SPAWN_CHUNK_SIZE = 8;
-      for (let i = 0; i < playerJsonParts.length; i += SPAWN_CHUNK_SIZE) {
-        sendPacket(receivingPlayer.ws, packetManager.loadPlayersJson(
-          playerJsonParts.slice(i, i + SPAWN_CHUNK_SIZE),
-          globalStateRevision
-        ));
-      }
-
-      const animationPromises = playersWithSprites.map(async (spawnData) => {
-        const spawnedPlayer = allPlayers[spawnData.id];
-        if (!spawnedPlayer) {
-          return null;
+    const playersWithSprites = await Promise.all(
+      batchToSend.map(async (queuedPlayer) => {
+        const fullPlayer = allPlayers[queuedPlayer.id];
+        if (!fullPlayer) {
+          return { ...queuedPlayer, spriteData: null };
         }
 
         const animationName = getAnimationNameForDirection(
-          spawnedPlayer.location.position.direction,
-          spawnedPlayer.moving,
-          spawnedPlayer.mounted,
-          spawnedPlayer.mount_type,
-          spawnedPlayer.casting || false
+          fullPlayer.location.position?.direction || "down",
+          !!fullPlayer.moving,
+          !!fullPlayer.mounted,
+          fullPlayer.mount_type,
+          !!fullPlayer.casting
         );
 
-        const fullPlayer = allPlayers[spawnData.id];
-        const equipRev = fullPlayer?.equipmentRevision || 0;
-        const animCacheKey = `${spawnData.id}:${animationName}:${equipRev}`;
-        let animData = animationDataCache.get(animCacheKey);
-        if (animData === undefined) {
-          animData = await getAnimationData(animationName, spawnData.id);
-          animationDataCache.set(animCacheKey, animData);
+        const spriteCacheKey = `${queuedPlayer.id}:${animationName}:${fullPlayer.equipmentRevision || 0}`;
+        let playerSpriteData = spriteDataCache.get(spriteCacheKey);
+        if (playerSpriteData === undefined) {
+          playerSpriteData = await getPlayerSpriteSheetData(animationName, fullPlayer.equipment || null);
+          spriteDataCache.set(spriteCacheKey, playerSpriteData);
         }
-        return animData;
-      });
 
-      const animationDataArray = (await Promise.all(animationPromises)).filter(a => a !== null);
+        const mountSpriteForBatch = fullPlayer.mount_type ? getMountSpriteUrl(fullPlayer.mount_type) : null;
 
-      if (animationDataArray.length > 0) {
-        const animJsonParts = animationDataArray.map((animData) => {
-          const key = String(animData.id);
-          let json = animJsonCache.get(key);
-          if (json === undefined) {
-            json = JSON.stringify(animData);
-            animJsonCache.set(key, json);
-          }
-          return json;
-        });
-        sendPacket(receivingPlayer.ws, packetManager.batchSpriteSheetAnimationJson(animJsonParts));
-      }
-
-      // Re-queue remaining spawns for the next flush
-      if (remaining.length > 0) {
-        spawnedPlayers.clear();
-        for (const r of remaining) {
-          spawnedPlayers.set(r.id, r);
+        let spriteData = null;
+        if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite || mountSpriteForBatch) {
+          // Sprite URLs are now sent to the client, which fetches them from the asset server
+          spriteData = {
+            mountSprite: mountSpriteForBatch,
+            bodySprite: playerSpriteData.bodySprite || null,
+            headSprite: playerSpriteData.headSprite || null,
+            armorHelmetSprite: playerSpriteData.armorHelmetSprite || null,
+            armorShoulderguardsSprite: playerSpriteData.armorShoulderguardsSprite || null,
+            armorNeckSprite: playerSpriteData.armorNeckSprite || null,
+            armorHandsSprite: playerSpriteData.armorHandsSprite || null,
+            armorChestSprite: playerSpriteData.armorChestSprite || null,
+            armorFeetSprite: playerSpriteData.armorFeetSprite || null,
+            armorLegsSprite: playerSpriteData.armorLegsSprite || null,
+            armorWeaponSprite: playerSpriteData.armorWeaponSprite || null,
+            animationState: playerSpriteData.animationState,
+          };
         }
-      } else {
-        spawnBatchQueue.delete(receivingPlayerId);
+
+        return {
+          ...queuedPlayer,
+          spriteData: spriteData,
+        };
+      })
+    );
+
+    const playerJsonParts = playersWithSprites.map((spawnData) => {
+      let json = spawnJsonCache.get(spawnData.id);
+      if (json === undefined) {
+        json = JSON.stringify(spawnData);
+        spawnJsonCache.set(spawnData.id, json);
       }
+      return json;
+    });
+
+    const SPAWN_CHUNK_SIZE = 8;
+    for (let i = 0; i < playerJsonParts.length; i += SPAWN_CHUNK_SIZE) {
+      sendPacket(receivingPlayer.ws, packetManager.loadPlayersJson(
+        playerJsonParts.slice(i, i + SPAWN_CHUNK_SIZE),
+        globalStateRevision
+      ));
     }
+
+    const animationPromises = playersWithSprites.map(async (spawnData) => {
+      const spawnedPlayer = allPlayers[spawnData.id];
+      if (!spawnedPlayer) {
+        return null;
+      }
+
+      const animationName = getAnimationNameForDirection(
+        spawnedPlayer.location?.position?.direction || "down",
+        spawnedPlayer.moving,
+        spawnedPlayer.mounted,
+        spawnedPlayer.mount_type,
+        spawnedPlayer.casting || false
+      );
+
+      const fullPlayer = allPlayers[spawnData.id];
+      const equipRev = fullPlayer?.equipmentRevision || 0;
+      const animCacheKey = `${spawnData.id}:${animationName}:${equipRev}`;
+      let animData = animationDataCache.get(animCacheKey);
+      if (animData === undefined) {
+        animData = await getAnimationData(animationName, spawnData.id);
+        animationDataCache.set(animCacheKey, animData);
+      }
+      return animData;
+    });
+
+    const animationDataArray = (await Promise.all(animationPromises)).filter(a => a !== null);
+
+    if (animationDataArray.length > 0) {
+      const animJsonParts = animationDataArray.map((animData) => {
+        const key = String(animData.id);
+        let json = animJsonCache.get(key);
+        if (json === undefined) {
+          json = JSON.stringify(animData);
+          animJsonCache.set(key, json);
+        }
+        return json;
+      });
+      sendPacket(receivingPlayer.ws, packetManager.batchSpriteSheetAnimationJson(animJsonParts));
+    }
+
+    // Re-queue remaining spawns for the next flush, merged with anything
+    // that arrived while this receiver was awaiting sprite/animation data.
+    // The old code cleared the live entry here, dropping those arrivals.
+      const remainder = new Map<string, any>();
+      for (const r of remaining) {
+        remainder.set(r.id, r);
+      }
+      requeueSpawnBatch(spawnBatchQueue, receivingPlayerId, remainder);
   }
 }
 
@@ -861,25 +888,35 @@ function flushDespawnBatches() {
 
   const allPlayers = playerCache.list();
 
-  for (const [receivingPlayerId, despawnedPlayerIds] of despawnBatchQueue.entries()) {
-    if (despawnedPlayerIds.size === 0) continue;
+  for (const receivingPlayerId of Array.from(despawnBatchQueue.keys())) {
+    // Claim (detach) up front so the tail clear below cannot drop entries for
+    // receivers skipped on backpressure - the old code `continue`d past them
+    // and then wiped them with a blanket clear, leaving ghost entities stuck
+    // on the client's screen.
+    const claimed = claimDespawnEntry(despawnBatchQueue, receivingPlayerId);
+    if (!claimed || claimed.size === 0) continue;
 
     const receivingPlayer = allPlayers[receivingPlayerId];
 
     if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
 
-    if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) continue;
+    if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
+      requeueDespawnEntry(despawnBatchQueue, receivingPlayerId, claimed);
+      continue;
+    }
 
-    const despawnsArray = Array.from(despawnedPlayerIds);
+    const despawnsArray = Array.from(claimed);
 
     if (despawnsArray.length > 0) {
 
       const despawnData = despawnsArray.map(playerId => ({ id: playerId, reason: "disconnect" }));
       sendPacket(receivingPlayer.ws, packetManager.batchDisconnectPlayer(despawnData));
     }
-  }
 
-  despawnBatchQueue.clear();
+    // Anything re-queued for this receiver while its despawns were sending
+    // (e.g. a player disconnecting mid-flush) is already in a fresh entry and
+    // is left for the next flush.
+  }
 }
 
 // Movement runs on its own timer, decoupled from spawn/despawn. A spawn burst
@@ -907,15 +944,23 @@ let spawnFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function scheduleSpawnFlush() {
   try {
-    const _s0 = PROFILE ? performance.now() : 0;
     const _qSize = PROFILE ? spawnBatchQueue.size : 0;
-    await flushSpawnBatches();
+    // Despawns drain BEFORE spawns every cycle (removal-before-add). On a
+    // rapid refresh the kick queues despawn(old session) and the relogin
+    // queues spawn(new session) for the same viewer; if both land in one
+    // cycle the old order sent spawn-then-despawn, and any client matching
+    // the despawn to the same user dropped the just-added entity - leaving
+    // the refresher permanently invisible until the next AOI retrigger.
     const _s1 = PROFILE ? performance.now() : 0;
     flushDespawnBatches();
     if (PROFILE) {
-      prof.spawnFlushCount++;
-      prof.spawnFlushMs += _s1 - _s0;
       prof.despawnFlushMs += performance.now() - _s1;
+    }
+    const _s2 = PROFILE ? performance.now() : 0;
+    await flushSpawnBatches();
+    if (PROFILE) {
+      prof.spawnFlushCount++;
+      prof.spawnFlushMs += performance.now() - _s2;
       prof.spawnQueueSeen += _qSize;
     }
   } catch (error) {
@@ -1384,11 +1429,29 @@ authWorker.on("message", async (result: any) => {
           }));
         }
 
+        // World-index hygiene for the kicked session. The later onDisconnect
+        // for the closing socket early-returns on the cache miss below, so
+        // nothing else removes the stale id from viewers' AOI sets, the
+        // reverse index, its layer, the map index or the spatial grid.
+        cleanupKickedSession(p, despawnBatchQueue);
+        gameLoop.unregisterMovingPlayer(p.id);
+        clearBatchQueuesForPlayer(p.id);
+        try {
+          await worlds.adjustPlayerCount(p.location?.map || "", -1);
+        } catch (err) {
+          log.error(`[WorldsFetchError] Failed to update world player count: ${err}`);
+        }
+
         const map = p.location?.map;
         if (map) {
           for (const [, other] of Object.entries(playerCache.list()) as [string, any][]) {
+            // Map-wide notify so bystanders whose AOI missed the old session
+            // still drop it. This MUST be a DESPAWN_PLAYER: the previous
+            // packetManager.disconnect (DISCONNECT_MALIFORMED) reads as "you
+            // are disconnected" client-side and blanks the bystander's screen,
+            // swallowing the replacement session's spawn that follows.
             if (other.location?.map === map && other.id !== p.id && other.ws?.readyState === 1) {
-              other.ws.send(packetManager.disconnect(p.id));
+              other.ws.send(packetManager.despawnPlayer(p.id, "disconnect"));
             }
           }
         }
