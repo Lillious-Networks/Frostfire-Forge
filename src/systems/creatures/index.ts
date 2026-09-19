@@ -386,6 +386,7 @@ async function buildSpawnerData(): Promise<SpawnerData> {
     templates,
     spawns: new Map(sList.map((s) => [s.id, s])),
     pools: new Map(pList.map((p) => [p.id, p])),
+    patrolPaths,
   };
 }
 

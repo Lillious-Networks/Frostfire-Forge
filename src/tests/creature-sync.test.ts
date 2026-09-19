@@ -1,4 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
+
+// Generated at server start (`bun create-config`) and gitignored, so CI has
+// no copy on disk. Mock the values instead of requiring the file.
+mock.module("../config/settings.json", () => ({
+  default: { creatures: {} },
+  creatures: {},
+}));
 
 const { CreatureRegistry } = await import("../systems/creatures/registry");
 const { CreatureSync, diffVisibility } = await import("../systems/creatures/sync");

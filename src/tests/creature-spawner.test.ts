@@ -2,9 +2,16 @@ import { describe, expect, mock, test } from "bun:test";
 
 mock.module("../controllers/sqldatabase", () => ({ default: async () => [] }));
 
+// Generated at server start (`bun create-config`) and gitignored, so CI has
+// no copy on disk. Mock the values instead of requiring the file.
+mock.module("../config/settings.json", () => ({
+  default: { creatures: {} },
+  creatures: {},
+}));
+
 const { CreatureRegistry } = await import("../systems/creatures/registry");
 const { CreatureSpawner, computeMaxHealth, pickTemplateId, rollRespawnMs } = await import("../systems/creatures/spawner");
-const { normalizeSpawn, normalizeTemplate, normalizeSpawnPool } = await import("../systems/creatures/repository");
+const { normalizeSpawn, normalizeTemplate, normalizeSpawnPool, normalizePatrolPath } = await import("../systems/creatures/repository");
 const { POOL_RETRY_MS } = await import("../systems/creatures/constants");
 const { createCombatState } = await import("../systems/creatures/threat");
 const { createAuras } = await import("../systems/creatures/auras");
@@ -17,7 +24,7 @@ const seq = (...values: number[]) => {
 const template = (over: any = {}) => normalizeTemplate({ id: 1, name: "Wolf", level_min: 3, level_max: 5, health_base: 50, health_per_level: 10, ...over });
 const spawn = (over: any = {}) => normalizeSpawn({ id: 1, template_id: 1, map: "main", x: 100, y: 200, respawn_min_s: 10, respawn_max_s: 20, layer_policy: "shared", ...over });
 
-function setup(opts: { templates?: any[]; spawns?: any[]; pools?: any[]; r?: () => number } = {}) {
+function setup(opts: { templates?: any[]; spawns?: any[]; pools?: any[]; patrolPaths?: any[]; r?: () => number } = {}) {
   const registry = new CreatureRegistry(64);
   const events: string[] = [];
   const spawner = new CreatureSpawner(
@@ -33,6 +40,7 @@ function setup(opts: { templates?: any[]; spawns?: any[]; pools?: any[]; r?: () 
       templates: new Map(templates.map((t) => [t.id, t])),
       spawns: new Map(spawns.map((s) => [s.id, s])),
       pools: new Map((opts.pools ?? []).map((p) => [p.id, p])),
+      patrolPaths: new Map((opts.patrolPaths ?? []).map((p) => [p.id, p])),
     },
     1000
   );
@@ -74,6 +82,42 @@ describe("creature spawner", () => {
     expect(c.level).toBe(3);
     expect(c.health).toBe(c.maxHealth);
     expect(events).toEqual([`spawn:${id}`]);
+  });
+
+  test("patrol spawns start on the first point of their path", () => {
+    const path = normalizePatrolPath({
+      id: 7, map: "main", loop: 1,
+      points: [{ x: 1000, y: 1100, wait_ms: 0 }, { x: 1200, y: 1100, wait_ms: 500 }],
+    });
+    const { registry, spawner } = setup({
+      spawns: [spawn({ movement_type: "patrol", patrol_path_id: 7 })],
+      patrolPaths: [path],
+    });
+    const c = registry.get(spawner.getLiveInstanceId(1)!)!;
+    expect(c.x).toBe(1000);
+    expect(c.y).toBe(1100);
+    expect(c.homeX).toBe(1000);
+    expect(c.homeY).toBe(1100);
+    expect(c.sentX).toBe(1000);
+    expect(c.sentY).toBe(1100);
+    expect(c.patrolIndex).toBe(0);
+  });
+
+  test("patrol spawns fall back to the marker without a usable path", () => {
+    const empty = normalizePatrolPath({ id: 8, map: "main", loop: 1, points: [] });
+    const { registry, spawner } = setup({
+      spawns: [
+        spawn({ id: 1, movement_type: "patrol", patrol_path_id: 99 }),
+        spawn({ id: 2, movement_type: "patrol", patrol_path_id: 8 }),
+        spawn({ id: 3, movement_type: "idle", patrol_path_id: 8 }),
+      ],
+      patrolPaths: [empty],
+    });
+    // Unknown path, empty path, and non-patrol movement all keep the marker.
+    for (const id of [1, 2, 3]) {
+      const c = registry.get(spawner.getLiveInstanceId(id)!)!;
+      expect([c.x, c.y, c.homeX, c.homeY]).toEqual([100, 200, 100, 200]);
+    }
   });
 
   test("respawn time rolls within the window", () => {

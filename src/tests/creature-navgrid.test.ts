@@ -2,6 +2,13 @@ import { describe, expect, mock, test } from "bun:test";
 
 mock.module("../controllers/sqldatabase", () => ({ default: async () => [] }));
 
+// Generated at server start (`bun create-config`) and gitignored, so CI has
+// no copy on disk. Mock the values instead of requiring the file.
+mock.module("../config/settings.json", () => ({
+  default: { creatures: {} },
+  creatures: {},
+}));
+
 const { NavGrid, NavGridCache, decodeCollisionRLE, rleChecksum, FOOT_H } = await import("../systems/creatures/navgrid");
 const { advance, directionFor, setDestination } = await import("../systems/creatures/movement");
 const { advancePatrolIndex, tickCreature } = await import("../systems/creatures/ai");

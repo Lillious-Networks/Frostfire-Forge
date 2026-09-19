@@ -2,6 +2,13 @@ import { describe, expect, mock, test } from "bun:test";
 
 mock.module("../controllers/sqldatabase", () => ({ default: async () => [] }));
 
+// Generated at server start (`bun create-config`) and gitignored, so CI has
+// no copy on disk. Mock the values instead of requiring the file.
+mock.module("../config/settings.json", () => ({
+  default: { creatures: {} },
+  creatures: {},
+}));
+
 const { entityToTemplate, mapStance, spawnInput } = await import("../utility/migrate_entities_to_creatures");
 const { normalizeTemplate, normalizeSpawn } = await import("../systems/creatures/repository");
 const { YARD_PX, speedPxPerSec } = await import("../systems/creatures/constants");

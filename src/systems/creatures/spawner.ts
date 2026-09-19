@@ -5,6 +5,7 @@ import { createCombatState } from "./threat";
 import {
   AIState,
   type CreatureInstance,
+  type CreaturePatrolPath,
   type CreatureSpawn,
   type CreatureSpawnPool,
   type CreatureTemplate,
@@ -14,6 +15,8 @@ export interface SpawnerData {
   templates: Map<number, CreatureTemplate>;
   spawns: Map<number, CreatureSpawn>;
   pools: Map<number, CreatureSpawnPool>;
+  /** Patrol paths by id, so patrol spawns start on their route. */
+  patrolPaths?: Map<number, CreaturePatrolPath>;
 }
 
 export interface SpawnerHooks {
@@ -317,6 +320,19 @@ export class CreatureSpawner {
 
     const level = rollLevel(template, this.r);
     const maxHealth = computeMaxHealth(template, level);
+    // A patrol spawn's spawnpoint is the first point of its path: the
+    // creature starts on its route instead of walking in from the marker.
+    // Anything else (no path, an empty path, another movement type) keeps the
+    // placed position.
+    let homeX = spawn.x;
+    let homeY = spawn.y;
+    if (spawn.movement_type === "patrol" && spawn.patrol_path_id !== null) {
+      const first = this.data.patrolPaths?.get(spawn.patrol_path_id)?.points[0];
+      if (first) {
+        homeX = first.x;
+        homeY = first.y;
+      }
+    }
     const instance: CreatureInstance = {
       id: this.registry.allocateId(),
       templateId: template.id,
@@ -324,11 +340,11 @@ export class CreatureSpawner {
       poolId: pool ? pool.id : null,
       map: spawn.map,
       layerId,
-      x: spawn.x,
-      y: spawn.y,
+      x: homeX,
+      y: homeY,
       dir: spawn.direction,
-      homeX: spawn.x,
-      homeY: spawn.y,
+      homeX,
+      homeY,
       level,
       health: maxHealth,
       maxHealth,
@@ -339,8 +355,8 @@ export class CreatureSpawner {
       waitUntil: now + Math.floor(this.r() * 3000),
       patrolIndex: 0,
       patrolForward: true,
-      sentX: spawn.x,
-      sentY: spawn.y,
+      sentX: homeX,
+      sentY: homeY,
       sentDir: spawn.direction,
       sentMoving: false,
       combat: createCombatState(),
