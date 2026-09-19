@@ -40,14 +40,14 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "BENCHMARK", data: data })),
     ] as any[];
   },
-  login: (ws: any) => {
+  login: (wt: any) => {
     return [
       packet.encode(
         JSON.stringify({
           type: "LOGIN_SUCCESS",
-          data: ws.data.id,
-          secret: ws.data.secret,
-          chatDecryptionKey: ws.data.chatDecryptionKey,
+          data: wt.data.id,
+          secret: wt.data.secret,
+          chatDecryptionKey: wt.data.chatDecryptionKey,
         })
       )
     ] as any[];
@@ -359,19 +359,6 @@ export const packetManager = {
     view.setUint16(15, serverSendTime % 1000, true);
 
     return [packetData];
-  },
-  // JSON MOVEXY. The binary moveXY (0x02) is force-routed onto the unreliable
-  // datagram path by the transport (movement headers 0x01-0x03). For the
-  // mover's OWN self-echo we want guaranteed, ordered delivery on the reliable
-  // stream - the client hard-snaps its predicted position to each echo, so a
-  // lost one causes rubberbanding. A JSON frame stays on the reliable stream.
-  moveXYReliable: (data: any) => {
-    return [
-      packet.encode(JSON.stringify({
-        type: "MOVEXY",
-        data: { i: data.i, d: data.d, r: data.r ?? 0, s: data.s ?? 0 },
-      })),
-    ] as any[];
   },
   batchMoveXY: (movements: any[]) => {
     const HEADER_BYTE = 0x01;
@@ -767,57 +754,6 @@ export const packetManager = {
       )
     ] as any[];
   },
-  despawnEntity: (entityId: string, respawnTime?: number) => {
-    return [
-      packet.encode(
-        JSON.stringify({
-          type: "DESPAWN_ENTITY",
-          data: {
-            id: entityId,
-            respawnTime: respawnTime || 0
-          }
-        })
-      )
-    ] as any[];
-  },
-  spawnEntity: (entity: any) => {
-    return [
-      packet.encode(
-        JSON.stringify({
-          type: "SPAWN_ENTITY",
-          data: entity
-        })
-      )
-    ] as any[];
-  },
-  moveEntity: (data: any) => {
-    const HEADER_BYTE = 0x03;
-    const DIRECTION_MAP: Record<string, number> = {
-      up: 0, down: 1, left: 2, right: 3,
-      upleft: 4, upright: 5, downleft: 6, downright: 7
-    };
-
-    const entityId = typeof data.id === "number" ? data.id : parseInt(data.id, 10) || 0;
-    const x = typeof data.position?.x === "number" ? Math.round(data.position.x) : 0;
-    const y = typeof data.position?.y === "number" ? Math.round(data.position.y) : 0;
-    const direction = DIRECTION_MAP[data.direction as string] ?? 1;
-    const isMoving = data.isMoving ? 1 : 0;
-    const isCasting = data.isCasting ? 1 : 0;
-
-    const packetData = new Uint8Array(11);
-    const view = new DataView(packetData.buffer);
-
-    view.setUint8(0, HEADER_BYTE);
-    view.setUint32(1, entityId, true);
-    view.setInt16(5, x, true);
-    view.setInt16(7, y, true);
-
-    const flags = (direction << 4) | (isMoving << 3) | (isCasting << 2);
-    view.setUint8(9, flags);
-    view.setUint8(10, data.castingProgress ? Math.round(data.castingProgress * 100) : 0);
-
-    return [packetData];
-  },
   batchDisconnectPlayer: (despawnData: Array<{ id: string; reason: string }>) => {
     return [
       packet.encode(
@@ -846,110 +782,6 @@ export const packetManager = {
           data: players
         })
       )
-    ] as any[];
-  },
-  createEntity: (data: any) => {
-    return [
-      packet.encode(
-        JSON.stringify({
-          type: "CREATE_ENTITY",
-          data: {
-            id: data.id,
-            last_updated: data.last_updated,
-            name: data.name || null,
-            location: {
-              x: data.position.x,
-              y: data.position.y,
-              direction: data.position?.direction || "down",
-            },
-            health: data.health,
-            max_health: data.max_health,
-            level: data.level,
-            aggro_type: data.aggro_type,
-            particles: data.particles,
-            map: data.map,
-            position: data.position,
-            sprite_type: data.sprite_type || 'animated',
-            spriteLayers: data.spriteLayers || null,
-          },
-        })
-      )
-    ] as any[];
-  },
-  loadEntities: (entities: any[]) => {
-    return [
-      packet.encode(
-        JSON.stringify({
-          type: "LOAD_ENTITIES",
-          data: { entities },
-        })
-      )
-    ] as any[];
-  },
-  entityList: (entities: any[]) => {
-    return [
-      packet.encode(
-        JSON.stringify({
-          type: "ENTITY_LIST",
-          data: entities
-        })
-      )
-    ] as any[];
-  },
-  updateEntity: (entity: any) => {
-    return [
-      packet.encode(
-        JSON.stringify({
-          type: "UPDATE_ENTITY",
-          data: entity
-        })
-      )
-    ] as any[];
-  },
-  entityDied: (entityId: string, lootData?: any) => {
-    return [
-      packet.encode(
-        JSON.stringify({
-          type: "ENTITY_DIED",
-          data: {
-            id: entityId,
-            loot: lootData || []
-          }
-        })
-      )
-    ] as any[];
-  },
-  entityDamage: (entityId: string, damage: number, damageType: string = 'physical') => {
-    return [
-      packet.encode(
-        JSON.stringify({
-          type: "ENTITY_DAMAGE",
-          data: {
-            id: entityId,
-            damage: damage,
-            damageType: damageType
-          }
-        })
-      )
-    ] as any[];
-  },
-  updateEntityHealth: (entityId: string, health: number, maxHealth: number) => {
-    return [
-      packet.encode(
-        JSON.stringify({
-          type: "UPDATE_ENTITY_HEALTH",
-          data: {
-            id: entityId,
-            health: health,
-            maxHealth: maxHealth
-          }
-        })
-      )
-    ] as any[];
-  },
-  toggleEntityEditor: () => {
-    return [
-      packet.encode(JSON.stringify({ type: "TOGGLE_ENTITY_EDITOR", data: null })),
     ] as any[];
   },
   lootSpawn: (data: any) => {
@@ -1020,6 +852,131 @@ export const packetManager = {
   lootTableList: (tables: any[]) => {
     return [
       packet.encode(JSON.stringify({ type: "LOOT_TABLE_LIST", data: { tables } })),
+    ] as any[];
+  },
+  creatureSpawn: (creatures: any[]) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_SPAWN", data: { creatures } })),
+    ] as any[];
+  },
+  creatureDespawn: (ids: number[]) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_DESPAWN", data: { ids } })),
+    ] as any[];
+  },
+  creatureMove: (entries: any[]) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_MOVE", data: { c: entries } })),
+    ] as any[];
+  },
+  creatureState: (data: { id: number; state: string; victimId: string | null }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_STATE", data })),
+    ] as any[];
+  },
+  creatureHealth: (data: { id: number; health: number; maxHealth: number }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_HEALTH", data })),
+    ] as any[];
+  },
+  creatureCombatText: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_COMBAT_TEXT", data })),
+    ] as any[];
+  },
+  creatureAttackStopped: (id: number) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_ATTACK_STOPPED", data: { id } })),
+    ] as any[];
+  },
+  creatureTap: (data: { id: number; tap: "none" | "mine" | "other" }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_TAP", data })),
+    ] as any[];
+  },
+  creatureLootable: (data: { id: number; lootable: boolean }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_LOOTABLE", data })),
+    ] as any[];
+  },
+  creatureLootContents: (data: { id: number; items: any[]; copper: number }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_LOOT_CONTENTS", data })),
+    ] as any[];
+  },
+  creatureXp: (data: { creatureId: number; amount: number }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_XP", data })),
+    ] as any[];
+  },
+  creatureCast: (data: { id: number; spell: string; durationMs: number; targetId: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_CAST", data })),
+    ] as any[];
+  },
+  creatureCastEnd: (data: { id: number; spell: string; result: "success" | "interrupted" | "failed" }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_CAST_END", data })),
+    ] as any[];
+  },
+  creatureAuras: (data: { id: number; auras: any[] }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_AURAS", data })),
+    ] as any[];
+  },
+  toggleCreatureEditor: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "TOGGLE_CREATURE_EDITOR", data: null })),
+    ] as any[];
+  },
+  creatureEditorData: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_EDITOR_DATA", data })),
+    ] as any[];
+  },
+  creatureEditorResult: (data: { ok: boolean; errors: string[]; id?: number; action?: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_EDITOR_RESULT", data })),
+    ] as any[];
+  },
+  creatureEditorUpdated: (data: { by: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_EDITOR_UPDATED", data })),
+    ] as any[];
+  },
+  toggleItemEditor: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "TOGGLE_ITEM_EDITOR", data: null })),
+    ] as any[];
+  },
+  itemEditorData: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "ITEM_EDITOR_DATA", data })),
+    ] as any[];
+  },
+  itemEditorResults: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "ITEM_EDITOR_RESULTS", data })),
+    ] as any[];
+  },
+  itemEditorResult: (data: { ok: boolean; errors: string[]; name?: string; action?: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "ITEM_EDITOR_RESULT", data })),
+    ] as any[];
+  },
+  itemEditorUpdated: (data: { by: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "ITEM_EDITOR_UPDATED", data })),
+    ] as any[];
+  },
+  creatureDebug: (data: { creatures: any[] }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_DEBUG", data })),
+    ] as any[];
+  },
+  creatureTargeted: (data: { id: number }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATURE_TARGETED", data })),
     ] as any[];
   },
 };

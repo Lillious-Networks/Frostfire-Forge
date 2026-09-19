@@ -45,13 +45,13 @@ const httpRouteHandlers = new Map<string, (req: Request) => Promise<Response>>()
 
 import * as settings from "../config/settings.json";
 import assetCache from "../services/assetCache.ts";
-import entityCache from "../services/entityCache.ts";
 import dots from "../systems/dots.ts";
 import spellEffects, { getStunsForPlayer, getSlowsForPlayer } from "../systems/spelleffects.ts";
 import { saveOnDisconnect as saveSicknessOnDisconnect } from "../systems/resurrection.ts";
 import effectManager from "../services/effectmanager";
 import { GatewayClient } from "../modules/gateway-client.ts";
 import loot from "../systems/loot";
+import creatures from "../systems/creatures";
 import cooldownManager from "../services/cooldownmanager";
 
 const _cert = process.env.TLS_CERT_PATH;
@@ -202,6 +202,17 @@ Bun.serve({
     // Return 200 OK
     if (url.pathname === "/status" && req.method === "GET") {
       return new Response(JSON.stringify({ status: "ok" }));
+    }
+
+    // Creature system health, for the creature load test. Read-only counters and
+    // tick timings; no player or account data. ?reset=1 starts a fresh window.
+    if (url.pathname === "/creature-stats" && req.method === "GET") {
+      const snapshot = creatures.stats();
+      if (url.searchParams.get("reset") === "1") creatures.resetStats();
+      return new Response(JSON.stringify(snapshot), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     if (req.method === "OPTIONS") {
@@ -387,9 +398,9 @@ setInterval(() => {
   const backedUp: Array<{ id: string; kb: number }> = [];
   let maxBytes = 0;
   for (const playerData of Object.values(playerCache.list())) {
-    const ws = playerData.ws;
-    if (!ws || ws.readyState !== 1) continue;
-    const bytes = ws.bufferedAmount;
+    const wt = playerData.wt;
+    if (!wt || wt.readyState !== 1) continue;
+    const bytes = wt.bufferedAmount;
     if (bytes > 256 * 1024) {
       backedUp.push({ id: playerData.id, kb: Math.round(bytes / 1024) });
       if (bytes > maxBytes) maxBytes = bytes;
@@ -615,15 +626,6 @@ listener.on(Events.AWAKE, async () => {
   await player.clear();
 });
 
-listener.on(Events.START, async () => {
-  // Load entities into in-memory cache with full health
-  try {
-    const entitySystem = (await import("../systems/entities")).default;
-    await entityCache.initialize(entitySystem);
-  } catch (error: any) {
-    log.error(`Error initializing entities on server start: ${error.message}`);
-  }
-});
 
 event.emit("online");
 
@@ -652,6 +654,7 @@ listener.emit(Events.AWAKE);
 listener.emit(Events.START);
 
 gameLoop.start();
+await creatures.init();
 startAutoPartyLayerSync(sendAnimationTo);
 startAutoLayerCondensation(sendAnimationTo);
 
@@ -785,7 +788,7 @@ listener.on(Events.SERVER_TICK, async () => {
 
     if (typeof p.created === "number" && p.created > 0 && (nowEpoch - (PROCESS_STARTED_AT + p.created)) < 5000) continue;
 
-    const wsClosed = !p.ws || p.ws.readyState !== 1;
+    const wsClosed = !p.wt || p.wt.readyState !== 1;
 
     // The client no longer sends a periodic TIME_SYNC heartbeat, so a genuinely
     // AFK player can sit for minutes without sending anything. An open QUIC
@@ -841,7 +844,7 @@ listener.on(Events.SERVER_TICK, async () => {
   }
 
   for (const playerData of players) {
-    if (!playerData || inactiveSet.has(playerData.id) || !playerData.ws) continue;
+    if (!playerData || inactiveSet.has(playerData.id) || !playerData.wt) continue;
 
     // SERVER_TIME is no longer pushed on this 1Hz loop. The client anchors the
     // clock once at login and advances it locally; browser clock drift is
@@ -895,17 +898,17 @@ listener.on(Events.SERVER_TICK, async () => {
     // observer. Latest-wins absolute stats delivered as loss-tolerant
     // datagrams (this repeats every tick, so a dropped one self-heals).
     const statsFrame = packetManager.updateStats(updateStatsData)[0];
-    playerData.ws.sendBestEffort(statsFrame);
+    playerData.wt.sendBestEffort(statsFrame);
 
     // O(observers) via the AOI reverse index - was an O(all players) cache
     // scan per regenerating player, i.e. O(n^2) per tick.
     for (const other of findPlayersWithTargetInAOI(playerData.id)) {
       if (
         !inactiveSet.has(other.id) &&
-        other.ws &&
-        other.ws.readyState === 1
+        other.wt &&
+        other.wt.readyState === 1
       ) {
-        other.ws.sendBestEffort(statsFrame);
+        other.wt.sendBestEffort(statsFrame);
       }
     }
   }
@@ -925,9 +928,9 @@ listener.on(Events.SERVER_TICK, async () => {
       }
       if (!stillConnected) continue;
 
-      if (reason === "session_stolen" && stillInCache.ws?.readyState === 1) {
+      if (reason === "session_stolen" && stillInCache.wt?.readyState === 1) {
         try {
-          stillInCache.ws.send(
+          stillInCache.wt.send(
             packetManager.notify({
               message: "You have been logged in from another location.",
             })
@@ -938,7 +941,7 @@ listener.on(Events.SERVER_TICK, async () => {
         packetQueue.delete(id);
         ClientRateLimit.delete(id);
         try {
-          stillInCache.ws.close(1000, "Logged in from another location");
+          stillInCache.wt.close(1000, "Logged in from another location");
         } catch {
           console.error(`Failed to close connection for player ${id}`);
         }
@@ -986,9 +989,9 @@ listener.on("onDisconnect", async (data) => {
     const playerData = playerCache.get(data.id);
     if (!playerData) return;
 
-    if (data.reason === "session_stolen" && playerData.ws?.readyState === 1) {
+    if (data.reason === "session_stolen" && playerData.wt?.readyState === 1) {
       try {
-        playerData.ws.send(
+        playerData.wt.send(
           packetManager.notify({
             message: "You have been logged in from another location.",
           })
@@ -997,7 +1000,7 @@ listener.on("onDisconnect", async (data) => {
         console.error(`Failed to send session stolen notification to player ${data.id}`);
       }
       try {
-        playerData.ws.close(1000, "Logged in from another location");
+        playerData.wt.close(1000, "Logged in from another location");
       } catch (err) {
         console.error(`Failed to close connection for player ${data.id}`);
       }
@@ -1018,10 +1021,10 @@ listener.on("onDisconnect", async (data) => {
 
     cleanupPlayerState(playerData);
 
-    if (playerData.ws?.data?.connectionToken) {
+    if (playerData.wt?.data?.connectionToken) {
         removeFromAuthenticationQueues(
-            String(playerData.ws.data.id || playerData.id),
-            playerData.ws.data.connectionToken
+            String(playerData.wt.data.id || playerData.id),
+            playerData.wt.data.connectionToken
         );
     }
 
@@ -1058,15 +1061,15 @@ listener.on("onDisconnect", async (data) => {
       const allPlayers = playerCache.list();
       const usernameIndex = new Map<string, any>();
       for (const p of Object.values(allPlayers)) {
-        if (p.ws && p.username) {
+        if (p.wt && p.username) {
           usernameIndex.set(p.username.toLowerCase(), p);
         }
       }
       for (const friendUsername of playerData.friends) {
         const onlineFriend = usernameIndex.get(friendUsername.toLowerCase());
-        if (onlineFriend?.ws?.readyState === 1) {
+        if (onlineFriend?.wt?.readyState === 1) {
           try {
-            onlineFriend.ws.send(packetManager.updateOnlineStatus({ online: false, username: playerData.username })[0]);
+            onlineFriend.wt.send(packetManager.updateOnlineStatus({ online: false, username: playerData.username })[0]);
           } catch (e) { /* ignore */ }
         }
       }
@@ -1176,33 +1179,33 @@ export const events = {
   },
 };
 
-function handleBackpressure(ws: any, action: () => void, retryCount = 0) {
+function handleBackpressure(wt: any, action: () => void, retryCount = 0) {
   if (retryCount > 20) {
     log.warn("Max retries reached. Action skipped to avoid infinite loop.");
     return;
   }
 
-  if (!ws || ws.readyState !== 1) {
+  if (!wt || wt.readyState !== 1) {
     log.warn("Connection is not open. Action cannot proceed.");
     return;
   }
 
-  const queue = packetQueue.get(ws.data.id);
+  const queue = packetQueue.get(wt.data.id);
   if (!queue) {
     log.warn("No packet queue found for connection. Action cannot proceed.");
     return;
   }
 
-  if (ws.bufferedAmount > MAX_BUFFER_SIZE) {
+  if (wt.bufferedAmount > MAX_BUFFER_SIZE) {
     const retryInterval = Math.min(50 + retryCount * 50, 500);
     log.debug(`Backpressure detected. Retrying in ${retryInterval}ms (Attempt ${retryCount + 1})`);
 
     queue.push(action);
-    setTimeout(() => handleBackpressure(ws, action, retryCount + 1), retryInterval);
+    setTimeout(() => handleBackpressure(wt, action, retryCount + 1), retryInterval);
   } else {
     action();
 
-    while (queue.length > 0 && ws.bufferedAmount <= MAX_BUFFER_SIZE) {
+    while (queue.length > 0 && wt.bufferedAmount <= MAX_BUFFER_SIZE) {
       const nextAction = queue.shift();
       if (nextAction) {
         nextAction();

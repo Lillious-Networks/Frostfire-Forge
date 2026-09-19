@@ -12,7 +12,7 @@ import { claimBatchEntry, requeueSpawnBatch, claimDespawnEntry, requeueDespawnEn
 const authentication_queue = new Set<string>();
 const authentication_session_queue = new Set<string>();
 
-const pendingAuthentications = new Map<string, { ws: any; token: string; language: string }>();
+const pendingAuthentications = new Map<string, { wt: any; token: string; language: string }>();
 
 // Track current target for target cycling
 const currentTargetMap = new Map<string, string | null>();
@@ -36,7 +36,6 @@ import layerManager from "../services/layermanager";
 import mapIndex from "../services/mapindex";
 import gameLoop from "../services/gameloop";
 import assetCache from "../services/assetCache";
-import entityCache from "../services/entityCache.ts";
 import cooldownManager from "../services/cooldownmanager";
 import effectManager from "../services/effectmanager";
 import { reloadMap } from "../modules/assetloader";
@@ -52,10 +51,14 @@ import inventory from "../systems/inventory";
 import particles from "../systems/particles";
 import worlds from "../systems/worlds";
 import npcSystem from "../systems/npcs";
-import entitySystem from "../systems/entities";
-import entityAI from "../systems/entityAI";
 import spellEffects, { registerSpellEffect, spellHasHostileEffects, cancelEffect, setStunsForPlayer, setSlowsForPlayer } from "../systems/spelleffects";
 import dots from "../systems/dots";
+import { rollHeal, spellManaCost } from "../systems/spellmath";
+import creatures from "../systems/creatures";
+import { projectileTravelMs } from "../systems/creatures/projectile";
+import * as itemEditor from "../systems/itemeditor";
+import { setCreatureEngineBridge } from "../systems/creatures/bridge";
+import { spellMissChance } from "../systems/creatures/combat";
 import { spawnZone, setPlayerDeathHandler, getZonesOnMap } from "../systems/groundaoe";
 import bags from "../systems/bags";
 import query from "../controllers/sqldatabase";
@@ -74,8 +77,8 @@ import * as settings from "../config/settings.json";
 import AOI_CONFIG from "../config/aoi.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks, saveMapProperties, applyChunksWithRebase } from "../modules/assetloader";
-import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers, getEntitySpriteLayers } from "../modules/spriteSheetManager";
-import { initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, broadcastToAOIBestEffort, broadcastStatsUpdateToAOI, broadcastToAOIBestEffortAtPosition, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate, sendLoadPlayersChunked, cleanupKickedSession, aoiProf } from "./aoi";
+import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers } from "../modules/spriteSheetManager";
+import { setLayerChangeHandler, initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, broadcastToAOIBestEffort, broadcastStatsUpdateToAOI, broadcastToAOIBestEffortAtPosition, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate, sendLoadPlayersChunked, cleanupKickedSession, aoiProf } from "./aoi";
 import { realmWhitelist, isWhitelistEnabled } from "./server.ts";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
@@ -327,7 +330,7 @@ const prof = {
   tcCount: 0,
   tcFilterMs: 0,
   tcConeMs: 0,
-  tcEntityMs: 0,
+  tcCreatureMs: 0,
   spawnFlushCount: 0,
   spawnFlushMs: 0,
   despawnFlushMs: 0,
@@ -345,7 +348,7 @@ if (PROFILE) {
       `flush: ${prof.flushCount}x, ${prof.flushMs.toFixed(0)}ms total, ${prof.flushReceivers} recv, ${prof.flushSkipped} skipped, ${prof.datagramsSent} dgrams | ` +
       `spawnflush: ${prof.spawnFlushCount}x, ${prof.spawnFlushMs.toFixed(0)}ms spawn + ${prof.despawnFlushMs.toFixed(0)}ms despawn, queue seen ${prof.spawnQueueSeen} | ` +
       `collblocks: ${prof.collisionBlocks} ${JSON.stringify(prof.collisionReasons)} | ` +
-      `targetclosest: ${prof.tcCount}x, filter ${prof.tcFilterMs.toFixed(0)}ms, cone ${prof.tcConeMs.toFixed(0)}ms, entity ${prof.tcEntityMs.toFixed(0)}ms`;
+      `targetclosest: ${prof.tcCount}x, filter ${prof.tcFilterMs.toFixed(0)}ms, cone ${prof.tcConeMs.toFixed(0)}ms, creature ${prof.tcCreatureMs.toFixed(0)}ms`;
     log.info(line);
     if (aoiProf.calls > 0) {
       log.info(
@@ -359,7 +362,7 @@ if (PROFILE) {
     prof.moveCbCount = prof.collisionMs = 0;
     prof.aoiUpdateCount = 0;
     prof.flushCount = prof.flushMs = prof.flushReceivers = prof.flushSkipped = prof.datagramsSent = 0;
-    prof.tcCount = prof.tcFilterMs = prof.tcConeMs = prof.tcEntityMs = 0;
+    prof.tcCount = prof.tcFilterMs = prof.tcConeMs = prof.tcCreatureMs = 0;
     prof.spawnFlushCount = prof.spawnFlushMs = prof.despawnFlushMs = prof.spawnQueueSeen = 0;
     prof.collisionBlocks = 0;
     prof.collisionReasons = {};
@@ -558,7 +561,7 @@ async function flushMovementBatches() {
       }
 
       const receiver = allPlayers[receiverId];
-      if (!receiver || !receiver.ws || receiver.ws.readyState !== 1) continue;
+      if (!receiver || !receiver.wt || receiver.wt.readyState !== 1) continue;
 
       // No stream-queue backpressure gate here: movement batches are delivered
       // as DATAGRAMS, which never touch the reliable stream's queue. Skipping
@@ -599,7 +602,7 @@ async function flushMovementBatches() {
             }
             for (const batch of batches) {
               const receiver = allPlayersRef[batch.receiverId];
-              if (!receiver?.ws || receiver.ws.readyState !== 1) continue;
+              if (!receiver?.wt || receiver.wt.readyState !== 1) continue;
 
               const data = batch.data;
               const parts: Uint8Array[] = [];
@@ -609,9 +612,9 @@ async function flushMovementBatches() {
                 parts.push(new Uint8Array(data.buffer, data.byteOffset + start, end - start));
               }
               if (parts.length === 1) {
-                receiver.ws.send(parts[0]);
+                receiver.wt.send(parts[0]);
               } else if (parts.length > 1) {
-                receiver.ws.sendMovementBatch(parts);
+                receiver.wt.sendMovementBatch(parts);
               }
               movementDatagramsSent += parts.length;
               if (PROFILE) prof.datagramsSent += parts.length;
@@ -626,7 +629,7 @@ async function flushMovementBatches() {
 
         for (const receiverId of selectedReceiverIds) {
           const receiver = allPlayers[receiverId];
-          if (!receiver?.ws || receiver.ws.readyState !== 1) continue;
+          if (!receiver?.wt || receiver.wt.readyState !== 1) continue;
 
           const entries = collectReceiverEntries(selectedSets.get(receiverId)!, movers, receiverInfo[receiverId], movementTick);
           if (entries.length === 0) continue;
@@ -641,9 +644,9 @@ async function flushMovementBatches() {
             parts.push(new Uint8Array(data.buffer, data.byteOffset + start, end - start));
           }
           if (parts.length === 1) {
-            receiver.ws.send(parts[0]);
+            receiver.wt.send(parts[0]);
           } else if (parts.length > 1) {
-            receiver.ws.sendMovementBatch(parts);
+            receiver.wt.sendMovementBatch(parts);
           }
           movementDatagramsSent += parts.length;
           if (PROFILE) prof.datagramsSent += parts.length;
@@ -687,7 +690,7 @@ function queueSpawnForReceivers(spawnedPlayer: any, receivers: any[], spriteData
   if (spriteData) spawnData.spriteData = spriteData;
 
   for (const receiver of receivers) {
-    if (!receiver || !receiver.ws || receiver.id === spawnedPlayer.id) continue;
+    if (!receiver || !receiver.wt || receiver.id === spawnedPlayer.id) continue;
     if (!spawnBatchQueue.has(receiver.id)) spawnBatchQueue.set(receiver.id, new Map());
     spawnBatchQueue.get(receiver.id)!.set(spawnedPlayer.id, spawnData);
   }
@@ -744,7 +747,7 @@ async function flushOneSpawnBatch(
   // Previously this only `continue`d, leaving the entry in spawnBatchQueue
   // forever - after a load test the map held thousands of dead receivers and
   // the 50ms flush re-scanned all of them (~110ms/flush doing nothing).
-  if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) {
+  if (!receivingPlayer || !receivingPlayer.wt || receivingPlayer.wt.readyState !== 1) {
     return;
   }
 
@@ -753,7 +756,7 @@ async function flushOneSpawnBatch(
   // Spawn batches are the largest stream payloads. Use a FRESH queue reading
   // (not the 250ms cache) so a burst can't pile past the transport limit
   // before the gate notices. Skipped spawns stay queued for a later flush.
-  if (receivingPlayer.ws.getFreshQueuedBytes() > SPAWN_BACKPRESSURE_THRESHOLD) {
+  if (receivingPlayer.wt.getFreshQueuedBytes() > SPAWN_BACKPRESSURE_THRESHOLD) {
     requeueSpawnBatch(spawnBatchQueue, receivingPlayerId, claimed);
     return;
   }
@@ -824,7 +827,7 @@ async function flushOneSpawnBatch(
 
     const SPAWN_CHUNK_SIZE = 8;
     for (let i = 0; i < playerJsonParts.length; i += SPAWN_CHUNK_SIZE) {
-      sendPacket(receivingPlayer.ws, packetManager.loadPlayersJson(
+      sendPacket(receivingPlayer.wt, packetManager.loadPlayersJson(
         playerJsonParts.slice(i, i + SPAWN_CHUNK_SIZE),
         globalStateRevision
       ));
@@ -867,7 +870,7 @@ async function flushOneSpawnBatch(
         }
         return json;
       });
-      sendPacket(receivingPlayer.ws, packetManager.batchSpriteSheetAnimationJson(animJsonParts));
+      sendPacket(receivingPlayer.wt, packetManager.batchSpriteSheetAnimationJson(animJsonParts));
     }
 
     // Re-queue remaining spawns for the next flush, merged with anything
@@ -898,9 +901,9 @@ function flushDespawnBatches() {
 
     const receivingPlayer = allPlayers[receivingPlayerId];
 
-    if (!receivingPlayer || !receivingPlayer.ws || receivingPlayer.ws.readyState !== 1) continue;
+    if (!receivingPlayer || !receivingPlayer.wt || receivingPlayer.wt.readyState !== 1) continue;
 
-    if (receivingPlayer.ws.bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
+    if (receivingPlayer.wt.bufferedAmount > MAX_BUFFER_BACKPRESSURE) {
       requeueDespawnEntry(despawnBatchQueue, receivingPlayerId, claimed);
       continue;
     }
@@ -910,7 +913,7 @@ function flushDespawnBatches() {
     if (despawnsArray.length > 0) {
 
       const despawnData = despawnsArray.map(playerId => ({ id: playerId, reason: "disconnect" }));
-      sendPacket(receivingPlayer.ws, packetManager.batchDisconnectPlayer(despawnData));
+      sendPacket(receivingPlayer.wt, packetManager.batchDisconnectPlayer(despawnData));
     }
 
     // Anything re-queued for this receiver while its despawns were sending
@@ -1024,7 +1027,7 @@ async function transitionPlayerToMap(
   player: any,
   newMapName: string,
   newPosition: { x: number; y: number; direction?: string },
-  ws: any,
+  wt: any,
   spawnBatchQueue: Map<string, Map<string, any>>,
   despawnBatchQueue: Map<string, Set<string>>
 ): Promise<void> {
@@ -1041,14 +1044,17 @@ async function transitionPlayerToMap(
 
   const direction = newPosition.direction || updatedPlayer.location.position?.direction || "down";
   const mapMetadata = constructMapMetadata(newMapName, newPosition.x, newPosition.y, direction, maps, mapPropertiesCache);
-  sendPacket(ws, packetManager.loadMap(mapMetadata));
+  sendPacket(wt, packetManager.loadMap(mapMetadata));
+  // Loading a map clears the client's creatures, even when it is the same map
+  // again: resend every creature around the player.
+  creatures.resyncPlayer(player.id);
 
   setImmediate(async () => {
     try {
       const normalizedMap = newMapName.replace(".json", "");
       const resolved = await resolveWorldWeather(normalizedMap);
       if (resolved.weather) {
-        sendPacket(ws, packetManager.weather({ weather: resolved.weather, weatherData: resolved.weatherData }));
+        sendPacket(wt, packetManager.weather({ weather: resolved.weather, weatherData: resolved.weatherData }));
       }
     } catch (e) {
       log.warn(`Failed to fetch weather data for ${newMapName}: ${e}`);
@@ -1095,56 +1101,10 @@ async function transitionPlayerToMap(
         Promise.resolve([] as any[])
       );
       if (npcPackets.length) {
-        sendPacket(ws, npcPackets);
+        sendPacket(wt, npcPackets);
       }
     } catch (e) {
       log.warn(`Failed to fetch NPC data for ${newMapName}: ${e}`);
-    }
-
-    try {
-      const entitiesInMap = entityCache.getByMap(newMapName);
-      const particlesCache = await assetCache.get("particles") as Particle[] | null;
-      const entityPackets = await entitiesInMap.reduce(
-        async (packetsPromise: Promise<any[]>, entity: any) => {
-          const packets = await packetsPromise;
-          const particleArray =
-            typeof entity.particles === "string" && particlesCache
-              ? (
-                (entity.particles as string)
-                  .split(",")
-                  .map((name) =>
-                    particlesCache.find((p: Particle) => p.name === name.trim())
-                  )
-              ).filter(Boolean)
-              : [];
-          const entityData = {
-            id: entity.id,
-            last_updated: entity.last_updated,
-            name: entity.name || null,
-            location: {
-              x: entity.position.x,
-              y: entity.position.y,
-              direction: entity.position.direction || "down",
-            },
-            health: entity.health,
-            max_health: entity.max_health,
-            level: entity.level,
-            aggro_type: entity.aggro_type,
-            particles: particleArray,
-            map: entity.map,
-            position: entity.position,
-            sprite_type: entity.sprite_type || 'animated',
-            spriteLayers: getEntitySpriteLayers(entity),
-          };
-          return [...packets, ...packetManager.createEntity(entityData as any)];
-        },
-        Promise.resolve([] as any[])
-      );
-      if (entityPackets.length) {
-        sendPacket(ws, entityPackets);
-      }
-    } catch (e) {
-      log.warn(`Failed to fetch entity data for ${newMapName}: ${e}`);
     }
 
     try {
@@ -1163,7 +1123,7 @@ async function transitionPlayerToMap(
             ownerName: l.ownerName,
           })
         ).flat();
-        sendPacket(ws, lootPackets);
+        sendPacket(wt, lootPackets);
       }
     } catch (e) {
       log.warn(`Failed to sync loot for ${newMapName}: ${e}`);
@@ -1172,10 +1132,10 @@ async function transitionPlayerToMap(
     try {
       const playerPos = newPosition || player.location?.position;
       const playerRadius = player.aoi?.aoiRadius || AOI_CONFIG.DEFAULT_RADIUS;
-      const skeletonsInAOI = skeletons.getInRadius(newMapName, playerPos.x, playerPos.y, playerRadius);
-      if (skeletonsInAOI.length > 0) {
-        sendPacketBestEffort(ws, packetManager.loadSkeletons(skeletonsInAOI.map((s) => toSkeletonPacket(s))));
-      }
+      const skeletonsInAOI = skeletons.getInRadius(newMapName, playerPos.x, playerPos.y, playerRadius, layerManager.getPlayerLayer(player.id));
+      // Always sent, even when empty: this replaces the client list, clearing
+      // markers from the map or layer the player just left.
+      sendPacketBestEffort(wt, packetManager.loadSkeletons(skeletonsInAOI.map((s) => toSkeletonPacket(s))));
     } catch (e) {
       log.warn(`Failed to sync skeletons for ${newMapName}: ${e}`);
     }
@@ -1186,7 +1146,7 @@ async function transitionPlayerToMap(
         const chestPackets = chestsOnMap.map((c: any) =>
           packetManager.lootChestSpawn({ id: c.id, x: c.x, y: c.y, iconUrl: c.iconUrl, map: c.map })
         ).flat();
-        sendPacket(ws, chestPackets);
+        sendPacket(wt, chestPackets);
       }
     } catch (e) {
       log.warn(`Failed to sync loot chests for ${newMapName}: ${e}`);
@@ -1245,10 +1205,10 @@ async function transitionPlayerToMap(
       guild_name: p.guild_name || null,
       currency: p.currency || { copper: 0, silver: 0, gold: 0 },
     };
-    sendPacket(ws, packetManager.spawnPlayer(spawnData));
+    sendPacket(wt, packetManager.spawnPlayer(spawnData));
 
     try {
-      await sendAnimationTo(ws, animationName, player.id);
+      await sendAnimationTo(wt, animationName, player.id);
     } catch (e) {
       log.warn(`Failed to send animation for ${player.id}: ${e}`);
     }
@@ -1313,8 +1273,8 @@ export function clearTargetOnMapChange(playerId: string) {
   if (currentTargetMap.has(playerId)) {
     currentTargetMap.delete(playerId);
     const mover = playerCache.get(playerId);
-    if (mover?.ws && mover.ws.readyState === 1) {
-      sendPacket(mover.ws, packetManager.selectPlayer({ id: playerId, data: null }));
+    if (mover?.wt && mover.wt.readyState === 1) {
+      sendPacket(mover.wt, packetManager.selectPlayer({ id: playerId, data: null }));
     }
   }
 
@@ -1322,8 +1282,8 @@ export function clearTargetOnMapChange(playerId: string) {
     if (targetedId === playerId) {
       currentTargetMap.delete(observerId);
       const observer = playerCache.get(observerId);
-      if (observer?.ws && observer.ws.readyState === 1) {
-        sendPacket(observer.ws, packetManager.selectPlayer({ id: observerId, data: null }));
+      if (observer?.wt && observer.wt.readyState === 1) {
+        sendPacket(observer.wt, packetManager.selectPlayer({ id: observerId, data: null }));
       }
     }
   }
@@ -1356,13 +1316,13 @@ export function removeFromAuthenticationQueues(sessionId: string, token: string)
 }
 
 export async function teleportPlayerWrapper(playerObj: any, mapName: string, x: number, y: number): Promise<void> {
-  const ws = playerObj.ws;
-  if (!ws) return;
+  const wt = playerObj.wt;
+  if (!wt) return;
   await transitionPlayerToMap(
     playerObj,
     mapName.replace(".json", ""),
     { x, y, direction: playerObj.location?.position?.direction || "down" },
-    ws,
+    wt,
     spawnBatchQueue,
     despawnBatchQueue
   );
@@ -1376,21 +1336,21 @@ authWorker.on("message", async (result: any) => {
   const pending = pendingAuthentications.get(sessionId);
   if (!pending) return;
 
-  const { ws, token, language } = pending;
+  const { wt, token, language } = pending;
 
   pendingAuthentications.delete(sessionId);
   authentication_queue.delete(token);
   authentication_session_queue.delete(sessionId);
 
   if (status.error && !status.authenticated) {
-    sendPacket(ws, packetManager.loginFailed());
-    ws.close(1008, status.error);
+    sendPacket(wt, packetManager.loginFailed());
+    wt.close(1008, status.error);
     return;
   }
 
   if (status.authenticated && status.completed && status.error) {
-    sendPacket(ws, packetManager.loginFailed());
-    ws.close(1008, status.error);
+    sendPacket(wt, packetManager.loginFailed());
+    wt.close(1008, status.error);
     return;
   }
 
@@ -1399,8 +1359,8 @@ authWorker.on("message", async (result: any) => {
     // Check realm whitelist
     if (isWhitelistEnabled && !realmWhitelist.has(playerData.username.toLowerCase())) {
       log.warn(`[Whitelist] Access denied for ${playerData.username} - not in whitelist`);
-      sendPacket(ws, packetManager.loginFailed());
-      ws.close(1008, "Username not whitelisted on this realm");
+      sendPacket(wt, packetManager.loginFailed());
+      wt.close(1008, "Username not whitelisted on this realm");
       return;
     }
 
@@ -1423,8 +1383,8 @@ authWorker.on("message", async (result: any) => {
       if (p.username?.toLowerCase() === newUsername) {
         log.info(`Kicking existing session for ${playerData.username} (duplicate login)`);
 
-        if (p.ws && p.ws.readyState === 1) {
-          p.ws.send(packetManager.notify({
+        if (p.wt && p.wt.readyState === 1) {
+          p.wt.send(packetManager.notify({
             message: "You have been logged in from another location."
           }));
         }
@@ -1450,14 +1410,14 @@ authWorker.on("message", async (result: any) => {
             // packetManager.disconnect (DISCONNECT_MALIFORMED) reads as "you
             // are disconnected" client-side and blanks the bystander's screen,
             // swallowing the replacement session's spawn that follows.
-            if (other.location?.map === map && other.id !== p.id && other.ws?.readyState === 1) {
-              other.ws.send(packetManager.despawnPlayer(p.id, "disconnect"));
+            if (other.location?.map === map && other.id !== p.id && other.wt?.readyState === 1) {
+              other.wt.send(packetManager.despawnPlayer(p.id, "disconnect"));
             }
           }
         }
 
-        if (p.ws && p.ws.readyState === 1) {
-          p.ws.close(1000, "Logged in from another location");
+        if (p.wt && p.wt.readyState === 1) {
+          p.wt.close(1000, "Logged in from another location");
         }
         playerCache.remove(p.id);
         break;
@@ -1545,7 +1505,7 @@ authWorker.on("message", async (result: any) => {
     if (world) {
       const resolved = await resolveWorldWeather(spawnLocation.map.replace(".json", ""));
       if (resolved.weather) {
-        sendPacket(ws, packetManager.weather({ weather: resolved.weather, weatherData: resolved.weatherData }));
+        sendPacket(wt, packetManager.weather({ weather: resolved.weather, weatherData: resolved.weatherData }));
       }
     }
 
@@ -1555,13 +1515,13 @@ authWorker.on("message", async (result: any) => {
     const limitedCollectables = Array.isArray(playerData.collectables) ? playerData.collectables.slice(0, 50) : [];
     const limitedLearnedSpells = Array.isArray(playerData.learnedSpells) ? playerData.learnedSpells.slice(0, 100) : (playerData.learnedSpells || []);
 
-    playerCache.add(ws.data.id, {
+    playerCache.add(wt.data.id, {
       username: playerData.username,
       animation: null,
       isAdmin: playerData.isAdmin,
       isStealth: playerData.isStealth,
       isNoclip: playerData.isNoclip,
-      id: ws.data.id,
+      id: wt.data.id,
       userid: playerData.id,
       location: {
         map: spawnLocation.map.replace(".json", ""),
@@ -1573,7 +1533,7 @@ authWorker.on("message", async (result: any) => {
         },
       },
       language: language || "en",
-      ws,
+      wt,
       stats: playerData.stats || {},
       friends: limitedFriends,
       attackDelay: 0,
@@ -1621,7 +1581,7 @@ authWorker.on("message", async (result: any) => {
       equipmentRevision: 0,
     });
 
-    const _pcache = playerCache.get(ws.data.id);
+    const _pcache = playerCache.get(wt.data.id);
     if (!_pcache) return;
 
     // Send initial packets immediately - stats sync and effect restoration follow asynchronously
@@ -1638,15 +1598,15 @@ authWorker.on("message", async (result: any) => {
       maps,
       mapPropertiesCache
     );
-    sendPacket(ws, packetManager.loadMap(mapMetadata));
+    sendPacket(wt, packetManager.loadMap(mapMetadata));
 
     // Anchor the client's clock once. It advances time locally from here, so
     // this is not re-pushed on the server tick.
-    sendPacket(ws, packetManager.serverTime());
+    sendPacket(wt, packetManager.serverTime());
 
     setTimeout(async () => {
 
-      const currentPlayer = playerCache.get(ws.data.id);
+      const currentPlayer = playerCache.get(wt.data.id);
       if (!currentPlayer) return;
 
       // Sync stats with equipment bonuses before spawning
@@ -1683,7 +1643,7 @@ authWorker.on("message", async (result: any) => {
       }
 
       const spawnDataForAll = {
-        id: ws.data.id,
+        id: wt.data.id,
         userid: playerData.id,
         location: {
           map: spawnLocation.map,
@@ -1712,14 +1672,14 @@ authWorker.on("message", async (result: any) => {
         currency: playerData.currency || { copper: 0, silver: 0, gold: 0 },
         effects: spellEffects.getEffectsPayload(currentPlayer),
       };
-      sendPacket(ws, packetManager.spawnPlayer(spawnDataForAll));
+      sendPacket(wt, packetManager.spawnPlayer(spawnDataForAll));
 
       const snapshotRevision = globalStateRevision;
 
       const playerDataForLoad: any[] = [];
       const playersInAOI = Array.from(currentPlayer.aoi.playersInAOI)
         .map(id => playerCache.get(id as string))
-        .filter(p => p && p.ws);
+        .filter(p => p && p.wt);
 
       for (const p of playersInAOI) {
 
@@ -1790,13 +1750,13 @@ authWorker.on("message", async (result: any) => {
       // Chunk the initial player snapshot: a single frame with 50 sprite-laden
       // players can exceed the transport's per-stream queue limit (~256KB) and
       // destroy the stream during login.
-      sendLoadPlayersChunked(sendPacket, ws, playerDataForLoad, snapshotRevision);
+      sendLoadPlayersChunked(sendPacket, wt, playerDataForLoad, snapshotRevision);
 
       // Batch animation data for all existing players into one packet for the new player
       if (playerDataForLoad.length > 0) {
         const animationDataArray: any[] = [];
         for (const pl of playerDataForLoad) {
-          if (pl.id !== ws.data.id && pl.location.direction) {
+          if (pl.id !== wt.data.id && pl.location.direction) {
             const pcache = playerCache.get(pl.id);
             const animName = getAnimationNameForDirection(pl.location.direction, !!pcache?.moving, !!pcache?.mounted, pcache?.mount_type, !!pcache?.casting);
             animationDataArray.push({
@@ -1809,7 +1769,7 @@ authWorker.on("message", async (result: any) => {
         // Chunked for the same queue-limit reason
         const ANIMATION_CHUNK_SIZE = 25;
         for (let i = 0; i < animationDataArray.length; i += ANIMATION_CHUNK_SIZE) {
-          sendPacket(ws, packetManager.batchSpriteSheetAnimation(animationDataArray.slice(i, i + ANIMATION_CHUNK_SIZE)));
+          sendPacket(wt, packetManager.batchSpriteSheetAnimation(animationDataArray.slice(i, i + ANIMATION_CHUNK_SIZE)));
         }
       }
 
@@ -1827,15 +1787,15 @@ authWorker.on("message", async (result: any) => {
         }
 
         if (movementsForNewPlayer.length > 0) {
-          sendPacket(ws, packetManager.batchMoveXY(movementsForNewPlayer));
+          sendPacket(wt, packetManager.batchMoveXY(movementsForNewPlayer));
         }
       }
 
       if (position?.direction) {
         await sendAnimationTo(
-          ws,
+          wt,
           getAnimationNameForDirection(position.direction, false, false, undefined, false),
-          ws.data.id
+          wt.data.id
         );
       }
 
@@ -1844,7 +1804,7 @@ authWorker.on("message", async (result: any) => {
       // Send active ground AoE zones on this map to the newly connected player
       const activeZones = getZonesOnMap(currentPlayer.location.map);
       for (const zone of activeZones) {
-        sendPacket(ws, packetManager.groundAoeSpawn({
+        sendPacket(wt, packetManager.groundAoeSpawn({
           id: zone.id,
           spell: zone.spellName,
           casterId: zone.casterId,
@@ -1890,7 +1850,7 @@ authWorker.on("message", async (result: any) => {
         // were already synced above; push the scaled values to the client.
         if (resurrection.restoreOnLogin(currentPlayer)) {
           sendPacket(
-            ws,
+            wt,
             packetManager.updateStats({
               id: currentPlayer.id,
               target: currentPlayer.id,
@@ -1907,12 +1867,12 @@ authWorker.on("message", async (result: any) => {
     // Defer secondary loads with a delay so the game loop can process between player spawns
     setTimeout(async () => {
 
-      const currentPlayerData = playerCache.get(ws.data.id);
+      const currentPlayerData = playerCache.get(wt.data.id);
       if (currentPlayerData) {
         const allPlayers = playerCache.list();
         const usernameIndex = new Map<string, any>();
         for (const player of Object.values(allPlayers)) {
-          if (player.ws && player.username) {
+          if (player.wt && player.username) {
             usernameIndex.set(player.username.toLowerCase(), player);
           }
         }
@@ -1920,8 +1880,8 @@ authWorker.on("message", async (result: any) => {
         for (const friendUsername of newPlayerFriends) {
           const onlineFriend = usernameIndex.get(friendUsername.toLowerCase());
           if (onlineFriend) {
-            sendPacket(onlineFriend.ws, packetManager.updateOnlineStatus({ online: true, username: currentPlayerData.username }));
-            sendPacket(currentPlayerData.ws, packetManager.updateOnlineStatus({ online: true, username: onlineFriend.username }));
+            sendPacket(onlineFriend.wt, packetManager.updateOnlineStatus({ online: true, username: currentPlayerData.username }));
+            sendPacket(currentPlayerData.wt, packetManager.updateOnlineStatus({ online: true, username: onlineFriend.username }));
           }
         }
       }
@@ -1944,56 +1904,35 @@ authWorker.on("message", async (result: any) => {
             sprite_type: npc.sprite_type, spriteLayers: getNpcSpriteLayers(npc),
           });
         }
-        sendPacket(ws, packetManager.loadNpcs(npcDataArray));
+        sendPacket(wt, packetManager.loadNpcs(npcDataArray));
       }
 
-      // Entities
       const mapName = spawnLocation.map.replace(".json", "");
-      const entitiesInMap = entityCache.getByMap(mapName);
-      if (entitiesInMap.length) {
-        const particlesCache = await assetCache.get("particles") as Particle[] | null;
-        const entityDataArray: any[] = [];
-        for (const entity of entitiesInMap) {
-          const particleArray = typeof entity.particles === "string" && particlesCache
-            ? (entity.particles as string).split(",").map((name) => particlesCache.find((p: Particle) => p.name === name.trim())).filter(Boolean)
-            : [];
-          entityDataArray.push({
-            id: entity.id, last_updated: entity.last_updated, name: entity.name || null,
-            location: { x: entity.position.x, y: entity.position.y, direction: entity.position.direction || "down" },
-            health: entity.health, max_health: entity.max_health, level: entity.level,
-            aggro_type: entity.aggro_type, particles: particleArray, map: entity.map, position: entity.position,
-            sprite_type: entity.sprite_type || 'animated', spriteLayers: getEntitySpriteLayers(entity as any),
-          });
-        }
-        sendPacket(ws, packetManager.loadEntities(entityDataArray));
-      }
 
       // Loot
       const lootOnMap = loot.getOnMap(mapName);
       if (lootOnMap.length) {
-        sendPacket(ws, packetManager.loadLoot(lootOnMap));
+        sendPacket(wt, packetManager.loadLoot(lootOnMap));
       }
 
       // Death skeletons inside the player's AOI only.
-      const skeletonViewer = playerCache.get(ws.data.id);
+      const skeletonViewer = playerCache.get(wt.data.id);
       const skeletonPos = skeletonViewer?.location?.position;
       if (skeletonPos) {
         const skeletonRadius = skeletonViewer.aoi?.aoiRadius || AOI_CONFIG.DEFAULT_RADIUS;
-        const skeletonsInAOI = skeletons.getInRadius(mapName, skeletonPos.x, skeletonPos.y, skeletonRadius);
-        if (skeletonsInAOI.length) {
-          sendPacketBestEffort(ws, packetManager.loadSkeletons(skeletonsInAOI.map((s) => toSkeletonPacket(s))));
-        }
+        const skeletonsInAOI = skeletons.getInRadius(mapName, skeletonPos.x, skeletonPos.y, skeletonRadius, layerManager.getPlayerLayer(wt.data.id));
+        sendPacketBestEffort(wt, packetManager.loadSkeletons(skeletonsInAOI.map((s) => toSkeletonPacket(s))));
       }
 
       // Relogging while dead: restore the phase. The corpse gets its popup
       // back; the ghost is re-announced so others keep rendering it.
-      const relogPlayer = playerCache.get(ws.data.id);
+      const relogPlayer = playerCache.get(wt.data.id);
       if (relogPlayer?.isDead) {
-        sendPacket(ws, packetManager.playerDied({ id: relogPlayer.id }));
+        sendPacket(wt, packetManager.playerDied({ id: relogPlayer.id }));
       } else if (relogPlayer?.isGhost) {
         const viewersInMap = filterPlayersByMap(relogPlayer.location.map);
         viewersInMap.forEach((p) => {
-          sendPacket(p.ws, packetManager.playerGhost({ id: relogPlayer.id, ghost: true }));
+          sendPacket(p.wt, packetManager.playerGhost({ id: relogPlayer.id, ghost: true }));
         });
       }
     }, 200);
@@ -2017,7 +1956,7 @@ authWorker.on("message", async (result: any) => {
       const lockoutRemaining = Math.max(0, (_pcache?.spellLockoutUntil || 0) - now);
       clientConfig[0].spell_lockout = Math.ceil(lockoutRemaining);
     }
-    sendPacket(ws, packetManager.clientConfig(clientConfig));
+    sendPacket(wt, packetManager.clientConfig(clientConfig));
 
     // Convert icon names to Asset Server URLs for inventory items
     const bagBoundaries = await getBagBoundaries(playerData.username);
@@ -2049,6 +1988,9 @@ authWorker.on("message", async (result: any) => {
           is_thrown: (spellData as any).is_thrown ?? null,
           charge_distance: (spellData as any).charge_distance ?? null,
           teleport_behind: (spellData as any).teleport_behind ?? null,
+          // Lets the client skip its optimistic cast bar for stand-still
+          // spells pressed while moving (the server ignores those).
+          can_move: (spellData as any).can_move ? 1 : 0,
         };
       }
     }
@@ -2060,26 +2002,26 @@ authWorker.on("message", async (result: any) => {
       icon: undefined // Remove the old icon field
     })) || [];
 
-    sendPacket(ws, packetManager.inventory(inventoryWithIconUrls, inventorySlots));
-    sendPacket(ws, packetManager.equipment(playerData.equipment || {}));
+    sendPacket(wt, packetManager.inventory(inventoryWithIconUrls, inventorySlots));
+    sendPacket(wt, packetManager.equipment(playerData.equipment || {}));
 
     const playerBags = await bags.ensure(playerData.username);
-    sendPacket(ws, packetManager.bags(playerBags));
-    sendPacket(ws, packetManager.collectables(collectablesWithIconUrls));
-    sendPacket(ws, packetManager.spells(spellsWithSpriteUrls));
-    sendPacket(ws, packetManager.questlog(completedQuest, incompleteQuest));
+    sendPacket(wt, packetManager.bags(playerBags));
+    sendPacket(wt, packetManager.collectables(collectablesWithIconUrls));
+    sendPacket(wt, packetManager.spells(spellsWithSpriteUrls));
+    sendPacket(wt, packetManager.questlog(completedQuest, incompleteQuest));
   }
 });
 
 export default async function packetReceiver(
   server: any,
-  ws: any,
+  wt: any,
   message: string,
   preParsed?: Packet
 ) {
   try {
 
-    if (!message) return ws.close(1008, "Empty message");
+    if (!message) return wt.close(1008, "Empty message");
 
     // Size check BEFORE parsing: parsing first let a hostile client force a
     // full JSON.parse of a maxPayloadMB-sized frame (50MB by default) before
@@ -2090,36 +2032,36 @@ export default async function packetReceiver(
     // The transport layer already parsed this frame to route it; reuse that
     // result instead of parsing the same JSON a second time.
     const parsedMessage: Packet = (preParsed ?? tryParsePacket(message)) as Packet;
-    if (!parsedMessage) return ws.close(1007, "Malformed message");
+    if (!parsedMessage) return wt.close(1007, "Malformed message");
 
     if (
       oversized &&
       parsedMessage.type !== "BENCHMARK" &&
       !(settings as any)?.webtransport?.benchmarkenabled
     )
-      return ws.close(1009, "Message too large");
+      return wt.close(1009, "Message too large");
 
     const data = parsedMessage?.data;
     const type = parsedMessage?.type;
 
     if (!type || (!data && data != null))
-      return ws.close(1007, "Malformed message");
+      return wt.close(1007, "Malformed message");
 
     if (!validPacketTypes.has(type as unknown as string)) {
-      ws.close(1007, "Invalid packet type");
+      wt.close(1007, "Invalid packet type");
     }
 
-    const currentPlayer = playerCache.get(ws.data.id) || null;
+    const currentPlayer = playerCache.get(wt.data.id) || null;
 
     for (const interceptor of packetInterceptors) {
-      if (interceptor(type, data, ws, currentPlayer)) {
+      if (interceptor(type, data, wt, currentPlayer)) {
         return;
       }
     }
 
     const pluginHandler = pluginHandlers.get(type);
     if (pluginHandler) {
-      await pluginHandler(ws, currentPlayer, data, sendPacket);
+      await pluginHandler(wt, currentPlayer, data, sendPacket);
       return;
     }
 
@@ -2144,48 +2086,48 @@ export default async function packetReceiver(
     switch (type) {
       case "BENCHMARK": {
         (data as any)["returned_timestamp"] = Date.now();
-        sendPacket(ws, packetManager.benchmark(data));
+        sendPacket(wt, packetManager.benchmark(data));
         break;
       }
       case "PING": {
-        sendPacket(ws, packetManager.ping(data));
+        sendPacket(wt, packetManager.ping(data));
         break;
       }
       case "PONG": {
-        sendPacket(ws, packetManager.pong(data));
+        sendPacket(wt, packetManager.pong(data));
         break;
       }
       case "LOGIN": {
-        sendPacket(ws, packetManager.login(ws));
+        sendPacket(wt, packetManager.login(wt));
         break;
       }
       case "AUTH": {
         const token = data?.toString() as string;
 
         if (!token) {
-          sendPacket(ws, packetManager.loginFailed());
-          ws.close(1008, "Invalid token");
+          sendPacket(wt, packetManager.loginFailed());
+          wt.close(1008, "Invalid token");
           break;
         }
 
         if (authentication_queue.has(token)) {
-          sendPacket(ws, packetManager.loginFailed());
-          ws.close(1008, "Authentication already in progress");
+          sendPacket(wt, packetManager.loginFailed());
+          wt.close(1008, "Authentication already in progress");
           break;
         }
 
-        if (authentication_session_queue.has(ws.data.id)) {
-          sendPacket(ws, packetManager.loginFailed());
-          ws.close(1008, "Session authentication already in progress");
+        if (authentication_session_queue.has(wt.data.id)) {
+          sendPacket(wt, packetManager.loginFailed());
+          wt.close(1008, "Session authentication already in progress");
           break;
         }
 
         authentication_queue.add(token);
-        authentication_session_queue.add(ws.data.id);
+        authentication_session_queue.add(wt.data.id);
 
-        pendingAuthentications.set(ws.data.id, { ws, token, language: parsedMessage?.language || "en" });
+        pendingAuthentications.set(wt.data.id, { wt, token, language: parsedMessage?.language || "en" });
 
-        authWorker.postMessage({ token, id: ws.data.id });
+        authWorker.postMessage({ token, id: wt.data.id });
 
         break;
       }
@@ -2201,8 +2143,8 @@ export default async function packetReceiver(
         listener.emit(Events.PLAYER_LOGOUT, { player: currentPlayer });
         // Close the connection so the onDisconnect handler fires and does the
         // full in-memory cleanup (despawn, remove from cache, update friends, etc.)
-        if (ws.readyState === 1) {
-          ws.close(1000, "Player logout");
+        if (wt.readyState === 1) {
+          wt.close(1000, "Player logout");
         }
         break;
       }
@@ -2237,8 +2179,8 @@ export default async function packetReceiver(
             };
             const playersInMap = filterPlayersByMap(draggedPlayer.location.map);
             playersInMap.forEach((p) => {
-              if (p.ws && p.ws.readyState === 1) {
-                sendPacket(p.ws, packetManager.dragPlayerStop(dragStopData));
+              if (p.wt && p.wt.readyState === 1) {
+                sendPacket(p.wt, packetManager.dragPlayerStop(dragStopData));
               }
             });
           }
@@ -2310,7 +2252,7 @@ export default async function packetReceiver(
 
         globalStateRevision++;
         await sendPositionAnimation(
-          ws,
+          wt,
           direction,
           true,
           currentPlayer.mounted,
@@ -2324,7 +2266,7 @@ export default async function packetReceiver(
 
         const movePlayer = async () => {
 
-          if (!ws || ws.readyState !== 1) {
+          if (!wt || wt.readyState !== 1) {
             gameLoop.unregisterMovingPlayer(currentPlayer.id);
             return;
           }
@@ -2438,7 +2380,7 @@ export default async function packetReceiver(
 
             globalStateRevision++;
             await sendPositionAnimation(
-              ws,
+              wt,
               direction,
               false,
               currentPlayer.mounted,
@@ -2451,7 +2393,7 @@ export default async function packetReceiver(
             const reason = collision?.reason;
 
             if (reason === "tile_collision" && collision?.tile) {
-              sendPacket(ws, packetManager.collisionDebug({
+              sendPacket(wt, packetManager.collisionDebug({
                 tileX: collision.tile.x,
                 tileY: collision.tile.y
               }));
@@ -2468,7 +2410,7 @@ export default async function packetReceiver(
                 if (!currentPlayer.lastCombatWarpNotify || nowTs - currentPlayer.lastCombatWarpNotify > 2000) {
                   currentPlayer.lastCombatWarpNotify = nowTs;
             sendPacket(
-              ws,
+              wt,
               packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer))
             );
                 }
@@ -2481,7 +2423,7 @@ export default async function packetReceiver(
               };
 
               for (const interceptor of warpInterceptors) {
-                if (await interceptor(warp, ws, currentPlayer, sendPacket)) {
+                if (await interceptor(warp, wt, currentPlayer, sendPacket)) {
                   return;
                 }
               }
@@ -2511,7 +2453,7 @@ export default async function packetReceiver(
                 };
 
                 if (currentMap !== warp.map) {
-                  await transitionPlayerToMap(currentPlayer, newMap, newPosition, ws, spawnBatchQueue, despawnBatchQueue);
+                  await transitionPlayerToMap(currentPlayer, newMap, newPosition, wt, spawnBatchQueue, despawnBatchQueue);
                 } else {
                   await handleMapChangeAOI(currentPlayer, newMap, newPosition, spawnBatchQueue, despawnBatchQueue);
 
@@ -2520,7 +2462,7 @@ export default async function packetReceiver(
                   globalStateRevision++;
 
                   const movementData = {
-                    i: ws.data.id,
+                    i: wt.data.id,
                     d: {
                       x: Number(currentPlayer.location.position.x),
                       y: Number(currentPlayer.location.position.y),
@@ -2529,7 +2471,7 @@ export default async function packetReceiver(
                     r: globalStateRevision,
                     s: currentPlayer.isStealth ? 1 : 0
                   };
-                  sendPacket(ws, packetManager.moveXY(movementData));
+                  sendPacket(wt, packetManager.moveXY(movementData));
                 }
               }
             }
@@ -2644,7 +2586,7 @@ export default async function packetReceiver(
 
                     if (chunksToPreload.length > 0) {
                       sendPacket(
-                        ws,
+                        wt,
                         packetManager.preloadMapChunks({
                           mapName: destMapName,
                           chunks: chunksToPreload,
@@ -2675,7 +2617,7 @@ export default async function packetReceiver(
           }
 
           const movementData = {
-            i: ws.data.id,
+            i: wt.data.id,
             d: {
               x: Number(currentPlayer.location.position.x),
               y: Number(currentPlayer.location.position.y),
@@ -2685,17 +2627,14 @@ export default async function packetReceiver(
             s: currentPlayer.isStealth ? 1 : 0
           };
 
-          if (ws.readyState === 1) {
-            // Direct self-echo, every tick, on the RELIABLE stream. The client
-            // runs local prediction for the own player and hard-snaps position
-            // to each echo, so the echo must be timely AND not lost - a dropped
-            // datagram (which the lossy path does under load) leaves prediction
-            // running ahead until the next echo snaps it back: slow + choppy +
-            // rubberband. It's one ~20-byte frame per moving player per tick and
-            // only ~15-25% of players are moving at once, so the reliable stream
-            // absorbs it easily. Other players still learn about this mover only
-            // via the batched (datagram) flush below.
-            sendPacket(ws, packetManager.moveXYReliable(movementData));
+          if (wt.readyState === 1) {
+            // Direct self-echo, every tick, as a datagram (binary moveXY, 0x02).
+            // It is the client's only source for its own position - it ignores
+            // its entry in the batches below. A lost echo is just a skipped
+            // step: the client interpolates across it using the send time
+            // each packet carries, and drops any that arrive out of order.
+            // Other players learn about this mover via the batched flush below.
+            sendPacket(wt, packetManager.moveXY(movementData));
 
             const layerId = currentPlayer.aoi?.layerId || layerManager.getPlayerLayer(currentPlayer.id);
             const groupKey = layerId || currentPlayer.location.map;
@@ -2742,7 +2681,7 @@ export default async function packetReceiver(
         }
 
         const movementData = {
-          i: ws.data.id,
+          i: wt.data.id,
           d: {
             x: Number(currentPlayer.location.position.x),
             y: Number(currentPlayer.location.position.y),
@@ -2762,7 +2701,7 @@ export default async function packetReceiver(
         const ghostSpeak = currentPlayer.isGhost && !currentPlayer.isAdmin;
         if (currentPlayer.isGuest) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: "Please create an account to use that feature.",
             })
@@ -2773,25 +2712,25 @@ export default async function packetReceiver(
         const message = messageData?.message;
 
         if (typeof message === "string" && message.length > MAX_CHAT_LENGTH) {
-          sendPacket(ws, packetManager.notify({ message: `Message too long (max ${MAX_CHAT_LENGTH} characters).` }));
+          sendPacket(wt, packetManager.notify({ message: `Message too long (max ${MAX_CHAT_LENGTH} characters).` }));
           return;
         }
 
         const now = Date.now();
-        const timestamps = chatRateLimit.get(ws.data.id) || [];
+        const timestamps = chatRateLimit.get(wt.data.id) || [];
         const recent = timestamps.filter((t) => now - t < CHAT_RATE_WINDOW);
         if (recent.length >= CHAT_RATE_MAX) {
-          sendPacket(ws, packetManager.notify({ message: "You are sending messages too fast." }));
+          sendPacket(wt, packetManager.notify({ message: "You are sending messages too fast." }));
           return;
         }
         recent.push(now);
-        chatRateLimit.set(ws.data.id, recent);
+        chatRateLimit.set(wt.data.id, recent);
 
         const mode = messageData?.mode;
 
         const sendMessageToPlayer = (playerWs: any, message: string) => {
           const chatData = {
-            id: ws.data.id,
+            id: wt.data.id,
             message,
             username: currentPlayer.username,
           };
@@ -2801,7 +2740,7 @@ export default async function packetReceiver(
         if (message == null) {
           const playersInMap = filterPlayersByMap(currentPlayer.location.map);
           playersInMap.forEach((player) => {
-            sendMessageToPlayer(player.ws, "");
+            sendMessageToPlayer(player.wt, "");
           });
           return;
         }
@@ -2829,12 +2768,12 @@ export default async function packetReceiver(
           decryptedMessage = generateGhostSpeak();
         }
 
-        sendMessageToPlayer(ws, decryptedMessage as string);
+        sendMessageToPlayer(wt, decryptedMessage as string);
 
         const cache = playerCache.list();
         let playersInMap = Object.values(cache).filter(
           (p) =>
-            p.location.map === currentPlayer.location.map && p.id !== ws.data.id
+            p.location.map === currentPlayer.location.map && p.id !== wt.data.id
         );
 
         listener.emit(Events.PLAYER_CHAT, { player: currentPlayer, message: decryptedMessage || data?.toString(), mapName: currentPlayer.location.map });
@@ -2858,12 +2797,12 @@ export default async function packetReceiver(
           }
 
           const chatData = {
-            id: ws.data.id,
+            id: wt.data.id,
             message: translations[player.language],
             username: currentPlayer.username,
           };
 
-          sendPacket(player.ws, packetManager.chat(chatData));
+          sendPacket(player.wt, packetManager.chat(chatData));
         });
         break;
       }
@@ -2871,14 +2810,14 @@ export default async function packetReceiver(
         if (!currentPlayer || currentPlayer?.isGuest) return;
         if (currentPlayer.isDead || currentPlayer.isGhost) return;
         const typingData = {
-          id: ws.data.id,
+          id: wt.data.id,
         };
         let playersInMap = filterPlayersByMap(currentPlayer.location.map);
         if (currentPlayer.isStealth) {
           playersInMap = playersInMap.filter((p) => p.isAdmin);
         }
         playersInMap.forEach((player) => {
-          sendPacketBestEffort(player.ws, packetManager.typing(typingData));
+          sendPacketBestEffort(player.wt, packetManager.typing(typingData));
         });
         break;
       }
@@ -2895,16 +2834,16 @@ export default async function packetReceiver(
           if (!editorEditHistory.has(mapName)) {
             editorEditHistory.set(mapName, []);
           }
-          editorEditHistory.get(mapName)!.push({ senderId: ws.data.id, mapName, edits: editData.edits });
+          editorEditHistory.get(mapName)!.push({ senderId: wt.data.id, mapName, edits: editData.edits });
         }
 
         const targets = filterPlayersByMap(currentPlayer.location.map).filter(
-          (p) => p.isAdmin && p.id !== ws.data.id && p.ws?.readyState === 1
+          (p) => p.isAdmin && p.id !== wt.data.id && p.wt?.readyState === 1
         );
         if (targets.length === 0) break;
-        const relay = { senderId: ws.data.id, mapName: editData.mapName, edits: editData.edits };
+        const relay = { senderId: wt.data.id, mapName: editData.mapName, edits: editData.edits };
         targets.forEach((player) => {
-          sendPacket(player.ws, packetManager.editorTileEdit(relay));
+          sendPacket(player.wt, packetManager.editorTileEdit(relay));
         });
         break;
       }
@@ -2914,12 +2853,12 @@ export default async function packetReceiver(
         const lockData = data as any;
         if (!lockData || lockData.mapName !== currentPlayer.location.map) return;
         const targets = filterPlayersByMap(currentPlayer.location.map).filter(
-          (p) => p.isAdmin && p.id !== ws.data.id && p.ws?.readyState === 1
+          (p) => p.isAdmin && p.id !== wt.data.id && p.wt?.readyState === 1
         );
         if (targets.length === 0) break;
         const relay = { mapName: lockData.mapName, layerName: lockData.layerName, locked: lockData.locked };
         targets.forEach((player) => {
-          sendPacket(player.ws, packetManager.editorLayerLock(relay));
+          sendPacket(player.wt, packetManager.editorLayerLock(relay));
         });
         break;
       }
@@ -2929,7 +2868,7 @@ export default async function packetReceiver(
         if (!activeEditorsByMap.has(mapName)) {
           activeEditorsByMap.set(mapName, new Set());
         }
-        activeEditorsByMap.get(mapName)!.add(ws.data.id);
+        activeEditorsByMap.get(mapName)!.add(wt.data.id);
 
         // Replay all unsaved edits as one batch.
         const history = editorEditHistory.get(mapName);
@@ -2942,11 +2881,11 @@ export default async function packetReceiver(
             }
           }
           if (allEdits.length > 0) {
-            sendPacket(ws, packetManager.editorTileEdit({ mapName, edits: allEdits }));
+            sendPacket(wt, packetManager.editorTileEdit({ mapName, edits: allEdits }));
           }
         }
 
-        sendPacket(ws, packetManager.editorSyncReady({ mapName }));
+        sendPacket(wt, packetManager.editorSyncReady({ mapName }));
         break;
       }
       case "EDITOR_CLOSE": {
@@ -2954,7 +2893,7 @@ export default async function packetReceiver(
         const mapName = currentPlayer.location.map;
         const editors = activeEditorsByMap.get(mapName);
         if (editors) {
-          editors.delete(ws.data.id);
+          editors.delete(wt.data.id);
           if (editors.size === 0) {
             activeEditorsByMap.delete(mapName);
             // No editors left on this map - clear unsaved edit history
@@ -2965,7 +2904,7 @@ export default async function packetReceiver(
       }
       case "CLIENTCONFIG": {
         if (!currentPlayer) return;
-        await player.setConfig(ws.data.id, data);
+        await player.setConfig(wt.data.id, data);
         break;
       }
       case "SELECTPLAYER": {
@@ -2977,13 +2916,24 @@ export default async function packetReceiver(
           (p) => p.location.map === currentPlayer.location.map
         );
 
-        const selectedPlayer = players.find(
-          (p) =>
-            Math.abs(p.location.position.x - Math.floor(Number(location.x))) <
-            25 &&
-            Math.abs(p.location.position.y - Math.floor(Number(location.y))) <
-            25
-        );
+        // Taps from touch devices get a wider pick area: a fingertip is far
+        // less precise than a cursor. With the wider area two players can both
+        // qualify, so the nearest one wins.
+        const pickRange = (data as any)?.touch === true ? 49 : 35;
+        const pickX = Math.floor(Number(location.x));
+        const pickY = Math.floor(Number(location.y));
+        let selectedPlayer: any = null;
+        let selectedDistSq = Infinity;
+        for (const p of players) {
+          const dx = p.location.position.x - pickX;
+          const dy = p.location.position.y - pickY;
+          if (Math.abs(dx) >= pickRange || Math.abs(dy) >= pickRange) continue;
+          const distSq = dx * dx + dy * dy;
+          if (distSq < selectedDistSq) {
+            selectedPlayer = p;
+            selectedDistSq = distSq;
+          }
+        }
 
         if (!selectedPlayer) break;
         // Corpses cannot be targeted (despawned for observers). Ghosts can be
@@ -2991,18 +2941,18 @@ export default async function packetReceiver(
         // is still pending (not rendered anywhere yet).
         if (selectedPlayer.isDead || (selectedPlayer.isGhost && selectedPlayer.ghostTeleportPending)) {
           const selectPlayerData = {
-            id: ws.data.id,
+            id: wt.data.id,
             data: null,
           };
-          sendPacket(ws, packetManager.selectPlayer(selectPlayerData));
+          sendPacket(wt, packetManager.selectPlayer(selectPlayerData));
           break;
         }
         if (selectedPlayer.isStealth && !currentPlayer.isAdmin) {
           const selectPlayerData = {
-            id: ws.data.id,
+            id: wt.data.id,
             data: null,
           };
-          sendPacket(ws, packetManager.selectPlayer(selectPlayerData));
+          sendPacket(wt, packetManager.selectPlayer(selectPlayerData));
           break;
         } else {
           const selectPlayerData = {
@@ -3010,7 +2960,7 @@ export default async function packetReceiver(
             username: selectedPlayer.username,
             stats: selectedPlayer.stats,
           };
-          sendPacket(ws, packetManager.selectPlayer(selectPlayerData));
+          sendPacket(wt, packetManager.selectPlayer(selectPlayerData));
         }
         break;
       }
@@ -3028,7 +2978,7 @@ export default async function packetReceiver(
 
         // Get all players on the same map
         const playersInRange = filterPlayersByDistance(
-          ws,
+          wt,
           TARGETING_RANGE,
           currentPlayer.location.map
         ).filter((p) => !p.isStealth && !p.isDead && !(p.isGhost && p.ghostTeleportPending) && p.id !== currentPlayer.id);
@@ -3047,99 +2997,29 @@ export default async function packetReceiver(
 
         const _tcT2 = PROFILE ? performance.now() : 0;
 
-        // Also check for closest entity in facing cone (from in-memory cache)
-        const entitiesInMap = entityCache.getByMap(currentPlayer.location.map);
-        const entitiesInCone: any[] = [];
-
-        if (entitiesInMap && entitiesInMap.length > 0) {
-          const selfPosition = currentPlayer.location.position as any;
-          const direction = selfPosition.direction || "down";
-
-          const directionAngles: { [key: string]: number } = {
-            right: 0,
-            downright: 45,
-            down: 90,
-            downleft: 135,
-            left: 180,
-            upleft: -135,
-            up: -90,
-            upright: -45,
-          };
-
-          const facingAngle = directionAngles[direction] ?? 90;
-          const tolerance = CONE_ANGLE / 2;
-
-          const isFacingTarget = (targetAngle: number): boolean => {
-            const minAngle = facingAngle - tolerance;
-            const maxAngle = facingAngle + tolerance;
-
-            if (minAngle < -180) {
-              return targetAngle >= (minAngle + 360) || targetAngle <= maxAngle;
-            } else if (maxAngle > 180) {
-              return targetAngle >= minAngle || targetAngle <= (maxAngle - 360);
-            }
-
-            return targetAngle >= minAngle && targetAngle <= maxAngle;
-          };
-
-          for (const entity of entitiesInMap) {
-            // Skip dead entities - check both health and combatState
-            if ((entity.health ?? 0) <= 0 || (entity as any).combatState === 'dead') continue;
-
-            const dx = entity.position.x - selfPosition.x;
-            const dy = entity.position.y - selfPosition.y;
-            const distance = Math.sqrt(dx * dx + dy * dy);
-
-            if (distance > TARGETING_RANGE) continue;
-
-            const angle = Math.atan2(dy, dx) * (180 / Math.PI);
-
-            if (isFacingTarget(angle)) {
-              entitiesInCone.push({
-                ...entity,
-                distance: distance,
-              });
-            }
-          }
-
-          // Sort entities by distance (closest first)
-          entitiesInCone.sort((a, b) => a.distance - b.distance);
-        }
-
-        // Get next entity target (cycling through cone)
-        let nextEntity: any = null;
-        if (entitiesInCone.length > 0) {
+        // Closest creature in the facing cone, cycling like players do.
+        const creatureCandidates = creatures.coneTargets(currentPlayer, TARGETING_RANGE, CONE_ANGLE);
+        let nextCreature: { id: number; distance: number } | null = null;
+        if (creatureCandidates.length > 0) {
           const currentTargetId = currentTargetMap.get(currentPlayer.id) || null;
-          if (!currentTargetId) {
-            nextEntity = entitiesInCone[0];
-          } else {
-            const currentIndex = entitiesInCone.findIndex((e) => e.id === currentTargetId);
-            if (currentIndex === -1 || currentIndex === entitiesInCone.length - 1) {
-              nextEntity = entitiesInCone[0];
-            } else {
-              nextEntity = entitiesInCone[currentIndex + 1];
-            }
-          }
+          const currentIndex = creatureCandidates.findIndex((c) => `c:${c.id}` === currentTargetId);
+          nextCreature = currentIndex === -1 || currentIndex === creatureCandidates.length - 1
+            ? creatureCandidates[0]
+            : creatureCandidates[currentIndex + 1];
         }
 
-        // Determine which target is closer (player vs entity)
+        // Pick whichever is closer: the next player or the next creature.
         let targetToSelect: any = null;
-        if (nextPlayer && nextEntity) {
+        if (nextPlayer && nextCreature) {
           const playerPos = nextPlayer?.location?.position as any;
-          const playerDistance = Math.sqrt(
-            Math.pow(currentPlayer.location.position.x - playerPos.x, 2) +
-            Math.pow(currentPlayer.location.position.y - playerPos.y, 2)
-          );
-          targetToSelect = playerDistance < nextEntity.distance ? nextPlayer : nextEntity;
-        } else if (nextPlayer) {
-          targetToSelect = nextPlayer;
-        } else if (nextEntity) {
-          targetToSelect = nextEntity;
+          const playerDistance = Math.hypot(currentPlayer.location.position.x - playerPos.x, currentPlayer.location.position.y - playerPos.y);
+          targetToSelect = playerDistance < nextCreature.distance ? nextPlayer : nextCreature;
+        } else {
+          targetToSelect = nextPlayer || nextCreature;
         }
-
         if (targetToSelect) {
           // Update current target for cycling
-          currentTargetMap.set(currentPlayer.id, targetToSelect.id);
+          currentTargetMap.set(currentPlayer.id, targetToSelect.stats ? targetToSelect.id : `c:${targetToSelect.id}`);
 
           if (targetToSelect.stats) {
             // It's a player
@@ -3148,20 +3028,16 @@ export default async function packetReceiver(
               username: targetToSelect.username || null,
               stats: targetToSelect.stats || null,
             };
-            sendPacket(ws, packetManager.selectPlayer(selectPlayerData));
+            sendPacket(wt, packetManager.selectPlayer(selectPlayerData));
           } else {
-            // It's an entity
-            const selectEntityData = {
-              id: targetToSelect.id || null,
-            };
-            sendPacket(ws, packetManager.selectPlayer(selectEntityData));
+            sendPacket(wt, packetManager.creatureTargeted({ id: targetToSelect.id }));
           }
         }
         if (PROFILE) {
           const now = performance.now();
           prof.tcFilterMs += _tcT1 - _tcT0;
           prof.tcConeMs += _tcT2 - _tcT1;
-          prof.tcEntityMs += now - _tcT2;
+          prof.tcCreatureMs += now - _tcT2;
           prof.tcCount++;
         }
         break;
@@ -3182,7 +3058,7 @@ export default async function packetReceiver(
               equipment: targetPlayer.equipment || {},
               inventory: targetPlayer.inventory || [],
             };
-            sendPacket(ws, packetManager.inspectPlayer(inspectPlayerData));
+            sendPacket(wt, packetManager.inspectPlayer(inspectPlayerData));
           }
         }
         break;
@@ -3192,10 +3068,10 @@ export default async function packetReceiver(
         const isNoclip = await player.toggleNoclip(currentPlayer.username);
         currentPlayer.isNoclip = isNoclip;
         const noclipData = {
-          id: ws.data.id,
+          id: wt.data.id,
           isNoclip: currentPlayer.isNoclip,
         };
-        sendPacket(ws, packetManager.noclip(noclipData));
+        sendPacket(wt, packetManager.noclip(noclipData));
         break;
       }
       case "STEALTH": {
@@ -3204,23 +3080,23 @@ export default async function packetReceiver(
         currentPlayer.isStealth = isStealth;
         const playersInMap = filterPlayersByMap(currentPlayer.location.map);
         const stealthData = {
-          id: ws.data.id,
+          id: wt.data.id,
           isStealth: currentPlayer.isStealth,
         };
-        sendPacket(ws, packetManager.stealth(stealthData));
+        sendPacket(wt, packetManager.stealth(stealthData));
         playersInMap.forEach((player) => {
           const stealthData = {
-            id: ws.data.id,
+            id: wt.data.id,
             isStealth: currentPlayer.isStealth,
           };
-          sendPacket(player.ws, packetManager.stealth(stealthData));
+          sendPacket(player.wt, packetManager.stealth(stealthData));
         });
         if (isStealth) {
           // When stealthing, despawn from other players (admins can still see stealthed players)
           playersInMap.forEach((player) => {
             if (player.id === currentPlayer.id) return;
             if (player.isAdmin) return;
-            sendPacket(player.ws, packetManager.despawnPlayer(currentPlayer.id as string));
+            sendPacket(player.wt, packetManager.despawnPlayer(currentPlayer.id as string));
           });
         } else if (!isStealth) {
           globalStateRevision++;
@@ -3264,7 +3140,7 @@ export default async function packetReceiver(
 
           for (const player of nonAdminPlayers) {
             const moveXYData = {
-              i: ws.data.id,
+              i: wt.data.id,
               d: {
                 x: Number(currentPlayer.location.position.x),
                 y: Number(currentPlayer.location.position.y),
@@ -3275,7 +3151,7 @@ export default async function packetReceiver(
             };
 
             if (currentPlayer.location.position?.direction) {
-              sendPacket(player.ws, packetManager.moveXY(moveXYData));
+              sendPacket(player.wt, packetManager.moveXY(moveXYData));
             }
           }
         }
@@ -3285,7 +3161,7 @@ export default async function packetReceiver(
       case "DRAG_PLAYER_START": {
         // Check for admin.drag or admin.* permission
         if (!currentPlayer || !Array.isArray(currentPlayer.permissions)) {
-          sendPacket(ws, packetManager.notify({ message: "Permissions not loaded" }));
+          sendPacket(wt, packetManager.notify({ message: "Permissions not loaded" }));
           break;
         }
 
@@ -3304,20 +3180,20 @@ export default async function packetReceiver(
         if (!targetPlayer) break;
 
         // Track that this player is being dragged
-        draggedPlayersMap.set(targetPlayerId, ws.data.id);
+        draggedPlayersMap.set(targetPlayerId, wt.data.id);
 
         // Send confirmation to admin that drag started
         const dragStartData = {
           id: targetPlayerId,
-          adminId: ws.data.id,
+          adminId: wt.data.id,
         };
-        sendPacket(ws, packetManager.dragPlayerStart(dragStartData));
+        sendPacket(wt, packetManager.dragPlayerStart(dragStartData));
 
         // Notify all players on the map that drag started
         const playersInMap = filterPlayersByMap(targetPlayer.location.map);
         playersInMap.forEach((p) => {
-          if (p.ws && p.ws.readyState === 1) {
-            sendPacket(p.ws, packetManager.dragPlayerStart(dragStartData));
+          if (p.wt && p.wt.readyState === 1) {
+            sendPacket(p.wt, packetManager.dragPlayerStart(dragStartData));
           }
         });
         break;
@@ -3344,15 +3220,15 @@ export default async function packetReceiver(
         // Send confirmation to admin that drag stopped
         const dragStopData = {
           id: targetPlayerId,
-          adminId: ws.data.id,
+          adminId: wt.data.id,
         };
-        sendPacket(ws, packetManager.dragPlayerStop(dragStopData));
+        sendPacket(wt, packetManager.dragPlayerStop(dragStopData));
 
         // Notify all players on the map that drag stopped
         const playersInMap = filterPlayersByMap(targetPlayer.location.map);
         playersInMap.forEach((p) => {
-          if (p.ws && p.ws.readyState === 1) {
-            sendPacket(p.ws, packetManager.dragPlayerStop(dragStopData));
+          if (p.wt && p.wt.readyState === 1) {
+            sendPacket(p.wt, packetManager.dragPlayerStop(dragStopData));
           }
         });
         break;
@@ -3424,13 +3300,175 @@ export default async function packetReceiver(
         await player.saveInventoryConfig(currentPlayer.username, data as any);
         break;
       }
+      case "CREATURE_ATTACK": {
+        if (!currentPlayer) return;
+        const creatureId = (data as any)?.id;
+        if (creatureId === null || creatureId === undefined) {
+          creatures.stopAutoAttack(currentPlayer);
+          break;
+        }
+        if (currentPlayer.isDead || currentPlayer.isGhost || currentPlayer.isGuest) return;
+        const creature = creatures.getCreature(Number(creatureId));
+        if (!creature || !creatures.isTargetableBy(currentPlayer, creature)) {
+          sendPacket(wt, packetManager.creatureAttackStopped(Number(creatureId)));
+          break;
+        }
+        if (creatures.startAutoAttack(currentPlayer, creature.id)) {
+          sendPacket(wt, packetManager.creatureAttackStopped(creature.id));
+        }
+        break;
+      }
+      case "CREATURE_EDITOR_LIST":
+      case "CREATURE_EDITOR_CLOSE":
+      case "CREATURE_EDITOR_SAVE_TEMPLATE":
+      case "CREATURE_EDITOR_DELETE_TEMPLATE":
+      case "CREATURE_EDITOR_SAVE_ABILITY":
+      case "CREATURE_EDITOR_DELETE_ABILITY":
+      case "CREATURE_EDITOR_SAVE_ABILITIES":
+      case "CREATURE_EDITOR_SAVE_SPAWN":
+      case "CREATURE_EDITOR_DELETE_SPAWN":
+      case "CREATURE_EDITOR_SAVE_PATH":
+      case "CREATURE_EDITOR_DELETE_PATH":
+      case "CREATURE_EDITOR_SAVE_LINKGROUP":
+      case "CREATURE_EDITOR_DELETE_LINKGROUP":
+      case "CREATURE_EDITOR_SAVE_POOL":
+      case "CREATURE_EDITOR_DELETE_POOL":
+      case "CREATURE_EDITOR_ACTION": {
+        if (!currentPlayer) return;
+        // Permission is re-checked on every editor packet, not just on /ce.
+        if (!creatures.canUseEditor(currentPlayer)) {
+          sendPacket(wt, packetManager.notify({ message: "You don't have permission to use the creature editor." }));
+          break;
+        }
+        const result = await creatures.handleEditorPacket(currentPlayer, type, data);
+        if (result.kind === "data") {
+          sendPacket(wt, packetManager.creatureEditorData(result.data));
+          break;
+        }
+        if (result.kind === "goto" && result.goto) {
+          const destMap = String(result.goto.map).replace(".json", "");
+          const currentMap = String(currentPlayer.location?.map ?? "").replace(".json", "");
+          if (destMap === currentMap) {
+            // Already on that map: move there like an admin teleport, without
+            // reloading the map (a reload wipes everything the client shows).
+            const direction = currentPlayer.location.position?.direction || "down";
+            currentPlayer.location.position = {
+              ...currentPlayer.location.position,
+              x: Math.round(Number(result.goto.x)),
+              y: Math.round(Number(result.goto.y)),
+              direction,
+            };
+            globalStateRevision++;
+            if (shouldUpdateAOI(currentPlayer)) {
+              await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
+            }
+            broadcastToAOI(currentPlayer, packetManager.moveXY({
+              i: wt.data.id,
+              d: { x: currentPlayer.location.position.x, y: currentPlayer.location.position.y, dr: direction },
+              r: globalStateRevision,
+              s: currentPlayer.isStealth ? 1 : 0,
+            }), true);
+          } else {
+            await teleportPlayerWrapper(currentPlayer, result.goto.map, result.goto.x, result.goto.y);
+          }
+          sendPacket(wt, packetManager.creatureEditorResult({ ok: true, errors: [], action: type }));
+          break;
+        }
+        if (result.kind === "result") {
+          sendPacket(wt, packetManager.creatureEditorResult({ ok: result.ok, errors: result.errors, id: result.id, action: type }));
+          if (result.ok) {
+            const updated = packetManager.creatureEditorUpdated({ by: currentPlayer.username });
+            for (const viewerId of creatures.editorViewerIds()) {
+              if (viewerId === currentPlayer.id) continue;
+              const viewer = playerCache.get(viewerId);
+              if (viewer?.wt) sendPacket(viewer.wt, updated);
+            }
+          }
+        }
+        break;
+      }
+      case "ITEM_EDITOR_LIST":
+      case "ITEM_EDITOR_SEARCH":
+      case "ITEM_EDITOR_SAVE":
+      case "ITEM_EDITOR_DELETE": {
+        if (!currentPlayer) return;
+        // Permission is re-checked on every editor packet, not just on /ie.
+        if (!itemEditor.canUseEditor(currentPlayer)) {
+          sendPacket(wt, packetManager.notify({ message: "You don't have permission to use the item editor." }));
+          break;
+        }
+        const result = await itemEditor.handleEditorPacket(type, data);
+        if (result.kind === "data") {
+          sendPacket(wt, packetManager.itemEditorData(result.data));
+          break;
+        }
+        if (result.kind === "search") {
+          sendPacket(wt, packetManager.itemEditorResults(result.data));
+          break;
+        }
+        sendPacket(wt, packetManager.itemEditorResult({ ok: result.ok, errors: result.errors, name: result.name, action: type }));
+        if (result.ok) {
+          // Items are cached per process; tell every other editor to reload.
+          const updated = packetManager.itemEditorUpdated({ by: currentPlayer.username });
+          for (const other of Object.values(playerCache.list()) as any[]) {
+            if (!other?.wt || other.id === currentPlayer.id) continue;
+            if (itemEditor.canUseEditor(other)) sendPacket(other.wt, updated);
+          }
+        }
+        break;
+      }
+      case "CREATURE_DEBUG_SUBSCRIBE": {
+        if (!currentPlayer) return;
+        if (!creatures.canUseEditor(currentPlayer)) return;
+        creatures.setDebugSubscription(currentPlayer.id, !!(data as any)?.on);
+        break;
+      }
+      case "CREATURE_LOOT":
+      case "CREATURE_LOOT_TAKE": {
+        if (!currentPlayer) return;
+        if (currentPlayer.isDead || currentPlayer.isGhost || currentPlayer.isGuest) return;
+        const creatureId = Number((data as any)?.id);
+        if (!Number.isFinite(creatureId)) return;
+        const lootErrors: Record<string, string> = {
+          not_found: "Corpse not found.",
+          too_far: "You are too far away to loot that.",
+          not_allowed: "You don't have permission to loot that corpse.",
+          empty: "There is nothing to loot.",
+        };
+        if (type === "CREATURE_LOOT") {
+          const opened = creatures.openCorpseFor(currentPlayer, creatureId);
+          if (typeof opened === "string") {
+            sendPacket(wt, packetManager.notify({ message: lootErrors[opened] }));
+            break;
+          }
+          sendPacket(wt, packetManager.creatureLootContents({ id: creatureId, items: opened.items, copper: opened.copper }));
+          break;
+        }
+        const rawIndices = (data as any)?.indices;
+        const indices = Array.isArray(rawIndices) ? rawIndices.map(Number).filter(Number.isFinite) : null;
+        const result = await creatures.takeCorpseLootFor(currentPlayer, creatureId, indices);
+        if (typeof result === "string") {
+          sendPacket(wt, packetManager.notify({ message: lootErrors[result] }));
+          break;
+        }
+        if (result.taken.length > 0) {
+          currentPlayer.inventory = await inventory.get(currentPlayer.username);
+          playerCache.set(currentPlayer.id, currentPlayer);
+          sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
+        }
+        break;
+      }
       case "HOTBAR": {
         if (!currentPlayer) return;
         // Corpses and ghosts cannot cast.
         if (currentPlayer.isDead || currentPlayer.isGhost) return;
+        // GM stealth is non-interactive: an invisible admin casting would hit
+        // things (AoE, ground zones, projectiles) while nothing can see or fight
+        // back, and the visuals would give the admin away anyway.
+        if (currentPlayer.isStealth) return;
         if (currentPlayer.isGuest) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: "Please create an account to use that feature.",
             })
@@ -3465,16 +3503,14 @@ export default async function packetReceiver(
         }
 
         const spell_identifier = (data as any).spell;
-        const targetId = (data as any).target?.id;
-        const isEntityRequest = (data as any).entity === true;
-
-        log.debug(`[ATTACK] Spell cast request - spell=${spell_identifier}, targetId=${targetId}, isEntityRequest=${isEntityRequest}`);
+        let targetId = (data as any).target?.id;
+        log.debug(`[ATTACK] Spell cast request - spell=${spell_identifier}, targetId=${targetId}`);
 
         const spell = await spells.find(spell_identifier);
         const spell_id = spell?.id;
         if (!spell || !spell_id) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "Invalid spell selected." })
           );
           break;
@@ -3482,37 +3518,42 @@ export default async function packetReceiver(
 
         if (!spell_identifier) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "No spell selected." })
           );
           break;
         }
 
         if (!currentPlayer.learnedSpells?.[spell.name]) {
-          sendPacket(ws, packetManager.notify({ message: "You have not learned this spell." }));
+          sendPacket(wt, packetManager.notify({ message: "You have not learned this spell." }));
           return;
+        }
+
+        if ((data as any).creature === true) {
+          // As in WoW: a friendly spell (a heal, or harmless effects only) cast
+          // with an enemy selected lands on the caster instead of failing.
+          const creatureSpellValue = Number(spell.damage) || 0;
+          const friendlySpell = creatureSpellValue < 0 ||
+            (creatureSpellValue === 0 && Array.isArray(spell.effects) && spell.effects.length > 0 && !spellHasHostileEffects(spell));
+          // An AoE centred on the caster (Flamestrike-style) ignores the
+          // selection: the normal cast hits every player and creature around
+          // the caster, so the selected creature is not needed.
+          const casterCentredAoe = (Number(spell.aoe_radius) || 0) > 0 && spell.ground_aoe !== 1;
+          if (!friendlySpell && !casterCentredAoe) {
+            await castSpellOnCreature(wt, currentPlayer, spell, Number(targetId));
+            return;
+          }
+          targetId = currentPlayer.id;
         }
 
         log.debug(`[ATTACK] Looking for target ID: ${targetId}`);
         let target = null;
 
-        if (isEntityRequest) {
-          // Looking for an entity target (from in-memory cache)
-          log.debug(`[ATTACK] Entity request detected, looking in entity cache...`);
-          target = entityCache.getById(targetId);
-          if (target) {
-            log.debug(`[ATTACK] Found target as entity ${target.id} with aggro_type=${target.aggro_type}`);
-          } else {
-            log.debug(`[ATTACK] Entity target not found in cache: ${targetId}`);
-          }
-        } else {
-          // Looking for a player target
-          target = playerCache.get(targetId);
-          if (target) {
-            log.debug(`[ATTACK] Found target as player: ${target.username}`);
-          } else if (targetId) {
-            log.debug(`[ATTACK] Player target not found in cache: ${targetId}`);
-          }
+        target = playerCache.get(targetId);
+        if (target) {
+          log.debug(`[ATTACK] Found target as player: ${target.username}`);
+        } else if (targetId) {
+          log.debug(`[ATTACK] Player target not found in cache: ${targetId}`);
         }
 
         if (!target && !targetId) {
@@ -3522,9 +3563,9 @@ export default async function packetReceiver(
         }
 
         // Ghosts cannot be targeted or damaged.
-        if (target && !isEntityRequest && target.isGhost) {
+        if (target && target.isGhost) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "You cannot attack ghosts." })
           );
           return;
@@ -3537,7 +3578,7 @@ export default async function packetReceiver(
         if (!isAoeSpell && !isGroundAoe && !target?.id) {
           log.debug(`[ATTACK] Player ${currentPlayer.username} attempted attack with invalid target: ${targetId}`);
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "Target not found." })
           );
           return;
@@ -3546,7 +3587,7 @@ export default async function packetReceiver(
         // Only guests check applies to players, not entities
         if (target.isGuest) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "You cannot attack guests." })
           );
           return;
@@ -3554,7 +3595,6 @@ export default async function packetReceiver(
 
         // These are re-evaluated later if the target changes (auto-self-cast)
         let isSelf = (target.id === currentPlayer.id) || (currentPlayer.username === target.username);
-        let isEntityTarget = target.aggro_type !== undefined && target.health !== undefined && !target.stats;
 
         const freshPlayerForCooldown = playerCache.get(currentPlayer.id);
         if (!freshPlayerForCooldown) return;
@@ -3575,7 +3615,7 @@ export default async function packetReceiver(
         if (currentPlayer.isVanished && spell_damage <= 0 && !spellIsHostileEffect) {
           const hasVanishEffect = Array.isArray(spell?.effects) && spell.effects.some((e: SpellEffect) => e.type === "vanish");
           if (!hasVanishEffect) {
-            sendPacket(ws, packetManager.notify({ message: "You cannot cast beneficial spells while vanished." }));
+            sendPacket(wt, packetManager.notify({ message: "You cannot cast beneficial spells while vanished." }));
             listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "vanished" } as any);
             return;
           }
@@ -3583,15 +3623,9 @@ export default async function packetReceiver(
 
         currentPlayer.interruptableSpell = !spell?.can_move || false;
 
+        // A stand-still spell pressed while moving simply does nothing: it
+        // never started, so there is no cast to interrupt and nothing to show.
         if (!spell?.can_move && currentPlayer.moving) {
-
-          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-          broadcastCastToMap(
-            playersInMap,
-            currentPlayer.id,
-            packetManager.castSpell({ id: currentPlayer.id, spell: 'interrupted', time: 1 })
-          );
-          currentPlayer.lastInterruptTime = performance.now();
 
           listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "moving" } as any);
           return;
@@ -3600,7 +3634,8 @@ export default async function packetReceiver(
         const freshPlayerForMana = playerCache.get(currentPlayer.id);
         if (!freshPlayerForMana) return;
 
-        const actualManaCost = Math.floor(freshPlayerForMana.stats.total_max_stamina * (spell_mana / 100));
+        // WoW-style: a percentage of base stamina (level only, not gear).
+        const actualManaCost = spellManaCost(spell_mana, freshPlayerForMana.stats);
         if ((freshPlayerForMana.stats.stamina || 0) < actualManaCost) {
           listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "mana" } as any);
           return;
@@ -3651,7 +3686,7 @@ export default async function packetReceiver(
           }
 
           globalStateRevision++;
-          await sendPositionAnimation(ws, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, true);
+          await sendPositionAnimation(wt, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, true);
 
           const aoePlayersInMap = filterPlayersByMap(currentPlayer.location.map);
           broadcastCastToMap(
@@ -3694,7 +3729,7 @@ export default async function packetReceiver(
           playerCache.set(currentPlayer.id, currentPlayer);
 
           globalStateRevision++;
-          await sendPositionAnimation(ws, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, false);
+          await sendPositionAnimation(wt, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, false);
 
           // Mana deduction
           const aoeManaCheck = playerCache.get(currentPlayer.id);
@@ -3717,13 +3752,13 @@ export default async function packetReceiver(
 
           // Send a projectile packet from caster to self as a visual indicator
           aoePlayersInMap.forEach((p) => {
-            sendPacketBestEffort(p.ws, packetManager.projectile({
+            sendPacketBestEffort(p.wt, packetManager.projectile({
               id: currentPlayer.id, time: 0.3, target_id: currentPlayer.id,
               spell: spell.name, icon: getIconUrl(spell.icon), entity: false
             }));
           });
 
-          const splashTargets: Array<{ target: any; isEntity: boolean }> = [];
+          const splashTargets: Array<{ target: any }> = [];
           const aoeIsHeal = spell_damage < 0;
           for (const p of aoePlayersInMap) {
             if (p.id === currentPlayer.id && !aoeIsHeal) continue;
@@ -3741,36 +3776,22 @@ export default async function packetReceiver(
             const pPos = p.location?.position;
             if (!pPos) continue;
             const dist = Math.sqrt((pPos.x - aoeX) ** 2 + (pPos.y - aoeY) ** 2);
-            if (dist <= aoeRadius) splashTargets.push({ target: p, isEntity: false });
+            if (dist <= aoeRadius) splashTargets.push({ target: p });
           }
 
-          // Entities don't receive healing AoE
-          if (!aoeIsHeal) {
-          const aoeMapEntities = entityCache.getByMap(currentPlayer.location.map);
-          for (const e of aoeMapEntities) {
-            if (e.aggro_type === 'friendly') continue;
-            const ePos = e.position;
-            if (!ePos) continue;
-            const dist = Math.sqrt((ePos.x - aoeX) ** 2 + (ePos.y - aoeY) ** 2);
-            if (dist <= aoeRadius) {
-              const entityState = entityAI.getEntityAIState(String(e.id));
-              if (entityState?.combatState === 'returning') continue;
-              splashTargets.push({ target: e, isEntity: true });
-            }
-          }
-          }
+          // Creatures don't receive healing AoE
+          if (!aoeIsHeal) splashCreatures(currentPlayer, spell, aoeX, aoeY, aoeRadius, null);
 
           const attackerDamageBonus = currentPlayer.stats.stat_damage || 0;
           for (const splash of splashTargets) {
             const st = splash.target;
-            const si = splash.isEntity;
-            const splashMin = spell_damage < 0 ? spell_damage - (playerLevel - 1) * 2 : spell_damage + (playerLevel - 1) * 2;
-            const splashMax = spell_damage < 0 ? spell_damage - (playerLevel - 1) * 5 : spell_damage + (playerLevel - 1) * 5;
-            let splashDmg = Math.floor(Math.random() * (Math.abs(splashMax - splashMin) + 1)) + Math.min(splashMin, splashMax);
-            splashDmg += attackerDamageBonus;
+            // Heals: WoW-style roll (negative = healing); damage: level roll + damage stat.
+            let splashDmg = spell_damage < 0
+              ? -rollHeal(spell_damage, currentPlayer.stats, spell.cast_time).amount
+              : Math.floor(Math.random() * ((playerLevel - 1) * 3 + 1)) + spell_damage + (playerLevel - 1) * 2 + attackerDamageBonus;
             if (spell_damage === 0) splashDmg = 0;
 
-            if (splashDmg > 0 && !si) {
+            if (splashDmg > 0) {
               const av = st.stats?.stat_avoidance || 0;
               if (Math.random() * 100 < av) splashDmg = 0;
               if (splashDmg > 0) {
@@ -3779,28 +3800,7 @@ export default async function packetReceiver(
               }
             }
 
-            if (si) {
-              entityAI.applyDamageToEntity(st, splashDmg, currentPlayer);
-              if (st.health < 0) st.health = 0;
-              entityCache.updateHealth(st.id, st.health);
-              if (spell_damage !== 0) {
-              broadcastToAOIBestEffortAtPosition(
-                st.position.x,
-                st.position.y,
-                currentPlayer.location.map,
-                packetManager.updateStats({ id: ws.data.id, target: st.id, stats: { health: st.health, total_max_health: st.max_health }, isCrit: false, damage: splashDmg, entity: true })
-              );
-              }
-              if (st.health <= 0) {
-                aoePlayersInMap.forEach((pp) => sendPacket(pp.ws, packetManager.despawnEntity(st.id, 30)));
-                entityCache.remove(st.id);
-                dots.clearEntityDots(st.id);
-              } else {
-                if (!(spell_damage > 0 && splashDmg === 0)) {
-                spellEffects.applySpellEffects(spell, currentPlayer, st, () => {}, () => {});
-                }
-              }
-            } else {
+            {
               let toHealth = splashDmg;
               if (splashDmg > 0) {
                 const ab = spellEffects.consumeBarrier(st, splashDmg);
@@ -3818,7 +3818,7 @@ export default async function packetReceiver(
               } else {
                 if (!(spell_damage > 0 && splashDmg === 0)) {
                 await spellEffects.applySpellEffects(spell, currentPlayer, st,
-                  (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.ws, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
+                  (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.wt, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
                   (pp: any) => spellEffects.broadcastEffectsUpdate(pp)
                 );
                 }
@@ -3826,7 +3826,7 @@ export default async function packetReceiver(
                 broadcastStatsUpdateToAOI(
                   st,
                   currentPlayer,
-                  packetManager.updateStats({ id: ws.data.id, target: st.id, stats: st.stats, isCrit: false, damage: splashDmg })
+                  packetManager.updateStats({ id: wt.data.id, target: st.id, stats: st.stats, isCrit: false, damage: splashDmg })
                 );
                 }
               }
@@ -3900,7 +3900,7 @@ export default async function packetReceiver(
           const groundDuration = spell.ground_duration || 0;
 
           globalStateRevision++;
-          await sendPositionAnimation(ws, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, true);
+          await sendPositionAnimation(wt, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, true);
 
           const groundPlayersInMap = filterPlayersByMap(currentPlayer.location.map);
           broadcastCastToMap(
@@ -3923,7 +3923,7 @@ export default async function packetReceiver(
           if (groundUpdatedPlayer && groundUpdatedPlayer.manualSpellCancel && groundUpdatedPlayer.manualSpellCancel >= groundCastStartTime) {
             // Cancel: clear preview
             groundPlayersInMap.forEach((p) => {
-              sendPacket(p.ws, packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" }));
+              sendPacket(p.wt, packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" }));
             });
             if (groundUpdatedPlayer.spellCooldowns) {
               delete groundUpdatedPlayer.spellCooldowns[spell_id];
@@ -3940,7 +3940,7 @@ export default async function packetReceiver(
 
           if (!spell.can_move && !playerCache.get(currentPlayer.id)?.casting) {
             groundPlayersInMap.forEach((p) => {
-              sendPacket(p.ws, packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" }));
+              sendPacket(p.wt, packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" }));
             });
             const resetPlayer = playerCache.get(currentPlayer.id);
             if (resetPlayer && resetPlayer.spellCooldowns) {
@@ -3952,7 +3952,7 @@ export default async function packetReceiver(
 
           // Clear casting preview
           groundPlayersInMap.forEach((p) => {
-            sendPacket(p.ws, packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" }));
+            sendPacket(p.wt, packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" }));
           });
 
           currentPlayer.casting = false;
@@ -3960,7 +3960,7 @@ export default async function packetReceiver(
           playerCache.set(currentPlayer.id, currentPlayer);
 
           globalStateRevision++;
-          await sendPositionAnimation(ws, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, false);
+          await sendPositionAnimation(wt, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, false);
 
           // Mana deduction
           const groundManaCheck = playerCache.get(currentPlayer.id);
@@ -3993,7 +3993,7 @@ export default async function packetReceiver(
             const travelTime = Math.max(0.4, Math.min(throwDist / throwSpeed, 2.5));
 
             groundPlayersInMap.forEach((p) => {
-              sendPacketBestEffort(p.ws, packetManager.projectile({
+              sendPacketBestEffort(p.wt, packetManager.projectile({
                 id: currentPlayer.id,
                 time: travelTime,
                 target_id: currentPlayer.id,
@@ -4033,7 +4033,7 @@ export default async function packetReceiver(
             });
           } else {
             // Instant burst at ground position (no lingering)
-            const splashTargets: Array<{ target: any; isEntity: boolean }> = [];
+            const splashTargets: Array<{ target: any }> = [];
             for (const p of groundPlayersInMap) {
               if (p.isGuest) continue;
               const inParty = currentPlayer?.party?.includes(p.username) || false;
@@ -4045,35 +4045,21 @@ export default async function packetReceiver(
               const pPos = p.location?.position;
               if (!pPos) continue;
               const dist = Math.sqrt((pPos.x - groundX) ** 2 + (pPos.y - groundY) ** 2);
-              if (dist <= groundAoERadius) splashTargets.push({ target: p, isEntity: false });
+              if (dist <= groundAoERadius) splashTargets.push({ target: p });
             }
 
-            if (!isHeal) {
-              const groundMapEntities = entityCache.getByMap(currentPlayer.location.map);
-              for (const e of groundMapEntities) {
-                if (e.aggro_type === 'friendly') continue;
-                const ePos = e.position;
-                if (!ePos) continue;
-                const dist = Math.sqrt((ePos.x - groundX) ** 2 + (ePos.y - groundY) ** 2);
-                if (dist <= groundAoERadius) {
-                  const entityState = entityAI.getEntityAIState(String(e.id));
-                  if (entityState?.combatState === 'returning') continue;
-                  splashTargets.push({ target: e, isEntity: true });
-                }
-              }
-            }
+            if (!isHeal) splashCreatures(currentPlayer, spell, groundX, groundY, groundAoERadius, null);
 
             const attackerDamageBonus = currentPlayer.stats.stat_damage || 0;
             for (const splash of splashTargets) {
               const st = splash.target;
-              const si = splash.isEntity;
-              const splashMin = spell_damage < 0 ? spell_damage - (playerLevel - 1) * 2 : spell_damage + (playerLevel - 1) * 2;
-              const splashMax = spell_damage < 0 ? spell_damage - (playerLevel - 1) * 5 : spell_damage + (playerLevel - 1) * 5;
-              let splashDmg = Math.floor(Math.random() * (Math.abs(splashMax - splashMin) + 1)) + Math.min(splashMin, splashMax);
-              splashDmg += attackerDamageBonus;
+              // Heals: WoW-style roll (negative = healing); damage: level roll + damage stat.
+              let splashDmg = spell_damage < 0
+                ? -rollHeal(spell_damage, currentPlayer.stats, spell.cast_time).amount
+                : Math.floor(Math.random() * ((playerLevel - 1) * 3 + 1)) + spell_damage + (playerLevel - 1) * 2 + attackerDamageBonus;
               if (spell_damage === 0) splashDmg = 0;
 
-              if (splashDmg > 0 && !si) {
+              if (splashDmg > 0) {
                 const av = st.stats?.stat_avoidance || 0;
                 if (Math.random() * 100 < av) splashDmg = 0;
                 if (splashDmg > 0) {
@@ -4082,28 +4068,7 @@ export default async function packetReceiver(
                 }
               }
 
-              if (si) {
-                entityAI.applyDamageToEntity(st, splashDmg, currentPlayer);
-                if (st.health < 0) st.health = 0;
-                entityCache.updateHealth(st.id, st.health);
-                if (spell_damage !== 0) {
-                  broadcastToAOIBestEffortAtPosition(
-                    st.position.x,
-                    st.position.y,
-                    currentPlayer.location.map,
-                    packetManager.updateStats({ id: ws.data.id, target: st.id, stats: { health: st.health, total_max_health: st.max_health }, isCrit: false, damage: splashDmg, entity: true })
-                  );
-                }
-                if (st.health <= 0) {
-                  groundPlayersInMap.forEach((pp) => sendPacket(pp.ws, packetManager.despawnEntity(st.id, 30)));
-                  entityCache.remove(st.id);
-                  dots.clearEntityDots(st.id);
-                } else {
-                  if (!(spell_damage > 0 && splashDmg === 0)) {
-                    spellEffects.applySpellEffects(spell, currentPlayer, st, () => {}, () => {});
-                  }
-                }
-              } else {
+              {
                 let toHealth = splashDmg;
                 if (splashDmg > 0) {
                   const ab = spellEffects.consumeBarrier(st, splashDmg);
@@ -4121,7 +4086,7 @@ export default async function packetReceiver(
                 } else {
                   if (!(spell_damage > 0 && splashDmg === 0)) {
                     await spellEffects.applySpellEffects(spell, currentPlayer, st,
-                      (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.ws, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
+                      (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.wt, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
                       (pp: any) => spellEffects.broadcastEffectsUpdate(pp)
                     );
                   }
@@ -4129,7 +4094,7 @@ export default async function packetReceiver(
                     broadcastStatsUpdateToAOI(
                       st,
                       currentPlayer,
-                      packetManager.updateStats({ id: ws.data.id, target: st.id, stats: st.stats, isCrit: false, damage: splashDmg })
+                      packetManager.updateStats({ id: wt.data.id, target: st.id, stats: st.stats, isCrit: false, damage: splashDmg })
                     );
                   }
                 }
@@ -4158,7 +4123,7 @@ export default async function packetReceiver(
 
             // Visual projectile from caster to ground position
             groundPlayersInMap.forEach((p) => {
-              sendPacketBestEffort(p.ws, packetManager.projectile({
+              sendPacketBestEffort(p.wt, packetManager.projectile({
                 id: currentPlayer.id, time: 0.3, target_id: currentPlayer.id,
                 spell: spell.name, icon: getIconUrl(spell.icon), entity: false
               }));
@@ -4181,7 +4146,7 @@ export default async function packetReceiver(
         if (isInParty && (spell_damage > 0 || spellIsHostileEffect)) {
           if (isSelf) return;
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: "You cannot attack your party members",
             })
@@ -4192,92 +4157,40 @@ export default async function packetReceiver(
         if ((spell_damage < 0 || (spell_damage === 0 && hasEffects && !spellIsHostileEffect)) && target.id !== currentPlayer.id && !isInParty) {
           target = currentPlayer;
           isSelf = true;
-          isEntityTarget = false;
         }
 
         const playersInMap = filterPlayersByMap(currentPlayer.location.map);
 
         const playersInAttackRange = filterPlayersByDistance(
-          ws,
+          wt,
           spell_range,
           currentPlayer.location.map
         );
 
-        // Determine if target is an entity or a player
-        isEntityTarget = target.aggro_type !== undefined && target.health !== undefined && !target.stats;
+        log.debug(`[ATTACK] Identified target as player. username=${target.username}`);
 
-        if (isEntityTarget) {
-          log.debug(`[ATTACK] Identified target as entity. aggro_type=${target.aggro_type}, health=${target.health}, has_stats=${!!target.stats}`);
-
-          // Prevent casting on friendly entities
-          if (target.aggro_type === 'friendly') {
-            return;
-          }
-        } else {
-          log.debug(`[ATTACK] Identified target as player. username=${target.username}`);
+        // Casting at someone behind you turns you to face them (WoW) rather
+        // than failing the facing check below.
+        if (target.id !== currentPlayer.id && target.location?.position) {
+          faceToward(currentPlayer, Number(target.location.position.x), Number(target.location.position.y));
         }
 
-        let canAttack: any = { value: true };
-
-        if (isEntityTarget) {
-          // For entity targets, check map first
-          if (target.map !== currentPlayer.location.map) {
-            canAttack = { value: false, reason: "different_map" };
-          } else {
-            // Check if entity is in returning state (invulnerable)
-            const entityState = entityAI.getEntityAIState(target.id);
-            if (entityState && entityState.combatState === 'returning') {
-              canAttack = { value: false, reason: "entity_returning" };
-            } else {
-              // Convert entity to player-like format for canAttack
-              const entityAsPlayer = {
-                ...target,
-                location: {
-                  map: target.map,
-                  position: target.position
-                },
-                stats: { health: target.health }
-              };
-              canAttack = await player.canAttack(currentPlayer, entityAsPlayer,
-                {
-                  width: 24,
-                  height: 40,
-                },
-                spell_range
-              );
-            }
-          }
-        } else {
-          // Perform canAttack check for player targets
-          canAttack = await player.canAttack(currentPlayer, target,
-            {
-              width: 24,
-              height: 40,
-            },
-            spell_range
-          );
-        }
+        const canAttack: any = await player.canAttack(currentPlayer, target,
+          {
+            width: 24,
+            height: 40,
+          },
+          spell_range
+        );
         log.debug(`[ATTACK] canAttack result: ${JSON.stringify(canAttack)}`);
 
-        // Handle both player targets (location.position) and entity targets (position)
-        const targetX = target.location?.position?.x || target.position?.x || 0;
-        const targetY = target.location?.position?.y || target.position?.y || 0;
+        const targetX = target.location?.position?.x || 0;
+        const targetY = target.location?.position?.y || 0;
 
         const distance = Math.sqrt(
           Math.pow(currentPlayer.location.position.x - targetX, 2) +
           Math.pow(currentPlayer.location.position.y - targetY, 2)
         );
-
-        // Check range for entities and players
-        log.debug(`[ATTACK] Distance to target: ${distance}, spell_range: ${spell_range}`);
-        if (isEntityTarget && distance > spell_range) {
-          log.debug(`[ATTACK] Entity target out of range. distance=${distance} > spell_range=${spell_range}`);
-          sendPacket(
-            ws,
-            packetManager.notify({ message: "Target is out of range" })
-          );
-          return;
-        }
 
         isSelf = (target.id === currentPlayer.id) || (currentPlayer.username === target.username);
         
@@ -4287,37 +4200,31 @@ export default async function packetReceiver(
         if (!canAttack?.value) {
           if (canAttack?.reason == "nopvp") {
             sendPacket(
-              ws,
+              wt,
               packetManager.notify({ message: "You are not in a PvP area" })
             );
           }
           if (canAttack?.reason == "path_blocked") {
             sendPacket(
-              ws,
+              wt,
               packetManager.notify({ message: "Target is not in line of sight" })
             );
           }
           if (canAttack?.reason == "range") {
             sendPacket(
-              ws,
+              wt,
               packetManager.notify({ message: "Target is out of range" })
-            );
-          }
-          if (canAttack?.reason == "entity_returning") {
-            sendPacket(
-              ws,
-              packetManager.notify({ message: "The entity is returning to its home" })
             );
           }
           listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: canAttack?.reason || "unknown" } as any);
           return;
-        } else if (!isEntityTarget && !playersInAttackRange.includes(target)) {
+        } else if (!playersInAttackRange.includes(target)) {
           return;
         }
 
         const isChargeSpell = spell?.charge_distance && spell.charge_distance > 0;
         const isTeleportBehind = spell?.teleport_behind === 1;
-        if (isChargeSpell && !isSelf && !isEntityTarget) {
+        if (isChargeSpell && !isSelf) {
           const cPos = currentPlayer.location.position;
           const cx = typeof cPos === 'string' ? Number(cPos.split(',')[0]) : cPos.x;
           const cy = typeof cPos === 'string' ? Number(cPos.split(',')[1]) : cPos.y;
@@ -4332,25 +4239,14 @@ export default async function packetReceiver(
 
           const losCharge = await hasLineOfSight(cx, cy, landX, landY, currentPlayer.location.map, (spell.charge_distance ?? 0) + 50);
           if (!losCharge) {
-            sendPacket(ws, packetManager.notify({ message: "Cannot charge - path blocked." }));
+            sendPacket(wt, packetManager.notify({ message: "Cannot charge - path blocked." }));
             if (currentPlayer.spellCooldowns) {
               delete currentPlayer.spellCooldowns[spell_id];
             }
             return;
           }
 
-          const dx2 = tx - landX;
-          const dy2 = ty - landY;
-          const ang = Math.atan2(dy2, dx2) * (180 / Math.PI);
-          let newDir = 'down';
-          if (ang >= -22.5 && ang < 22.5) newDir = 'right';
-          else if (ang >= 22.5 && ang < 67.5) newDir = 'downright';
-          else if (ang >= 67.5 && ang < 112.5) newDir = 'down';
-          else if (ang >= 112.5 && ang < 157.5) newDir = 'downleft';
-          else if (ang >= 157.5 || ang < -157.5) newDir = 'left';
-          else if (ang >= -157.5 && ang < -112.5) newDir = 'upleft';
-          else if (ang >= -112.5 && ang < -67.5) newDir = 'up';
-          else if (ang >= -67.5 && ang < -22.5) newDir = 'upright';
+          const newDir = directionToward(landX, landY, tx, ty);
 
           currentPlayer.location.position.x = landX;
           currentPlayer.location.position.y = landY;
@@ -4363,14 +4259,14 @@ export default async function packetReceiver(
             await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
           }
           const chargeMoveData = {
-            i: ws.data.id,
+            i: wt.data.id,
             d: { x: landX, y: landY, dr: newDir },
             r: globalStateRevision,
             s: currentPlayer.isStealth ? 1 : 0,
           };
           broadcastToAOI(currentPlayer, packetManager.moveXY(chargeMoveData), true);
 
-          await sendPositionAnimation(ws, newDir, false, false, "", undefined, globalStateRevision, false);
+          await sendPositionAnimation(wt, newDir, false, false, "", undefined, globalStateRevision, false);
 
           broadcastCastToMap(
             playersInMap,
@@ -4386,11 +4282,11 @@ export default async function packetReceiver(
               spellEffects.broadcastEffectsUpdate(currentPlayer);
             }
           }
-          listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target, isEntityTarget });
+          listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target, isEntityTarget: false });
 
           if (Array.isArray(spell.effects) && spell.effects.length > 0) {
             await spellEffects.applySpellEffects(spell, currentPlayer, target,
-              (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.ws, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
+              (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.wt, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
               (pp: any) => spellEffects.broadcastEffectsUpdate(pp)
             );
           }
@@ -4401,7 +4297,7 @@ export default async function packetReceiver(
           break;
         }
 
-        if (isTeleportBehind && !isSelf && !isEntityTarget) {
+        if (isTeleportBehind && !isSelf) {
           const tPos = target.location.position;
           const tx = typeof tPos === 'string' ? Number(tPos.split(',')[0]) : tPos.x;
           const ty = typeof tPos === 'string' ? Number(tPos.split(',')[1]) : tPos.y;
@@ -4423,7 +4319,7 @@ export default async function packetReceiver(
 
           const losBehind = await hasLineOfSight(tx, ty, landX, landY, currentPlayer.location.map, 60);
           if (!losBehind) {
-            sendPacket(ws, packetManager.notify({ message: "Cannot teleport behind target - path blocked." }));
+            sendPacket(wt, packetManager.notify({ message: "Cannot teleport behind target - path blocked." }));
             if (currentPlayer.spellCooldowns) {
               delete currentPlayer.spellCooldowns[spell_id];
             }
@@ -4441,14 +4337,14 @@ export default async function packetReceiver(
             await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
           }
           const tpMoveData = {
-            i: ws.data.id,
+            i: wt.data.id,
             d: { x: landX, y: landY, dr: offset.face },
             r: globalStateRevision,
             s: currentPlayer.isStealth ? 1 : 0,
           };
           broadcastToAOI(currentPlayer, packetManager.moveXY(tpMoveData), true);
 
-          await sendPositionAnimation(ws, offset.face, false, false, "", undefined, globalStateRevision, false);
+          await sendPositionAnimation(wt, offset.face, false, false, "", undefined, globalStateRevision, false);
 
           broadcastCastToMap(
             playersInMap,
@@ -4464,11 +4360,11 @@ export default async function packetReceiver(
               spellEffects.broadcastEffectsUpdate(currentPlayer);
             }
           }
-          listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target, isEntityTarget });
+          listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target, isEntityTarget: false });
 
           if (Array.isArray(spell.effects) && spell.effects.length > 0) {
             await spellEffects.applySpellEffects(spell, currentPlayer, target,
-              (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.ws, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
+              (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.wt, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
               (pp: any) => spellEffects.broadcastEffectsUpdate(pp)
             );
           }
@@ -4503,7 +4399,7 @@ export default async function packetReceiver(
 
         globalStateRevision++;
         await sendPositionAnimation(
-          ws,
+          wt,
           currentPlayer.location.position?.direction || "down",
           currentPlayer.moving || false,
           false,
@@ -4538,7 +4434,7 @@ export default async function packetReceiver(
           delete updatedPlayer.manualSpellCancel;
           updatedPlayer.casting = false;
           playerCache.set(updatedPlayer.id, updatedPlayer);
-          // Sync back to currentPlayer so ws.data stays current
+          // Sync back to currentPlayer so wt.data stays current
           currentPlayer.spellCooldowns = updatedPlayer.spellCooldowns;
           currentPlayer.manualSpellCancel = undefined;
           currentPlayer.casting = false;
@@ -4560,9 +4456,16 @@ export default async function packetReceiver(
         currentPlayer.mounted = false;
         playerCache.set(currentPlayer.id, currentPlayer);
 
+        // The target may have moved behind the caster during the cast: face
+        // them again so the completion check below does not fail on facing.
+        const targetNow = playerCache.get(target.id) ?? target;
+        if (!isSelf && targetNow.location?.position) {
+          faceToward(currentPlayer, Number(targetNow.location.position.x), Number(targetNow.location.position.y));
+        }
+
         globalStateRevision++;
         await sendPositionAnimation(
-          ws,
+          wt,
           currentPlayer.location.position?.direction || "down",
           currentPlayer.moving || false,
           false,
@@ -4575,37 +4478,13 @@ export default async function packetReceiver(
         let canAttack2: any = { value: true };
 
         if (spell.cast_time > 0) {
-          if (isEntityTarget) {
-            // Check if entity is still in returning state
-            const entityState = entityAI.getEntityAIState(target.id);
-            if (entityState && entityState.combatState === 'returning') {
-              canAttack2 = { value: false, reason: "entity_returning" };
-            } else {
-              const entityAsPlayer = {
-                ...target,
-                location: {
-                  map: target.map,
-                  position: target.position
-                },
-                stats: { health: target.health }
-              };
-              canAttack2 = await player.canAttack(currentPlayer, entityAsPlayer,
-                {
-                  width: 24,
-                  height: 40,
-                },
-                spell_range
-              );
-            }
-          } else {
-            canAttack2 = await player.canAttack(currentPlayer, target,
-              {
-                width: 24,
-                height: 40,
-              },
-              spell_range
-            );
-          }
+          canAttack2 = await player.canAttack(currentPlayer, target,
+            {
+              width: 24,
+              height: 40,
+            },
+            spell_range
+          );
         }
 
         if (canAttack2?.reason == "nopvp") {
@@ -4676,23 +4555,6 @@ export default async function packetReceiver(
           return;
         }
 
-        if (canAttack2?.reason == "entity_returning") {
-          broadcastCastToMap(
-            playersInMap,
-            currentPlayer.id,
-            packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
-          );
-
-          const resetPlayer = playerCache.get(currentPlayer.id);
-          if (resetPlayer && resetPlayer.spellCooldowns) {
-            delete resetPlayer.spellCooldowns[spell_id];
-            cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
-            playerCache.set(resetPlayer.id, resetPlayer);
-          }
-          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "entity_returning" } as any);
-          return;
-        }
-
         // If canAttack validation failed for any other reason, abort
         if (!canAttack2?.value) {
           const resetPlayer = playerCache.get(currentPlayer.id);
@@ -4710,14 +4572,14 @@ export default async function packetReceiver(
           const resolvedParticles = resolveSpellParticles(spell, liveParticleCache);
           playersInMap.forEach((player) => {
             sendPacketBestEffort(
-              player.ws,
+              player.wt,
               packetManager.projectile({
                 id: currentPlayer.id,
                 time: delay / 1000,
                 target_id: target.id,
                 spell: spell.name,
                 icon: getIconUrl(spell.icon),
-                entity: isEntityTarget,
+                entity: false,
                 particles: resolvedParticles,
               })
             );
@@ -4725,31 +4587,26 @@ export default async function packetReceiver(
         }
         await new Promise((resolve) => setTimeout(resolve, delay));
 
-        const minDamage = spell_damage < 0 ?
-          spell_damage - (playerLevel - 1) * 2 :
-          spell_damage + (playerLevel - 1) * 2;
-        const maxDamage = spell_damage < 0 ?
-          spell_damage - (playerLevel - 1) * 5 :
-          spell_damage + (playerLevel - 1) * 5;
-        const spellDamage = Math.floor(Math.random() * (Math.abs(maxDamage - minDamage) + 1)) + Math.min(minDamage, maxDamage);
-
         const attackerDamageBonus = currentPlayer.stats.stat_damage || 0;
-        const baseDamage = spellDamage + attackerDamageBonus;
-        const healingDamage = spellDamage < 0 ? spellDamage : 0;
-        const critChance = currentPlayer.stats.stat_critical_chance || 0;
-        const critDamage = currentPlayer.stats.stat_critical_damage || 0;
-        const critRoll = Math.random() * 100;
-        const isCrit = critRoll < critChance;
-
-        let finalDamage = healingDamage !== 0 ? healingDamage : baseDamage;
-        if (isCrit) {
-          finalDamage = Math.floor(healingDamage !== 0 ? healingDamage * (1 + critDamage / 100) : baseDamage * (1 + critDamage / 100));
+        let finalDamage: number;
+        let isCrit: boolean;
+        if (spell_damage < 0) {
+          // WoW-style heal: level roll + cast-time share of the damage stat,
+          // 150% on a crit. Negative = healing.
+          const heal = rollHeal(spell_damage, currentPlayer.stats, spell.cast_time);
+          finalDamage = -heal.amount;
+          isCrit = heal.isCrit;
+        } else {
+          const baseDamage = Math.floor(Math.random() * ((playerLevel - 1) * 3 + 1)) + spell_damage + (playerLevel - 1) * 2 + attackerDamageBonus;
+          const critDamage = currentPlayer.stats.stat_critical_damage || 0;
+          isCrit = Math.random() * 100 < (currentPlayer.stats.stat_critical_chance || 0);
+          finalDamage = isCrit ? Math.floor(baseDamage * (1 + critDamage / 100)) : baseDamage;
         }
 
         // Utility/effect-only spells (base damage 0) never deal damage and skip avoidance/armor
         if (spell_damage === 0) finalDamage = 0;
 
-        log.debug(`[ATTACK] Damage calculation: spell=${spell_damage}, bonus=${attackerDamageBonus}, base=${baseDamage}, crit=${isCrit}, final=${finalDamage}`);
+        log.debug(`[ATTACK] Damage calculation: spell=${spell_damage}, bonus=${attackerDamageBonus}, crit=${isCrit}, final=${finalDamage}`);
 
         if (finalDamage > 0) {
           const targetAvoidance = target.stats?.stat_avoidance || 0;
@@ -4783,56 +4640,7 @@ export default async function packetReceiver(
           currentPlayer.stats.stamina = 0;
         }
 
-        if (isEntityTarget) {
-          // Apply damage to entity using AI system with same calculation as players
-          log.debug(`[ATTACK] Applying ${finalDamage} damage to entity ${target.id}. Current health: ${target.health}`);
-          entityAI.applyDamageToEntity(target, finalDamage, currentPlayer);
-
-          log.debug(`[ATTACK] Entity health after damage: ${target.health}`);
-
-          // Clamp health to 0 if negative
-          if (target.health < 0) {
-            target.health = 0;
-          }
-
-          // Update entity health in cache only (not database - database is only updated on respawn/init)
-          entityCache.updateHealth(target.id, target.health);
-
-          // Broadcast entity damage to players whose AOI covers the entity
-          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-          log.debug(`[ATTACK] Broadcasting damage to ${playersInMap.length} players on map`);
-          broadcastToAOIBestEffortAtPosition(
-            target.position.x,
-            target.position.y,
-            currentPlayer.location.map,
-            packetManager.updateStats({
-              id: ws.data.id,
-              target: target.id,
-              stats: { health: target.health, total_max_health: target.max_health },
-              isCrit: isCrit,
-              damage: finalDamage,
-              entity: true,
-            })
-          );
-
-          // If entity died, broadcast despawn and remove from cache
-          if (target.health <= 0) {
-            log.debug(`[ATTACK] Entity ${target.id} died, broadcasting despawn`);
-            const respawnTime = 30; // 30 seconds respawn time
-            playersInMap.forEach((player) => {
-              sendPacket(
-                player.ws,
-                packetManager.despawnEntity(target.id, respawnTime)
-              );
-            });
-            // Remove entity from cache when despawned
-            entityCache.remove(target.id);
-            dots.clearEntityDots(target.id);
-          } else {
-            // Apply spell effects (e.g. damage over time) to surviving entities
-            await spellEffects.applySpellEffects(spell, currentPlayer, target, () => {}, () => {});
-          }
-        } else {
+        {
           // Apply damage to player target
           // Add if negative damage (healing) to current health, subtract positive damage
           // Positive damage is first absorbed by absorbtion, remainder hits health
@@ -4873,7 +4681,7 @@ export default async function packetReceiver(
               return true;
             });
             pls.forEach((pl: any) =>
-              sendPacket(pl.ws, packetManager.updateStats({ id: p.id, target: p.id, stats: p.stats }))
+              sendPacket(pl.wt, packetManager.updateStats({ id: p.id, target: p.id, stats: p.stats }))
             );
             sendStatsToPartyMembers(p.username, p.id, p.stats);
           };
@@ -4892,7 +4700,7 @@ export default async function packetReceiver(
               if (player.id === target.id) return;
               if (player.isAdmin) return;
               if (player.party?.includes(target.username)) return;
-              sendPacket(player.ws, packetManager.despawnPlayer(target.id));
+              sendPacket(player.wt, packetManager.despawnPlayer(target.id));
             });
           }
 
@@ -4902,7 +4710,7 @@ export default async function packetReceiver(
             target,
             currentPlayer,
             packetManager.updateStats({
-              id: ws.data.id,
+              id: wt.data.id,
               target: target.id,
               stats: target.stats,
               isCrit: isCrit,
@@ -4930,16 +4738,14 @@ export default async function packetReceiver(
         // Update attacker stats regardless of target type
         playerCache.set(currentPlayer.id, currentPlayer);
 
-        // Is not in the targets party and is not an entity (entities don't have PvP flag), and is not self, then set PvP flag on both
-        if (!isInParty && !isEntityTarget && !isSelf) {
+        // Is not in the targets party and is not self, then set PvP flag on both
+        if (!isInParty && !isSelf) {
           setPlayerPvp(currentPlayer, true);
           setPlayerPvp(target, true);
         }
 
         currentPlayer.last_attack = performance.now();
-        if (!isEntityTarget) {
-          target.last_attack = performance.now();
-        }
+        target.last_attack = performance.now();
 
         // Attacking breaks vanish (but not DoT ticks - this is a direct cast)
         if (currentPlayer.isVanished && !isSelf && !isInParty) {
@@ -4949,18 +4755,18 @@ export default async function packetReceiver(
             spellEffects.broadcastEffectsUpdate(currentPlayer);
           }
         }
-        listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target, isEntityTarget });
+        listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target, isEntityTarget: false });
 
         // AoE splash: apply damage and effects to all valid targets within aoe_radius
         // of the primary target (excluding the primary target itself).
         const aoeRadius = spell?.aoe_radius;
         if (aoeRadius && aoeRadius > 0) {
-          const splashTargets: Array<{ target: any; isEntity: boolean; distance: number }> = [];
+          const splashTargets: Array<{ target: any; distance: number }> = [];
 
           // Collect nearby players
           const allMapPlayers = filterPlayersByMap(currentPlayer.location.map);
           for (const p of allMapPlayers) {
-            if (p.id === target.id && !isEntityTarget) continue;
+            if (p.id === target.id) continue;
             if (p.isGuest) continue;
             // Ghosts cannot be damaged or healed.
             if (p.isGhost) continue;
@@ -4969,41 +4775,24 @@ export default async function packetReceiver(
             if (!pPos) continue;
             const dist = Math.sqrt((pPos.x - targetX) ** 2 + (pPos.y - targetY) ** 2);
             if (dist <= aoeRadius) {
-              splashTargets.push({ target: p, isEntity: false, distance: dist });
+              splashTargets.push({ target: p, distance: dist });
             }
           }
 
-          // Collect nearby entities
-          const mapEntities = entityCache.getByMap(currentPlayer.location.map);
-          for (const e of mapEntities) {
-            if (e.id === target.id && isEntityTarget) continue;
-            if (e.aggro_type === 'friendly') continue;
-            const ePos = e.position;
-            if (!ePos) continue;
-            const dist = Math.sqrt((ePos.x - targetX) ** 2 + (ePos.y - targetY) ** 2);
-            if (dist <= aoeRadius) {
-              const entityState = entityAI.getEntityAIState(String(e.id));
-              if (entityState?.combatState === 'returning') continue;
-              splashTargets.push({ target: e, isEntity: true, distance: dist });
-            }
-          }
+          // Creatures near the target take the splash too.
+          splashCreatures(currentPlayer, spell, targetX, targetY, aoeRadius, null);
 
           for (const splash of splashTargets) {
             const splashTarget = splash.target;
-            const splashIsEntity = splash.isEntity;
 
             // AoE damage: independent roll per target (same formula as primary)
-            const splashMin = spell_damage < 0
-              ? spell_damage - (playerLevel - 1) * 2
-              : spell_damage + (playerLevel - 1) * 2;
-            const splashMax = spell_damage < 0
-              ? spell_damage - (playerLevel - 1) * 5
-              : spell_damage + (playerLevel - 1) * 5;
-            let splashDmg = Math.floor(Math.random() * (Math.abs(splashMax - splashMin) + 1)) + Math.min(splashMin, splashMax);
-            splashDmg += attackerDamageBonus;
+            // Heals: WoW-style roll (negative = healing); damage: level roll + damage stat.
+            let splashDmg = spell_damage < 0
+              ? -rollHeal(spell_damage, currentPlayer.stats, spell.cast_time).amount
+              : Math.floor(Math.random() * ((playerLevel - 1) * 3 + 1)) + spell_damage + (playerLevel - 1) * 2 + attackerDamageBonus;
             if (spell_damage === 0) splashDmg = 0;
 
-            if (splashDmg > 0 && !splashIsEntity) {
+            if (splashDmg > 0) {
               const splashAvoid = splashTarget.stats?.stat_avoidance || 0;
               if (Math.random() * 100 < splashAvoid) splashDmg = 0;
               if (splashDmg > 0) {
@@ -5012,35 +4801,7 @@ export default async function packetReceiver(
               }
             }
 
-            if (splashIsEntity) {
-              entityAI.applyDamageToEntity(splashTarget, splashDmg, currentPlayer);
-              if (splashTarget.health < 0) splashTarget.health = 0;
-              entityCache.updateHealth(splashTarget.id, splashTarget.health);
-
-              broadcastToAOIBestEffortAtPosition(
-                splashTarget.position.x,
-                splashTarget.position.y,
-                currentPlayer.location.map,
-                packetManager.updateStats({
-                  id: ws.data.id,
-                  target: splashTarget.id,
-                  stats: { health: splashTarget.health, total_max_health: splashTarget.max_health },
-                  isCrit: false,
-                  damage: splashDmg,
-                  entity: true,
-                })
-              );
-
-              if (splashTarget.health <= 0) {
-                playersInMap.forEach((p) => {
-                  sendPacket(p.ws, packetManager.despawnEntity(splashTarget.id, 30));
-                });
-                entityCache.remove(splashTarget.id);
-                dots.clearEntityDots(splashTarget.id);
-              } else {
-                spellEffects.applySpellEffects(spell, currentPlayer, splashTarget, () => {}, () => {});
-              }
-            } else {
+            {
               let splashToHealth = splashDmg;
               if (splashDmg > 0) {
                 const absorbed = spellEffects.consumeBarrier(splashTarget, splashDmg);
@@ -5056,7 +4817,7 @@ export default async function packetReceiver(
                 await spellEffects.applySpellEffects(spell, currentPlayer, splashTarget,
                   (p: any) => {
                     const pls = filterPlayersByMap(p.location.map);
-                    pls.forEach((pl: any) => sendPacket(pl.ws, packetManager.updateStats({ id: p.id, target: p.id, stats: p.stats })));
+                    pls.forEach((pl: any) => sendPacket(pl.wt, packetManager.updateStats({ id: p.id, target: p.id, stats: p.stats })));
                   },
                   (p: any) => spellEffects.broadcastEffectsUpdate(p)
                 );
@@ -5065,7 +4826,7 @@ export default async function packetReceiver(
                   splashTarget,
                   currentPlayer,
                   packetManager.updateStats({
-                    id: ws.data.id,
+                    id: wt.data.id,
                     target: splashTarget.id,
                     stats: splashTarget.stats,
                     isCrit: false,
@@ -5100,14 +4861,14 @@ export default async function packetReceiver(
         );
         playersInMap.forEach((player) => {
           sendPacket(
-            player.ws,
+            player.wt,
             packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" })
           );
         });
 
         globalStateRevision++;
         await sendPositionAnimation(
-          ws,
+          wt,
           currentPlayer.location.position?.direction || "down",
           currentPlayer.moving || false,
           currentPlayer.mounted,
@@ -5163,20 +4924,20 @@ export default async function packetReceiver(
       case "QUESTDETAILS": {
         const questId = data as unknown as number;
         const quest = await quests.find(questId);
-        sendPacket(ws, packetManager.questDetails(quest));
+        sendPacket(wt, packetManager.questDetails(quest));
         break;
       }
       case "STOPTYPING": {
         if (!currentPlayer || currentPlayer.isGuest) return;
         let playersInMap = filterPlayersByMap(currentPlayer.location.map);
         const stopTypingData = {
-          id: ws.data.id,
+          id: wt.data.id,
         };
         if (currentPlayer.isStealth) {
           playersInMap = playersInMap.filter((p) => p.isAdmin);
         }
         playersInMap.forEach((player) => {
-          sendPacketBestEffort(player.ws, packetManager.stopTyping(stopTypingData));
+          sendPacketBestEffort(player.wt, packetManager.stopTyping(stopTypingData));
         });
         break;
       }
@@ -5188,7 +4949,7 @@ export default async function packetReceiver(
         const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
 
         if (!hasPermission) {
-          sendPacket(ws, packetManager.notify({
+          sendPacket(wt, packetManager.notify({
             message: 'You do not have permission to save map changes.'
           }));
           return;
@@ -5340,7 +5101,7 @@ export default async function packetReceiver(
             log.warn(`Failed to reload map collision cache: ${reloadError}`);
           }
 
-          sendPacket(ws, packetManager.notify({
+          sendPacket(wt, packetManager.notify({
             message: `Map saved successfully! ${saveData.chunks.length} chunks updated.`
           }));
 
@@ -5373,7 +5134,7 @@ export default async function packetReceiver(
             }
             const rebasePayload = { shiftX: shiftPxX, shiftY: shiftPxY, width: newMapWidth, height: newMapHeight };
             onMapPlayers.forEach((player) => {
-              sendPacket(player.ws, packetManager.mapRebase(rebasePayload));
+              sendPacket(player.wt, packetManager.mapRebase(rebasePayload));
             });
           } else {
             // No re-base (grew or trimmed): update EVERYONE's bounds (shiftX/Y = 0 is
@@ -5381,21 +5142,21 @@ export default async function packetReceiver(
             // and refresh the saved chunks for OTHER players only.
             const boundsPayload = { shiftX: 0, shiftY: 0, width: newMapWidth, height: newMapHeight };
             onMapPlayers.forEach((player) => {
-              sendPacket(player.ws, packetManager.mapRebase(boundsPayload));
+              sendPacket(player.wt, packetManager.mapRebase(boundsPayload));
             });
             const chunkCoords = saveData.chunks.map((chunk: any) => ({
               chunkX: chunk.chunkX,
               chunkY: chunk.chunkY
             }));
             onMapPlayers
-              .filter((p) => p.id !== ws.data.id)
+              .filter((p) => p.id !== wt.data.id)
               .forEach((player) => {
-                sendPacket(player.ws, packetManager.updateChunks({ chunks: chunkCoords }));
+                sendPacket(player.wt, packetManager.updateChunks({ chunks: chunkCoords }));
               });
           }
         } catch (error: any) {
           log.error(`Error saving map: ${error.message}`);
-          sendPacket(ws, packetManager.notify({
+          sendPacket(wt, packetManager.notify({
             message: 'Error saving map changes.'
           }));
         }
@@ -5415,7 +5176,7 @@ export default async function packetReceiver(
         const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
 
         if (!hasPermission) {
-          sendPacket(ws, packetManager.notify({
+          sendPacket(wt, packetManager.notify({
             message: 'You do not have permission to save particles.'
           }));
           return;
@@ -5446,18 +5207,18 @@ export default async function packetReceiver(
             const allPlayers = playerCache.list();
             for (const playerId in allPlayers) {
               const player = allPlayers[playerId];
-              if (player.ws && player.ws.readyState === 1) { // readyState 1 = OPEN
-                sendPacket(player.ws, updatePacket);
+              if (player.wt && player.wt.readyState === 1) { // readyState 1 = OPEN
+                sendPacket(player.wt, updatePacket);
               }
             }
           }
 
-          sendPacket(ws, packetManager.notify({
+          sendPacket(wt, packetManager.notify({
             message: 'Particle saved successfully'
           }));
         } catch (error: any) {
           log.error(`Error saving particle: ${error.message}`);
-          sendPacket(ws, packetManager.notify({
+          sendPacket(wt, packetManager.notify({
             message: 'Error saving particle.'
           }));
         }
@@ -5471,7 +5232,7 @@ export default async function packetReceiver(
         const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
 
         if (!hasPermission) {
-          sendPacket(ws, packetManager.notify({
+          sendPacket(wt, packetManager.notify({
             message: 'You do not have permission to delete particles.'
           }));
           return;
@@ -5482,12 +5243,12 @@ export default async function packetReceiver(
           await particles.remove({ name } as any);
           log.info(`Particle deleted by ${currentPlayer.username}: ${name}`);
 
-          sendPacket(ws, packetManager.notify({
+          sendPacket(wt, packetManager.notify({
             message: 'Particle deleted successfully'
           }));
         } catch (error: any) {
           log.error(`Error deleting particle: ${error.message}`);
-          sendPacket(ws, packetManager.notify({
+          sendPacket(wt, packetManager.notify({
             message: 'Error deleting particle.'
           }));
         }
@@ -5498,13 +5259,13 @@ export default async function packetReceiver(
 
         try {
           const particleList = await particles.list();
-          sendPacket(ws, packetManager.custom({
+          sendPacket(wt, packetManager.custom({
             type: "PARTICLE_LIST",
             data: particleList
           }));
         } catch (error: any) {
           log.error(`Error listing particles: ${error.message}`);
-          sendPacket(ws, packetManager.notify({
+          sendPacket(wt, packetManager.notify({
             message: 'Error loading particles.'
           }));
         }
@@ -5521,10 +5282,10 @@ export default async function packetReceiver(
           const resolvedNpcs = await Promise.all(npcsInMap.map(resolveNpcForClient));
 
 
-          sendPacket(ws, packetManager.npcList(resolvedNpcs));
+          sendPacket(wt, packetManager.npcList(resolvedNpcs));
         } catch (error: any) {
           log.error(`Error listing NPCs: ${error.message}`);
-          sendPacket(ws, packetManager.notify({ message: "Error loading NPCs." }));
+          sendPacket(wt, packetManager.notify({ message: "Error loading NPCs." }));
         }
         break;
       }
@@ -5536,7 +5297,7 @@ export default async function packetReceiver(
             (p: string) => p === "server.admin" || p === "server.*"
           )
         ) {
-          sendPacket(ws, packetManager.notify({ message: "You do not have permission to add NPCs." }));
+          sendPacket(wt, packetManager.notify({ message: "You do not have permission to add NPCs." }));
           return;
         }
 
@@ -5584,8 +5345,8 @@ export default async function packetReceiver(
             const updatePacket = packetManager.npcUpdated(resolvedNpc);
             const playersInMap = filterPlayersByMap(mapName);
             for (const p of playersInMap) {
-              if (p.ws && p.ws.readyState === 1) {
-                sendPacket(p.ws, updatePacket);
+              if (p.wt && p.wt.readyState === 1) {
+                sendPacket(p.wt, updatePacket);
               }
             }
           }
@@ -5593,7 +5354,7 @@ export default async function packetReceiver(
           log.info(`NPC added by ${currentPlayer.username} on map ${mapName}`);
         } catch (error: any) {
           log.error(`Error adding NPC: ${error.message}`);
-          sendPacket(ws, packetManager.notify({ message: "Error adding NPC." }));
+          sendPacket(wt, packetManager.notify({ message: "Error adding NPC." }));
         }
         break;
       }
@@ -5605,14 +5366,14 @@ export default async function packetReceiver(
             (p: string) => p === "server.admin" || p === "server.*"
           )
         ) {
-          sendPacket(ws, packetManager.notify({ message: "You do not have permission to save NPCs." }));
+          sendPacket(wt, packetManager.notify({ message: "You do not have permission to save NPCs." }));
           return;
         }
 
         try {
           const npcData = data as unknown as Npc;
           if (!npcData?.id) {
-            sendPacket(ws, packetManager.notify({ message: "Invalid NPC data." }));
+            sendPacket(wt, packetManager.notify({ message: "Invalid NPC data." }));
             return;
           }
 
@@ -5626,17 +5387,17 @@ export default async function packetReceiver(
             const updatePacket = packetManager.npcUpdated(resolvedNpc);
             const playersInMap = filterPlayersByMap(resolvedNpc.map);
             for (const p of playersInMap) {
-              if (p.ws && p.ws.readyState === 1) {
-                sendPacket(p.ws, updatePacket);
+              if (p.wt && p.wt.readyState === 1) {
+                sendPacket(p.wt, updatePacket);
               }
             }
           }
 
-          sendPacket(ws, packetManager.notify({ message: "NPC saved successfully." }));
+          sendPacket(wt, packetManager.notify({ message: "NPC saved successfully." }));
           log.info(`NPC ${npcData.id} saved by ${currentPlayer.username}`);
         } catch (error: any) {
           log.error(`Error saving NPC: ${error.message}`);
-          sendPacket(ws, packetManager.notify({ message: "Error saving NPC." }));
+          sendPacket(wt, packetManager.notify({ message: "Error saving NPC." }));
         }
         break;
       }
@@ -5648,21 +5409,21 @@ export default async function packetReceiver(
             (p: string) => p === "server.admin" || p === "server.*"
           )
         ) {
-          sendPacket(ws, packetManager.notify({ message: "You do not have permission to move NPCs." }));
+          sendPacket(wt, packetManager.notify({ message: "You do not have permission to move NPCs." }));
           return;
         }
 
         try {
           const { id, position } = data as unknown as { id: number; position: { x: number; y: number } };
           if (!id || !position) {
-            sendPacket(ws, packetManager.notify({ message: "Invalid NPC move data." }));
+            sendPacket(wt, packetManager.notify({ message: "Invalid NPC move data." }));
             return;
           }
 
           const allNpcs = await assetCache.get("npcs") as Npc[];
           const existingNpc = (allNpcs || []).find((n: Npc) => n.id === id);
           if (!existingNpc) {
-            sendPacket(ws, packetManager.notify({ message: "NPC not found." }));
+            sendPacket(wt, packetManager.notify({ message: "NPC not found." }));
             return;
           }
 
@@ -5685,8 +5446,8 @@ export default async function packetReceiver(
             const updatePacket = packetManager.npcUpdated(resolvedNpc);
             const playersInMap = filterPlayersByMap(resolvedNpc.map);
             for (const p of playersInMap) {
-              if (p.ws && p.ws.readyState === 1) {
-                sendPacket(p.ws, updatePacket);
+              if (p.wt && p.wt.readyState === 1) {
+                sendPacket(p.wt, updatePacket);
               }
             }
           }
@@ -5694,7 +5455,7 @@ export default async function packetReceiver(
           log.info(`NPC ${id} moved by ${currentPlayer.username}`);
         } catch (error: any) {
           log.error(`Error moving NPC: ${error.message}`);
-          sendPacket(ws, packetManager.notify({ message: "Error moving NPC." }));
+          sendPacket(wt, packetManager.notify({ message: "Error moving NPC." }));
         }
         break;
       }
@@ -5706,21 +5467,21 @@ export default async function packetReceiver(
             (p: string) => p === "server.admin" || p === "server.*"
           )
         ) {
-          sendPacket(ws, packetManager.notify({ message: "You do not have permission to delete NPCs." }));
+          sendPacket(wt, packetManager.notify({ message: "You do not have permission to delete NPCs." }));
           return;
         }
 
         try {
           const { id } = data as unknown as { id: number };
           if (!id) {
-            sendPacket(ws, packetManager.notify({ message: "Invalid NPC ID." }));
+            sendPacket(wt, packetManager.notify({ message: "Invalid NPC ID." }));
             return;
           }
 
           const allNpcs = await assetCache.get("npcs") as Npc[];
           const existingNpc = (allNpcs || []).find((n: Npc) => n.id === id);
           if (!existingNpc) {
-            sendPacket(ws, packetManager.notify({ message: "NPC not found." }));
+            sendPacket(wt, packetManager.notify({ message: "NPC not found." }));
             return;
           }
 
@@ -5732,241 +5493,16 @@ export default async function packetReceiver(
           const removePacket = packetManager.npcRemoved(id);
           const playersInMap = filterPlayersByMap(mapName);
           for (const p of playersInMap) {
-            if (p.ws && p.ws.readyState === 1) {
-              sendPacket(p.ws, removePacket);
+            if (p.wt && p.wt.readyState === 1) {
+              sendPacket(p.wt, removePacket);
             }
           }
 
-          sendPacket(ws, packetManager.notify({ message: "NPC deleted successfully." }));
+          sendPacket(wt, packetManager.notify({ message: "NPC deleted successfully." }));
           log.info(`NPC ${id} deleted by ${currentPlayer.username}`);
         } catch (error: any) {
           log.error(`Error deleting NPC: ${error.message}`);
-          sendPacket(ws, packetManager.notify({ message: "Error deleting NPC." }));
-        }
-        break;
-      }
-      case "LIST_ENTITIES": {
-        if (!currentPlayer) return;
-
-        try {
-          let allEntities = await assetCache.get("entities") as any[];
-          if (!allEntities || allEntities.length === 0) {
-            allEntities = await entitySystem.list();
-          }
-          const mapName = currentPlayer.location.map.replace(".json", "");
-          const entitiesInMap = (allEntities || []).filter((e: any) => e.map === mapName);
-          sendPacket(ws, packetManager.entityList(entitiesInMap));
-        } catch (error: any) {
-          log.error(`Error listing entities: ${error.message}`);
-          sendPacket(ws, packetManager.notify({ message: "Error loading entities." }));
-        }
-        break;
-      }
-      case "ADD_ENTITY": {
-        if (!currentPlayer) return;
-
-        if (
-          !currentPlayer.permissions.some(
-            (p: string) => p === "server.admin" || p === "server.*"
-          )
-        ) {
-          sendPacket(ws, packetManager.notify({ message: "You do not have permission to add entities." }));
-          return;
-        }
-
-        try {
-          const mapName = currentPlayer.location.map.replace(".json", "");
-          const clientData = data as any;
-          const newEntity: any = {
-            id: null,
-            last_updated: null,
-            map: mapName,
-            name: clientData?.name ?? null,
-            position: {
-              x: clientData?.position?.x ?? currentPlayer.location.position.x,
-              y: clientData?.position?.y ?? currentPlayer.location.position.y,
-              direction: clientData?.position?.direction ?? "down",
-            },
-            max_health: clientData?.max_health ?? 100,
-            level: clientData?.level ?? 1,
-            aggro_type: clientData?.aggro_type ?? 'neutral',
-            aggro_range: clientData?.aggro_range ?? 300,
-            speed: clientData?.speed ?? 2.0,
-            aggro_leash: clientData?.aggro_leash ?? 600,
-            particles: clientData?.particles ?? [],
-            sprite_type: clientData?.sprite_type ?? 'animated',
-            sprite_body: clientData?.sprite_body ?? 'player_body_base',
-            sprite_head: clientData?.sprite_head ?? 'player_head_base',
-            sprite_helmet: clientData?.sprite_helmet ?? null,
-            sprite_shoulderguards: clientData?.sprite_shoulderguards ?? null,
-            sprite_neck: clientData?.sprite_neck ?? null,
-            sprite_hands: clientData?.sprite_hands ?? null,
-            sprite_chest: clientData?.sprite_chest ?? null,
-            sprite_feet: clientData?.sprite_feet ?? null,
-            sprite_legs: clientData?.sprite_legs ?? null,
-            sprite_weapon: clientData?.sprite_weapon ?? null,
-          };
-
-          await entitySystem.add(newEntity);
-          const updatedEntities = await entitySystem.list();
-          await assetCache.set("entities", updatedEntities);
-
-          const createdEntity = updatedEntities
-            .filter((e: any) => e.map === mapName)
-            .sort((a: any, b: any) => (b.id ?? 0) - (a.id ?? 0))[0];
-
-          if (createdEntity) {
-            // Initialize AI and spawn data for the new entity
-            entityAI.initializeEntityAI(createdEntity);
-
-            // Add the new entity to the in-memory cache with health = max_health and isMoving = false
-            const entityWithHealth = { ...createdEntity, health: createdEntity.max_health, isMoving: false };
-            entityCache.add(entityWithHealth);
-
-            // Broadcast entity with a small delay to ensure sprite data is ready
-            setTimeout(() => {
-              const resolvedEntity = { ...createdEntity, sprite_type: (createdEntity as any).sprite_type || 'animated', spriteLayers: getEntitySpriteLayers(createdEntity as any) };
-              const updatePacket = packetManager.createEntity(resolvedEntity as any);
-              const playersInMap = filterPlayersByMap(mapName);
-              for (const p of playersInMap) {
-                if (p.ws && p.ws.readyState === 1) {
-                  sendPacket(p.ws, updatePacket);
-                }
-              }
-            }, 100);
-          }
-
-          log.info(`Entity added by ${currentPlayer.username} on map ${mapName}`);
-        } catch (error: any) {
-          log.error(`Error adding entity: ${error.message}`);
-          sendPacket(ws, packetManager.notify({ message: "Error adding entity." }));
-        }
-        break;
-      }
-      case "SAVE_ENTITY": {
-        if (!currentPlayer) return;
-
-        if (
-          !currentPlayer.permissions.some(
-            (p: string) => p === "server.admin" || p === "server.*"
-          )
-        ) {
-          sendPacket(ws, packetManager.notify({ message: "You do not have permission to save entities." }));
-          return;
-        }
-
-        try {
-          const entityData = data as unknown as any;
-          if (!entityData?.id) {
-            sendPacket(ws, packetManager.notify({ message: "Invalid entity ID." }));
-            return;
-          }
-
-          await entitySystem.update(entityData);
-          const updatedEntities = await entitySystem.list();
-          await assetCache.set("entities", updatedEntities);
-
-          const mapName = entityData.map;
-          const updatedEntity = updatedEntities.find((e: any) => e.id === entityData.id);
-          if (updatedEntity) {
-            // Update the entity in the in-memory cache (reset health to max_health)
-            const cachedEntity = entityCache.getById(entityData.id);
-            if (cachedEntity) {
-              // Update properties from database and reset health to max_health
-              Object.assign(cachedEntity, {
-                ...updatedEntity,
-                health: updatedEntity.max_health // Reset health to max_health when saving
-              });
-              // Reset hasMoved so the entity won't broadcast unless it actually moves
-              (cachedEntity as any).hasMoved = false;
-            } else {
-              // Entity not in cache yet, add it with health = max_health and isMoving = false
-              entityCache.add({ ...updatedEntity, health: updatedEntity.max_health, isMoving: false, hasMoved: false });
-            }
-
-            // Reset entity to its original spawn position
-            const spawnData = entityAI.getEntitySpawnData(entityData.id);
-            if (spawnData && spawnData.position && cachedEntity) {
-              cachedEntity.position = {
-                x: spawnData.position.x,
-                y: spawnData.position.y,
-                direction: spawnData.position.direction || 'down'
-              };
-            }
-
-            // Reset entity AI state (aggro, target, etc.) when saving
-            entityAI.resetEntityAI(entityData.id);
-
-            // Include the in-memory health in the update packet to preserve health
-            const resolvedEntity = {
-              ...updatedEntity,
-              sprite_type: (updatedEntity as any).sprite_type || 'animated',
-              spriteLayers: getEntitySpriteLayers(updatedEntity as any),
-              health: cachedEntity ? cachedEntity.health : updatedEntity.max_health
-            };
-            const updatePacket = packetManager.updateEntity(resolvedEntity as any);
-            const playersInMap = filterPlayersByMap(mapName);
-            for (const p of playersInMap) {
-              if (p.ws && p.ws.readyState === 1) {
-                sendPacket(p.ws, updatePacket);
-              }
-            }
-          }
-
-          log.info(`Entity ${entityData.id} saved by ${currentPlayer.username}`);
-        } catch (error: any) {
-          log.error(`Error saving entity: ${error.message}`);
-          sendPacket(ws, packetManager.notify({ message: "Error saving entity." }));
-        }
-        break;
-      }
-      case "DELETE_ENTITY": {
-        if (!currentPlayer) return;
-
-        if (
-          !currentPlayer.permissions.some(
-            (p: string) => p === "server.admin" || p === "server.*"
-          )
-        ) {
-          sendPacket(ws, packetManager.notify({ message: "You do not have permission to delete entities." }));
-          return;
-        }
-
-        try {
-          const { id } = data as unknown as { id: number };
-          if (!id) {
-            sendPacket(ws, packetManager.notify({ message: "Invalid entity ID." }));
-            return;
-          }
-
-          const allEntities = await assetCache.get("entities") as any[];
-          const existingEntity = (allEntities || []).find((e: any) => e.id === id);
-          if (!existingEntity) {
-            sendPacket(ws, packetManager.notify({ message: "Entity not found." }));
-            return;
-          }
-
-          const mapName = existingEntity.map;
-          await entitySystem.remove({ id } as any);
-          const updatedEntities = await entitySystem.list();
-          await assetCache.set("entities", updatedEntities);
-
-          // Remove entity from in-memory cache
-          entityCache.remove(id);
-
-          const removePacket = packetManager.entityDied(id.toString());
-          const playersInMap = filterPlayersByMap(mapName);
-          for (const p of playersInMap) {
-            if (p.ws && p.ws.readyState === 1) {
-              sendPacket(p.ws, removePacket);
-            }
-          }
-
-          sendPacket(ws, packetManager.notify({ message: "Entity deleted successfully." }));
-          log.info(`Entity ${id} deleted by ${currentPlayer.username}`);
-        } catch (error: any) {
-          log.error(`Error deleting entity: ${error.message}`);
-          sendPacket(ws, packetManager.notify({ message: "Error deleting entity." }));
+          sendPacket(wt, packetManager.notify({ message: "Error deleting NPC." }));
         }
         break;
       }
@@ -5988,7 +5524,7 @@ export default async function packetReceiver(
           // Broadcast test particle event to all players in the map
           const playersInMap = filterPlayersByMap(currentPlayer.location.map);
           playersInMap.forEach((player) => {
-            sendPacket(player.ws, packetManager.custom({
+            sendPacket(player.wt, packetManager.custom({
               type: "TEST_PARTICLE_EVENT",
               data: {
                 testType,
@@ -6010,7 +5546,7 @@ export default async function packetReceiver(
         // (/s, the CHAT packet) is barred for them.
         if (currentPlayer.isGuest) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: "Please create an account to use that feature.",
             })
@@ -6049,7 +5585,7 @@ export default async function packetReceiver(
           !["P", "PARTY", "W", "WHISPER", "G", "GUILD"].includes(commandName || "")
         ) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "You cannot do that while dead." })
           );
           return;
@@ -6067,7 +5603,7 @@ export default async function packetReceiver(
             const message = args.join(" ");
             if (!message) {
               sendPacket(
-                ws,
+                wt,
                 packetManager.notify({ message: "Please provide a message" })
               );
               break;
@@ -6078,7 +5614,7 @@ export default async function packetReceiver(
             );
             if (!partyId) {
               sendPacket(
-                ws,
+                wt,
                 packetManager.notify({ message: "You are not in a party" })
               );
               break;
@@ -6087,7 +5623,7 @@ export default async function packetReceiver(
             const partyMembers = await parties.getPartyMembers(partyId);
             if (partyMembers.length === 0 || !partyMembers) {
               sendPacket(
-                ws,
+                wt,
                 packetManager.notify({ message: "You are not in a party" })
               );
               break;
@@ -6098,9 +5634,9 @@ export default async function packetReceiver(
               const memberPlayer = playerCache.get(session_id);
               if (memberPlayer) {
                 sendPacket(
-                  memberPlayer.ws,
+                  memberPlayer.wt,
                   packetManager.partyChat({
-                    id: ws.data.id,
+                    id: wt.data.id,
                     message,
                     username:
                       currentPlayer.username.charAt(0).toUpperCase() +
@@ -6121,7 +5657,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Please provide a username",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -6134,14 +5670,14 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Player not found or is not online",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
             sendPacket(
-              targetPlayer.ws,
+              targetPlayer.wt,
               packetManager.whisper({
-                id: ws.data.id,
+                id: wt.data.id,
                 message: args.slice(1).join(" "),
 
                 username: `<- ${currentPlayer.username.charAt(0).toUpperCase() +
@@ -6151,7 +5687,7 @@ export default async function packetReceiver(
             );
 
             sendPacket(
-              ws,
+              wt,
               packetManager.whisper({
                 id: targetPlayer.id,
                 message: args.slice(1).join(" "),
@@ -6168,7 +5704,7 @@ export default async function packetReceiver(
             const username = args[0]?.toLowerCase() || null;
             if (!username) {
               sendPacket(
-                ws,
+                wt,
                 packetManager.notify({
                   message: "Usage: /invite <username>",
                 })
@@ -6178,7 +5714,7 @@ export default async function packetReceiver(
 
             if (username === currentPlayer.username.toLowerCase()) {
               sendPacket(
-                ws,
+                wt,
                 packetManager.notify({
                   message: "You cannot invite yourself to a party.",
                 })
@@ -6193,7 +5729,7 @@ export default async function packetReceiver(
 
             if (!targetPlayer) {
               sendPacket(
-                ws,
+                wt,
                 packetManager.notify({
                   message: `Player ${username} is not online.`,
                 })
@@ -6203,7 +5739,7 @@ export default async function packetReceiver(
 
             if (targetPlayer.id === currentPlayer.id) {
               sendPacket(
-                ws,
+                wt,
                 packetManager.notify({
                   message: "You cannot invite yourself to a party.",
                 })
@@ -6217,7 +5753,7 @@ export default async function packetReceiver(
 
             if (existingInvite) {
               sendPacket(
-                ws,
+                wt,
                 packetManager.notify({
                   message: `You have already sent a party invite to ${targetPlayer.username}.`,
                 })
@@ -6248,10 +5784,10 @@ export default async function packetReceiver(
 
             playerCache.set(currentPlayer.id, currentPlayer);
 
-            sendPacket(targetPlayer.ws, packetManager.invitation(invite_data));
+            sendPacket(targetPlayer.wt, packetManager.invitation(invite_data));
 
             sendPacket(
-              ws,
+              wt,
               packetManager.notify({
                 message: `Invitation sent to ${targetPlayer.username.charAt(0).toUpperCase() +
                   targetPlayer.username.slice(1)
@@ -6267,19 +5803,19 @@ export default async function packetReceiver(
             if (!currentPlayer) return;
             const message = args.join(" ");
             if (!message) {
-              sendPacket(ws, packetManager.notify({ message: "Please provide a message" }));
+              sendPacket(wt, packetManager.notify({ message: "Please provide a message" }));
               break;
             }
 
             const guildId = currentPlayer.guild_id;
             if (!guildId) {
-              sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+              sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
               break;
             }
 
             const guildMembers = await guilds.getGuildMembers(guildId);
             if (!guildMembers || guildMembers.length === 0) {
-              sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+              sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
               break;
             }
 
@@ -6288,9 +5824,9 @@ export default async function packetReceiver(
               const memberPlayer = playerCache.get(session_id);
               if (memberPlayer) {
                 sendPacket(
-                  memberPlayer.ws,
+                  memberPlayer.wt,
                   packetManager.guildChat({
-                    id: ws.data.id,
+                    id: wt.data.id,
                     message,
                     username:
                       currentPlayer.username.charAt(0).toUpperCase() +
@@ -6307,30 +5843,30 @@ export default async function packetReceiver(
           case "GINVITE": {
             if (!currentPlayer) return;
             if (currentPlayer.isGuest) {
-              sendPacket(ws, packetManager.notify({ message: "Please create an account to use that feature." }));
+              sendPacket(wt, packetManager.notify({ message: "Please create an account to use that feature." }));
               break;
             }
 
             const guildId = currentPlayer.guild_id;
             if (!guildId) {
-              sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+              sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
               break;
             }
 
             const isLeader = await guilds.isGuildLeader(currentPlayer.username);
             if (!isLeader) {
-              sendPacket(ws, packetManager.notify({ message: "You are not the guild leader" }));
+              sendPacket(wt, packetManager.notify({ message: "You are not the guild leader" }));
               break;
             }
 
             const username = args[0]?.toLowerCase() || null;
             if (!username) {
-              sendPacket(ws, packetManager.notify({ message: "Usage: /ginvite <username>" }));
+              sendPacket(wt, packetManager.notify({ message: "Usage: /ginvite <username>" }));
               break;
             }
 
             if (username === currentPlayer.username.toLowerCase()) {
-              sendPacket(ws, packetManager.notify({ message: "You cannot invite yourself to your guild." }));
+              sendPacket(wt, packetManager.notify({ message: "You cannot invite yourself to your guild." }));
               break;
             }
 
@@ -6340,18 +5876,18 @@ export default async function packetReceiver(
             );
 
             if (!targetPlayer) {
-              sendPacket(ws, packetManager.notify({ message: `Player ${username} is not online.` }));
+              sendPacket(wt, packetManager.notify({ message: `Player ${username} is not online.` }));
               break;
             }
 
             if (targetPlayer.isGuest) {
-              sendPacket(ws, packetManager.notify({ message: `${targetPlayer.username} is a guest and cannot join a guild.` }));
+              sendPacket(wt, packetManager.notify({ message: `${targetPlayer.username} is a guest and cannot join a guild.` }));
               break;
             }
 
             const targetInGuild = await guilds.isInGuild(targetPlayer.username);
             if (targetInGuild) {
-              sendPacket(ws, packetManager.notify({ message: `${targetPlayer.username} is already in a guild` }));
+              sendPacket(wt, packetManager.notify({ message: `${targetPlayer.username} is already in a guild` }));
               break;
             }
 
@@ -6360,7 +5896,7 @@ export default async function packetReceiver(
             );
 
             if (existingInvite) {
-              sendPacket(ws, packetManager.notify({ message: `You have already sent a guild invite to ${targetPlayer.username}.` }));
+              sendPacket(wt, packetManager.notify({ message: `You have already sent a guild invite to ${targetPlayer.username}.` }));
               break;
             }
 
@@ -6389,10 +5925,10 @@ export default async function packetReceiver(
 
             playerCache.set(currentPlayer.id, currentPlayer);
 
-            sendPacket(targetPlayer.ws, packetManager.invitation(invite_data));
+            sendPacket(targetPlayer.wt, packetManager.invitation(invite_data));
 
             sendPacket(
-              ws,
+              wt,
               packetManager.notify({
                 message: `Invitation sent to ${targetPlayer.username.charAt(0).toUpperCase() +
                   targetPlayer.username.slice(1)}`,
@@ -6412,7 +5948,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -6421,7 +5957,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Please provide a username or ID",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -6440,7 +5976,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Player not found or is not online",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -6448,7 +5984,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You cannot summon yourself",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -6456,7 +5992,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You cannot summon other admins",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -6499,20 +6035,20 @@ export default async function packetReceiver(
                     y: Math.round(currentPlayer.location.position.y),
                     direction: targetPlayer.location.position?.direction || "down",
                   },
-                  targetPlayer.ws,
+                  targetPlayer.wt,
                   spawnBatchQueue,
                   despawnBatchQueue
                 );
 
                 sendPacket(
-                  targetPlayer.ws,
+                  targetPlayer.wt,
                   packetManager.notify({
                     message: `You have been summoned by an admin`,
                   })
                 );
 
                 sendPacket(
-                  ws,
+                  wt,
                   packetManager.notify({
                     message: `Summoned ${targetPlayer.username.charAt(0).toUpperCase() +
                       targetPlayer.username.slice(1)
@@ -6523,7 +6059,7 @@ export default async function packetReceiver(
                 const notifyData = {
                   message: "Failed to summon player",
                 };
-                sendPacket(ws, packetManager.notify(notifyData));
+                sendPacket(wt, packetManager.notify(notifyData));
               }
             } else {
 
@@ -6545,6 +6081,7 @@ export default async function packetReceiver(
                     layer.players.add(targetPlayer.id);
                     layer.playerCount++;
                     targetPlayer.aoi.layerId = adminLayerId;
+                    resyncSkeletonsFor(targetPlayer.id);
                     log.info(`[SUMMON] ${targetPlayer.username} moved to admin's layer ${adminLayerId}`);
                   }
                 }
@@ -6605,7 +6142,7 @@ export default async function packetReceiver(
                 guild_name: targetPlayer.guild_name || null,
               };
 
-              sendPacket(ws, packetManager.loadPlayers({
+              sendPacket(wt, packetManager.loadPlayers({
                 players: [targetSpawnData],
                 snapshotRevision: globalStateRevision
               }));
@@ -6617,7 +6154,7 @@ export default async function packetReceiver(
                 targetPlayer.mount_type || undefined,
                 !!targetPlayer.casting
               );
-              await sendAnimationTo(ws, targetAnimationName, targetPlayer.id);
+              await sendAnimationTo(wt, targetAnimationName, targetPlayer.id);
 
               globalStateRevision++;
 
@@ -6631,30 +6168,30 @@ export default async function packetReceiver(
                 r: globalStateRevision,
                 s: targetPlayer.isStealth ? 1 : 0
               };
-              sendPacket(targetPlayer.ws, packetManager.moveXY(targetMovementData));
+              sendPacket(targetPlayer.wt, packetManager.moveXY(targetMovementData));
 
-              sendPacket(ws, packetManager.moveXY(targetMovementData));
+              sendPacket(wt, packetManager.moveXY(targetMovementData));
 
               const allPlayers = playerCache.list();
               for (const playerId of currentPlayer.aoi.playersInAOI) {
                 const otherPlayer = allPlayers[playerId as string];
-                if (!otherPlayer || !otherPlayer.ws || otherPlayer.id === targetPlayer.id || otherPlayer.id === currentPlayer.id) continue;
+                if (!otherPlayer || !otherPlayer.wt || otherPlayer.id === targetPlayer.id || otherPlayer.id === currentPlayer.id) continue;
 
                 const canSeeTarget = !targetPlayer.isStealth || otherPlayer.isAdmin;
                 if (canSeeTarget) {
-                  sendPacket(otherPlayer.ws, packetManager.moveXY(targetMovementData));
+                  sendPacket(otherPlayer.wt, packetManager.moveXY(targetMovementData));
                 }
               }
 
               sendPacket(
-                targetPlayer.ws,
+                targetPlayer.wt,
                 packetManager.notify({
                   message: `You have been summoned by an admin`,
                 })
               );
 
               sendPacket(
-                ws,
+                wt,
                 packetManager.notify({
                   message: `Summoned ${targetPlayer.username.charAt(0).toUpperCase() +
                     targetPlayer.username.slice(1)
@@ -6676,7 +6213,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -6685,7 +6222,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Please provide a username or ID",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -6705,7 +6242,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Player not found or is not online",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -6713,7 +6250,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You cannot teleport to yourself",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -6757,13 +6294,13 @@ export default async function packetReceiver(
                     y: Math.round(targetPlayer.location.position.y),
                     direction: currentPlayer.location.position?.direction || "down",
                   },
-                  ws,
+                  wt,
                   spawnBatchQueue,
                   despawnBatchQueue
                 );
 
                 sendPacket(
-                  ws,
+                  wt,
                   packetManager.notify({
                     message: `Teleported to ${targetPlayer.username.charAt(0).toUpperCase() +
                       targetPlayer.username.slice(1)
@@ -6774,7 +6311,7 @@ export default async function packetReceiver(
                 const notifyData = {
                   message: "Failed to teleport to player",
                 };
-                sendPacket(ws, packetManager.notify(notifyData));
+                sendPacket(wt, packetManager.notify(notifyData));
               }
             } else {
 
@@ -6796,6 +6333,7 @@ export default async function packetReceiver(
                     layer.players.add(currentPlayer.id);
                     layer.playerCount++;
                     currentPlayer.aoi.layerId = targetLayerId;
+                    resyncSkeletonsFor(currentPlayer.id);
                     log.info(`[TELEPORT] Admin ${currentPlayer.username} moved to target's layer ${targetLayerId}`);
                   }
                 }
@@ -6856,7 +6394,7 @@ export default async function packetReceiver(
                 guild_name: targetPlayer.guild_name || null,
               };
 
-              sendPacket(ws, packetManager.loadPlayers({
+              sendPacket(wt, packetManager.loadPlayers({
                 players: [targetSpawnDataTeleport],
                 snapshotRevision: globalStateRevision
               }));
@@ -6868,7 +6406,7 @@ export default async function packetReceiver(
                 targetPlayer.mount_type || undefined,
                 !!targetPlayer.casting
               );
-              await sendAnimationTo(ws, targetAnimationNameTeleport, targetPlayer.id);
+              await sendAnimationTo(wt, targetAnimationNameTeleport, targetPlayer.id);
 
               globalStateRevision++;
 
@@ -6882,7 +6420,7 @@ export default async function packetReceiver(
                 r: globalStateRevision,
                 s: currentPlayer.isStealth ? 1 : 0
               };
-              sendPacket(ws, packetManager.moveXY(adminMovementData));
+              sendPacket(wt, packetManager.moveXY(adminMovementData));
 
               const targetMovementData = {
                 i: targetPlayer.id,
@@ -6894,13 +6432,13 @@ export default async function packetReceiver(
                 r: globalStateRevision,
                 s: targetPlayer.isStealth ? 1 : 0
               };
-              sendPacket(targetPlayer.ws, packetManager.moveXY(targetMovementData));
+              sendPacket(targetPlayer.wt, packetManager.moveXY(targetMovementData));
 
               broadcastToAOI(currentPlayer, packetManager.moveXY(adminMovementData), true);
               broadcastToAOI(targetPlayer, packetManager.moveXY(targetMovementData), true);
 
               sendPacket(
-                ws,
+                wt,
                 packetManager.notify({
                   message: `Teleported to ${targetPlayer.username.charAt(0).toUpperCase() +
                     targetPlayer.username.slice(1)
@@ -6922,7 +6460,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
             const identifier = args[0].toLowerCase() || null;
@@ -6930,7 +6468,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Please provide a username or ID",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -6950,7 +6488,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You cannot disconnect yourself",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -6958,7 +6496,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Player not found or is not online",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -6966,17 +6504,17 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You cannot disconnect other admins",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
-            player.kick(targetPlayer.username, targetPlayer.ws);
+            player.kick(targetPlayer.username, targetPlayer.wt);
             const notifyData = {
               message: `Disconnected ${targetPlayer.username.charAt(0).toUpperCase() +
                 targetPlayer.username.slice(1)
                 } from the server`,
             };
-            sendPacket(ws, packetManager.notify(notifyData));
+            sendPacket(wt, packetManager.notify(notifyData));
             break;
           }
 
@@ -6991,7 +6529,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
             let message;
@@ -7014,7 +6552,7 @@ export default async function packetReceiver(
                   const notifyData = {
                     message: message,
                   };
-                  sendPacket(player.ws, packetManager.notify(notifyData));
+                  sendPacket(player.wt, packetManager.notify(notifyData));
                 });
                 break;
               }
@@ -7029,7 +6567,7 @@ export default async function packetReceiver(
                   const notifyData = {
                     message: message,
                   };
-                  sendPacket(player.ws, packetManager.notify(notifyData));
+                  sendPacket(player.wt, packetManager.notify(notifyData));
                 });
                 break;
               }
@@ -7041,7 +6579,7 @@ export default async function packetReceiver(
                   const notifyData = {
                     message: message,
                   };
-                  sendPacket(player.ws, packetManager.notify(notifyData));
+                  sendPacket(player.wt, packetManager.notify(notifyData));
                 });
                 break;
               }
@@ -7059,7 +6597,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
             const identifier = args[0].toLowerCase() || null;
@@ -7067,7 +6605,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Please provide a username or ID",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7094,7 +6632,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Player not found",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7102,7 +6640,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You cannot ban yourself",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7110,7 +6648,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You cannot ban other admins",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7120,17 +6658,17 @@ export default async function packetReceiver(
                   targetPlayer.username.slice(1)
                   } is already banned`,
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
-            await player.ban(targetPlayer.username, targetPlayer.ws);
+            await player.ban(targetPlayer.username, targetPlayer.wt);
             const notifyData = {
               message: `Banned ${targetPlayer.username.charAt(0).toUpperCase() +
                 targetPlayer.username.slice(1)
                 } from the server`,
             };
-            sendPacket(ws, packetManager.notify(notifyData));
+            sendPacket(wt, packetManager.notify(notifyData));
             break;
           }
           case "UNBAN": {
@@ -7143,7 +6681,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
             const identifier = args[0] || null;
@@ -7151,7 +6689,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Please provide a username or ID",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7162,7 +6700,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Player not found or is not online",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7170,7 +6708,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You cannot unban yourself",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7178,7 +6716,7 @@ export default async function packetReceiver(
             const notifyData = {
               message: `Unbanned ${targetPlayer[0].username} from the server`,
             };
-            sendPacket(ws, packetManager.notify(notifyData));
+            sendPacket(wt, packetManager.notify(notifyData));
             break;
           }
 
@@ -7193,7 +6731,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
             const identifier = args[0].toLowerCase() || null;
@@ -7201,7 +6739,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Please provide a username or ID",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7228,13 +6766,13 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You cannot toggle your own admin status",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
             const admin = await player.toggleAdmin(targetPlayer.username);
 
-            if (targetPlayer && targetPlayer.ws) {
+            if (targetPlayer && targetPlayer.wt) {
               targetPlayer.isAdmin = admin;
               playerCache.set(targetPlayer.id, targetPlayer);
             }
@@ -7244,10 +6782,10 @@ export default async function packetReceiver(
                 } is now ${admin ? "an admin" : "not an admin"}`,
             };
 
-            if (targetPlayer?.ws) {
-              sendPacket(targetPlayer.ws, packetManager.reconnect());
+            if (targetPlayer?.wt) {
+              sendPacket(targetPlayer.wt, packetManager.reconnect());
             }
-            sendPacket(ws, packetManager.notify(notifyData));
+            sendPacket(wt, packetManager.notify(notifyData));
             break;
           }
 
@@ -7258,7 +6796,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Whitelist is not enabled on this realm",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7270,7 +6808,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7281,7 +6819,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Usage: /whitelist add|remove [username]",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7289,7 +6827,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: `Usage: /whitelist ${whitelistMode} [username]`,
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7299,34 +6837,34 @@ export default async function packetReceiver(
                   const notifyData = {
                     message: "You cannot add yourself to the whitelist",
                   };
-                  sendPacket(ws, packetManager.notify(notifyData));
+                  sendPacket(wt, packetManager.notify(notifyData));
                   break;
                 }
                 const result = await player.whitelistAdd(whitelistUsername);
                 const notifyData = {
                   message: result.message,
                 };
-                sendPacket(ws, packetManager.notify(notifyData));
+                sendPacket(wt, packetManager.notify(notifyData));
               } else if (whitelistMode === "remove") {
                 if (whitelistUsername.toLowerCase() === currentPlayer.username.toLowerCase()) {
                   const notifyData = {
                     message: "You cannot remove yourself from the whitelist",
                   };
-                  sendPacket(ws, packetManager.notify(notifyData));
+                  sendPacket(wt, packetManager.notify(notifyData));
                   break;
                 }
                 const result = await player.whitelistRemove(whitelistUsername);
                 const notifyData = {
                   message: result.message,
                 };
-                sendPacket(ws, packetManager.notify(notifyData));
+                sendPacket(wt, packetManager.notify(notifyData));
               }
             } catch (error) {
               log.error(`Whitelist command error: ${error}`);
               const notifyData = {
                 message: "An error occurred while processing the whitelist command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
             }
             break;
           }
@@ -7341,7 +6879,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
             const players = Object.values(playerCache.list());
@@ -7350,18 +6888,18 @@ export default async function packetReceiver(
                 message:
                   "⚠️ Server shutting down - please reconnect in a few minutes ⚠️",
               };
-              sendPacket(player.ws, packetManager.notify(notifyData));
+              sendPacket(player.wt, packetManager.notify(notifyData));
             });
 
             await new Promise((resolve) => setTimeout(resolve, 5000));
             players.forEach((player) => {
-              player.ws.close(1000, "Server is restarting");
+              player.wt.close(1000, "Server is restarting");
             });
 
             const checkInterval = setInterval(async () => {
               const remainingPlayers = Object.values(playerCache.list());
               remainingPlayers.forEach((player) => {
-                player.ws.close(1000, "Server is restarting");
+                player.wt.close(1000, "Server is restarting");
               });
 
               if (remainingPlayers.length === 0) {
@@ -7384,11 +6922,11 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
-            sendPacket(ws, packetManager.toggleTileEditor());
+            sendPacket(wt, packetManager.toggleTileEditor());
             break;
           }
 
@@ -7403,11 +6941,31 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
-            sendPacket(ws, packetManager.toggleParticleEditor());
+            sendPacket(wt, packetManager.toggleParticleEditor());
+            break;
+          }
+
+          case "IE":
+          case "ITEMEDITOR": {
+            if (!itemEditor.canUseEditor(currentPlayer)) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(wt, packetManager.toggleItemEditor());
+            break;
+          }
+
+          case "CE":
+          case "CREATUREEDITOR": {
+            if (!creatures.canUseEditor(currentPlayer)) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(wt, packetManager.toggleCreatureEditor());
             break;
           }
 
@@ -7422,30 +6980,11 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
-            sendPacket(ws, packetManager.toggleNpcEditor());
-            break;
-          }
-
-          case "EE":
-          case "ENTITYEDITOR": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "tools.entity_editor" || p === "tools.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(ws, packetManager.notify(notifyData));
-              break;
-            }
-
-            sendPacket(ws, packetManager.toggleEntityEditor());
+            sendPacket(wt, packetManager.toggleNpcEditor());
             break;
           }
 
@@ -7459,7 +6998,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7473,7 +7012,7 @@ export default async function packetReceiver(
                 const notifyData = {
                   message: "⚠️ Server restart has been aborted ⚠️",
                 };
-                sendPacket(player.ws, packetManager.notify(notifyData));
+                sendPacket(player.wt, packetManager.notify(notifyData));
               });
               break;
             }
@@ -7503,7 +7042,7 @@ export default async function packetReceiver(
                       message: `⚠️ Server restarting in ${minutes} minute${minutes === 1 ? "" : "s"
                         } ⚠️`,
                     };
-                    sendPacket(player.ws, packetManager.notify(notifyData));
+                    sendPacket(player.wt, packetManager.notify(notifyData));
                   });
                 }, RESTART_DELAY - minutes * 60 * 1000)
               );
@@ -7518,7 +7057,7 @@ export default async function packetReceiver(
                       message: `⚠️ Server restarting in ${seconds} second${seconds === 1 ? "" : "s"
                         } ⚠️`,
                     };
-                    sendPacket(player.ws, packetManager.notify(notifyData));
+                    sendPacket(player.wt, packetManager.notify(notifyData));
                   });
                 }, RESTART_DELAY - seconds * 1000)
               );
@@ -7528,13 +7067,13 @@ export default async function packetReceiver(
               setTimeout(() => {
                 const players = Object.values(playerCache.list());
                 players.forEach((player) => {
-                  player.ws.close(1000, "Server is restarting");
+                  player.wt.close(1000, "Server is restarting");
                 });
 
                 const checkInterval = setInterval(async () => {
                   const remainingPlayers = Object.values(playerCache.list());
                   remainingPlayers.forEach((player) => {
-                    player.ws.close(1000, "Server is restarting");
+                    player.wt.close(1000, "Server is restarting");
                   });
 
                   if (remainingPlayers.length === 0) {
@@ -7558,7 +7097,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7591,7 +7130,7 @@ export default async function packetReceiver(
                 const notifyData = {
                   message: "Player not found",
                 };
-                sendPacket(ws, packetManager.notify(notifyData));
+                sendPacket(wt, packetManager.notify(notifyData));
                 break;
               }
             }
@@ -7655,10 +7194,10 @@ export default async function packetReceiver(
                   r: globalStateRevision,
                   s: targetPlayer.isStealth ? 1 : 0
                 };
-                sendPacket(player.ws, packetManager.moveXY(moveData));
-                sendPacket(player.ws, packetManager.playerGhost({ id: targetPlayer.id, ghost: false }));
+                sendPacket(player.wt, packetManager.moveXY(moveData));
+                sendPacket(player.wt, packetManager.playerGhost({ id: targetPlayer.id, ghost: false }));
                 if (targetPlayer.stats) {
-                  sendPacket(player.ws, packetManager.revive({
+                  sendPacket(player.wt, packetManager.revive({
                     id: targetPlayer.id,
                     target: targetPlayer.id,
                     stats: targetPlayer.stats,
@@ -7673,7 +7212,7 @@ export default async function packetReceiver(
                 targetPlayer.username.slice(1)
                 }`,
             };
-            sendPacket(ws, packetManager.notify(notifyData));
+            sendPacket(wt, packetManager.notify(notifyData));
             listener.emit(Events.PLAYER_RESPAWN, { player: targetPlayer, mapName: targetPlayer.location.map, x: targetPlayer.location.position.x, y: targetPlayer.location.position.y });
             break;
           }
@@ -7688,7 +7227,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7710,7 +7249,7 @@ export default async function packetReceiver(
 
             const onlineTarget = reviveTarget ? playerCache.get(reviveTarget.id) : null;
             if (!onlineTarget) {
-              sendPacket(ws, packetManager.notify({ message: "Player must be online to revive" }));
+              sendPacket(wt, packetManager.notify({ message: "Player must be online to revive" }));
               break;
             }
 
@@ -7718,7 +7257,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: `${onlineTarget.username.charAt(0).toUpperCase() + onlineTarget.username.slice(1)} is not dead`,
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7745,8 +7284,8 @@ export default async function packetReceiver(
 
             globalStateRevision++;
             filterPlayersByMap(onlineTarget.location.map).forEach((player) => {
-              sendPacket(player.ws, packetManager.playerGhost({ id: onlineTarget.id, ghost: false }));
-              sendPacket(player.ws, packetManager.revive({
+              sendPacket(player.wt, packetManager.playerGhost({ id: onlineTarget.id, ghost: false }));
+              sendPacket(player.wt, packetManager.revive({
                 id: onlineTarget.id,
                 target: onlineTarget.id,
                 stats: onlineTarget.stats,
@@ -7755,7 +7294,7 @@ export default async function packetReceiver(
             spellEffects.broadcastEffectsUpdate(onlineTarget);
             sendStatsToPartyMembers(onlineTarget.username, onlineTarget.id, onlineTarget.stats);
 
-            sendPacket(ws, packetManager.notify({
+            sendPacket(wt, packetManager.notify({
               message: `Revived ${onlineTarget.username.charAt(0).toUpperCase() + onlineTarget.username.slice(1)}`,
             }));
             listener.emit(Events.PLAYER_REVIVED, { player: onlineTarget });
@@ -7772,7 +7311,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7794,7 +7333,7 @@ export default async function packetReceiver(
 
             const onlineTarget = killTarget ? playerCache.get(killTarget.id) : null;
             if (!onlineTarget) {
-              sendPacket(ws, packetManager.notify({ message: "Player must be online to kill" }));
+              sendPacket(wt, packetManager.notify({ message: "Player must be online to kill" }));
               break;
             }
 
@@ -7802,7 +7341,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: `${onlineTarget.username.charAt(0).toUpperCase() + onlineTarget.username.slice(1)} is already dead`,
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7813,7 +7352,7 @@ export default async function packetReceiver(
               isCrit: false,
             });
 
-            sendPacket(ws, packetManager.notify({
+            sendPacket(wt, packetManager.notify({
               message: `Killed ${onlineTarget.username.charAt(0).toUpperCase() + onlineTarget.username.slice(1)}`,
             }));
             break;
@@ -7830,7 +7369,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
             const mode = args[0]?.toUpperCase() || null;
@@ -7838,7 +7377,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Please provide a mode",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7852,7 +7391,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Invalid mode",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7862,7 +7401,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Please provide a username or ID",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7888,7 +7427,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Player not found",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7914,7 +7453,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Insufficient permissions for this operation",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7923,7 +7462,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You cannot modify your own permissions",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7933,7 +7472,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You can only modify permissions for admin players",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -7952,7 +7491,7 @@ export default async function packetReceiver(
                   const notifyData = {
                     message: `Invalid permission: ${permission}`,
                   };
-                  sendPacket(ws, packetManager.notify(notifyData));
+                  sendPacket(wt, packetManager.notify(notifyData));
                   return;
                 }
               }
@@ -7970,7 +7509,7 @@ export default async function packetReceiver(
                   const notifyData = {
                     message: `You cannot grant the ${permission} permission`,
                   };
-                  sendPacket(ws, packetManager.notify(notifyData));
+                  sendPacket(wt, packetManager.notify(notifyData));
                   return;
                 }
               }
@@ -7981,7 +7520,7 @@ export default async function packetReceiver(
               case "ADD": {
                 await permissions.add(targetPlayer.username, permissionsArray.join(","));
 
-                if (targetPlayer.ws) {
+                if (targetPlayer.wt) {
                   const existingPerms = targetPlayer.permissions || [];
                   targetPlayer.permissions = [
                     ...new Set([...existingPerms, ...permissionsArray])
@@ -8002,7 +7541,7 @@ export default async function packetReceiver(
                   )}\` added to ${targetPlayer.username.charAt(0).toUpperCase() +
                     targetPlayer.username.slice(1)}`,
                 };
-                sendPacket(ws, packetManager.notify(notifyData));
+                sendPacket(wt, packetManager.notify(notifyData));
                 break;
               }
               case "REMOVE": {
@@ -8011,7 +7550,7 @@ export default async function packetReceiver(
                   permissionsArray.join(",")
                 );
 
-                if (targetPlayer.ws) {
+                if (targetPlayer.wt) {
                   targetPlayer.permissions = (targetPlayer.permissions || []).filter(
                     (p: string) => !permissionsArray.includes(p)
                   );
@@ -8029,13 +7568,13 @@ export default async function packetReceiver(
                   message: `Permissions removed from ${targetPlayer.username.charAt(0).toUpperCase() +
                     targetPlayer.username.slice(1)}`,
                 };
-                sendPacket(ws, packetManager.notify(notifyData));
+                sendPacket(wt, packetManager.notify(notifyData));
                 break;
               }
               case "SET": {
                 await permissions.set(targetPlayer.username, permissionsArray);
 
-                if (targetPlayer.ws) {
+                if (targetPlayer.wt) {
                   targetPlayer.permissions = permissionsArray;
                   playerCache.set(targetPlayer.id, targetPlayer);
                 }
@@ -8051,7 +7590,7 @@ export default async function packetReceiver(
                   message: `Permissions set for ${targetPlayer.username.charAt(0).toUpperCase() +
                     targetPlayer.username.slice(1)}`,
                 };
-                sendPacket(ws, packetManager.notify(notifyData));
+                sendPacket(wt, packetManager.notify(notifyData));
                 break;
               }
               case "CLEAR": {
@@ -8059,7 +7598,7 @@ export default async function packetReceiver(
 
                 targetPlayer.permissions = [];
                 const p = playerCache.get(targetPlayer.id);
-                if (p && p.ws) {
+                if (p && p.wt) {
                   playerCache.set(targetPlayer.id, targetPlayer);
                 }
 
@@ -8072,7 +7611,7 @@ export default async function packetReceiver(
                   message: `Permissions cleared for ${targetPlayer.username.charAt(0).toUpperCase() +
                     targetPlayer.username.slice(1)}`,
                 };
-                sendPacket(ws, packetManager.notify(notifyData));
+                sendPacket(wt, packetManager.notify(notifyData));
                 break;
               }
               case "LIST": {
@@ -8086,7 +7625,7 @@ export default async function packetReceiver(
                     ", "
                   )}`,
                 };
-                sendPacket(ws, packetManager.notify(notifyData));
+                sendPacket(wt, packetManager.notify(notifyData));
                 break;
               }
             }
@@ -8102,7 +7641,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
             const mapName = args[0]?.toLowerCase() || null;
@@ -8110,7 +7649,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Please provide a map name",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -8121,7 +7660,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: `Map ${mapName} not found`,
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -8130,7 +7669,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: `Map ${mapName} reloaded successfully`,
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
 
               map.compressed = result.compressed;
               map.data = result.data;
@@ -8146,14 +7685,14 @@ export default async function packetReceiver(
                   maps,
                   mapPropertiesCache
                 );
-                sendPacket(player.ws, packetManager.loadMap(mapMetadata));
+                sendPacket(player.wt, packetManager.loadMap(mapMetadata));
               });
             } else {
               log.error(`Failed to reload map ${mapName}`);
               const notifyData = {
                 message: `Failed to reload map ${mapName}`,
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
             }
             break;
           }
@@ -8167,7 +7706,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You don't have permission to use this command",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
             const currentMapName = currentPlayer.location.map;
@@ -8177,7 +7716,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Please provide a map name",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -8185,7 +7724,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "You are already in this map",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -8197,7 +7736,7 @@ export default async function packetReceiver(
               const notifyData = {
                 message: "Map not found",
               };
-              sendPacket(ws, packetManager.notify(notifyData));
+              sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
 
@@ -8237,7 +7776,7 @@ export default async function packetReceiver(
                     y: centerY,
                     direction: currentPlayer.location.position?.direction || "down",
                   },
-                  ws,
+                  wt,
                   spawnBatchQueue,
                   despawnBatchQueue
                 );
@@ -8245,7 +7784,7 @@ export default async function packetReceiver(
                 const notifyData = {
                   message: "Failed to update location",
                 };
-                sendPacket(ws, packetManager.notify(notifyData));
+                sendPacket(wt, packetManager.notify(notifyData));
             }
             listener.emit(Events.GUILD_CHANGED, { type: "join", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username });
             break;
@@ -8261,7 +7800,7 @@ export default async function packetReceiver(
               )
             ) {
               sendPacket(
-                ws,
+                wt,
                 packetManager.notify({ message: "You don't have permission to use this command" })
               );
               break;
@@ -8270,7 +7809,7 @@ export default async function packetReceiver(
             const weatherName = args[0]?.toLowerCase() || null;
             if (!weatherName) {
               sendPacket(
-                ws,
+                wt,
                 packetManager.notify({ message: "Usage: /weather <weather_name|clear|random>" })
               );
               break;
@@ -8280,7 +7819,7 @@ export default async function packetReceiver(
               const allWeathers = await assetCache.get("weather") as WeatherData[];
               if (!allWeathers?.find((w: WeatherData) => w.name === weatherName)) {
                 sendPacket(
-                  ws,
+                  wt,
                   packetManager.notify({ message: `Weather '${weatherName}' not found` })
                 );
                 break;
@@ -8318,16 +7857,16 @@ export default async function packetReceiver(
             const playerIds = mapIndex.getPlayersOnMap(currentMapName);
             for (const playerId of playerIds) {
               const player = playerCache.get(playerId);
-              if (player?.ws && player.ws.readyState === 1) {
+              if (player?.wt && player.wt.readyState === 1) {
                 sendPacket(
-                  player.ws,
+                  player.wt,
                   packetManager.changeWeather({ weather: resolvedWeatherName, weatherData })
                 );
               }
             }
 
             sendPacket(
-              ws,
+              wt,
               packetManager.notify({ message: `Weather changed to '${weatherName}' for world '${currentMapName}'` })
             );
             break;
@@ -8338,7 +7877,7 @@ export default async function packetReceiver(
                 (p: string) => p === "admin.items" || p === "admin.*"
               )
             ) {
-              sendPacket(ws, packetManager.notify({ message: "You don't have permission to use this command" }));
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
               break;
             }
 
@@ -8347,7 +7886,7 @@ export default async function packetReceiver(
             const quantity = parseInt(args[2]) || 1;
 
             if (!targetIdentifier || !itemName) {
-              sendPacket(ws, packetManager.notify({ message: "Usage: /give <user> <item> <amount>" }));
+              sendPacket(wt, packetManager.notify({ message: "Usage: /give <user> <item> <amount>" }));
               break;
             }
 
@@ -8365,7 +7904,7 @@ export default async function packetReceiver(
             }
 
             if (!targetPlayer) {
-              sendPacket(ws, packetManager.notify({ message: "Player not found" }));
+              sendPacket(wt, packetManager.notify({ message: "Player not found" }));
               break;
             }
 
@@ -8374,7 +7913,7 @@ export default async function packetReceiver(
             const items = await assetCache.get("items") as Item[];
             const itemDef = Array.isArray(items) ? items.find((i: any) => i.name.toLowerCase() === itemName.toLowerCase()) : null;
             if (!itemDef) {
-              sendPacket(ws, packetManager.notify({ message: `Item '${itemName}' does not exist` }));
+              sendPacket(wt, packetManager.notify({ message: `Item '${itemName}' does not exist` }));
               break;
             }
 
@@ -8386,9 +7925,9 @@ export default async function packetReceiver(
               const existing = cachedTarget.inventory.find((i: any) => i.name.toLowerCase() === itemDef.name.toLowerCase());
               if (existing) {
                 existing.quantity += quantity;
-                if (cachedTarget.ws) {
-                  sendPacket(cachedTarget.ws, packetManager.addInventoryItem(existing));
-                  sendPacket(cachedTarget.ws, packetManager.notify({ message: `You received ${quantity}x ${itemDef.name}` }));
+                if (cachedTarget.wt) {
+                  sendPacket(cachedTarget.wt, packetManager.addInventoryItem(existing));
+                  sendPacket(cachedTarget.wt, packetManager.notify({ message: `You received ${quantity}x ${itemDef.name}` }));
                 }
               } else {
                 const newItem = {
@@ -8413,15 +7952,15 @@ export default async function packetReceiver(
                   description: itemDef?.description || '',
                 };
                 cachedTarget.inventory.push(newItem);
-                if (cachedTarget.ws) {
-                  sendPacket(cachedTarget.ws, packetManager.addInventoryItem(newItem));
-                  sendPacket(cachedTarget.ws, packetManager.notify({ message: `You received ${quantity}x ${itemDef.name}` }));
+                if (cachedTarget.wt) {
+                  sendPacket(cachedTarget.wt, packetManager.addInventoryItem(newItem));
+                  sendPacket(cachedTarget.wt, packetManager.notify({ message: `You received ${quantity}x ${itemDef.name}` }));
                 }
               }
               playerCache.set(cachedTarget.id, cachedTarget);
             }
 
-            sendPacket(ws, packetManager.notify({ message: `Gave ${quantity}x ${itemDef.name} to ${targetName}` }));
+            sendPacket(wt, packetManager.notify({ message: `Gave ${quantity}x ${itemDef.name} to ${targetName}` }));
             break;
           }
           case "DROP": {
@@ -8430,7 +7969,7 @@ export default async function packetReceiver(
                 (p: string) => p === "admin.items" || p === "admin.*"
               )
             ) {
-              sendPacket(ws, packetManager.notify({ message: "You don't have permission to use this command" }));
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
               break;
             }
 
@@ -8438,14 +7977,14 @@ export default async function packetReceiver(
             const dropQty = Math.min(parseInt(args[1]) || 1, 9999);
 
             if (!dropItem) {
-              sendPacket(ws, packetManager.notify({ message: "Usage: /drop <item> [amount]" }));
+              sendPacket(wt, packetManager.notify({ message: "Usage: /drop <item> [amount]" }));
               break;
             }
 
             const dropItems = await assetCache.get("items") as Item[];
             const dropDef = Array.isArray(dropItems) ? dropItems.find((i: any) => i.name.toLowerCase() === dropItem.toLowerCase()) : null;
             if (!dropDef) {
-              sendPacket(ws, packetManager.notify({ message: `Item '${dropItem}' does not exist` }));
+              sendPacket(wt, packetManager.notify({ message: `Item '${dropItem}' does not exist` }));
               break;
             }
 
@@ -8467,22 +8006,22 @@ export default async function packetReceiver(
             const playerIds = mapIndex.getPlayersOnMap(spawnedLoot.map);
             for (const playerId of playerIds) {
               const p = playerCache.get(playerId);
-              if (p?.ws && p.ws.readyState === 1) {
-                sendPacket(p.ws, packetManager.lootSpawn(spawnData));
+              if (p?.wt && p.wt.readyState === 1) {
+                sendPacket(p.wt, packetManager.lootSpawn(spawnData));
               }
             }
 
-            sendPacket(ws, packetManager.notify({ message: `Dropped ${dropQty}x ${dropDef.name}.` }));
+            sendPacket(wt, packetManager.notify({ message: `Dropped ${dropQty}x ${dropDef.name}.` }));
             break;
           }
           case "SPAWNCHEST": {
             if (!currentPlayer.permissions.some((p: string) => p === "admin.items" || p === "admin.*")) {
-              sendPacket(ws, packetManager.notify({ message: "You don't have permission to use this command" }));
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
               break;
             }
             const mode = args[0]?.toLowerCase() || null;
             if (!mode || (mode !== "table" && mode !== "inline")) {
-              sendPacket(ws, packetManager.notify({ message: "Usage: /spawnchest table <loot_table_id> or /spawnchest inline <item> <min> <max> <chance> ..." }));
+              sendPacket(wt, packetManager.notify({ message: "Usage: /spawnchest table <loot_table_id> or /spawnchest inline <item> <min> <max> <chance> ..." }));
               break;
             }
             const playerPos = typeof currentPlayer.location.position === 'string'
@@ -8490,93 +8029,93 @@ export default async function packetReceiver(
               : (currentPlayer.location.position as any);
             if (mode === "table") {
               const tableId = parseInt(args[1]);
-              if (!tableId || isNaN(tableId)) { sendPacket(ws, packetManager.notify({ message: "Usage: /spawnchest table <loot_table_id>" })); break; }
+              if (!tableId || isNaN(tableId)) { sendPacket(wt, packetManager.notify({ message: "Usage: /spawnchest table <loot_table_id>" })); break; }
               const table = await lootTable.get(tableId);
-              if (!table) { sendPacket(ws, packetManager.notify({ message: `Loot table ${tableId} not found.` })); break; }
+              if (!table) { sendPacket(wt, packetManager.notify({ message: `Loot table ${tableId} not found.` })); break; }
               const chestId = lootChest.spawn(currentPlayer.location.map, playerPos.x, playerPos.y, tableId, undefined, currentPlayer.username);
               const chestData = { id: chestId, x: playerPos.x, y: playerPos.y, iconUrl: getIconUrl("loot_chest"), map: currentPlayer.location.map };
               const playerIds = mapIndex.getPlayersOnMap(currentPlayer.location.map);
-              for (const pid of playerIds) { const p = playerCache.get(pid); if (p?.ws && p.ws.readyState === 1) { sendPacket(p.ws, packetManager.lootChestSpawn(chestData)); } }
-              sendPacket(ws, packetManager.notify({ message: `Loot chest spawned using table "${table.name}".` }));
+              for (const pid of playerIds) { const p = playerCache.get(pid); if (p?.wt && p.wt.readyState === 1) { sendPacket(p.wt, packetManager.lootChestSpawn(chestData)); } }
+              sendPacket(wt, packetManager.notify({ message: `Loot chest spawned using table "${table.name}".` }));
             } else {
               const itemArgs = args.slice(1);
               if (itemArgs.length < 4 || itemArgs.length % 4 !== 0) {
-                sendPacket(ws, packetManager.notify({ message: "Usage: /spawnchest inline <item> <min> <max> <chance> ..." }));
+                sendPacket(wt, packetManager.notify({ message: "Usage: /spawnchest inline <item> <min> <max> <chance> ..." }));
                 break;
               }
               const inlineEntries: any[] = [];
               for (let i = 0; i < itemArgs.length; i += 4) {
                 const itemName = itemArgs[i]; const minQty = parseInt(itemArgs[i + 1]); const maxQty = parseInt(itemArgs[i + 2]); const chance = parseFloat(itemArgs[i + 3]);
-                if (!itemName || isNaN(minQty) || isNaN(maxQty) || isNaN(chance)) { sendPacket(ws, packetManager.notify({ message: `Invalid entry at position ${i}` })); break; }
+                if (!itemName || isNaN(minQty) || isNaN(maxQty) || isNaN(chance)) { sendPacket(wt, packetManager.notify({ message: `Invalid entry at position ${i}` })); break; }
                 inlineEntries.push({ itemName, minQuantity: minQty, maxQuantity: maxQty, dropChance: chance, quality: "common" });
               }
               if (inlineEntries.length === 0) break;
               const chestId = lootChest.spawn(currentPlayer.location.map, playerPos.x, playerPos.y, undefined, inlineEntries, currentPlayer.username);
               const chestData = { id: chestId, x: playerPos.x, y: playerPos.y, iconUrl: getIconUrl("loot_chest"), map: currentPlayer.location.map };
               const playerIds = mapIndex.getPlayersOnMap(currentPlayer.location.map);
-              for (const pid of playerIds) { const p = playerCache.get(pid); if (p?.ws && p.ws.readyState === 1) { sendPacket(p.ws, packetManager.lootChestSpawn(chestData)); } }
-              sendPacket(ws, packetManager.notify({ message: `Loot chest spawned with ${inlineEntries.length} inline entries.` }));
+              for (const pid of playerIds) { const p = playerCache.get(pid); if (p?.wt && p.wt.readyState === 1) { sendPacket(p.wt, packetManager.lootChestSpawn(chestData)); } }
+              sendPacket(wt, packetManager.notify({ message: `Loot chest spawned with ${inlineEntries.length} inline entries.` }));
             }
             break;
           }
           case "LOOTTABLE": {
             if (!currentPlayer.permissions.some((p: string) => p === "admin.loot" || p === "admin.*")) {
-              sendPacket(ws, packetManager.notify({ message: "You don't have permission to use this command" }));
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
               break;
             }
             const sub = args[0]?.toLowerCase() || null;
-            if (!sub) { sendPacket(ws, packetManager.notify({ message: "Usage: /loottable list|create|delete|info|additem|removeitem ..." })); break; }
+            if (!sub) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable list|create|delete|info|additem|removeitem ..." })); break; }
             if (sub === "list") {
               const tables = await lootTable.list();
               const names = tables.length ? tables.map((t: any) => `#${t.id} ${t.name} (${t.items.length} items)`).join(", ") : "No loot tables found.";
-              sendPacket(ws, packetManager.notify({ message: `Loot tables: ${names}` }));
+              sendPacket(wt, packetManager.notify({ message: `Loot tables: ${names}` }));
             } else if (sub === "create") {
-              const name = args[1]; if (!name) { sendPacket(ws, packetManager.notify({ message: "Usage: /loottable create <name>" })); break; }
+              const name = args[1]; if (!name) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable create <name>" })); break; }
               const r = await lootTable.create(name);
-              sendPacket(ws, packetManager.notify({ message: r ? `Loot table "${name}" created.` : `Table "${name}" already exists.` }));
+              sendPacket(wt, packetManager.notify({ message: r ? `Loot table "${name}" created.` : `Table "${name}" already exists.` }));
             } else if (sub === "delete") {
-              const id = parseInt(args[1]); if (!id || isNaN(id)) { sendPacket(ws, packetManager.notify({ message: "Usage: /loottable delete <id>" })); break; }
-              await lootTable.delete(id); sendPacket(ws, packetManager.notify({ message: `Loot table ${id} deleted.` }));
+              const id = parseInt(args[1]); if (!id || isNaN(id)) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable delete <id>" })); break; }
+              await lootTable.delete(id); sendPacket(wt, packetManager.notify({ message: `Loot table ${id} deleted.` }));
             } else if (sub === "info") {
-              const id = parseInt(args[1]); if (!id || isNaN(id)) { sendPacket(ws, packetManager.notify({ message: "Usage: /loottable info <id>" })); break; }
+              const id = parseInt(args[1]); if (!id || isNaN(id)) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable info <id>" })); break; }
               const table = await lootTable.get(id);
-              if (!table) { sendPacket(ws, packetManager.notify({ message: `Loot table ${id} not found.` })); break; }
+              if (!table) { sendPacket(wt, packetManager.notify({ message: `Loot table ${id} not found.` })); break; }
               const lines = table.items.map((it: any) => `  #${it.id} ${it.item_name} (${it.min_quantity}-${it.max_quantity}, ${it.drop_chance}%, ${it.quality})`).join("\n");
-              sendPacket(ws, packetManager.notify({ message: `Table #${table.id} "${table.name}":\n${lines || "  (no items)"}` }));
+              sendPacket(wt, packetManager.notify({ message: `Table #${table.id} "${table.name}":\n${lines || "  (no items)"}` }));
             } else if (sub === "additem") {
               const tableId = parseInt(args[1]); const itemName = args[2];
               const minQty = parseInt(args[3]) || 1; const maxQty = parseInt(args[4]) || 1;
               const chance = parseFloat(args[5]) || 100; const quality = args[6] || "common";
-              if (!tableId || isNaN(tableId) || !itemName) { sendPacket(ws, packetManager.notify({ message: "Usage: /loottable additem <tableId> <item> <min> <max> <chance> [quality]" })); break; }
+              if (!tableId || isNaN(tableId) || !itemName) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable additem <tableId> <item> <min> <max> <chance> [quality]" })); break; }
               const r = await lootTable.addItem(tableId, itemName, minQty, maxQty, chance, quality);
-              if (r && (r as any).error) { sendPacket(ws, packetManager.notify({ message: (r as any).error })); break; }
-              sendPacket(ws, packetManager.notify({ message: `Added "${itemName}" to loot table ${tableId}.` }));
+              if (r && (r as any).error) { sendPacket(wt, packetManager.notify({ message: (r as any).error })); break; }
+              sendPacket(wt, packetManager.notify({ message: `Added "${itemName}" to loot table ${tableId}.` }));
             } else if (sub === "removeitem") {
-              const itemId = parseInt(args[1]); if (!itemId || isNaN(itemId)) { sendPacket(ws, packetManager.notify({ message: "Usage: /loottable removeitem <itemId>" })); break; }
-              await lootTable.removeItem(itemId); sendPacket(ws, packetManager.notify({ message: `Item ${itemId} removed from loot table.` }));
+              const itemId = parseInt(args[1]); if (!itemId || isNaN(itemId)) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable removeitem <itemId>" })); break; }
+              await lootTable.removeItem(itemId); sendPacket(wt, packetManager.notify({ message: `Item ${itemId} removed from loot table.` }));
             } else if (sub === "updateitem") {
               const itemId = parseInt(args[1]); const minQty = parseInt(args[2]) || 1; const maxQty = parseInt(args[3]) || 1;
               const chance = parseFloat(args[4]) || 100; const quality = args[5] || "common";
-              if (!itemId || isNaN(itemId)) { sendPacket(ws, packetManager.notify({ message: "Usage: /loottable updateitem <itemId> <min> <max> <chance> [quality]" })); break; }
+              if (!itemId || isNaN(itemId)) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable updateitem <itemId> <min> <max> <chance> [quality]" })); break; }
               await lootTable.updateItem(itemId, minQty, maxQty, chance, quality);
-              sendPacket(ws, packetManager.notify({ message: `Item ${itemId} updated.` }));
-            } else { sendPacket(ws, packetManager.notify({ message: "Unknown sub-command. Use: list|create|delete|info|additem|removeitem|updateitem" })); }
+              sendPacket(wt, packetManager.notify({ message: `Item ${itemId} updated.` }));
+            } else { sendPacket(wt, packetManager.notify({ message: "Unknown sub-command. Use: list|create|delete|info|additem|removeitem|updateitem" })); }
             break;
           }
           case "LE":
           case "LOOTEDITOR": {
             if (!currentPlayer.permissions.some((p: string) => p === "admin.loot" || p === "admin.*")) {
-              sendPacket(ws, packetManager.notify({ message: "You don't have permission to use this command" }));
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
               break;
             }
-            sendPacket(ws, packetManager.toggleLootEditor());
+            sendPacket(wt, packetManager.toggleLootEditor());
             break;
           }
           default: {
             const notifyData = {
               message: "Invalid command",
             };
-            sendPacket(ws, packetManager.notify(notifyData));
+            sendPacket(wt, packetManager.notify(notifyData));
             break;
           }
         }
@@ -8588,7 +8127,7 @@ export default async function packetReceiver(
         const partyId = await parties.getPartyId(currentPlayer.username);
         if (!partyId) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "You are not in a party" })
           );
           return;
@@ -8597,7 +8136,7 @@ export default async function packetReceiver(
         const isLeader = await parties.isPartyLeader(currentPlayer.username);
         if (!isLeader) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "You are not the party leader" })
           );
           return;
@@ -8606,7 +8145,7 @@ export default async function packetReceiver(
         const member = (data as any)?.username;
         if (!member) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "Please provide a username" })
           );
           return;
@@ -8615,7 +8154,7 @@ export default async function packetReceiver(
         const members = await parties.getPartyMembers(partyId);
         if (!members || members?.length === 0) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "You are not in a party" })
           );
           return;
@@ -8623,7 +8162,7 @@ export default async function packetReceiver(
 
         if (!members.includes(member)) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: `${member.charAt(0).toUpperCase() + member.slice(1)
                 } is not in your party`,
@@ -8636,7 +8175,7 @@ export default async function packetReceiver(
 
         if (typeof result === "boolean" && !result) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: `Failed to kick ${member.charAt(0).toUpperCase() + member.slice(1)
                 } from the party`,
@@ -8651,9 +8190,9 @@ export default async function packetReceiver(
             const session_id = await player.getSessionIdByUsername(m);
             const p = session_id && playerCache.get(session_id);
             if (p) {
-              sendPacket(p.ws, packetManager.updateParty({ members: [] }));
+              sendPacket(p.wt, packetManager.updateParty({ members: [] }));
               sendPacket(
-                p.ws,
+                p.wt,
                 packetManager.notify({
                   message: "The party has been disbanded",
                 })
@@ -8668,7 +8207,7 @@ export default async function packetReceiver(
 
         if (Array.isArray(result) && result.length > 0) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: `${member.charAt(0).toUpperCase() + member.slice(1)
                 } has been kicked from the party`,
@@ -8676,7 +8215,7 @@ export default async function packetReceiver(
           );
           currentPlayer.party = [];
           playerCache.set(currentPlayer.id, currentPlayer);
-          sendPacket(ws, packetManager.updateParty({ members: [] }));
+          sendPacket(wt, packetManager.updateParty({ members: [] }));
 
           result.forEach(async (m: string) => {
             const session_id = await player.getSessionIdByUsername(m);
@@ -8684,11 +8223,11 @@ export default async function packetReceiver(
             if (p) {
               if (m !== member) {
                 sendPacket(
-                  p.ws,
+                  p.wt,
                   packetManager.updateParty({ members: result })
                 );
                 sendPacket(
-                  p.ws,
+                  p.wt,
                   packetManager.notify({
                     message: `${currentPlayer.username.charAt(0).toUpperCase() +
                       currentPlayer.username.slice(1)
@@ -8698,9 +8237,9 @@ export default async function packetReceiver(
                 );
                 p.party = result;
               } else {
-                sendPacket(p.ws, packetManager.updateParty({ members: [] }));
+                sendPacket(p.wt, packetManager.updateParty({ members: [] }));
                 sendPacket(
-                  p.ws,
+                  p.wt,
                   packetManager.notify({
                     message: `You have been kicked from the party`,
                   })
@@ -8731,7 +8270,7 @@ export default async function packetReceiver(
         const partyId = await parties.getPartyId(currentPlayer.username);
         if (!partyId) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "You are not in a party" })
           );
           return;
@@ -8740,7 +8279,7 @@ export default async function packetReceiver(
         const members = await parties.getPartyMembers(partyId);
         if (!members || members?.length === 0) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "You are not in a party" })
           );
           return;
@@ -8751,7 +8290,7 @@ export default async function packetReceiver(
         const type = typeof result;
         if (type === "boolean" && !result) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "Failed to leave party" })
           );
           return;
@@ -8762,9 +8301,9 @@ export default async function packetReceiver(
             const session_id = await player.getSessionIdByUsername(member);
             const p = session_id && playerCache.get(session_id);
             if (p) {
-              sendPacket(p.ws, packetManager.updateParty({ members: [] }));
+              sendPacket(p.wt, packetManager.updateParty({ members: [] }));
               sendPacket(
-                p.ws,
+                p.wt,
                 packetManager.notify({
                   message: "The party has been disbanded",
                 })
@@ -8778,7 +8317,7 @@ export default async function packetReceiver(
             for (const member of members) {
               const session_id = await player.getSessionIdByUsername(member);
               const pm = session_id && playerCache.get(session_id);
-              if (pm && pm.ws && pm.id !== currentPlayer.id) sendPacket(pm.ws, packetManager.despawnPlayer(currentPlayer.id));
+              if (pm && pm.wt && pm.id !== currentPlayer.id) sendPacket(pm.wt, packetManager.despawnPlayer(currentPlayer.id));
             }
           }
           return;
@@ -8786,21 +8325,21 @@ export default async function packetReceiver(
 
         if (type === "object" && (result as string[]).length > 0) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "You have left the party" })
           );
           currentPlayer.party = [];
           playerCache.set(currentPlayer.id, currentPlayer);
-          sendPacket(ws, packetManager.updateParty({ members: [] }));
+          sendPacket(wt, packetManager.updateParty({ members: [] }));
           listener.emit(Events.PARTY_CHANGED, { type: "leave", username: currentPlayer.username, members: [currentPlayer.username] });
 
           (result as string[]).forEach(async (member: string) => {
             const session_id = await player.getSessionIdByUsername(member);
             const p = session_id && playerCache.get(session_id);
             if (p) {
-              sendPacket(p.ws, packetManager.updateParty({ members: result }));
+              sendPacket(p.wt, packetManager.updateParty({ members: result }));
               sendPacket(
-                p.ws,
+                p.wt,
                 packetManager.notify({
                   message: `${currentPlayer.username.charAt(0).toUpperCase() +
                     currentPlayer.username.slice(1)
@@ -8826,7 +8365,7 @@ export default async function packetReceiver(
             for (const member of (result as string[])) {
               const session_id = await player.getSessionIdByUsername(member);
               const pm = session_id && playerCache.get(session_id);
-              if (pm && pm.ws && pm.id !== currentPlayer.id) sendPacket(pm.ws, packetManager.despawnPlayer(currentPlayer.id));
+              if (pm && pm.wt && pm.id !== currentPlayer.id) sendPacket(pm.wt, packetManager.despawnPlayer(currentPlayer.id));
             }
           }
         }
@@ -8837,19 +8376,19 @@ export default async function packetReceiver(
 
         const guildId = currentPlayer.guild_id;
         if (!guildId) {
-          sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+          sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
           return;
         }
 
         const isLeader = await guilds.isGuildLeader(currentPlayer.username);
         if (!isLeader) {
-          sendPacket(ws, packetManager.notify({ message: "You are not the guild leader" }));
+          sendPacket(wt, packetManager.notify({ message: "You are not the guild leader" }));
           return;
         }
 
         const members = await guilds.getGuildMembers(guildId);
         if (!members || members.length === 0) {
-          sendPacket(ws, packetManager.notify({ message: "Your guild has no members" }));
+          sendPacket(wt, packetManager.notify({ message: "Your guild has no members" }));
           return;
         }
 
@@ -8857,9 +8396,9 @@ export default async function packetReceiver(
           const session_id = await player.getSessionIdByUsername(member);
           const p = session_id && playerCache.get(session_id);
           if (p) {
-            sendPacket(p.ws, packetManager.updateGuild({ members: [] }));
+            sendPacket(p.wt, packetManager.updateGuild({ members: [] }));
             if (p.id !== currentPlayer.id) {
-              sendPacket(p.ws, packetManager.notify({ message: "The guild has been disbanded" }));
+              sendPacket(p.wt, packetManager.notify({ message: "The guild has been disbanded" }));
             }
             p.guild_id = null;
             p.guild = [];
@@ -8879,26 +8418,26 @@ export default async function packetReceiver(
 
         const guildId = currentPlayer.guild_id;
         if (!guildId) {
-          sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+          sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
           return;
         }
 
         const isLeader = await guilds.isGuildLeader(currentPlayer.username);
         if (isLeader) {
-          sendPacket(ws, packetManager.notify({ message: "You cannot leave your own guild." }));
+          sendPacket(wt, packetManager.notify({ message: "You cannot leave your own guild." }));
           return;
         }
 
         const members = await guilds.getGuildMembers(guildId);
         if (!members || members.length === 0) {
-          sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+          sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
           return;
         }
 
         const result = await guilds.leave(currentPlayer.username);
 
         if (typeof result === "boolean" && !result) {
-          sendPacket(ws, packetManager.notify({ message: "Failed to leave guild" }));
+          sendPacket(wt, packetManager.notify({ message: "Failed to leave guild" }));
           return;
         }
 
@@ -8910,7 +8449,7 @@ export default async function packetReceiver(
         playerCache.set(currentPlayer.id, currentPlayer);
 
         broadcastPlayerUpdate(currentPlayer);
-        sendPacket(ws, packetManager.updateGuild({ members: [] }));
+        sendPacket(wt, packetManager.updateGuild({ members: [] }));
 
         if (Array.isArray(result) && result.length > 0) {
           for (const member of result) {
@@ -8918,7 +8457,7 @@ export default async function packetReceiver(
             const p = session_id && playerCache.get(session_id);
             if (p) {
               if (p.id !== currentPlayer.id) {
-                sendPacket(p.ws, packetManager.updateGuild({ members: result, guild_name: currentPlayer.guild_name || await guilds.getGuildName(guildId) }));
+                sendPacket(p.wt, packetManager.updateGuild({ members: result, guild_name: currentPlayer.guild_name || await guilds.getGuildName(guildId) }));
               }
             }
           }
@@ -8931,55 +8470,55 @@ export default async function packetReceiver(
 
         const guildId = currentPlayer.guild_id;
         if (!guildId) {
-          sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+          sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
           return;
         }
 
         const isLeader = await guilds.isGuildLeader(currentPlayer.username);
         if (!isLeader) {
-          sendPacket(ws, packetManager.notify({ message: "You are not the guild leader" }));
+          sendPacket(wt, packetManager.notify({ message: "You are not the guild leader" }));
           return;
         }
 
         const memberUsername = (data as any)?.username;
         if (!memberUsername) {
-          sendPacket(ws, packetManager.notify({ message: "Please provide a username" }));
+          sendPacket(wt, packetManager.notify({ message: "Please provide a username" }));
           return;
         }
 
         const members = await guilds.getGuildMembers(guildId);
         if (!members || members.length === 0) {
-          sendPacket(ws, packetManager.notify({ message: "Your guild has no members" }));
+          sendPacket(wt, packetManager.notify({ message: "Your guild has no members" }));
           return;
         }
 
         if (!members.includes(memberUsername)) {
-          sendPacket(ws, packetManager.notify({
+          sendPacket(wt, packetManager.notify({
             message: `${memberUsername} is not in your guild`,
           }));
           return;
         }
 
         if (memberUsername.toLowerCase() === currentPlayer.username.toLowerCase()) {
-          sendPacket(ws, packetManager.notify({ message: "You cannot kick yourself." }));
+          sendPacket(wt, packetManager.notify({ message: "You cannot kick yourself." }));
           return;
         }
 
         const result = await guilds.remove(memberUsername);
 
         if (typeof result === "boolean" && !result) {
-          sendPacket(ws, packetManager.notify({ message: `Failed to kick ${memberUsername} from the guild` }));
+          sendPacket(wt, packetManager.notify({ message: `Failed to kick ${memberUsername} from the guild` }));
           return;
         }
 
-        sendPacket(ws, packetManager.notify({ message: `${memberUsername} has been kicked from the guild` }));
+        sendPacket(wt, packetManager.notify({ message: `${memberUsername} has been kicked from the guild` }));
 
         if (Array.isArray(result) && result.length > 0) {
           for (const member of result) {
             const session_id = await player.getSessionIdByUsername(member);
             const p = session_id && playerCache.get(session_id);
             if (p) {
-              sendPacket(p.ws, packetManager.updateGuild({ members: result, guild_name: currentPlayer.guild_name }));
+              sendPacket(p.wt, packetManager.updateGuild({ members: result, guild_name: currentPlayer.guild_name }));
               p.guild = result;
               playerCache.set(p.id, p);
             }
@@ -8989,8 +8528,8 @@ export default async function packetReceiver(
         const kickedSessionId = await player.getSessionIdByUsername(memberUsername);
         const kickedPlayer = kickedSessionId && playerCache.get(kickedSessionId);
         if (kickedPlayer) {
-          sendPacket(kickedPlayer.ws, packetManager.updateGuild({ members: [] }));
-          sendPacket(kickedPlayer.ws, packetManager.notify({ message: "You have been kicked from the guild" }));
+          sendPacket(kickedPlayer.wt, packetManager.updateGuild({ members: [] }));
+          sendPacket(kickedPlayer.wt, packetManager.notify({ message: "You have been kicked from the guild" }));
           kickedPlayer.guild_id = null;
           kickedPlayer.guild = [];
           kickedPlayer.guild_name = null;
@@ -9003,31 +8542,31 @@ export default async function packetReceiver(
       case "CREATE_GUILD": {
         if (!currentPlayer) return;
         if (currentPlayer.isGuest) {
-          sendPacket(ws, packetManager.notify({ message: "Please create an account to use that feature." }));
+          sendPacket(wt, packetManager.notify({ message: "Please create an account to use that feature." }));
           return;
         }
 
         const guildName = (data as any)?.name;
         if (!guildName || !guildName.trim()) {
-          sendPacket(ws, packetManager.notify({ message: "Please provide a guild name" }));
+          sendPacket(wt, packetManager.notify({ message: "Please provide a guild name" }));
           return;
         }
 
         const alreadyInGuild = await guilds.isInGuild(currentPlayer.username);
         if (alreadyInGuild) {
-          sendPacket(ws, packetManager.notify({ message: "You are already in a guild" }));
+          sendPacket(wt, packetManager.notify({ message: "You are already in a guild" }));
           return;
         }
 
         const nameExists = await guilds.exists(guildName.trim());
         if (nameExists) {
-          sendPacket(ws, packetManager.notify({ message: "A guild with that name already exists" }));
+          sendPacket(wt, packetManager.notify({ message: "A guild with that name already exists" }));
           return;
         }
 
         const result = await guilds.create(currentPlayer.username.toLowerCase(), guildName.trim());
         if (!result) {
-          sendPacket(ws, packetManager.notify({ message: "Failed to create guild" }));
+          sendPacket(wt, packetManager.notify({ message: "Failed to create guild" }));
           return;
         }
 
@@ -9038,8 +8577,8 @@ export default async function packetReceiver(
         playerCache.set(currentPlayer.id, currentPlayer);
 
         broadcastPlayerUpdate(currentPlayer);
-        sendPacket(ws, packetManager.updateGuild({ members: result, guild_name: guildName.trim() }));
-        sendPacket(ws, packetManager.notify({ message: `Guild "${guildName.trim()}" created successfully` }));
+        sendPacket(wt, packetManager.updateGuild({ members: result, guild_name: guildName.trim() }));
+        sendPacket(wt, packetManager.notify({ message: `Guild "${guildName.trim()}" created successfully` }));
         listener.emit(Events.GUILD_CHANGED, { type: "create", guildId: currentPlayer.guild_id, guildName: guildName.trim(), playerUsername: currentPlayer.username });
         break;
       }
@@ -9050,12 +8589,12 @@ export default async function packetReceiver(
         if (!currentPlayer || !invited_user || !invitedUserUsername) return;
 
         if (currentPlayer.isGuest) {
-          sendPacket(ws, packetManager.notify({ message: "Please create an account to use that feature." }));
+          sendPacket(wt, packetManager.notify({ message: "Please create an account to use that feature." }));
           return;
         }
 
         if (invitedUser.isGuest) {
-          sendPacket(ws, packetManager.notify({
+          sendPacket(wt, packetManager.notify({
             message: `${invitedUserUsername.charAt(0).toUpperCase() + invitedUserUsername.slice(1)} is a guest and cannot join a guild.`,
           }));
           return;
@@ -9063,19 +8602,19 @@ export default async function packetReceiver(
 
         const guildId = currentPlayer.guild_id;
         if (!guildId) {
-          sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+          sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
           return;
         }
 
         const isLeader = await guilds.isGuildLeader(currentPlayer.username);
         if (!isLeader) {
-          sendPacket(ws, packetManager.notify({ message: "You are not the guild leader" }));
+          sendPacket(wt, packetManager.notify({ message: "You are not the guild leader" }));
           return;
         }
 
         const invitedUserInGuild = await guilds.isInGuild(invitedUserUsername);
         if (invitedUserInGuild) {
-          sendPacket(ws, packetManager.notify({
+          sendPacket(wt, packetManager.notify({
             message: `${invitedUserUsername.charAt(0).toUpperCase() + invitedUserUsername.slice(1)} is already in a guild`,
           }));
           return;
@@ -9102,9 +8641,9 @@ export default async function packetReceiver(
 
         playerCache.set(currentPlayer.id, currentPlayer);
 
-        sendPacket(invitedUser.ws, packetManager.invitation(invite_data));
+        sendPacket(invitedUser.wt, packetManager.invitation(invite_data));
         sendPacket(
-          ws,
+          wt,
           packetManager.notify({
             message: `Invitation sent to ${invitedUserUsername.charAt(0).toUpperCase() + invitedUserUsername.slice(1)}`,
           })
@@ -9119,13 +8658,13 @@ export default async function packetReceiver(
 
         const guildId = currentPlayer.guild_id;
         if (!guildId) {
-          sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+          sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
           return;
         }
 
         const guildMembers = await guilds.getGuildMembers(guildId);
         if (!guildMembers || guildMembers.length === 0) {
-          sendPacket(ws, packetManager.notify({ message: "You are not in a guild" }));
+          sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
           return;
         }
 
@@ -9134,9 +8673,9 @@ export default async function packetReceiver(
           const memberPlayer = playerCache.get(session_id);
           if (memberPlayer) {
             sendPacket(
-              memberPlayer.ws,
+              memberPlayer.wt,
               packetManager.guildChat({
-                id: ws.data.id,
+                id: wt.data.id,
                 message,
                 username:
                   currentPlayer.username.charAt(0).toUpperCase() +
@@ -9157,7 +8696,7 @@ export default async function packetReceiver(
 
         if (currentPlayer.isGuest) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: "Please create an account to use that feature.",
             })
@@ -9167,7 +8706,7 @@ export default async function packetReceiver(
 
         if (invitedUser.isGuest) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: `${invitedUserUsername.charAt(0).toUpperCase() +
                 invitedUserUsername.slice(1)
@@ -9183,7 +8722,7 @@ export default async function packetReceiver(
           const isLeader = await parties.isPartyLeader(currentPlayer.username);
           if (!isLeader) {
             sendPacket(
-              ws,
+              wt,
               packetManager.notify({ message: "You are not the party leader" })
             );
             return;
@@ -9196,7 +8735,7 @@ export default async function packetReceiver(
 
         if (invitedUserPartyId) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: `${invitedUserUsername.charAt(0).toUpperCase() +
                 invitedUserUsername.slice(1)
@@ -9211,7 +8750,7 @@ export default async function packetReceiver(
         );
         if (invitedUserLeader) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: `${invitedUserUsername.charAt(0).toUpperCase() +
                 invitedUserUsername.slice(1)
@@ -9234,7 +8773,7 @@ export default async function packetReceiver(
 
         if (!invitedUser) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: `${invitedUserUsername.charAt(0).toUpperCase() +
                 invitedUserUsername.slice(1)
@@ -9252,9 +8791,9 @@ export default async function packetReceiver(
 
         playerCache.set(currentPlayer.id, currentPlayer);
 
-        sendPacket(invitedUser.ws, packetManager.invitation(invite_data));
+        sendPacket(invitedUser.wt, packetManager.invitation(invite_data));
         sendPacket(
-          ws,
+          wt,
           packetManager.notify({
             message: `Invitation sent to ${invitedUserUsername.charAt(0).toUpperCase() +
               invitedUserUsername.slice(1)
@@ -9272,7 +8811,7 @@ export default async function packetReceiver(
 
         if (currentPlayer.isGuest) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: "Please create an account to use that feature.",
             })
@@ -9285,7 +8824,7 @@ export default async function packetReceiver(
 
         if (get_friend.id === currentPlayer.id || get_friend.username.toLowerCase() === currentPlayer.username.toLowerCase()) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: "You cannot add yourself as a friend.",
             })
@@ -9299,7 +8838,7 @@ export default async function packetReceiver(
 
         if (get_friend.isGuest) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: `${get_friend.username.charAt(0).toUpperCase() +
                 get_friend.username.slice(1)
@@ -9324,7 +8863,7 @@ export default async function packetReceiver(
 
         playerCache.set(currentPlayer.id, currentPlayer);
 
-        sendPacket(get_friend.ws, packetManager.invitation(invite_data));
+        sendPacket(get_friend.wt, packetManager.invitation(invite_data));
         break;
       }
       case "INVITATION_RESPONSE": {
@@ -9340,7 +8879,7 @@ export default async function packetReceiver(
         if (!inviter) {
 
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message:
                 "Unable to process invitation - user not found or has disconnected",
@@ -9357,7 +8896,7 @@ export default async function packetReceiver(
           const notifyData = {
             message: "Invitation not found or has already been processed",
           };
-          sendPacket(ws, packetManager.notify(notifyData));
+          sendPacket(wt, packetManager.notify(notifyData));
           return;
         }
 
@@ -9380,7 +8919,7 @@ export default async function packetReceiver(
               );
 
               sendPacket(
-                ws,
+                wt,
                 packetManager.notify({
                   message: `You are now friends with ${inviter.username.charAt(0).toUpperCase() +
                     inviter.username.slice(1)
@@ -9388,14 +8927,14 @@ export default async function packetReceiver(
                 })
               );
               sendPacket(
-                ws,
+                wt,
                 packetManager.updateFriends({
                   friends: updatedCurrentPlayersFriendsList,
                 })
               );
 
               sendPacket(
-                inviter.ws,
+                inviter.wt,
                 packetManager.notify({
                   message: `You are now friends with ${currentPlayer.username.charAt(0).toUpperCase() +
                     currentPlayer.username.slice(1)
@@ -9404,7 +8943,7 @@ export default async function packetReceiver(
               );
 
               sendPacket(
-                inviter.ws,
+                inviter.wt,
                 packetManager.updateFriends({ friends: updatedFriendsList })
               );
             }
@@ -9425,13 +8964,13 @@ export default async function packetReceiver(
                 );
                 if (!updatedPartyMembers) {
                   sendPacket(
-                    ws,
+                    wt,
                     packetManager.notify({ message: "Failed to join party" })
                   );
                   return;
                 }
                 sendPacket(
-                  ws,
+                  wt,
                   packetManager.notify({
                     message: `You have joined ${inviter.username.charAt(0).toUpperCase() +
                       inviter.username.slice(1)
@@ -9439,7 +8978,7 @@ export default async function packetReceiver(
                   })
                 );
                 sendPacket(
-                  inviter.ws,
+                  inviter.wt,
                   packetManager.notify({
                     message: `${currentPlayer.username.charAt(0).toUpperCase() +
                       currentPlayer.username.slice(1)
@@ -9451,7 +8990,7 @@ export default async function packetReceiver(
                   const session_id = await player.getSessionIdByUsername(member);
                   const p = session_id && playerCache.get(session_id);
                   if (p) {
-                    sendPacket(p.ws, packetManager.updateParty({ members: updatedPartyMembers }));
+                    sendPacket(p.wt, packetManager.updateParty({ members: updatedPartyMembers }));
                     p.party = updatedPartyMembers;
                     playerCache.set(p.id, p);
                   }
@@ -9482,7 +9021,7 @@ export default async function packetReceiver(
                     if (otherUsername.toLowerCase() === memberUsername.toLowerCase()) continue;
                     const otherSessionId = await player.getSessionIdByUsername(otherUsername);
                     const otherPlayer = otherSessionId && playerCache.get(otherSessionId);
-                    if (otherPlayer && otherPlayer.ws) receivers.push(otherPlayer);
+                    if (otherPlayer && otherPlayer.wt) receivers.push(otherPlayer);
                   }
                   queueSpawnForReceivers(memberPlayer, receivers, (sd as any).spriteData);
                 }
@@ -9494,13 +9033,13 @@ export default async function packetReceiver(
                 );
                 if (!updatedPartyMembers) {
                   sendPacket(
-                    ws,
+                    wt,
                     packetManager.notify({ message: "Failed to create party" })
                   );
                   return;
                 }
                 sendPacket(
-                  ws,
+                  wt,
                   packetManager.notify({
                     message: `You have joined ${inviter.username.charAt(0).toUpperCase() +
                       inviter.username.slice(1)
@@ -9508,7 +9047,7 @@ export default async function packetReceiver(
                   })
                 );
                 sendPacket(
-                  inviter.ws,
+                  inviter.wt,
                   packetManager.notify({
                     message: `${currentPlayer.username.charAt(0).toUpperCase() +
                       currentPlayer.username.slice(1)
@@ -9516,18 +9055,18 @@ export default async function packetReceiver(
                   })
                 );
                 sendPacket(
-                  inviter.ws,
+                  inviter.wt,
                   packetManager.updateParty({ members: updatedPartyMembers })
                 );
                 sendPacket(
-                  ws,
+                  wt,
                   packetManager.updateParty({ members: updatedPartyMembers })
                 );
                 for (const member of (updatedPartyMembers as string[])) {
                   const session_id = await player.getSessionIdByUsername(member);
                   const p = session_id && playerCache.get(session_id);
                   if (p) {
-                    sendPacket(p.ws, packetManager.updateParty({ members: updatedPartyMembers }));
+                    sendPacket(p.wt, packetManager.updateParty({ members: updatedPartyMembers }));
                     p.party = updatedPartyMembers;
                     playerCache.set(p.id, p);
                   }
@@ -9557,7 +9096,7 @@ export default async function packetReceiver(
                     if (otherUsername.toLowerCase() === memberUsername.toLowerCase()) continue;
                     const otherSessionId = await player.getSessionIdByUsername(otherUsername);
                     const otherPlayer = otherSessionId && playerCache.get(otherSessionId);
-                    if (otherPlayer && otherPlayer.ws) receivers.push(otherPlayer);
+                    if (otherPlayer && otherPlayer.wt) receivers.push(otherPlayer);
                   }
                   queueSpawnForReceivers(memberPlayer, receivers, (sd as any).spriteData);
                 }
@@ -9572,19 +9111,19 @@ export default async function packetReceiver(
 
               const guildId = await guilds.getGuildId(inviter.username);
               if (!guildId) {
-                sendPacket(ws, packetManager.notify({ message: "That guild no longer exists" }));
+                sendPacket(wt, packetManager.notify({ message: "That guild no longer exists" }));
                 return;
               }
 
               const isLeader = await guilds.isGuildLeader(inviter.username);
               if (!isLeader) {
-                sendPacket(ws, packetManager.notify({ message: "The inviter is no longer the guild leader" }));
+                sendPacket(wt, packetManager.notify({ message: "The inviter is no longer the guild leader" }));
                 return;
               }
 
               const targetInGuild = await guilds.isInGuild(currentPlayer.username);
               if (targetInGuild) {
-                sendPacket(ws, packetManager.notify({ message: "You are already in a guild" }));
+                sendPacket(wt, packetManager.notify({ message: "You are already in a guild" }));
                 return;
               }
 
@@ -9593,16 +9132,16 @@ export default async function packetReceiver(
                 guildId
               );
               if (!updatedGuildMembers || updatedGuildMembers.length === 0) {
-                sendPacket(ws, packetManager.notify({ message: "Failed to join guild" }));
+                sendPacket(wt, packetManager.notify({ message: "Failed to join guild" }));
                 return;
               }
 
               const guildName = await guilds.getGuildName(guildId);
 
-              sendPacket(ws, packetManager.notify({
+              sendPacket(wt, packetManager.notify({
                 message: `You have joined "${guildName}"`,
               }));
-              sendPacket(inviter.ws, packetManager.notify({
+              sendPacket(inviter.wt, packetManager.notify({
                 message: `${currentPlayer.username} has joined your guild`,
               }));
 
@@ -9612,13 +9151,13 @@ export default async function packetReceiver(
               playerCache.set(currentPlayer.id, currentPlayer);
 
               broadcastPlayerUpdate(currentPlayer);
-              sendPacket(ws, packetManager.updateGuild({ members: updatedGuildMembers, guild_name: guildName }));
+              sendPacket(wt, packetManager.updateGuild({ members: updatedGuildMembers, guild_name: guildName }));
 
               for (const member of updatedGuildMembers) {
                 const session_id = await player.getSessionIdByUsername(member);
                 const p = session_id && playerCache.get(session_id);
                 if (p && p.id !== currentPlayer.id) {
-                  sendPacket(p.ws, packetManager.updateGuild({ members: updatedGuildMembers, guild_name: guildName }));
+                  sendPacket(p.wt, packetManager.updateGuild({ members: updatedGuildMembers, guild_name: guildName }));
                   p.guild = updatedGuildMembers;
                   playerCache.set(p.id, p);
                 }
@@ -9663,10 +9202,10 @@ export default async function packetReceiver(
           currentPlayer.username.toLowerCase()
         );
 
-        if (get_friend?.ws) {
+        if (get_friend?.wt) {
 
           sendPacket(
-            get_friend.ws,
+            get_friend.wt,
             packetManager.updateFriends({
               friends: updatedCurrentPlayersFriendsList,
             })
@@ -9674,11 +9213,11 @@ export default async function packetReceiver(
         }
 
         sendPacket(
-          ws,
+          wt,
           packetManager.updateFriends({ friends: updatedFriendsList })
         );
         sendPacket(
-          ws,
+          wt,
           packetManager.notify({
             message: `You have removed ${get_friend.username.charAt(0).toUpperCase() +
               get_friend.username.slice(1)
@@ -9698,7 +9237,7 @@ export default async function packetReceiver(
         // Prevent mounting while casting
         if (currentPlayer.casting && !dismounting) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "Cannot mount while casting." })
           );
           return;
@@ -9707,7 +9246,7 @@ export default async function packetReceiver(
         // Prevent mounting when PvP flag is enabled or vanished
         if ((currentPlayer.pvp || currentPlayer.isVanished) && !dismounting) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "Cannot mount while in PvP." })
           );
           return;
@@ -9722,7 +9261,7 @@ export default async function packetReceiver(
         const mount = (data as any).mount;
         if (!mount) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({ message: "No mount type specified." })
           );
           break;
@@ -9730,7 +9269,7 @@ export default async function packetReceiver(
 
         if (!canMount) {
           sendPacket(
-            ws,
+            wt,
             packetManager.notify({
               message: "Mount feature is currently locked.",
               })
@@ -9743,7 +9282,7 @@ export default async function packetReceiver(
           const hasMount = currentPlayer.collectables.some((c: any) => c.type === "mount" && c.item === mount);
           if (!hasMount) {
             sendPacket(
-              ws,
+              wt,
               packetManager.notify({ message: "You do not have the specified mount." })
             );
             break;
@@ -9765,7 +9304,7 @@ export default async function packetReceiver(
         globalStateRevision++;
 
         await sendPositionAnimation(
-          ws,
+          wt,
           direction,
           walking,
           mounted,
@@ -9779,7 +9318,7 @@ export default async function packetReceiver(
 
           const moveDirection = currentPlayer.location.position?.direction || "down";
 
-          await packetReceiver(server, ws, JSON.stringify({ type: "MOVEXY", data: moveDirection }));
+          await packetReceiver(server, wt, JSON.stringify({ type: "MOVEXY", data: moveDirection }));
         }
         listener.emit(Events.PLAYER_MOUNT, { player: currentPlayer, mounted: currentPlayer.mounted, mountType: currentPlayer.mount_type });
         break;
@@ -9826,7 +9365,7 @@ export default async function packetReceiver(
         const releaseId = currentPlayer.id;
         filterPlayersByMap(releaseMap).forEach((p) => {
           sendPacket(
-            p.ws,
+            p.wt,
             packetManager.playerGhost({ id: releaseId, ghost: true, x: spawn.x, y: spawn.y, map: releaseMap, pendingTeleport: true })
           );
         });
@@ -9840,7 +9379,7 @@ export default async function packetReceiver(
           globalStateRevision++;
           filterPlayersByMap(p.location.map).forEach((v) => {
             sendPacket(
-              v.ws,
+              v.wt,
               packetManager.moveXY({
                 i: p.id,
                 d: { x: spawn.x, y: spawn.y, dr: "down" },
@@ -9850,7 +9389,7 @@ export default async function packetReceiver(
             );
             // Ghost spawn signal: render from here, at the graveyard.
             sendPacket(
-              v.ws,
+              v.wt,
               packetManager.playerGhost({ id: p.id, ghost: true, x: spawn.x, y: spawn.y, map: p.location.map })
             );
           });
@@ -9863,8 +9402,8 @@ export default async function packetReceiver(
         // can never linger: it only hides on this verdict or on REVIVE.
         const denyRevive = () => {
           currentPlayer.reviveOffered = false;
-          if (currentPlayer.ws) {
-            sendPacket(currentPlayer.ws, packetManager.reviveOffer({ revoked: true }));
+          if (currentPlayer.wt) {
+            sendPacket(currentPlayer.wt, packetManager.reviveOffer({ revoked: true }));
           }
         };
         // Only a ghost standing at its own corpse can revive.
@@ -9901,11 +9440,11 @@ export default async function packetReceiver(
         const playersInMap = filterPlayersByMap(currentPlayer.location.map);
         playersInMap.forEach((p) => {
           sendPacket(
-            p.ws,
+            p.wt,
             packetManager.playerGhost({ id: currentPlayer.id, ghost: false })
           );
           sendPacket(
-            p.ws,
+            p.wt,
             packetManager.revive({
               id: currentPlayer.id,
               target: currentPlayer.id,
@@ -9946,11 +9485,11 @@ export default async function packetReceiver(
         globalStateRevision++;
         filterPlayersByMap(currentPlayer.location.map).forEach((p) => {
           sendPacket(
-            p.ws,
+            p.wt,
             packetManager.playerGhost({ id: currentPlayer.id, ghost: false })
           );
           sendPacket(
-            p.ws,
+            p.wt,
             packetManager.revive({
               id: currentPlayer.id,
               target: currentPlayer.id,
@@ -9961,7 +9500,7 @@ export default async function packetReceiver(
         spellEffects.broadcastEffectsUpdate(currentPlayer);
         sendStatsToPartyMembers(currentPlayer.username, currentPlayer.id, currentPlayer.stats);
         sendPacket(
-          currentPlayer.ws,
+          currentPlayer.wt,
           packetManager.notify({ message: "You have been resurrected with Resurrection Sickness (15 min)." })
         );
         listener.emit(Events.PLAYER_REVIVED, { player: currentPlayer });
@@ -10050,7 +9589,7 @@ export default async function packetReceiver(
             playerCache.set(currentPlayer.id, currentPlayer);
 
             sendPacket(
-              ws,
+              wt,
               packetManager.updateStats({
                 target: currentPlayer.id,
                 stats: currentPlayer.stats,
@@ -10073,17 +9612,17 @@ export default async function packetReceiver(
 
             if (slotIndex !== undefined) {
               sendPacket(
-                ws,
+                wt,
                 packetManager.clientConfig(currentPlayer.config || [])
               );
             }
 
             sendPacket(
-              ws,
+              wt,
               packetManager.equipment(currentPlayer.equipment)
             );
             sendPacket(
-              ws,
+              wt,
               packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer))
             );
 
@@ -10096,7 +9635,7 @@ export default async function packetReceiver(
               currentPlayer.mount_type || undefined,
               !!currentPlayer.casting
             );
-            await sendSpriteSheetAnimation(ws, currentAnimationName, currentPlayer.id);
+            await sendSpriteSheetAnimation(wt, currentAnimationName, currentPlayer.id);
           }
         }
         listener.emit(Events.ITEM_EQUIP, { player: currentPlayer, item: foundEquipment, slot });
@@ -10179,7 +9718,7 @@ export default async function packetReceiver(
             playerCache.set(currentPlayer.id, currentPlayer);
 
             sendPacket(
-              ws,
+              wt,
               packetManager.updateStats({
                 target: currentPlayer.id,
                 stats: currentPlayer.stats,
@@ -10201,11 +9740,11 @@ export default async function packetReceiver(
             );
 
             sendPacket(
-              ws,
+              wt,
               packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer))
             );
             sendPacket(
-              ws,
+              wt,
               packetManager.equipment(currentPlayer.equipment)
             );
 
@@ -10218,7 +9757,7 @@ export default async function packetReceiver(
               currentPlayer.mount_type || undefined,
               !!currentPlayer.casting
             );
-            await sendSpriteSheetAnimation(ws, currentAnimationName, currentPlayer.id);
+            await sendSpriteSheetAnimation(wt, currentAnimationName, currentPlayer.id);
           }
         }
         listener.emit(Events.ITEM_UNEQUIP, { player: currentPlayer, slot });
@@ -10259,8 +9798,8 @@ export default async function packetReceiver(
         const freshInventory = await inventory.get(currentPlayer.username);
         currentPlayer.inventory = await patchInventoryBagSlots(freshInventory, currentPlayer.username);
         playerCache.set(currentPlayer.id, currentPlayer);
-        sendPacket(ws, packetManager.bags(await bags.ensure(currentPlayer.username)));
-        sendPacket(ws, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
+        sendPacket(wt, packetManager.bags(await bags.ensure(currentPlayer.username)));
+        sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
         break;
       }
       case "BAG_UNEQUIP": {
@@ -10281,7 +9820,7 @@ export default async function packetReceiver(
         const freshInv = await inventory.get(currentPlayer.username);
         const itemsBeyond = (freshInv || []).filter((i: any) => !i.equipped && i.slot != null && i.slot >= newMax);
         if (itemsBeyond.length > 0) {
-          sendPacket(ws, packetManager.notify({ message: `Cannot unequip bag - ${itemsBeyond.length} item(s) occupy the extra slots. Move them to free up space first.` }));
+          sendPacket(wt, packetManager.notify({ message: `Cannot unequip bag - ${itemsBeyond.length} item(s) occupy the extra slots. Move them to free up space first.` }));
           break;
         }
 
@@ -10296,8 +9835,8 @@ export default async function packetReceiver(
         }
         currentPlayer.inventory = await patchInventoryBagSlots(await inventory.get(currentPlayer.username), currentPlayer.username);
         playerCache.set(currentPlayer.id, currentPlayer);
-        sendPacket(ws, packetManager.bags(await bags.ensure(currentPlayer.username)));
-        sendPacket(ws, packetManager.inventory(currentPlayer.inventory, newMax));
+        sendPacket(wt, packetManager.bags(await bags.ensure(currentPlayer.username)));
+        sendPacket(wt, packetManager.inventory(currentPlayer.inventory, newMax));
         break;
       }
       case "SAVE_INVENTORY_SLOTS": {
@@ -10364,8 +9903,8 @@ export default async function packetReceiver(
           currentPlayer.inventory = currentPlayer.inventory.filter((i: any) => i !== invItem);
           playerCache.set(currentPlayer.id, currentPlayer);
 
-          sendPacket(ws, packetManager.removeInventoryItem({ name: invItem.name }));
-          sendPacket(ws, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
+          sendPacket(wt, packetManager.removeInventoryItem({ name: invItem.name }));
+          sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
         } else if (from === "equipment" && slot) {
           const equippedName = currentPlayer.equipment[slot];
           if (!equippedName || equippedName.toLowerCase() !== String(itemName).toLowerCase()) return;
@@ -10379,15 +9918,15 @@ export default async function packetReceiver(
           );
           playerCache.set(currentPlayer.id, currentPlayer);
 
-          sendPacket(ws, packetManager.removeInventoryItem({ name: equippedName }));
-          sendPacket(ws, packetManager.equipment(currentPlayer.equipment));
-          sendPacket(ws, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
+          sendPacket(wt, packetManager.removeInventoryItem({ name: equippedName }));
+          sendPacket(wt, packetManager.equipment(currentPlayer.equipment));
+          sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
 
           const stats = await player.synchronizeStats(currentPlayer.username);
           if (stats) {
             currentPlayer.stats = stats;
             playerCache.set(currentPlayer.id, currentPlayer);
-            sendPacket(ws, packetManager.updateStats({ target: currentPlayer.id, stats: currentPlayer.stats }));
+            sendPacket(wt, packetManager.updateStats({ target: currentPlayer.id, stats: currentPlayer.stats }));
           }
         }
         break;
@@ -10401,7 +9940,7 @@ export default async function packetReceiver(
 
         const result = loot.pickup(currentPlayer, lootId);
         if (!result.success || !result.item) {
-          sendPacket(ws, packetManager.notify({ message: result.message || "Could not pick up loot." }));
+          sendPacket(wt, packetManager.notify({ message: result.message || "Could not pick up loot." }));
           break;
         }
 
@@ -10424,7 +9963,7 @@ export default async function packetReceiver(
           });
         }
         playerCache.set(currentPlayer.id, currentPlayer);
-        sendPacket(ws, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
+        sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
         break;
       }
       case "BATCH_PICKUP_LOOT": {
@@ -10456,8 +9995,8 @@ export default async function packetReceiver(
         }
 
         playerCache.set(currentPlayer.id, currentPlayer);
-        sendPacket(ws, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
-        sendPacket(ws, packetManager.notify({ message: `Picked up ${items.length} item(s).` }));
+        sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
+        sendPacket(wt, packetManager.notify({ message: `Picked up ${items.length} item(s).` }));
         break;
       }
       case "OPEN_LOOT_CHEST": {
@@ -10467,16 +10006,16 @@ export default async function packetReceiver(
         const chestId = (data as any)?.chestId;
         if (!chestId) return;
         const chest = lootChest.getChest(chestId);
-        if (!chest) { sendPacket(ws, packetManager.notify({ message: "Chest not found." })); break; }
-        if (chest.map !== currentPlayer.location.map) { sendPacket(ws, packetManager.notify({ message: "Chest is on a different map." })); break; }
+        if (!chest) { sendPacket(wt, packetManager.notify({ message: "Chest not found." })); break; }
+        if (chest.map !== currentPlayer.location.map) { sendPacket(wt, packetManager.notify({ message: "Chest is on a different map." })); break; }
         const playerPos = currentPlayer.location.position;
         const playerX = typeof playerPos === 'string' ? Number(playerPos.split(',')[0]) : (playerPos as any).x;
         const playerY = typeof playerPos === 'string' ? Number(playerPos.split(',')[1]) : (playerPos as any).y;
-        if (!lootChest.isWithinRange(chestId, playerX, playerY)) { sendPacket(ws, packetManager.notify({ message: "You are too far from the chest." })); break; }
+        if (!lootChest.isWithinRange(chestId, playerX, playerY)) { sendPacket(wt, packetManager.notify({ message: "You are too far from the chest." })); break; }
         const result = await lootChest.open(chestId, String(currentPlayer.id));
-        if (!result) { sendPacket(ws, packetManager.notify({ message: "Could not open chest." })); break; }
-        if (result.items.length === 0) { sendPacket(ws, packetManager.notify({ message: "This chest is empty for you." })); break; }
-        sendPacket(ws, packetManager.lootChestContents({ chestId, items: result.items }));
+        if (!result) { sendPacket(wt, packetManager.notify({ message: "Could not open chest." })); break; }
+        if (result.items.length === 0) { sendPacket(wt, packetManager.notify({ message: "This chest is empty for you." })); break; }
+        sendPacket(wt, packetManager.lootChestContents({ chestId, items: result.items }));
         break;
       }
       case "TAKE_CHEST_ITEMS": {
@@ -10487,16 +10026,16 @@ export default async function packetReceiver(
         const indices = (data as any)?.indices;
         if (!chestId || !Array.isArray(indices) || indices.length === 0) return;
         const result = await lootChest.takeItems(chestId, String(currentPlayer.id), currentPlayer.username, indices);
-        if (!result) { sendPacket(ws, packetManager.notify({ message: "Could not take items." })); break; }
+        if (!result) { sendPacket(wt, packetManager.notify({ message: "Could not take items." })); break; }
         currentPlayer.inventory = await inventory.get(currentPlayer.username);
         playerCache.set(currentPlayer.id, currentPlayer);
         const invSlots = await getInventorySlots(currentPlayer);
-        sendPacket(ws, packetManager.inventory(currentPlayer.inventory, invSlots));
+        sendPacket(wt, packetManager.inventory(currentPlayer.inventory, invSlots));
         if (result.allTaken) {
-          sendPacket(ws, packetManager.lootChestDespawn(chestId));
-          sendPacket(ws, packetManager.notify({ message: `Took ${result.taken.length} item(s). Chest emptied.` }));
+          sendPacket(wt, packetManager.lootChestDespawn(chestId));
+          sendPacket(wt, packetManager.notify({ message: `Took ${result.taken.length} item(s). Chest emptied.` }));
         } else {
-          sendPacket(ws, packetManager.notify({ message: `Took ${result.taken.length} item(s). ${result.remaining.length} item(s) remain.` }));
+          sendPacket(wt, packetManager.notify({ message: `Took ${result.taken.length} item(s). ${result.remaining.length} item(s) remain.` }));
         }
         break;
       }
@@ -10507,32 +10046,21 @@ export default async function packetReceiver(
         const chestId = (data as any)?.chestId;
         if (!chestId) return;
         const result = await lootChest.takeAllItems(chestId, String(currentPlayer.id), currentPlayer.username);
-        if (!result) { sendPacket(ws, packetManager.notify({ message: "Could not take items." })); break; }
+        if (!result) { sendPacket(wt, packetManager.notify({ message: "Could not take items." })); break; }
         currentPlayer.inventory = await inventory.get(currentPlayer.username);
         playerCache.set(currentPlayer.id, currentPlayer);
         const invSlots = await getInventorySlots(currentPlayer);
-        sendPacket(ws, packetManager.inventory(currentPlayer.inventory, invSlots));
-        sendPacket(ws, packetManager.lootChestDespawn(chestId));
-        sendPacket(ws, packetManager.notify({ message: `Took all ${result.taken.length} item(s).` }));
+        sendPacket(wt, packetManager.inventory(currentPlayer.inventory, invSlots));
+        sendPacket(wt, packetManager.lootChestDespawn(chestId));
+        sendPacket(wt, packetManager.notify({ message: `Took all ${result.taken.length} item(s).` }));
         break;
       }
       case "LIST_LOOT_TABLES": {
         if (!currentPlayer) return;
         const tables = await lootTable.list();
-        sendPacket(ws, packetManager.lootTableList(tables));
+        sendPacket(wt, packetManager.lootTableList(tables));
         break;
       }
-      case "RESPAWN_ENTITY": {
-        // This is a client-side notification that entity respawn timer has expired
-        // The actual respawn is handled server-side by the entityAI system
-        // This handler just validates the request
-        if (!data || !(data as any).id) return;
-
-        log.debug(`Client requested respawn for entity ${(data as any).id}`);
-        // Server-side respawn is already handled by entityAI setTimeout in handleEntityDeath
-        break;
-      }
-
       case "GET_ONLINE_PLAYERS": {
         if (!currentPlayer?.isAdmin) return;
 
@@ -10543,7 +10071,7 @@ export default async function packetReceiver(
           isAdmin: p.isAdmin || false
         }));
 
-        sendPacket(ws, packetManager.onlinePlayersList(playerList));
+        sendPacket(wt, packetManager.onlinePlayersList(playerList));
         break;
       }
 
@@ -10575,11 +10103,11 @@ async function forceStopPlayerMovement(target: any) {
     cached._movementState = undefined;
   }
 
-  const ws = target.ws;
-  if (ws && ws.readyState === 1) {
+  const wt = target.wt;
+  if (wt && wt.readyState === 1) {
     globalStateRevision++;
     await sendPositionAnimation(
-      ws,
+      wt,
       target.location?.position?.direction || "down",
       false,
       target.mounted,
@@ -10624,15 +10152,15 @@ async function interruptPlayerCast(target: any) {
   );
   playersInMap.forEach((p) => {
     sendPacket(
-      p.ws,
+      p.wt,
       packetManager.groundAoeDespawn({ id: target.id + "_casting" })
     );
   });
 
   globalStateRevision++;
-  if (target.ws) {
+  if (target.wt) {
     await sendPositionAnimation(
-      target.ws,
+      target.wt,
       target.location.position?.direction || "down",
       false,
       target.mounted,
@@ -10684,9 +10212,9 @@ function checkGhostReviveProximity(player: any): void {
   const dy = player.location.position.y - player.corpse.y;
   const dist2 = dx * dx + dy * dy;
   if (dist2 <= REVIVE_OFFER_RADIUS * REVIVE_OFFER_RADIUS) {
-    if (!player.reviveOffered && player.ws) {
+    if (!player.reviveOffered && player.wt) {
       player.reviveOffered = true;
-      sendPacket(player.ws, packetManager.reviveOffer({ x: player.corpse.x, y: player.corpse.y }));
+      sendPacket(player.wt, packetManager.reviveOffer({ x: player.corpse.x, y: player.corpse.y }));
     }
   } else if (dist2 > REVIVE_OFFER_HIDE_RADIUS * REVIVE_OFFER_HIDE_RADIUS) {
     // Outside the hide band: re-arm so walking back in re-offers. The client
@@ -10730,7 +10258,7 @@ export async function handlePlayerDeath(target: any, killer: any, info: { damage
   const deathY = Math.round(target.location.position.y);
 
   // Leave a skeleton marker where the player died.
-  skeletons.spawn(deathMap, deathX, deathY, target.username);
+  skeletons.spawn(deathMap, deathX, deathY, target.username, layerManager.getPlayerLayer(target.id));
 
   // Dead-awaiting-release: no teleport, no revive yet. The corpse stays where
   // it fell at 0 HP until the player releases their spirit.
@@ -10776,9 +10304,9 @@ export async function handlePlayerDeath(target: any, killer: any, info: { damage
       killer.stats = syncedStats;
     }
     playerCache.set(killer.id, killer);
-    if (killer.ws) {
+    if (killer.wt) {
       sendPacket(
-        killer.ws,
+        killer.wt,
         packetManager.updateStats({
           target: killer.id,
           stats: killer.stats,
@@ -10792,7 +10320,7 @@ export async function handlePlayerDeath(target: any, killer: any, info: { damage
   playersInMap.forEach((p) => {
 
     sendPacket(
-      p.ws,
+      p.wt,
       packetManager.updateStats({
         id: killer?.id,
         target: target.id,
@@ -10806,8 +10334,8 @@ export async function handlePlayerDeath(target: any, killer: any, info: { damage
   // The victim stays a corpse at 0 HP until they release. No teleport, no
   // revive yet — the client shows the Release Spirit popup from this.
   // Corpse included so the client can mark it past skeleton expiry.
-  if (target.ws) {
-    sendPacket(target.ws, packetManager.playerDied({ id: target.id, corpse: target.corpse }));
+  if (target.wt) {
+    sendPacket(target.wt, packetManager.playerDied({ id: target.id, corpse: target.corpse }));
   }
 
   if (killer) {
@@ -10817,7 +10345,273 @@ export async function handlePlayerDeath(target: any, killer: any, info: { damage
   listener.emit(Events.PLAYER_DEATH, { player: target, killer });
 }
 
+/**
+ * Single-target damage spell cast at a server-authoritative creature. Mirrors
+ * the player spell flow (cooldown, mana, cast bar, cancel/move interrupts) but
+ * resolves the hit through the creature combat system (threat, evade, death).
+ */
+/**
+ * AoE and splash damage from a player spell onto creatures around a point.
+ * Rolls spell hit and damage per creature like a direct cast, then applies
+ * the spell's effects. Healing spells never touch creatures.
+ */
+function splashCreatures(caster: any, spell: SpellData, x: number, y: number, radius: number, excludeCreatureId: number | null) {
+  const base = Number(spell.damage) || 0;
+  if (base < 0 || !radius || radius <= 0) return;
+  const level = caster.stats?.level || 1;
+  const now = Date.now();
+  for (const creature of creatures.creaturesInRadius(caster, x, y, radius)) {
+    if (creature.id === excludeCreatureId) continue;
+    if (creature.state === "evading") {
+      // Immune while evading: this shows "Evading" and does nothing else.
+      creatures.combat.damageCreature(creature, caster.id, 0, now);
+      continue;
+    }
+    const text = { creatureId: creature.id, targetId: `creature:${creature.id}`, sourceId: caster.id };
+    if (Math.random() * 100 < spellMissChance(level, creature.level)) {
+      creatures.combat.damageCreature(creature, caster.id, 0, now);
+      creatures.combat.emitCombatText({ ...text, kind: "resist", amount: 0 });
+      continue;
+    }
+    if (base > 0) {
+      const min = base + (level - 1) * 2;
+      const max = base + (level - 1) * 5;
+      const amount = Math.floor(Math.random() * (max - min + 1)) + min + (caster.stats?.stat_damage || 0);
+      const dealt = creatures.combat.damageCreature(creature, caster.id, amount, now);
+      creatures.combat.emitCombatText({ ...text, kind: "spell", amount: dealt });
+    } else {
+      creatures.combat.damageCreature(creature, caster.id, 0, now);
+    }
+    creatures.combat.applySpellToCreature(creature, caster.id, spell, now);
+  }
+}
+
+/** 8-way facing from one point toward another (the sprite directions). */
+function directionToward(fromX: number, fromY: number, toX: number, toY: number): string {
+  const ang = Math.atan2(toY - fromY, toX - fromX) * (180 / Math.PI);
+  if (ang >= -22.5 && ang < 22.5) return "right";
+  if (ang >= 22.5 && ang < 67.5) return "downright";
+  if (ang >= 67.5 && ang < 112.5) return "down";
+  if (ang >= 112.5 && ang < 157.5) return "downleft";
+  if (ang >= 157.5 || ang < -157.5) return "left";
+  if (ang >= -157.5 && ang < -112.5) return "upleft";
+  if (ang >= -112.5 && ang < -67.5) return "up";
+  return "upright";
+}
+
+/**
+ * Turn a caster to face their spell target, as WoW does when you cast at
+ * something behind you, so the cast never fails for facing the wrong way.
+ * Only the stored facing changes; the cast's animation packets show it.
+ */
+function faceToward(caster: any, x: number, y: number): void {
+  const pos = caster?.location?.position;
+  if (!pos || !Number.isFinite(x) || !Number.isFinite(y)) return;
+  if (pos.x === x && pos.y === y) return;
+  pos.direction = directionToward(pos.x, pos.y, x, y);
+  playerCache.set(caster.id, caster);
+}
+
+async function castSpellOnCreature(wt: any, currentPlayer: any, spell: SpellData, creatureId: number) {
+  const spellId = spell.id as number;
+  const fail = (reason: string, message?: string) => {
+    if (message) sendPacket(wt, packetManager.notify({ message }));
+    listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target: null, spellName: spell.name, reason } as any);
+  };
+  const resetCooldown = () => {
+    const fresh = playerCache.get(currentPlayer.id);
+    if (fresh?.spellCooldowns) {
+      delete fresh.spellCooldowns[spellId];
+      cooldownManager.deleteCooldown(fresh.username, spellId);
+      playerCache.set(fresh.id, fresh);
+    }
+  };
+  const inRangeWithSight = (creature: any): string | null => {
+    if (!creatures.isTargetableBy(currentPlayer, creature)) return "invalid_target";
+    const pos = currentPlayer.location.position;
+    if (Math.hypot(pos.x - creature.x, pos.y - creature.y) > (spell.range || 100)) return "range";
+    if (!creatures.hasLineOfSight(currentPlayer, creature)) return "path_blocked";
+    return null;
+  };
+
+  const creature = creatures.getCreature(creatureId);
+  if (!creature || !creatures.isTargetableBy(currentPlayer, creature)) return fail("invalid_target", "Target not found.");
+  const spellDamage = Number(spell.damage) || 0;
+  const creatureEffects = new Set(["damage_over_time", "stun", "slow", "interrupt", "taunt", "threat"]);
+  const hasCreatureEffects = Array.isArray(spell.effects) && spell.effects.some((e) => creatureEffects.has(e?.type));
+  if (spellDamage < 0 || (spellDamage === 0 && !hasCreatureEffects)) return fail("invalid_target", "You can't cast that on this target.");
+  if ((spell.aoe_radius && spell.aoe_radius > 0) || spell.ground_aoe) return fail("invalid_target", "That spell can't be used on this target yet.");
+
+  currentPlayer.spellCooldowns = currentPlayer.spellCooldowns || {};
+  if ((currentPlayer.spellCooldowns[spellId] || 0) > performance.now()) return fail("cooldown");
+
+  currentPlayer.interruptableSpell = !spell.can_move;
+  // Pressed while moving: nothing started, so nothing happens or shows.
+  if (!spell.can_move && currentPlayer.moving) return fail("moving");
+
+  const manaCost = spellManaCost(spell.mana || 0, currentPlayer.stats);
+  if ((currentPlayer.stats.stamina || 0) < manaCost) return fail("mana");
+
+  const preflight = inRangeWithSight(creature);
+  if (preflight === "range") return fail("range", "Target is out of range");
+  if (preflight === "path_blocked") return fail("path_blocked", "Target is not in line of sight");
+  if (preflight) return fail(preflight, "Target not found.");
+
+  const cooldownEnd = performance.now() + (spell.cooldown || 0) * 1000;
+  currentPlayer.spellCooldowns[spellId] = cooldownEnd;
+  cooldownManager.setCooldown(currentPlayer.username, spellId, cooldownEnd);
+  currentPlayer.lastCastTime = performance.now();
+  currentPlayer.castingSpellId = spellId;
+  currentPlayer.casting = true;
+  currentPlayer.castId = (currentPlayer.castId || 0) + 1;
+  currentPlayer.mounted = false;
+  const thisCastId = currentPlayer.castId;
+  const castStart = performance.now();
+  playerCache.set(currentPlayer.id, currentPlayer);
+
+  // Face the creature, as with player targets, so the cast is aimed at it.
+  faceToward(currentPlayer, creature.x, creature.y);
+  const direction = currentPlayer.location.position?.direction || "down";
+  globalStateRevision++;
+  await sendPositionAnimation(wt, direction, currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, true);
+  broadcastCastToMap(filterPlayersByMap(currentPlayer.location.map), currentPlayer.id, packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: spell.cast_time }));
+
+  await new Promise((resolve) => setTimeout(resolve, (spell.cast_time || 0) * 1000));
+
+  const after = playerCache.get(currentPlayer.id);
+  if (!after || after.castId !== thisCastId) return;
+  if (after.manualSpellCancel && after.manualSpellCancel >= castStart) {
+    delete after.manualSpellCancel;
+    after.casting = false;
+    playerCache.set(after.id, after);
+    return resetCooldown();
+  }
+  if (!spell.can_move && !after.casting) return resetCooldown();
+  after.casting = false;
+  playerCache.set(after.id, after);
+  // The creature may have moved during the cast: finish facing where it is now.
+  const creatureNow = creatures.getCreature(creatureId);
+  if (creatureNow) faceToward(after, creatureNow.x, creatureNow.y);
+  globalStateRevision++;
+  await sendPositionAnimation(wt, after.location.position?.direction || direction, after.moving || false, false, after.mount_type || "unicorn", undefined, globalStateRevision, false);
+
+  // Re-validate at completion: the creature may have died, evaded, moved or broken sight.
+  const target = creatures.getCreature(creatureId);
+  const finalCheck = target ? inRangeWithSight(target) : "invalid_target";
+  if (!target || finalCheck || after.isDead) {
+    broadcastCastToMap(filterPlayersByMap(after.location.map), after.id, packetManager.castSpell({ id: after.id, spell: "failed", time: 1 }));
+    resetCooldown();
+    return fail(finalCheck || "invalid_target", finalCheck === "range" ? "Target is out of range" : finalCheck === "path_blocked" ? "Target is not in line of sight" : undefined);
+  }
+  if ((after.stats.stamina || 0) < manaCost) {
+    resetCooldown();
+    return fail("mana");
+  }
+  after.stats.stamina = Math.max(0, after.stats.stamina - manaCost);
+
+  if (after.isVanished) {
+    const vanishId = spellEffects.getVanishedEffectId(after);
+    if (vanishId) {
+      cancelEffect(after, vanishId);
+      spellEffects.broadcastEffectsUpdate(after);
+    }
+  }
+
+  // Projectile visual from the caster to the creature, same as player targets:
+  // travel time scales with distance and the damage lands when it arrives.
+  const travelMs = projectileTravelMs(Math.hypot(after.location.position.x - target.x, after.location.position.y - target.y));
+  const creatureParticles = resolveSpellParticles(spell, (await assetCache.get("particles")) as Particle[] | null);
+  const projectile = packetManager.projectile({
+    id: after.id,
+    time: travelMs / 1000,
+    target_id: `c:${target.id}`,
+    spell: spell.name,
+    icon: getIconUrl(spell.icon),
+    creature: true,
+    particles: creatureParticles,
+  });
+  if (projectile.length) {
+    for (const p of filterPlayersByMap(after.location.map)) sendPacketBestEffort(p.wt, projectile);
+  }
+
+  if (travelMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, travelMs));
+    // The creature may have died while the projectile was in flight.
+    const stillThere = creatures.getCreature(creatureId);
+    if (!stillThere || stillThere.state === "dead") return;
+  }
+
+  // Evading creatures are immune: the hit lands as "Evading", nothing else.
+  if (target.state === "evading") {
+    creatures.combat.damageCreature(target, after.id, 0, Date.now());
+    return;
+  }
+
+  const now = Date.now();
+  const playerLevel = after.stats.level || 1;
+  const textBase = { creatureId: target.id, targetId: `creature:${target.id}`, sourceId: after.id };
+  if (Math.random() * 100 < spellMissChance(playerLevel, target.level)) {
+    // A resisted spell still pulls the creature.
+    creatures.combat.damageCreature(target, after.id, 0, now);
+    creatures.combat.emitCombatText({ ...textBase, kind: "resist", amount: 0 });
+  } else if (spellDamage === 0) {
+    creatures.combat.damageCreature(target, after.id, 0, now);
+    creatures.combat.applySpellToCreature(target, after.id, spell, now);
+  } else {
+    const minDamage = spellDamage + (playerLevel - 1) * 2;
+    const maxDamage = spellDamage + (playerLevel - 1) * 5;
+    const rolled = Math.floor(Math.random() * (maxDamage - minDamage + 1)) + minDamage + (after.stats.stat_damage || 0);
+    const isCrit = Math.random() * 100 < (after.stats.stat_critical_chance || 0);
+    const amount = Math.round(isCrit ? rolled * (1.5 + (after.stats.stat_critical_damage || 0) / 100) : rolled);
+    const dealt = creatures.combat.damageCreature(target, after.id, amount, now);
+    creatures.combat.emitCombatText({ ...textBase, kind: isCrit ? "crit" : "spell", amount: dealt });
+    if (hasCreatureEffects) creatures.combat.applySpellToCreature(target, after.id, spell, now);
+  }
+
+  playerCache.set(after.id, after);
+  broadcastToAOIBestEffort(after, packetManager.updateStats({ id: after.id, target: after.id, stats: after.stats }));
+  sendStatsToPartyMembers(after.username, after.id, after.stats);
+  listener.emit(Events.SPELL_CAST, { player: after, spellName: spell.name, target: null, isEntityTarget: false, creatureId: target.id } as any);
+}
+
 dots.setPlayerDeathHandler(handlePlayerDeath);
+
+setCreatureEngineBridge({
+  damagePlayer: async (target, amount, info) => {
+    if (target.isDead || target.isGhost || !target.stats) return;
+    const absorbed = spellEffects.consumeBarrier(target, amount);
+    if (absorbed > 0) spellEffects.broadcastEffectsUpdate(target);
+    target.stats.health = Math.max(0, Math.round(target.stats.health - (amount - absorbed)));
+    const attacker = { id: `creature:${info.creatureId}`, username: info.creatureName, isCreature: true };
+    listener.emit(Events.PLAYER_DAMAGED, { attacker, target, damage: amount, isCrit: info.isCrit });
+    playerCache.set(target.id, target);
+    if (target.stats.health <= 0) {
+      await handlePlayerDeath(target, null, { damage: amount, isCrit: info.isCrit });
+      return;
+    }
+    broadcastStatsUpdateToAOI(
+      target,
+      target,
+      packetManager.updateStats({ id: target.id, target: target.id, stats: target.stats, isCrit: info.isCrit, damage: amount, absorb: absorbed })
+    );
+    sendStatsToPartyMembers(target.username, target.id, target.stats);
+  },
+  dazePlayer: async (target) => {
+    if (target.isDead || target.isGhost) return;
+    const dazed = { name: "dazed", icon: null, effects: [{ type: "slow", value: 50, duration: 4 }] } as unknown as SpellData;
+    await spellEffects.applySpellEffects(dazed, target, target, () => {}, (p: any) => spellEffects.broadcastEffectsUpdate(p));
+  },
+  applySpellEffects: async (target, caster, spell) => {
+    if (target.isDead || target.isGhost) return;
+    await spellEffects.applySpellEffects(
+      spell,
+      caster,
+      target,
+      (p: any) => broadcastStatsUpdateToAOI(p, p, packetManager.updateStats({ id: p.id, target: p.id, stats: p.stats })),
+      (p: any) => spellEffects.broadcastEffectsUpdate(p)
+    );
+  },
+});
 setPlayerDeathHandler(handlePlayerDeath);
 
 // When a stun lands on a moving player, stop their movement server-side
@@ -10862,7 +10656,7 @@ spellEffects.setVanishRemovedHandler(async (player) => {
   const allOnMap = filterPlayersByMap(map);
   allOnMap.forEach((p) => {
     if (p.id === player.id) return;
-    sendPacket(p.ws, spawnPacket);
+    sendPacket(p.wt, spawnPacket);
   });
 });
 
@@ -10883,8 +10677,8 @@ registerSpellEffect("interrupt", ({ target, effect }) => {
   cooldownManager.setLockout(fresh.username, performance.now() + lockoutSec * 1000);
   playerCache.set(fresh.id, fresh);
 
-  if (fresh.ws) {
-    sendPacket(fresh.ws, packetManager.spellLockout({ duration: lockoutSec }));
+  if (fresh.wt) {
+    sendPacket(fresh.wt, packetManager.spellLockout({ duration: lockoutSec }));
   }
   listener.emit(Events.SPELL_INTERRUPTED, { player: fresh });
 });
@@ -10927,8 +10721,8 @@ function parsePos(pos: any): { x: number; y: number } {
 // on the map: at high pop with everyone clustered on one map that was O(1000s)
 // per call, and TARGETCLOSEST / SELECTPLAYER / attack-range fire it per packet,
 // so the inbound queue collapsed under it (~4ms/call, count climbing).
-function filterPlayersByDistance(ws: any, distance: number, _map: string) {
-  const currentPlayer = playerCache.get(ws.data.id);
+function filterPlayersByDistance(wt: any, distance: number, _map: string) {
+  const currentPlayer = playerCache.get(wt.data.id);
   if (!currentPlayer) return [];
 
   const currPos = parsePos(currentPlayer.location.position);
@@ -10963,27 +10757,27 @@ function tryParsePacket(data: any) {
   }
 }
 
-function sendPacket(ws: any, packets: any[]) {
-  if (!ws || !ws.send || ws.readyState !== 1) {
+function sendPacket(wt: any, packets: any[]) {
+  if (!wt || !wt.send || wt.readyState !== 1) {
 
     return;
   }
   try {
     packets.forEach((packet) => {
-      ws.send(packet);
+      wt.send(packet);
     });
   } catch (error) {
     log.error(`Failed to send packet: ${error}`);
   }
 }
 
-function sendPacketBestEffort(ws: any, packets: any[]) {
-  if (!ws || typeof ws.sendBestEffort !== "function" || ws.readyState !== 1) {
+function sendPacketBestEffort(wt: any, packets: any[]) {
+  if (!wt || typeof wt.sendBestEffort !== "function" || wt.readyState !== 1) {
     return;
   }
   try {
     packets.forEach((packet) => {
-      ws.sendBestEffort(packet);
+      wt.sendBestEffort(packet);
     });
   } catch (error) {
     log.debug(`Best-effort packet send failed: ${error}`);
@@ -10998,11 +10792,11 @@ function sendPacketBestEffort(ws: any, packets: any[]) {
  */
 function broadcastCastToMap(playersInMap: any[], casterId: string, packets: any[]) {
   for (const player of playersInMap) {
-    if (!player?.ws || player.ws.readyState !== 1) continue;
+    if (!player?.wt || player.wt.readyState !== 1) continue;
     if (player.id === casterId) {
-      sendPacket(player.ws, packets);
+      sendPacket(player.wt, packets);
     } else {
-      sendPacketBestEffort(player.ws, packets);
+      sendPacketBestEffort(player.wt, packets);
     }
   }
 }
@@ -11011,8 +10805,8 @@ loot.setOnDespawn((lootItem) => {
   const playerIds = mapIndex.getPlayersOnMap(lootItem.map);
   for (const playerId of playerIds) {
     const p = playerCache.get(playerId);
-    if (p?.ws && p.ws.readyState === 1) {
-      sendPacket(p.ws, packetManager.lootDespawn(lootItem.id));
+    if (p?.wt && p.wt.readyState === 1) {
+      sendPacket(p.wt, packetManager.lootDespawn(lootItem.id));
     }
   }
 });
@@ -11032,12 +10826,28 @@ function toSkeletonPacket(skeleton: any) {
 // Death skeletons are position-static, low importance markers, so both spawn
 // and expiry fan out as datagrams to exactly the players whose AOI radius
 // covers the marker.
+/** Resend the death markers a player should see on their current map and layer. */
+function resyncSkeletonsFor(playerId: string): void {
+  const viewer = playerCache.get(playerId);
+  const pos = viewer?.location?.position;
+  if (!viewer?.wt || !pos) return;
+  const map = String(viewer.location.map || "").replaceAll(".json", "");
+  const radius = viewer.aoi?.aoiRadius || AOI_CONFIG.DEFAULT_RADIUS;
+  const visible = skeletons.getInRadius(map, pos.x, pos.y, radius, layerManager.getPlayerLayer(playerId));
+  sendPacketBestEffort(viewer.wt, packetManager.loadSkeletons(visible.map((s) => toSkeletonPacket(s))));
+}
+
+// Layer moves (party sync, layer condensation, warps) change which markers a
+// player should see, so the list is rebuilt for them.
+setLayerChangeHandler(resyncSkeletonsFor);
+
 skeletons.setOnSpawn((skeleton) => {
   broadcastToAOIBestEffortAtPosition(
     skeleton.x,
     skeleton.y,
     skeleton.map,
-    packetManager.skeletonSpawn(toSkeletonPacket(skeleton))
+    packetManager.skeletonSpawn(toSkeletonPacket(skeleton)),
+    skeleton.layerId
   );
 });
 
@@ -11046,7 +10856,8 @@ skeletons.setOnDespawn((skeleton) => {
     skeleton.x,
     skeleton.y,
     skeleton.map,
-    packetManager.skeletonDespawn(skeleton.id)
+    packetManager.skeletonDespawn(skeleton.id),
+    skeleton.layerId
   );
 });
 
@@ -11060,7 +10871,7 @@ resurrection.setOnSicknessExpiry(async (p) => {
   globalStateRevision++;
   filterPlayersByMap(p.location.map).forEach((v) => {
     sendPacket(
-      v.ws,
+      v.wt,
       packetManager.updateStats({ id: p.id, target: p.id, stats: p.stats })
     );
   });
@@ -11081,9 +10892,9 @@ async function sendStatsToPartyMembers(playerUsername: string, playerId: string,
     const sessionId = await player.getSessionIdByUsername(memberName);
     const partyMember = sessionId && playerCache.get(sessionId);
 
-    if (partyMember && partyMember.ws) {
+    if (partyMember && partyMember.wt) {
       sendPacketBestEffort(
-        partyMember.ws,
+        partyMember.wt,
         packetManager.updateStats({
           target: playerId,
           username: playerUsername,
@@ -11094,8 +10905,8 @@ async function sendStatsToPartyMembers(playerUsername: string, playerId: string,
   }
 }
 
-async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string, revision?: number) {
-  const currentPlayer = playerCache.get(playerId || ws.data.id);
+async function sendSpriteSheetAnimation(wt: any, name: string, playerId?: string, revision?: number) {
+  const currentPlayer = playerCache.get(playerId || wt.data.id);
   if (!currentPlayer) return;
 
   const playerEquipment = currentPlayer.equipment || null;
@@ -11129,14 +10940,14 @@ async function sendSpriteSheetAnimation(ws: any, name: string, playerId?: string
   // sprite state must never desync). Observers also get the reliable stream:
   // animation is state, not latest-wins data - a single lost walk/idle
   // datagram would stick the wrong pose until the next direction change.
-  if (currentPlayer.ws) {
-    sendPacket(currentPlayer.ws, packetManager.spriteSheetAnimation(spriteSheetPacketData));
+  if (currentPlayer.wt) {
+    sendPacket(currentPlayer.wt, packetManager.spriteSheetAnimation(spriteSheetPacketData));
   }
   broadcastToAOI(currentPlayer, packetManager.spriteSheetAnimation(spriteSheetPacketData), false);
 }
 
-async function sendAnimation(ws: any, name: string, playerId?: string, revision?: number) {
-  const currentPlayer = playerCache.get(playerId || ws.data.id);
+async function sendAnimation(wt: any, name: string, playerId?: string, revision?: number) {
+  const currentPlayer = playerCache.get(playerId || wt.data.id);
   if (!currentPlayer) return;
 
   if (!useSpriteSheets) {
@@ -11149,7 +10960,7 @@ async function sendAnimation(ws: any, name: string, playerId?: string, revision?
     return;
   }
 
-  await sendSpriteSheetAnimation(ws, name, playerId, revision);
+  await sendSpriteSheetAnimation(wt, name, playerId, revision);
 }
 
 function getAnimationNameForDirection(
@@ -11175,7 +10986,7 @@ function getAnimationNameForDirection(
 }
 
 async function sendPositionAnimation(
-  ws: any,
+  wt: any,
   direction: string,
   walking: boolean,
   mounted: boolean = false,
@@ -11185,7 +10996,7 @@ async function sendPositionAnimation(
   casting: boolean = false
 ) {
   const animation = getAnimationNameForDirection(direction, walking, mounted, mount_type, casting);
-  await sendAnimation(ws, animation, playerId, revision);
+  await sendAnimation(wt, animation, playerId, revision);
 }
 
 function normalizeDirection(direction: string): string {
@@ -11319,9 +11130,9 @@ function scheduleWeatherCycle() {
         const playerIds = mapIndex.getPlayersOnMap(world.name);
         for (const playerId of playerIds) {
           const player = playerCache.get(playerId);
-          if (player?.ws && player.ws.readyState === 1) {
+          if (player?.wt && player.wt.readyState === 1) {
             sendPacket(
-              player.ws,
+              player.wt,
               packetManager.changeWeather({ weather: randomWeather.name, weatherData: randomWeather })
             );
           }

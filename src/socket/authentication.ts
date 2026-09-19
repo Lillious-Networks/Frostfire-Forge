@@ -128,6 +128,7 @@ const authentication = {
                 is_thrown: number | null,
                 charge_distance: number | null,
                 teleport_behind: number | null,
+                can_move: number,
             }> = Object.create(null);
 
             for (const row of learnedSpellsData) {
@@ -153,6 +154,7 @@ const authentication = {
                     is_thrown: spellDetails.is_thrown ?? null,
                     charge_distance: spellDetails.charge_distance ?? null,
                     teleport_behind: spellDetails.teleport_behind ?? null,
+                    can_move: spellDetails.can_move ? 1 : 0,
                 };
             }
 

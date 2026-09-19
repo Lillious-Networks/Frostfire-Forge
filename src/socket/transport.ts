@@ -426,6 +426,13 @@ async function startStreamLoop(
           continue;
         }
 
+        // A handler closed this connection (LOGOUT, a kick) while frames the
+        // client sent after it were still in this chunk. Handlers can't act on
+        // a closed connection, and running them anyway (e.g. a trailing
+        // movement packet re-registering a mover) would undo the close
+        // cleanup - stop reading instead.
+        if (!connection.isOpen()) return;
+
         // Stamp the actual read time so handlers can measure event-loop
         // queueing between frame arrival and dispatch.
         connection.lastFrameReadAt = readWallTime;
@@ -449,6 +456,8 @@ function startDatagramLoop(session: any, connection: TransportConnection, option
         const { value: datagram, done } = await reader.read();
         if (done) break;
         if (!connection.data.id) continue;
+        // Closed by a handler: late datagrams are dropped, as on the stream.
+        if (!connection.isOpen()) break;
 
         try {
           const message = textDecoder.decode(datagram instanceof Uint8Array ? datagram : new Uint8Array(datagram));

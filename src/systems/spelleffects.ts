@@ -132,9 +132,9 @@ export function broadcastEffectsUpdate(player: any) {  if (!player?.id) return;
   const packets = packetManager.effects({ id: player.id, effects: getEffectsPayload(player) });
   const map = player.location?.map;
   if (!map) {
-    if (player.ws?.readyState === 1) {
+    if (player.wt?.readyState === 1) {
       try {
-        packets.forEach((pk: any) => player.ws.send(pk));
+        packets.forEach((pk: any) => player.wt.send(pk));
       } catch (e) {
         log.error(`Failed to send effects update: ${e}`);
       }
@@ -147,17 +147,17 @@ export function broadcastEffectsUpdate(player: any) {  if (!player?.id) return;
     if (!p || p.id === player.id) continue;
     // Vanished players' effects are only visible to admins and party
     if (player.isVanished && !p.isAdmin && !p.party?.includes(player.username)) continue;
-    if (p?.ws?.readyState === 1) {
+    if (p?.wt?.readyState === 1) {
       try {
-        packets.forEach((pk: any) => p.ws.send(pk));
+        packets.forEach((pk: any) => p.wt.send(pk));
       } catch (e) {
         log.error(`Failed to send effects update: ${e}`);
       }
     }
   }
   // Always send to the player themselves
-  if (player.ws?.readyState === 1) {
-    try { packets.forEach((pk: any) => player.ws.send(pk)); } catch (e) { log.error(`Failed to send effects update: ${e}`); }
+  if (player.wt?.readyState === 1) {
+    try { packets.forEach((pk: any) => player.wt.send(pk)); } catch (e) { log.error(`Failed to send effects update: ${e}`); }
   }
 }
 
@@ -325,9 +325,9 @@ registerSpellEffect("stun", async ({ caster, target, spell, effect, broadcastEff
   }
 
   // Grey out the hotbar while stunned (same visual as interrupt lockout)
-  if (target.ws?.readyState === 1) {
+  if (target.wt?.readyState === 1) {
     try {
-      packetManager.spellLockout({ duration: durationSec }).forEach((pk: any) => target.ws.send(pk));
+      packetManager.spellLockout({ duration: durationSec }).forEach((pk: any) => target.wt.send(pk));
     } catch (e) { /* ignore */ }
   }
 
@@ -341,10 +341,10 @@ registerSpellEffect("stun", async ({ caster, target, spell, effect, broadcastEff
     fresh.stunnedUntil = arr.length > 0 ? Math.max(...arr.map((s) => s.expiresAt)) : 0;
     listener.emit(Events.PLAYER_DEBUFF_REMOVED, { player: fresh, effectId: id, effectType: "stun", spellName } as PlayerEffectRemovedEvent);
     // Update lockout to match remaining stun time, or clear it
-    if (fresh.ws?.readyState === 1) {
+    if (fresh.wt?.readyState === 1) {
       try {
         const remaining = fresh.stunnedUntil ? Math.max(0, Math.ceil((fresh.stunnedUntil - Date.now()) / 1000)) : 0;
-        packetManager.spellLockout({ duration: remaining }).forEach((pk: any) => fresh.ws.send(pk));
+        packetManager.spellLockout({ duration: remaining }).forEach((pk: any) => fresh.wt.send(pk));
       } catch (e) { /* ignore */ }
     }
     broadcastEffects(fresh);

@@ -1,12 +1,10 @@
 import playerCache from "../services/playermanager";
-import entityCache from "../services/entityCache";
 import mapIndex from "../services/mapindex";
-import entityAI from "./entityAI";
 import { consumeBarrier, broadcastEffectsUpdate, applySpellEffects, cancelEffect, getVanishedEffectId } from "./spelleffects";
 import { packetManager } from "../socket/packet_manager";
 import log from "../modules/logger";
 import { setPlayerPvp, listener, Events } from "./events";
-import { broadcastToAOIBestEffort, broadcastToAOIBestEffortAtPosition } from "../socket/aoi";
+import { broadcastToAOIBestEffort } from "../socket/aoi";
 
 export interface GroundAoeZone {
   id: string;
@@ -38,6 +36,14 @@ let zoneIdCounter = 0;
 
 let playerDeathHandler: ((player: any, attacker: any, damageInfo: { damage: number; isCrit: boolean }) => Promise<void>) | null = null;
 
+/** Applies a zone tick to creatures inside it; registered by the creature system. */
+type CreatureZoneHandler = (zone: GroundAoeZone, caster: any) => void;
+let creatureZoneHandler: CreatureZoneHandler | null = null;
+
+export function setCreatureZoneHandler(handler: CreatureZoneHandler) {
+  creatureZoneHandler = handler;
+}
+
 export function setPlayerDeathHandler(handler: typeof playerDeathHandler) {
   playerDeathHandler = handler;
 }
@@ -51,10 +57,10 @@ function broadcastToMap(map: string, packets: any[]) {
       for (const p of packets) {
         if (Array.isArray(p)) {
           for (const sub of p) {
-            player.ws.send(sub);
+            player.wt.send(sub);
           }
         } else {
-          player.ws.send(p);
+          player.wt.send(p);
         }
       }
     }
@@ -307,51 +313,12 @@ async function processZoneTicks(): Promise<void> {
         }
         zoneOccupants.set(zone.id, currentOccupants);
 
-        const mapEntities = entityCache.getByMap(mapName);
-        for (const entity of mapEntities) {
-          if (isHeal) continue;
-          if (entity.aggro_type === "friendly") continue;
-          const ePos = entity.position;
-          if (!ePos) continue;
-          const dist = Math.sqrt((ePos.x - zone.position.x) ** 2 + (ePos.y - zone.position.y) ** 2);
-          if (dist > zone.radius) continue;
-
-          const entityState = entityAI.getEntityAIState(String(entity.id));
-          if (entityState?.combatState === "returning") continue;
-
-          const tickDamage = zone.damagePerTick;
-          if (tickDamage > 0) {
-            entityAI.applyDamageToEntity(entity, tickDamage, caster || { username: "Ground AoE" });
-          }
-          if (entity.health == null || entity.health < 0) entity.health = 0;
-          const entityHealth = entity.health ?? 0;
-          if (entity.id != null) {
-            entityCache.updateHealth(entity.id, entityHealth);
-          }
-
-          if (tickDamage !== 0) {
-            broadcastToAOIBestEffortAtPosition(
-              zone.position.x,
-              zone.position.y,
-              mapName,
-              packetManager.updateStats({
-                id: zone.casterId,
-                target: entity.id,
-                stats: { health: entity.health, total_max_health: entity.max_health },
-                isCrit: false,
-                damage: tickDamage,
-                entity: true,
-              })
-            );
-          }
-
-          if (entity.health <= 0 && entity.id != null) {
-            broadcastToMap(mapName, packetManager.despawnEntity(String(entity.id), 30));
-            entityCache.remove(entity.id);
-          }
-
-          if (caster && zone.spell && zone.effects && zone.effects.length > 0 && entity.health > 0) {
-            applySpellEffects(zone.spell, caster, entity, () => {}, () => {});
+        // Creatures standing in the zone take the tick too (hostile zones only).
+        if (!isHeal && creatureZoneHandler) {
+          try {
+            creatureZoneHandler(zone, caster || null);
+          } catch (e) {
+            log.error(`Ground AoE creature tick failed: ${e}`);
           }
         }
 

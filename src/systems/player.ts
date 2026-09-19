@@ -352,7 +352,7 @@ const player = {
       return false;
     }
 
-    // sessionId comes from ws.data.id which is a number via parseInt(),
+    // sessionId comes from wt.data.id which is a number via parseInt(),
     // but the DB column is VARCHAR. Normalize to string for comparisons.
     const sid = String(sessionId);
     const accountResult = await query(
@@ -1038,7 +1038,7 @@ const player = {
 
     return { value: false, reason: "no_collision" };
   },
-  kick: async (username: string, ws: any) => {
+  kick: async (username: string, wt: any) => {
     const response = (await query(
       "SELECT session_id FROM accounts WHERE username = ?",
       [username]
@@ -1046,9 +1046,9 @@ const player = {
     if (response[0]?.session_id) {
       player.logout(response[0]?.session_id);
     }
-    if (ws) ws.close();
+    if (wt) wt.close();
   },
-  ban: async (username: string, ws: any) => {
+  ban: async (username: string, wt: any) => {
     if (!username) return;
     username = username.toLowerCase();
     const response = await query(
@@ -1059,7 +1059,7 @@ const player = {
     if (session_id[0]?.session_id) {
       player.logout(session_id[0]?.session_id);
     }
-    if (ws) ws.close();
+    if (wt) wt.close();
     return response;
   },
   unban: async (username: string) => {

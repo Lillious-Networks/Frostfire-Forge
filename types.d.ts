@@ -151,6 +151,10 @@ declare interface Item {
   equipable: boolean;
   equipment_slot: Nullable<ItemSlot>;
   bag_slots: Nullable<number>;
+  /** Weapons: swing damage range and swing speed. Null means "not a weapon". */
+  damage_min: Nullable<number>;
+  damage_max: Nullable<number>;
+  attack_speed_ms: Nullable<number>;
 }
 
 declare interface Equipment {
@@ -519,36 +523,6 @@ declare interface ServerRegistrationConfig {
   wtEnabled?: boolean;
   maxConnections: number;
   heartbeatInterval: number;
-}
-
-declare interface Entity {
-  id: Nullable<number>;
-  isMoving: Nullable<boolean>;
-  hasMoved: Nullable<boolean>;
-  tileSize: Nullable<number>;
-  last_updated: Nullable<number>;
-  map: string;
-  name: Nullable<string>;
-  position: PositionData;
-  aggro_type: Nullable<string>;
-  level: Nullable<number>;
-  health: Nullable<number>;
-  max_health: Nullable<number>;
-  particles: Nullable<Particle[]>;
-  sprite_type: Nullable<'none' | 'static' | 'animated'>;
-  sprite_body: Nullable<string>;
-  sprite_head: Nullable<string>;
-  sprite_helmet: Nullable<string>;
-  sprite_shoulderguards: Nullable<string>;
-  sprite_neck: Nullable<string>;
-  sprite_hands: Nullable<string>;
-  sprite_chest: Nullable<string>;
-  sprite_feet: Nullable<string>;
-  sprite_legs: Nullable<string>;
-  sprite_weapon: Nullable<string>;
-  entity_type?: 'normal' | 'boss';
-  loot_table_id?: number | null;
-  initialize: Nullable<() => Promise<void>>;
 }
 
 declare interface LootTableEntry {

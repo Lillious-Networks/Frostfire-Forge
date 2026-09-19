@@ -43,7 +43,7 @@ function makePlayer(id: string, username: string, map: string, x: number, y: num
     id,
     username,
     location: { map, position: { x, y, direction: "down" } },
-    ws: { readyState: 1, send: () => {} },
+    wt: { readyState: 1, send: () => {} },
     party: [],
     party_id: null,
     moving: false,

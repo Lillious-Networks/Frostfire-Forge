@@ -6,6 +6,8 @@ export interface DeathSkeleton {
   id: string;
   username: string;
   map: string;
+  /** Layer the death happened on; only players on it see the marker. */
+  layerId: string | null;
   x: number;
   y: number;
   createdAt: number;
@@ -32,7 +34,7 @@ const skeletons = {
     onDespawn = fn;
   },
 
-  spawn(map: string, x: number, y: number, username: string): DeathSkeleton | null {
+  spawn(map: string, x: number, y: number, username: string, layerId: string | null = null): DeathSkeleton | null {
     // Players only: this is the single choke point for marker creation and
     // entities have no username/account, so reject anything else here rather
     // than trusting every present and future call site.
@@ -45,6 +47,7 @@ const skeletons = {
       id: generateId(),
       username: username || "Unknown",
       map,
+      layerId,
       x: Math.round(x),
       y: Math.round(y),
       createdAt: now,
@@ -79,13 +82,16 @@ const skeletons = {
     return skeletonList.get(id);
   },
 
-  getInRadius(map: string, x: number, y: number, radius: number): DeathSkeleton[] {
+  /** Markers a viewer can see: same map, same layer (or layerless), in radius. */
+  getInRadius(map: string, x: number, y: number, radius: number, layerId: string | null = null): DeathSkeleton[] {
     const result: DeathSkeleton[] = [];
     const expired: string[] = [];
     const now = Date.now();
     const r2 = radius * radius;
     for (const skeleton of skeletonList.values()) {
       if (skeleton.map !== map) continue;
+      // A layerless marker predates layer tracking; show it to everyone.
+      if (skeleton.layerId !== null && layerId !== null && skeleton.layerId !== layerId) continue;
       if (skeleton.expiresAt <= now) {
         expired.push(skeleton.id);
         continue;

@@ -1,14 +1,12 @@
 import playerCache from "../services/playermanager";
-import entityCache from "../services/entityCache";
-import mapIndex from "../services/mapindex";
-import entityAI from "./entityAI";
 import { registerSpellEffect, registerEffectsPayloadProvider, consumeBarrier, broadcastEffectsUpdate, resolveParticleNames, cancelEffect, getVanishedEffectId } from "./spelleffects";
 import { packetManager } from "../socket/packet_manager";
 import { getSpriteUrl } from "../modules/spriteSheetManager";
 import { listener } from "../modules/event_bus";
 import { Events, setPlayerPvp } from "./events";
 import log from "../modules/logger";
-import { broadcastToAOIBestEffort, broadcastToAOIBestEffortAtPosition } from "../socket/aoi";
+import { withPeriodicBonus } from "./spellmath";
+import { broadcastToAOIBestEffort } from "../socket/aoi";
 
 export interface DotInstance {
   id: string;
@@ -31,7 +29,6 @@ const DEFAULT_MAX_STACKS = 5;
 const SCHEDULER_INTERVAL_MS = 250;
 
 const playerDots = new Map<string, DotInstance[]>();
-const entityDots = new Map<string | number, DotInstance[]>();
 
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -42,23 +39,6 @@ export function setPlayerDeathHandler(fn: PlayerDeathHandler) {
   playerDeathHandler = fn;
 }
 
-function sendPacket(ws: any, packets: any[]) {
-  if (!ws || !ws.send || ws.readyState !== 1) return;
-  try {
-    packets.forEach((packet) => ws.send(packet));
-  } catch (error) {
-    log.error(`Failed to send packet: ${error}`);
-  }
-}
-
-function broadcastToMap(map: string, packets: any[]) {
-  if (!map) return;
-  const playerIds = mapIndex.getPlayersOnMap(map);
-  for (const playerId of playerIds) {
-    const p = playerCache.get(playerId);
-    if (p?.ws) sendPacket(p.ws, packets);
-  }
-}
 
 function sendEffectsToTarget(target: any) {
   broadcastEffectsUpdate(target);
@@ -70,17 +50,16 @@ function ensureScheduler() {
 }
 
 function stopSchedulerIfIdle() {
-  if (playerDots.size === 0 && entityDots.size === 0 && schedulerTimer) {
+  if (playerDots.size === 0 && schedulerTimer) {
     clearInterval(schedulerTimer);
     schedulerTimer = null;
   }
 }
 
-function isEntityTarget(target: any): boolean {
-  return target?.aggro_type !== undefined && target?.health !== undefined && !target?.stats;
-}
-
-export async function applyDot(caster: any, target: any, spell: SpellData, effect: SpellEffect) {
+export async function applyDot(caster: any, target: any, spell: SpellData, baseEffect: SpellEffect) {
+  // Classic WoW: each tick also gets a share of the caster's damage stat,
+  // fixed now, at application. Creature casters have no stats: no bonus.
+  const effect = withPeriodicBonus(baseEffect, caster?.stats?.stat_damage || 0);
   const valuePerTick = Math.floor(Number(effect.value) || 0);
   const durationSec = Number(effect.duration) || 0;
   const intervalSec = Number(effect.interval) || 1;
@@ -93,13 +72,13 @@ export async function applyDot(caster: any, target: any, spell: SpellData, effec
 
   const resolvedParticles = await resolveParticleNames(effect.target_particles);
 
-  const entity = isEntityTarget(target);
-  const key = entity ? target.id : String(target.id);
-  const store = entity ? entityDots : playerDots;
-  let list = store.get(key);
+  // Creature DoTs live in the creature aura system; this store is players only.
+  if (!target?.stats) return;
+  const key = String(target.id);
+  let list = playerDots.get(key);
   if (!list) {
     list = [];
-    store.set(key, list);
+    playerDots.set(key, list);
   }
 
   const existing = list.find((d) => d.id === spellName);
@@ -135,7 +114,7 @@ export async function applyDot(caster: any, target: any, spell: SpellData, effec
   }
 
   ensureScheduler();
-  if (!entity) sendEffectsToTarget(target);
+  sendEffectsToTarget(target);
 }
 
 export function clearDots(targetId: string | number) {  const key = String(targetId);
@@ -143,11 +122,6 @@ export function clearDots(targetId: string | number) {  const key = String(targe
     const target = playerCache.get(key);
     if (target) sendEffectsToTarget(target);
   }
-  stopSchedulerIfIdle();
-}
-
-export function clearEntityDots(entityId: string | number) {
-  entityDots.delete(entityId);
   stopSchedulerIfIdle();
 }
 
@@ -253,49 +227,6 @@ async function tickPlayerDot(targetKey: string, dot: DotInstance): Promise<boole
   return true;
 }
 
-function tickEntityDot(entityKey: string | number, dot: DotInstance): boolean {
-  const entity: any = entityCache.getById(entityKey as number);
-  if (!entity || entity.health <= 0) {
-    entityDots.delete(entityKey);
-    return false;
-  }
-
-  const caster = playerCache.get(dot.casterId);
-  const damage = dot.damagePerTick * dot.stacks;
-
-  if (caster) {
-    entityAI.applyDamageToEntity(entity, damage, caster);
-  } else {
-    entity.health = Math.max(0, entity.health - damage);
-  }
-
-  if (entity.health < 0) entity.health = 0;
-  entityCache.updateHealth(entity.id, entity.health);
-
-  broadcastToAOIBestEffortAtPosition(
-    entity.position.x,
-    entity.position.y,
-    entity.map,
-    packetManager.updateStats({
-      id: dot.casterId,
-      target: entity.id,
-      stats: { health: entity.health, total_max_health: entity.max_health },
-      isCrit: false,
-      damage,
-      entity: true,
-    })
-  );
-
-  if (entity.health <= 0) {
-    const respawnTime = 30;
-    broadcastToMap(entity.map, packetManager.despawnEntity(entity.id, respawnTime));
-    entityCache.remove(entity.id);
-    entityDots.delete(entityKey);
-    return false;
-  }
-  return true;
-}
-
 async function processDotTicks() {
   const now = Date.now();
 
@@ -335,23 +266,6 @@ async function processDotTicks() {
     }
   }
 
-  for (const [key, list] of entityDots) {
-    for (let i = list.length - 1; i >= 0; i--) {
-      const dot = list[i];
-      if (dot.nextTickAt <= now && dot.expiresAt >= dot.nextTickAt) {
-        dot.nextTickAt += dot.interval * 1000;
-        const alive = tickEntityDot(key, dot);
-        if (!alive) break;
-      }
-      if (dot.expiresAt <= now) {
-        list.splice(i, 1);
-      }
-    }
-    if (entityDots.has(key) && list.length === 0) {
-      entityDots.delete(key);
-    }
-  }
-
   stopSchedulerIfIdle();
 }
 
@@ -386,5 +300,5 @@ export function setPlayerDots(playerId: string, dots: DotInstance[]) {
 // Re-export: dot system can be prodded back to life after login restoration
 export { ensureScheduler };
 
-export default { applyDot, clearDots, clearEntityDots, getDotsPayload, setPlayerDeathHandler, getPlayerDots, setPlayerDots };
+export default { applyDot, clearDots, getDotsPayload, setPlayerDeathHandler, getPlayerDots, setPlayerDots };
 

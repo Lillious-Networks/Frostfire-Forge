@@ -68,6 +68,8 @@ export const Events = {
     PLAYER_LEFT_PVP: "onPlayerLeftPVP",
     PLAYER_ENTER_AOE: "onPlayerEnterAOE",
     PLAYER_LEFT_AOE: "onPlayerLeftAOE",
+    CREATURE_KILLED: "onCreatureKilled",
+    CREATURE_KILL_CREDIT: "onCreatureKillCredit",
 } as const;
 
 // ── Event payload types ──

@@ -460,13 +460,28 @@ bun setup-production
 </details>
 
 <details>
-<summary><strong>Entity Editor</strong></summary>
+<summary><strong>Creature Editor</strong></summary>
 
 ```bash
-/entityeditor
+/creatureeditor
 ```
-- **Aliases**: `ee`
-- **Permission**: `tools.entity_editor` | `tools.*`
+- **Aliases**: `ce`
+- **Permission**: `tools.creature_editor` | `tools.*`
+
+Edits creature templates, abilities, spawns, patrol paths, link groups and spawn pools, with in-world spawn placement, patrol drawing and a debug overlay (aggro/leash radii, live threat table). Existing legacy entities can be converted with `bun migrate-entities` (add `--dry-run` to preview, `--drop-legacy` to drop the old tables afterwards).
+
+</details>
+
+<details>
+<summary><strong>Item Editor</strong></summary>
+
+```bash
+/itemeditor
+```
+- **Aliases**: `ie`
+- **Permission**: `tools.item_editor` | `tools.*`
+
+Creates and edits items: name, type, quality, icon, description, equipment slot, level requirement, bag slots and every stat. Weapons also carry `damage_min`, `damage_max` and `attack_speed_ms`, which drive melee auto-attack damage and swing timing — a weapon with no damage range falls back to its flat damage stat.
 
 </details>
 
@@ -562,8 +577,8 @@ Spells are stored in the `spells` database table. Each row defines a spell with 
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Unique spell identifier, used to reference the spell everywhere |
-| `damage` | number | Base damage dealt on hit. Use negative numbers for healing spells |
-| `mana` | number | Mana cost as a percentage of the caster's max stamina |
+| `damage` | number | Base damage dealt on hit, rolled with the caster's level (+2 to +5 per level past 1) plus their damage stat. Use negative numbers for healing spells: a heal restores the same level roll plus (cast time / 3.5s) of the caster's damage stat (instant casts count as 1.5s), crits for 150%, and ignores armor and avoidance, as in classic WoW |
+| `mana` | number | Mana cost as a percentage of the caster's base stamina (from level alone, not gear), as in WoW |
 | `range` | number | Maximum cast distance in pixels |
 | `type` | string | Spell category label. Currently only `"spell"` is supported. |
 | `cast_time` | number | How long the cast bar takes in seconds (0 = instant) |
@@ -615,6 +630,8 @@ Deals `value` damage to the target every `interval` seconds for the full `durati
 ```
 
 This deals 4 damage every 3 seconds for 12 seconds (4 ticks total), stacking up to 5 times.
+
+As in classic WoW, each tick also gets a share of the caster's damage stat, fixed when the effect lands: the stat × (`duration` / 15s, capped at 1), split evenly across the ticks. With 50 damage stat, the example above adds 50 × 12/15 = 40 over its 4 ticks, so 14 per tick. `heal_over_time` works the same way.
 </details>
 
 <details>
@@ -953,7 +970,7 @@ import { listener } from "@engine/systems/events";
 | Event | Payload | When |
 |-------|---------|------|
 | `onSpellCast` | `{ player, spellName, target, isEntityTarget }` | After spell effects applied, last-attack timers set |
-| `onSpellFailed` | `{ player, target, spellName, reason }` | After a spell cast fails validation. `reason` can be `"cooldown"`, `"mana"`, `"moving"`, `"vanished"`, `"range"`, `"nopvp"`, `"path_blocked"`, `"direction"`, `"entity_returning"`, `"no_effects"`, or `"unknown"`. |
+| `onSpellFailed` | `{ player, target, spellName, reason }` | After a spell cast fails validation. `reason` can be `"cooldown"`, `"mana"`, `"moving"`, `"vanished"`, `"range"`, `"nopvp"`, `"path_blocked"`, `"direction"`, `"no_effects"`, or `"unknown"`. |
 | `onSpellInterrupted` | `{ player }` | After spell cancelled via ESC and state cleared |
 | `onPlayerAbsorbtion` | `{ caster, target, spellName, amount, duration }` | After a barrier/shield is applied to a player. |
 | `onPlayerStunned` | `{ caster, target, spellName, duration }` | After a stun effect is applied to a player. |

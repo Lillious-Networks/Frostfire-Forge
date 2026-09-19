@@ -5,8 +5,8 @@ const items = {
   async add(item: Item) {
     if (!item?.name || !item?.quality || !item?.description || !item?.type || !item?.level_requirement || !item?.equipable) return;
     const result = await query(
-      "INSERT IGNORE INTO items (name, quality, description, icon, type, stat_armor, stat_damage, stat_critical_chance, stat_critical_damage, stat_health, stat_stamina, stat_avoidance, level_requirement, equipable, equipment_slot) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [item.name, item.quality, item.description, item.icon || null, item.type, item.stat_armor || null, item.stat_damage || null, item.stat_critical_chance || null, item.stat_critical_damage || null, item.stat_health || null, item.stat_stamina || null, item.stat_avoidance || null, item.level_requirement || null, item.equipable, item.equipment_slot || null]
+      "INSERT IGNORE INTO items (name, quality, description, icon, type, stat_armor, stat_damage, stat_critical_chance, stat_critical_damage, stat_health, stat_stamina, stat_avoidance, level_requirement, equipable, equipment_slot, damage_min, damage_max, attack_speed_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [item.name, item.quality, item.description, item.icon || null, item.type, item.stat_armor || null, item.stat_damage || null, item.stat_critical_chance || null, item.stat_critical_damage || null, item.stat_health || null, item.stat_stamina || null, item.stat_avoidance || null, item.level_requirement || null, item.equipable, item.equipment_slot || null, item.damage_min ?? null, item.damage_max ?? null, item.attack_speed_ms ?? null]
     ) as any;
 
     if (result.affectedRows > 0) {
@@ -40,8 +40,8 @@ const items = {
   async update(item: Item) {
     if (!item?.name || !item?.quality || !item?.description || !item?.type || !item?.level_requirement || !item?.equipable) return;
     const result = await query(
-      "UPDATE items SET quality = ?, description = ?, icon = ?, type = ?, stat_armor = ?, stat_damage = ?, stat_critical_chance = ?, stat_critical_damage = ?, stat_health = ?, stat_stamina = ?, stat_avoidance = ?, level_requirement = ?, equipable = ?, equipment_slot = ? WHERE name = ?",
-      [item.quality, item.description, item.icon || null, item.type, item.stat_armor || null, item.stat_damage || null, item.stat_critical_chance || null, item.stat_critical_damage || null, item.stat_health || null, item.stat_stamina || null, item.stat_avoidance || null, item.level_requirement || null, item.equipable, item.equipment_slot || null, item.name]
+      "UPDATE items SET quality = ?, description = ?, icon = ?, type = ?, stat_armor = ?, stat_damage = ?, stat_critical_chance = ?, stat_critical_damage = ?, stat_health = ?, stat_stamina = ?, stat_avoidance = ?, level_requirement = ?, equipable = ?, equipment_slot = ?, damage_min = ?, damage_max = ?, attack_speed_ms = ? WHERE name = ?",
+      [item.quality, item.description, item.icon || null, item.type, item.stat_armor || null, item.stat_damage || null, item.stat_critical_chance || null, item.stat_critical_damage || null, item.stat_health || null, item.stat_stamina || null, item.stat_avoidance || null, item.level_requirement || null, item.equipable, item.equipment_slot || null, item.damage_min ?? null, item.damage_max ?? null, item.attack_speed_ms ?? null, item.name]
     );
     if (result) {
       const items = await assetCache.get("items") as Item[];

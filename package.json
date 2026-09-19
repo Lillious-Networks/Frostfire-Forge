@@ -25,6 +25,8 @@
     "setup-development": "bun create-config --environment development",
     "setup-production": "bun create-config --environment production && bun setup",
     "setup-localdb": "bun --env-file=.env.development ./src/utility/database_setup_sqlite.ts",
+    "migrate-entities": "bun --env-file=.env.development ./src/utility/migrate_entities_to_creatures.ts",
+    "migrate-entities:production": "bun --env-file=.env.production ./src/utility/migrate_entities_to_creatures.ts",
     "generate-local-cert": "bun ./src/utility/generate_local_cert.ts",
     "docker:dev": "docker compose -f src/docker/docker-compose.dev.yml up -d",
     "docker:dev:down": "docker compose -f src/docker/docker-compose.dev.yml down",
@@ -41,7 +43,9 @@
     "benchmark:production": "bun --env-file=.env.production ./src/utility/benchmark-cli.ts",
     "benchmark:connections": "bun ./src/utility/benchmark-connections.ts",
     "benchmark:connections:development": "bun --env-file=.env.development ./src/utility/benchmark-connections.ts",
-    "benchmark:connections:production": "bun --env-file=.env.production ./src/utility/benchmark-connections.ts"
+    "benchmark:connections:production": "bun --env-file=.env.production ./src/utility/benchmark-connections.ts",
+    "creature-loadtest": "bun --env-file=.env.development ./src/utility/creature-loadtest.ts",
+    "creature-loadtest:production": "bun --env-file=.env.production ./src/utility/creature-loadtest.ts"
   },
   "type": "module"
 }

@@ -38,14 +38,14 @@ export interface PlayerAOIState {
 // exceed the transport's per-stream queue limit (~256KB) and destroy the
 // stream. Splitting keeps each frame below that ceiling.
 export function sendLoadPlayersChunked(
-  sendPacket: (ws: any, packets: any) => void,
-  ws: any,
+  sendPacket: (wt: any, packets: any) => void,
+  wt: any,
   players: any[],
   snapshotRevision: number | null,
   chunkSize = 8
 ): void {
   for (let i = 0; i < players.length; i += chunkSize) {
-    sendPacket(ws, packetManager.loadPlayers({ players: players.slice(i, i + chunkSize), snapshotRevision }));
+    sendPacket(wt, packetManager.loadPlayers({ players: players.slice(i, i + chunkSize), snapshotRevision }));
   }
 }
 
@@ -204,11 +204,11 @@ function filterPlayersByDistance(
   return result;
 }
 
-function sendPacket(ws: any, packets: any[]) {
-  if (!ws || !ws.send || ws.readyState !== 1) return;
+function sendPacket(wt: any, packets: any[]) {
+  if (!wt || !wt.send || wt.readyState !== 1) return;
   try {
     packets.forEach((packet) => {
-      ws.send(packet);
+      wt.send(packet);
     });
   } catch (error) {
     // Silently ignore packet send errors
@@ -267,8 +267,8 @@ export function broadcastPlayerUpdate(player: any): void {
 
   const viewers = findPlayersWithTargetInAOI(player.id);
   for (const viewer of viewers) {
-    if (viewer.ws) {
-      sendPacket(viewer.ws, spawnFrames);
+    if (viewer.wt) {
+      sendPacket(viewer.wt, spawnFrames);
     }
   }
 }
@@ -422,14 +422,14 @@ export async function updatePlayerAOI(
         }
         despawnBatchQueue.get(player.id)!.add(exitedPlayerId);
       } else {
-        sendPacket(player.ws, packetManager.despawnPlayer(exitedPlayerId, "distance"));
+        sendPacket(player.wt, packetManager.despawnPlayer(exitedPlayerId, "distance"));
       }
 
-      if (exitedPlayer && exitedPlayer.ws) {
+      if (exitedPlayer && exitedPlayer.wt) {
 
-        if (exitedPlayer.ws && exitedPlayer.ws.readyState === 1) {
+        if (exitedPlayer.wt && exitedPlayer.wt.readyState === 1) {
           sendPacket(
-            exitedPlayer.ws,
+            exitedPlayer.wt,
             packetManager.despawnPlayer(player.id, "distance")
           );
         } else if (despawnBatchQueue) {
@@ -498,24 +498,24 @@ export function broadcastToAOI(
 
   try {
 
-    if (includeSelf && sourcePlayer.ws) {
-      sendPacket(sourcePlayer.ws, packetData);
+    if (includeSelf && sourcePlayer.wt) {
+      sendPacket(sourcePlayer.wt, packetData);
     }
 
     const playersInAOI = Array.from(sourcePlayer.aoi.playersInAOI)
       .map((id) => playerCache.get(id as string))
-      .filter((p) => p && p.ws);
+      .filter((p) => p && p.wt);
 
     if (sourcePlayer.isStealth || sourcePlayer.isVanished) {
 
       const visibleTo = playersInAOI.filter((p) => p.isAdmin || p.party?.includes(sourcePlayer.username));
       visibleTo.forEach((player) => {
-        sendPacket(player.ws, packetData);
+        sendPacket(player.wt, packetData);
       });
     } else {
 
       playersInAOI.forEach((player) => {
-        sendPacket(player.ws, packetData);
+        sendPacket(player.wt, packetData);
       });
     }
   } catch (error) {
@@ -523,11 +523,11 @@ export function broadcastToAOI(
   }
 }
 
-function sendPacketBestEffort(ws: any, packetData: any[]) {
-  if (!ws || typeof ws.sendBestEffort !== "function" || ws.readyState !== 1) return;
+function sendPacketBestEffort(wt: any, packetData: any[]) {
+  if (!wt || typeof wt.sendBestEffort !== "function" || wt.readyState !== 1) return;
   try {
     packetData.forEach((packet) => {
-      ws.sendBestEffort(packet);
+      wt.sendBestEffort(packet);
     });
   } catch (error) {
     // Silently ignore best-effort send errors
@@ -551,13 +551,13 @@ export function broadcastToAOIBestEffort(
   try {
     const receivers = new Set<any>();
 
-    if (includeSelf && sourcePlayer.ws) {
+    if (includeSelf && sourcePlayer.wt) {
       receivers.add(sourcePlayer);
     }
 
     const playersInAOI = Array.from(sourcePlayer.aoi.playersInAOI)
       .map((id) => playerCache.get(id as string))
-      .filter((p) => p && p.ws);
+      .filter((p) => p && p.wt);
 
     const visibleTo = sourcePlayer.isStealth || sourcePlayer.isVanished
       ? playersInAOI.filter((p) => p.isAdmin || p.party?.includes(sourcePlayer.username))
@@ -568,7 +568,7 @@ export function broadcastToAOIBestEffort(
     }
 
     for (const player of receivers) {
-      sendPacketBestEffort(player.ws, packetData);
+      sendPacketBestEffort(player.wt, packetData);
     }
   } catch (error) {
     // Silently ignore broadcast errors
@@ -590,10 +590,10 @@ export function broadcastStatsUpdateToAOI(
 
   const collect = (source: any) => {
     if (!source || !source.aoi) return;
-    if (source.ws) receivers.set(String(source.id), source);
+    if (source.wt) receivers.set(String(source.id), source);
     for (const id of source.aoi.playersInAOI) {
       const p = playerCache.get(id as string);
-      if (p && p.ws) receivers.set(String(id), p);
+      if (p && p.wt) receivers.set(String(id), p);
     }
   };
 
@@ -601,7 +601,7 @@ export function broadcastStatsUpdateToAOI(
     collect(target);
     collect(caster);
     for (const player of receivers.values()) {
-      sendPacketBestEffort(player.ws, packetData);
+      sendPacketBestEffort(player.wt, packetData);
     }
   } catch (error) {
     // Silently ignore broadcast errors
@@ -613,25 +613,46 @@ export function broadcastStatsUpdateToAOI(
  * the given position. Used for entity-targeted stats broadcasts (entities are
  * not tracked in playersInAOI, so position distance stands in for visibility).
  */
+/**
+ * Called whenever a player moves to a different layer, so per-layer world state
+ * (death skeletons, and anything else keyed by layer) can be resent to them.
+ */
+let onLayerChanged: ((playerId: string) => void) | null = null;
+
+export function setLayerChangeHandler(fn: (playerId: string) => void): void {
+  onLayerChanged = fn;
+}
+
+export function notifyLayerChanged(playerId: string): void {
+  try {
+    onLayerChanged?.(playerId);
+  } catch {
+    // A failed resync must never break the layer move itself.
+  }
+}
+
 export function broadcastToAOIBestEffortAtPosition(
   x: number,
   y: number,
   map: string,
-  packetData: any[]
+  packetData: any[],
+  /** Restrict to viewers on this layer. Null/undefined reaches every layer. */
+  layerId?: string | null
 ): void {
   if (!map) return;
 
   const playerIds = mapIndex.getPlayersOnMap(map);
   for (const playerId of playerIds) {
     const p = playerCache.get(playerId);
-    if (!p || !p.ws || p.ws.readyState !== 1) continue;
+    if (!p || !p.wt || p.wt.readyState !== 1) continue;
+    if (layerId != null && layerManager.getPlayerLayer(playerId) !== layerId) continue;
     const pos = p.location?.position;
     if (!pos || typeof pos.x !== "number" || typeof pos.y !== "number") continue;
     const radius = p.aoi?.aoiRadius || AOI_CONFIG.DEFAULT_RADIUS;
     const dx = pos.x - x;
     const dy = pos.y - y;
     if (dx * dx + dy * dy > radius * radius) continue;
-    sendPacketBestEffort(p.ws, packetData);
+    sendPacketBestEffort(p.wt, packetData);
   }
 }
 
@@ -701,7 +722,7 @@ export function despawnPlayerFromAllAOI(
       } else {
 
         sendPacket(
-          player.ws,
+          player.wt,
           packetManager.despawnPlayer(departingPlayer.id, reason)
         );
       }
@@ -765,6 +786,7 @@ export async function handleMapChangeAOI(
 
       const newLayerId = layerManager.assignPlayerToLayer(player.id, newMap);
       player.aoi.layerId = newLayerId;
+      notifyLayerChanged(player.id);
 
       if (AOI_CONFIG.USE_SPATIAL_GRID) {
         spatialGrid.removePlayer(player.id);
@@ -816,7 +838,7 @@ interface AOIPlayer {
   id: string;
   username: string;
   aoi?: PlayerAOIState;
-  ws?: any;
+  wt?: any;
   location: { map: string; position: { x: number; y: number; direction?: string } };
   moving?: boolean;
   mounted?: boolean;
@@ -911,6 +933,7 @@ export async function syncPartyLayers(
       if (actualLayerId && actualLayerId !== oldLayerId && member.aoi) {
         member.aoi.layerId = actualLayerId;
         playerCache.set(member.id, member);
+        notifyLayerChanged(member.id);
         movedPlayers.push({ player: member, oldLayerId });
       }
     }
@@ -928,11 +951,11 @@ export async function syncPartyLayers(
 
     for (const [playerId, spawnsMap] of spawnBatchQueue.entries()) {
       const player = playerCache.get(playerId);
-      if (player && player.ws) {
+      if (player && player.wt) {
         const spawnsArray = Array.from(spawnsMap.values());
         if (spawnsArray.length > 0) {
           totalSpawns += spawnsArray.length;
-          sendLoadPlayersChunked(sendPacket, player.ws, spawnsArray, null);
+          sendLoadPlayersChunked(sendPacket, player.wt, spawnsArray, null);
 
           for (const spawnData of spawnsArray) {
             const spawnedPlayer = playerCache.get(spawnData.id);
@@ -957,7 +980,7 @@ export async function syncPartyLayers(
                 animationName = `player_${action}_${direction}.png`;
               }
 
-              await sendAnimationToFn(player.ws, animationName, spawnedPlayer.id);
+              await sendAnimationToFn(player.wt, animationName, spawnedPlayer.id);
             }
           }
         }
@@ -966,11 +989,11 @@ export async function syncPartyLayers(
 
     for (const [playerId, despawnSet] of despawnBatchQueue.entries()) {
       const player = playerCache.get(playerId);
-      if (player && player.ws) {
+      if (player && player.wt) {
         if (despawnSet.size > 0) {
           totalDespawns += despawnSet.size;
           despawnSet.forEach((despawnPlayerId) => {
-            sendPacket(player.ws, packetManager.despawnPlayer(despawnPlayerId, "map_change"));
+            sendPacket(player.wt, packetManager.despawnPlayer(despawnPlayerId, "map_change"));
           });
         }
       }
@@ -1144,6 +1167,7 @@ export function startAutoLayerCondensation(
 
             player.aoi.layerId = targetLayer.layerId;
             playerCache.set(playerId, player);
+            notifyLayerChanged(playerId);
 
             despawnPlayerFromAllAOI(player, "map_change", despawnBatchQueue);
 
@@ -1166,10 +1190,10 @@ export function startAutoLayerCondensation(
 
           for (const [playerId, spawnsMap] of spawnBatchQueue.entries()) {
             const player = playerCache.get(playerId);
-            if (player && player.ws) {
+            if (player && player.wt) {
               const spawnsArray = Array.from(spawnsMap.values());
               if (spawnsArray.length > 0) {
-                sendLoadPlayersChunked(sendPacket, player.ws, spawnsArray, null);
+                sendLoadPlayersChunked(sendPacket, player.wt, spawnsArray, null);
 
                 for (const spawnData of spawnsArray) {
                   const spawnedPlayer = playerCache.get(spawnData.id);
@@ -1192,7 +1216,7 @@ export function startAutoLayerCondensation(
                       animationName = `player_${action}_${direction}.png`;
                     }
 
-                    await sendAnimationToFn(player.ws, animationName, spawnedPlayer.id);
+                    await sendAnimationToFn(player.wt, animationName, spawnedPlayer.id);
                   }
                 }
               }
@@ -1201,9 +1225,9 @@ export function startAutoLayerCondensation(
 
           for (const [playerId, despawnSet] of despawnBatchQueue.entries()) {
             const player = playerCache.get(playerId);
-            if (player && player.ws && despawnSet.size > 0) {
+            if (player && player.wt && despawnSet.size > 0) {
               despawnSet.forEach((despawnPlayerId) => {
-                sendPacket(player.ws, packetManager.despawnPlayer(despawnPlayerId, "map_change"));
+                sendPacket(player.wt, packetManager.despawnPlayer(despawnPlayerId, "map_change"));
               });
             }
           }

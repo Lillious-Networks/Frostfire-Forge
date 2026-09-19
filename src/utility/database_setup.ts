@@ -105,7 +105,10 @@ const createItemsTable = async () => {
         level_requirement INT DEFAULT NULL,
         equipment_slot VARCHAR(255) DEFAULT NULL,
         equipable INT NOT NULL DEFAULT 0,
-        bag_slots INT NULL DEFAULT 0
+        bag_slots INT NULL DEFAULT 0,
+        damage_min INT DEFAULT NULL,
+        damage_max INT DEFAULT NULL,
+        attack_speed_ms INT DEFAULT NULL
     )
   `;
   await query(sql);
@@ -335,8 +338,9 @@ const createPermissionTypesTable = async () => {
         ('tools.*'),
         ('tools.tile_editor'),
         ('tools.npc_editor'),
-        ('tools.entity_editor'),
-        ('tools.particle_editor'),
+      ('tools.creature_editor'),
+      ('tools.item_editor'),
+          ('tools.particle_editor'),
         ('admin.loot')
     `;
     await query(insertPermissionsSql);
@@ -375,57 +379,6 @@ const createNpcTable = async () => {
       sprite_feet VARCHAR(255) DEFAULT NULL,
       sprite_legs VARCHAR(255) DEFAULT NULL,
       sprite_weapon VARCHAR(255) DEFAULT NULL
-    )
-  `;
-  await query(sql);
-};
-
-const createEntitiesTable = async () => {
-  log.info("Creating entities table...");
-  const sql = `
-    CREATE TABLE IF NOT EXISTS entities (
-      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
-      last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
-      name VARCHAR(255) DEFAULT NULL,
-      map VARCHAR(255) NOT NULL,
-      position VARCHAR(255) NOT NULL,
-      direction VARCHAR(10) NOT NULL DEFAULT 'down',
-      particles VARCHAR(500) DEFAULT NULL,
-      sprite_body VARCHAR(255) DEFAULT NULL,
-      sprite_head VARCHAR(255) DEFAULT NULL,
-      sprite_helmet VARCHAR(255) DEFAULT NULL,
-      sprite_shoulderguards VARCHAR(255) DEFAULT NULL,
-      sprite_neck VARCHAR(255) DEFAULT NULL,
-      sprite_hands VARCHAR(255) DEFAULT NULL,
-      sprite_chest VARCHAR(255) DEFAULT NULL,
-      sprite_feet VARCHAR(255) DEFAULT NULL,
-      sprite_legs VARCHAR(255) DEFAULT NULL,
-      sprite_weapon VARCHAR(255) DEFAULT NULL,
-      aggro_type VARCHAR(255) DEFAULT 'neutral',
-      level INT DEFAULT 1,
-      max_health INT DEFAULT 100,
-      aggro_range INT DEFAULT 300,
-      speed DECIMAL(5,2) DEFAULT 2.0,
-      aggro_leash INT DEFAULT 600,
-      entity_type VARCHAR(50) DEFAULT 'normal',
-      loot_table_id INT DEFAULT NULL
-    )
-  `;
-  await query(sql);
-};
-
-const createEntitySpawnPointsTable = async () => {
-  log.info("Creating entity_spawn_points table...");
-  const sql = `
-    CREATE TABLE IF NOT EXISTS entity_spawn_points (
-      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
-      entity_template_id INT NOT NULL,
-      map VARCHAR(255) NOT NULL,
-      position VARCHAR(255) NOT NULL,
-      respawn_time INT DEFAULT 30000,
-      max_spawns INT DEFAULT 1,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (entity_template_id) REFERENCES entities(id) ON DELETE CASCADE
     )
   `;
   await query(sql);
@@ -723,6 +676,155 @@ const createLootTableItemsTable = async () => {
   )`);
 };
 
+/** Weapon damage columns added to items after their first release. */
+const addItemWeaponColumns = async () => {
+  const columns = [
+    { name: "damage_min", type: "INT DEFAULT NULL" },
+    { name: "damage_max", type: "INT DEFAULT NULL" },
+    { name: "attack_speed_ms", type: "INT DEFAULT NULL" },
+  ];
+  for (const col of columns) {
+    const exists = (await query(
+      `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'items' AND COLUMN_NAME = ?`,
+      [database, col.name]
+    )) as any[];
+    if (!exists[0] || Number(exists[0].count) === 0) {
+      await query(`ALTER TABLE items ADD COLUMN ${col.name} ${col.type}`);
+    }
+  }
+};
+
+/** Columns added to creature_templates after its first release. */
+const addCreatureTemplateColumns = async () => {
+  const columns = [
+    { name: "sprite_type", type: "VARCHAR(20) NOT NULL DEFAULT 'none'" },
+    { name: "sprite_head", type: "VARCHAR(255) DEFAULT NULL" },
+    { name: "sprite_helmet", type: "VARCHAR(255) DEFAULT NULL" },
+    { name: "sprite_shoulderguards", type: "VARCHAR(255) DEFAULT NULL" },
+    { name: "sprite_neck", type: "VARCHAR(255) DEFAULT NULL" },
+    { name: "sprite_hands", type: "VARCHAR(255) DEFAULT NULL" },
+    { name: "sprite_chest", type: "VARCHAR(255) DEFAULT NULL" },
+    { name: "sprite_feet", type: "VARCHAR(255) DEFAULT NULL" },
+    { name: "sprite_legs", type: "VARCHAR(255) DEFAULT NULL" },
+    { name: "sprite_weapon", type: "VARCHAR(255) DEFAULT NULL" },
+  ];
+  for (const col of columns) {
+    const exists = (await query(
+      `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'creature_templates' AND COLUMN_NAME = ?`,
+      [database, col.name]
+    )) as any[];
+    if (!exists[0] || Number(exists[0].count) === 0) {
+      await query(`ALTER TABLE creature_templates ADD COLUMN ${col.name} ${col.type}`);
+    }
+  }
+};
+
+const createCreatureTables = async () => {
+  log.info("Creating creature tables...");
+  await query(`CREATE TABLE IF NOT EXISTS creature_templates (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+    name VARCHAR(255) NOT NULL,
+    subname VARCHAR(255) DEFAULT NULL,
+    level_min INT NOT NULL DEFAULT 1,
+    level_max INT NOT NULL DEFAULT 1,
+    \`rank\` VARCHAR(20) NOT NULL DEFAULT 'normal',
+    creature_type VARCHAR(50) NOT NULL DEFAULT 'beast',
+    stance VARCHAR(20) NOT NULL DEFAULT 'aggressive',
+    health_base INT NOT NULL DEFAULT 50,
+    health_per_level INT NOT NULL DEFAULT 10,
+    armor INT NOT NULL DEFAULT 0,
+    resist_json TEXT DEFAULT NULL,
+    damage_min INT NOT NULL DEFAULT 1,
+    damage_max INT NOT NULL DEFAULT 3,
+    attack_speed_ms INT NOT NULL DEFAULT 2000,
+    ranged TINYINT(1) NOT NULL DEFAULT 0,
+    move_speed_walk DECIMAL(6,2) NOT NULL DEFAULT 2.50,
+    move_speed_run DECIMAL(6,2) NOT NULL DEFAULT 7.00,
+    aggro_radius_override DECIMAL(6,2) DEFAULT NULL,
+    assist_radius DECIMAL(6,2) NOT NULL DEFAULT 10.00,
+    call_for_help_radius DECIMAL(6,2) NOT NULL DEFAULT 15.00,
+    flee_at_hp_pct INT NOT NULL DEFAULT 0,
+    flee_duration_ms INT NOT NULL DEFAULT 4000,
+    leash_override DECIMAL(6,2) DEFAULT NULL,
+    regen_ooc TINYINT(1) NOT NULL DEFAULT 1,
+    xp_mult DECIMAL(6,2) NOT NULL DEFAULT 1.00,
+    loot_table_id INT DEFAULT NULL,
+    gold_min INT NOT NULL DEFAULT 0,
+    gold_max INT NOT NULL DEFAULT 0,
+    sprite_type VARCHAR(20) NOT NULL DEFAULT 'none',
+    sprite VARCHAR(255) DEFAULT NULL,
+    sprite_head VARCHAR(255) DEFAULT NULL,
+    scale DECIMAL(5,2) NOT NULL DEFAULT 1.00,
+    flags INT NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  )`);
+  await query(`CREATE TABLE IF NOT EXISTS creature_abilities (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+    template_id INT NOT NULL,
+    spell_id INT NOT NULL,
+    \`trigger\` VARCHAR(30) NOT NULL DEFAULT 'combat_timer',
+    trigger_value DECIMAL(10,2) NOT NULL DEFAULT 0,
+    initial_cd_min_ms INT NOT NULL DEFAULT 0,
+    initial_cd_max_ms INT NOT NULL DEFAULT 0,
+    cooldown_min_ms INT NOT NULL DEFAULT 10000,
+    cooldown_max_ms INT NOT NULL DEFAULT 10000,
+    chance_pct INT NOT NULL DEFAULT 100,
+    target_mode VARCHAR(30) NOT NULL DEFAULT 'current',
+    max_range DECIMAL(6,2) NOT NULL DEFAULT 30.00,
+    interruptible TINYINT(1) NOT NULL DEFAULT 1,
+    priority INT NOT NULL DEFAULT 0,
+    FOREIGN KEY (template_id) REFERENCES creature_templates(id) ON DELETE CASCADE
+  )`);
+  await query(`CREATE TABLE IF NOT EXISTS creature_patrol_paths (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+    map VARCHAR(255) NOT NULL,
+    \`loop\` TINYINT(1) NOT NULL DEFAULT 1,
+    points_json TEXT NOT NULL
+  )`);
+  await query(`CREATE TABLE IF NOT EXISTS creature_link_groups (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+    name VARCHAR(255) NOT NULL
+  )`);
+  await query(`CREATE TABLE IF NOT EXISTS creature_spawn_pools (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+    max_active INT NOT NULL DEFAULT 1,
+    rare_chance_pct DECIMAL(5,2) NOT NULL DEFAULT 0,
+    rare_template_id INT DEFAULT NULL
+  )`);
+  await query(`CREATE TABLE IF NOT EXISTS creature_spawns (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+    template_id INT NOT NULL,
+    map VARCHAR(255) NOT NULL,
+    x INT NOT NULL,
+    y INT NOT NULL,
+    direction VARCHAR(10) NOT NULL DEFAULT 'down',
+    layer_policy VARCHAR(20) NOT NULL DEFAULT 'per_layer',
+    respawn_min_s INT NOT NULL DEFAULT 300,
+    respawn_max_s INT NOT NULL DEFAULT 300,
+    wander_radius DECIMAL(6,2) NOT NULL DEFAULT 0,
+    movement_type VARCHAR(20) NOT NULL DEFAULT 'idle',
+    patrol_path_id INT DEFAULT NULL,
+    link_group_id INT DEFAULT NULL,
+    pool_id INT DEFAULT NULL,
+    FOREIGN KEY (template_id) REFERENCES creature_templates(id) ON DELETE CASCADE
+  )`);
+  await query(`CREATE TABLE IF NOT EXISTS quest_kill_objectives (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+    quest_id INT NOT NULL,
+    template_id INT NOT NULL,
+    required_count INT NOT NULL DEFAULT 1,
+    UNIQUE KEY unique_quest_template (quest_id, template_id)
+  )`);
+  await query(`CREATE TABLE IF NOT EXISTS quest_kill_progress (
+    username VARCHAR(255) NOT NULL,
+    quest_id INT NOT NULL,
+    template_id INT NOT NULL,
+    kill_count INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (username, quest_id, template_id)
+  )`);
+};
+
 const insertDemoAccount = async () => {
   log.info("Inserting demo account...");
   const checkSql = `SELECT COUNT(*) as count FROM accounts WHERE username = 'demo_user'`;
@@ -920,12 +1022,11 @@ const createIndexes = async () => {
 
     ,{ name: "idx_equipment_username", sql: "CREATE INDEX idx_equipment_username ON equipment(username)" }
 
-    ,{ name: "idx_entities_map", sql: "CREATE INDEX idx_entities_map ON entities(map)" }
 
-    ,{ name: "idx_entity_spawn_points_map", sql: "CREATE INDEX idx_entity_spawn_points_map ON entity_spawn_points(map)" }
 
-    ,{ name: "idx_entity_spawn_points_template", sql: "CREATE INDEX idx_entity_spawn_points_template ON entity_spawn_points(entity_template_id)" }
     ,{ name: "idx_loot_tables_name", sql: "CREATE INDEX idx_loot_tables_name ON loot_tables(name)" }
+    ,{ name: "idx_creature_spawns_map", sql: "CREATE INDEX idx_creature_spawns_map ON creature_spawns(map)" }
+    ,{ name: "idx_creature_abilities_template", sql: "CREATE INDEX idx_creature_abilities_template ON creature_abilities(template_id)" }
   ];
 
   for (const index of indexes) {
@@ -969,8 +1070,6 @@ const setupDatabase = async () => {
   await createPermissionsTable();
   await createPermissionTypesTable();
   await createNpcTable();
-  await createEntitiesTable();
-  await createEntitySpawnPointsTable();
   await createParticleTable();
   await createWeatherTable();
   await createDefaultWeather();
@@ -991,6 +1090,9 @@ const setupDatabase = async () => {
   await createBagsTable();
   await createLootTablesTable();
   await createLootTableItemsTable();
+  await createCreatureTables();
+  await addCreatureTemplateColumns();
+  await addItemWeaponColumns();
   await insertDemoAccount();
   await insertDemoStats();
   await insertDemoClientConfig();
