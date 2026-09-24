@@ -2,6 +2,18 @@ import query from "../controllers/sqldatabase";
 import { getIconUrl } from "../modules/spriteSheetManager";
 import assetCache from "../services/assetCache";
 
+/**
+ * A drop chance as a percentage, 0-100. Only a missing or non-numeric value
+ * defaults to 100: 0 is a real setting (never drops), not "unset".
+ * DECIMAL columns come back from MySQL as strings, hence Number().
+ */
+export function normalizeDropChance(value: unknown): number {
+  if (value === null || value === undefined || value === "") return 100;
+  const chance = Number(value);
+  if (!Number.isFinite(chance)) return 100;
+  return Math.min(100, Math.max(0, chance));
+}
+
 const lootTable = {
   async list() {
     const tables = await query("SELECT * FROM loot_tables ORDER BY id DESC") as any[];
@@ -33,11 +45,11 @@ const lootTable = {
     const items = await assetCache.get("items") as any[];
     const matchedItem = items?.find((i: any) => i.name.toLowerCase() === itemName.toLowerCase());
     if (!matchedItem) return { error: `Item "${itemName}" not found` };
-    await query("INSERT INTO loot_table_items (loot_table_id, item_name, min_quantity, max_quantity, drop_chance, quality) VALUES (?, ?, ?, ?, ?, ?)", [tableId, matchedItem.name, minQuantity || 1, maxQuantity || 1, dropChance || 100, quality || matchedItem.quality || "common"]);
+    await query("INSERT INTO loot_table_items (loot_table_id, item_name, min_quantity, max_quantity, drop_chance, quality) VALUES (?, ?, ?, ?, ?, ?)", [tableId, matchedItem.name, minQuantity || 1, maxQuantity || 1, normalizeDropChance(dropChance), quality || matchedItem.quality || "common"]);
   },
   async removeItem(itemId: number) { await query("DELETE FROM loot_table_items WHERE id = ?", [itemId]); },
   async updateItem(itemId: number, minQuantity: number, maxQuantity: number, dropChance: number, quality: string) {
-    await query("UPDATE loot_table_items SET min_quantity = ?, max_quantity = ?, drop_chance = ?, quality = ? WHERE id = ?", [minQuantity || 1, maxQuantity || 1, dropChance || 100, quality || "common", itemId]);
+    await query("UPDATE loot_table_items SET min_quantity = ?, max_quantity = ?, drop_chance = ?, quality = ? WHERE id = ?", [minQuantity || 1, maxQuantity || 1, normalizeDropChance(dropChance), quality || "common", itemId]);
   },
   async roll(lootTableId?: number, inlineEntries?: LootTableEntry[]): Promise<LootRollResult[]> {
     let entries: any[];
@@ -45,7 +57,7 @@ const lootTable = {
     else if (inlineEntries?.length) { entries = inlineEntries.map((e: any) => ({ item_name: e.itemName, min_quantity: e.minQuantity, max_quantity: e.maxQuantity, drop_chance: e.dropChance, quality: e.quality })); }
     else { return []; }
     const results: LootRollResult[] = []; let idx = 0;
-    for (const e of entries) { if (Math.random() * 100 > (e.drop_chance || 100)) continue; const q = Math.floor(Math.random() * (e.max_quantity - e.min_quantity + 1)) + e.min_quantity; if (q <= 0) continue; results.push({ index: idx++, itemName: e.item_name, quantity: q, quality: e.quality || "common", iconUrl: getIconUrl(e.item_name) || "" }); }
+    for (const e of entries) { const chance = normalizeDropChance(e.drop_chance); if (chance <= 0 || Math.random() * 100 > chance) continue; const q = Math.floor(Math.random() * (e.max_quantity - e.min_quantity + 1)) + e.min_quantity; if (q <= 0) continue; results.push({ index: idx++, itemName: e.item_name, quantity: q, quality: e.quality || "common", iconUrl: getIconUrl(e.item_name) || "" }); }
     return results;
   },
 };

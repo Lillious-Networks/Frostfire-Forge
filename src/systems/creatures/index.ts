@@ -65,6 +65,9 @@ function sendBestEffort(wt: any, packets: any[]): void {
 
 const normMap = (map: any) => String(map || "").replaceAll(".json", "");
 
+/** A player's grid cell is refreshed only after moving UPDATE_THRESHOLD px. */
+const GRID_LAG_PAD_PX = Math.max(128, (Number((AOI_CONFIG as any).UPDATE_THRESHOLD) || 100) + 32);
+
 function resolvePlayer(id: string): SyncPlayer | null {
   const p = playerCache.get(id);
   const pos = p?.location?.position;
@@ -165,8 +168,13 @@ export const combat = new CreatureCombatSystem(registry, {
   grid: (map) => navGrids.get(map),
   getPlayer: (id) => toPlayerUnit(id, playerCache.get(id)),
   playersNear: (map, x, y, radius) => {
-    // Grid cells lag real positions by the AOI update threshold; pad the query.
-    const ids = spatialGrid.getPlayersInRadius(x, y, radius + 128, map);
+    // aoi.ts only maintains the spatial grid when USE_SPATIAL_GRID is on, and
+    // aoi.json is never regenerated once it exists, so an older config can have
+    // it off. Fall back to the map index then, or aggro scans see nobody.
+    // Grid cells lag real positions by the AOI update threshold; pad by that.
+    const ids = AOI_CONFIG.USE_SPATIAL_GRID
+      ? spatialGrid.getPlayersInRadius(x, y, radius + GRID_LAG_PAD_PX, map)
+      : mapIndex.getPlayersOnMap(map);
     const out: PlayerUnit[] = [];
     for (const id of ids) {
       const unit = toPlayerUnit(id, playerCache.get(id));

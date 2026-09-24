@@ -3,6 +3,7 @@
  * Mirrors systems/itemeditor.ts in shape and permission style.
  */
 import query from "../../controllers/sqldatabase";
+import log from "../../modules/logger";
 import assetCache from "../../services/assetCache";
 import { find, getCachedQuestsSync, npcLinksForQuest, reload } from "./definitions";
 
@@ -27,7 +28,7 @@ export interface QuestEditorData {
   objectiveTypes: string[];
   repeatableValues: string[];
   creatures: Array<{ id: number; name: string }>;
-  items: Array<{ name: string; icon: string | null }>;
+  items: Array<{ name: string; icon: string | null; quality: string }>;
   npcs: Array<{ id: number; name: string; map: string; quest_giver: boolean }>;
   maps: string[];
   questCount: number;
@@ -95,11 +96,12 @@ export async function buildEditorData(): Promise<QuestEditorData> {
   } catch {
     creatures = [];
   }
-  let items: Array<{ name: string; icon: string | null }> = [];
+  let items: Array<{ name: string; icon: string | null; quality: string }> = [];
   try {
     const all = ((await assetCache.get("items")) || []) as Item[];
     items = (all || [])
-      .map((i) => ({ name: String(i.name), icon: (i.icon ?? null) as string | null }))
+      // Quality drives the coloured frame around the item's icon in the editor.
+      .map((i) => ({ name: String(i.name), icon: (i.icon ?? null) as string | null, quality: String(i.quality || "common") }))
       .sort((a, b) => a.name.localeCompare(b.name));
   } catch {
     items = [];
@@ -414,7 +416,33 @@ export async function save(payload: QuestSavePayload): Promise<SaveResult> {
   }
 }
 
+/**
+ * Drop giver/ender links to NPCs that no longer exist (deleted since the quest
+ * was assigned), so saving the quest cleans them up instead of failing. Skipped
+ * when the NPC list can't be read: an unreadable cache must not wipe links.
+ */
+async function pruneDeletedNpcLinks(payload: QuestSavePayload): Promise<void> {
+  let npcIds: Set<number>;
+  try {
+    const npcs = (await assetCache.get("npcs")) as Npc[] | null;
+    if (!Array.isArray(npcs)) return;
+    npcIds = new Set(npcs.filter((n) => n.id !== null && n.id !== undefined).map((n) => Number(n.id)));
+  } catch {
+    return;
+  }
+  for (const role of ["givers", "enders"] as const) {
+    const list = payload[role];
+    if (!Array.isArray(list)) continue;
+    const kept = list.filter((npcId) => npcIds.has(Number(npcId)));
+    if (kept.length !== list.length) {
+      log.info(`Quest ${payload.id ?? "(new)"}: removed ${list.length - kept.length} deleted NPC(s) from ${role}`);
+      payload[role] = kept;
+    }
+  }
+}
+
 async function saveInner(payload: QuestSavePayload): Promise<SaveResult> {
+  await pruneDeletedNpcLinks(payload);
   const errors = await validateQuest(payload);
   if (errors.length > 0) return { ok: false, errors };
 

@@ -77,7 +77,8 @@ mock.module("../controllers/sqldatabase", () => ({
       return { affectedRows: 1 };
     }
     if (sql.includes("INSERT INTO npc_quests")) {
-      npcLinkTable.push({ npc_id: params[0], quest_id: params[1], role: params[2] });
+      // The role is a literal in the SQL, not a bound parameter.
+      npcLinkTable.push({ npc_id: params[0], quest_id: params[1], role: params[2] ?? (sql.includes("'giver'") ? "giver" : "ender") });
       return { affectedRows: 1 };
     }
     if (sql.includes("DELETE FROM quest_objective_progress") || sql.includes("DELETE FROM quest_log") || sql.includes("DELETE FROM quests") || sql.includes("UPDATE quests SET next_quest_id = NULL")) {
@@ -92,7 +93,7 @@ mock.module("../controllers/sqldatabase", () => ({
 
 const assetData = new Map<string, any>([
   ["creatureTemplates", [{ id: 1, name: "Rat" }, { id: 2, name: "Wolf" }]],
-  ["items", [{ name: "Bread" }, { name: "Apple" }, { name: "Sword" }]],
+  ["items", [{ name: "Bread" }, { name: "Apple", quality: "uncommon" }, { name: "Sword", quality: "epic" }]],
   ["npcs", [
     { id: 1, name: "Innkeeper", map: "overworld", quest_giver: true },
     { id: 2, name: "Guard", map: "overworld", quest_giver: false },
@@ -205,6 +206,19 @@ describe("quest editor validation", () => {
   });
 });
 
+describe("quest editor data", () => {
+  test("items carry their quality for the reward icon frames", async () => {
+    resetDb();
+    await seedCache();
+    const data = await editor.buildEditorData();
+    const byName = new Map(data.items.map((i: any) => [i.name, i.quality]));
+    expect(byName.get("Sword")).toBe("epic");
+    expect(byName.get("Apple")).toBe("uncommon");
+    // An item without a stored quality shows as common.
+    expect(byName.get("Bread")).toBe("common");
+  });
+});
+
 describe("quest editor saving", () => {
   test("saving persists children and reloads the cache", async () => {
     resetDb();
@@ -219,6 +233,31 @@ describe("quest editor saving", () => {
     expect(result.id).toBeDefined();
     expect(defs.find(result.id!)?.name).toBe("New Quest");
     expect(npcLinkTable.filter((r) => r.quest_id === result.id)).toHaveLength(2);
+  });
+
+  test("saving drops links to deleted NPCs instead of failing", async () => {
+    resetDb();
+    await seedCache();
+    const result = await editor.save({ ...validPayload(), id: 1, givers: [1, 999], enders: [998, 1] });
+    expect(result.ok).toBe(true);
+    const links = npcLinkTable.filter((r) => r.quest_id === 1);
+    expect(links.map((r) => r.npc_id).sort()).toEqual([1, 1]);
+    expect(links.map((r) => r.role).sort()).toEqual(["ender", "giver"]);
+  });
+
+  test("an unreadable NPC list never wipes quest links", async () => {
+    resetDb();
+    await seedCache();
+    npcLinkTable = [{ npc_id: 1, quest_id: 1, role: "giver" }];
+    const npcs = assetData.get("npcs");
+    assetData.delete("npcs");
+    try {
+      const result = await editor.save({ ...validPayload(), id: 1, givers: [1] });
+      expect(result.ok).toBe(false);
+      expect(npcLinkTable).toEqual([{ npc_id: 1, quest_id: 1, role: "giver" }]);
+    } finally {
+      assetData.set("npcs", npcs);
+    }
   });
 
   test("concurrent saves for one quest do not duplicate objectives", async () => {

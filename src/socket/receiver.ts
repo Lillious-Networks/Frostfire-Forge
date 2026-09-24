@@ -110,7 +110,7 @@ import currencySystem from "../systems/currency";
 import query from "../controllers/sqldatabase";
 import loot from "../systems/loot";
 import lootChest from "../systems/lootChest";
-import lootTable from "../systems/lootTable";
+import lootTable, { normalizeDropChance } from "../systems/lootTable";
 import skeletons from "../systems/skeletons";
 import * as resurrection from "../systems/resurrection";
 const maps = await assetCache.get("maps");
@@ -2296,7 +2296,13 @@ export default async function packetReceiver(
           return;
         }
 
-        currentPlayer.location.position.direction = direction || "down";
+        // Mid-cast (a can_move spell; the rest were interrupted above) the key
+        // changes where the caster walks, not where they face: they stay turned
+        // toward the target until restoreWalkingFacing runs at cast end.
+        const facing = currentPlayer.casting
+          ? currentPlayer.location.position.direction || direction
+          : direction;
+        currentPlayer.location.position.direction = facing || "down";
         currentPlayer.moving = true;
 
         // Track direction changes for smooth transitions
@@ -2314,7 +2320,7 @@ export default async function packetReceiver(
         globalStateRevision++;
         await sendPositionAnimation(
           wt,
-          direction,
+          currentPlayer.location.position.direction,
           true,
           currentPlayer.mounted,
           currentPlayer.mount_type || "unicorn",
@@ -2442,7 +2448,7 @@ export default async function packetReceiver(
             globalStateRevision++;
             await sendPositionAnimation(
               wt,
-              direction,
+              currentPlayer.location.position.direction || direction,
               false,
               currentPlayer.mounted,
               currentPlayer.mount_type || "unicorn",
@@ -4499,6 +4505,7 @@ export default async function packetReceiver(
           currentPlayer.spellCooldowns = updatedPlayer.spellCooldowns;
           currentPlayer.manualSpellCancel = undefined;
           currentPlayer.casting = false;
+          await resumeWalkingFacing(wt, updatedPlayer);
           return;
         }
 
@@ -4547,6 +4554,9 @@ export default async function packetReceiver(
             spell_range
           );
         }
+
+        // Facing only mattered for the check above; walk the way you are walking.
+        await resumeWalkingFacing(wt, currentPlayer);
 
         if (canAttack2?.reason == "nopvp") {
           broadcastCastToMap(
@@ -8535,7 +8545,7 @@ export default async function packetReceiver(
             } else if (sub === "additem") {
               const tableId = parseInt(args[1]); const itemName = args[2];
               const minQty = parseInt(args[3]) || 1; const maxQty = parseInt(args[4]) || 1;
-              const chance = parseFloat(args[5]) || 100; const quality = args[6] || "common";
+              const chance = normalizeDropChance(args[5]); const quality = args[6] || "common";
               if (!tableId || isNaN(tableId) || !itemName) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable additem <tableId> <item> <min> <max> <chance> [quality]" })); break; }
               const r = await lootTable.addItem(tableId, itemName, minQty, maxQty, chance, quality);
               if (r && (r as any).error) { sendPacket(wt, packetManager.notify({ message: (r as any).error })); break; }
@@ -8545,7 +8555,7 @@ export default async function packetReceiver(
               await lootTable.removeItem(itemId); sendPacket(wt, packetManager.notify({ message: `Item ${itemId} removed from loot table.` }));
             } else if (sub === "updateitem") {
               const itemId = parseInt(args[1]); const minQty = parseInt(args[2]) || 1; const maxQty = parseInt(args[3]) || 1;
-              const chance = parseFloat(args[4]) || 100; const quality = args[5] || "common";
+              const chance = normalizeDropChance(args[4]); const quality = args[5] || "common";
               if (!itemId || isNaN(itemId)) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable updateitem <itemId> <min> <max> <chance> [quality]" })); break; }
               await lootTable.updateItem(itemId, minQty, maxQty, chance, quality);
               sendPacket(wt, packetManager.notify({ message: `Item ${itemId} updated.` }));
@@ -9964,6 +9974,7 @@ export default async function packetReceiver(
         const equipmentItems = currentPlayer.inventory.filter((invItem: any) => invItem.type === "equipment");
         const foundEquipment = equipmentItems.find((invItem: any) => invItem.name.toLowerCase() === item.toLowerCase());
         const slot = foundEquipment?.equipment_slot;
+        if (await blockEquipmentChangeWhilePvp(wt, currentPlayer, slot)) return;
 
         if (foundEquipment?.level_requirement) {
           const playerLevel = currentPlayer.stats.level || 1;
@@ -10099,6 +10110,7 @@ export default async function packetReceiver(
 
         const equippedItemName = currentPlayer.equipment[slot];
         if (!equippedItemName) return;
+        if (await blockEquipmentChangeWhilePvp(wt, currentPlayer, slot)) return;
 
         const result = await equipment.unEquipItem(currentPlayer.username, slot, equippedItemName);
         if (result) {
@@ -10358,6 +10370,7 @@ export default async function packetReceiver(
         } else if (from === "equipment" && slot) {
           const equippedName = currentPlayer.equipment[slot];
           if (!equippedName || equippedName.toLowerCase() !== String(itemName).toLowerCase()) return;
+          if (await blockEquipmentChangeWhilePvp(wt, currentPlayer, slot)) return;
 
           await equipment.unEquipItem(currentPlayer.username, slot, equippedName);
           await inventory.delete(currentPlayer.username, { name: equippedName, quantity: 0 });
@@ -10607,6 +10620,7 @@ async function interruptPlayerCast(target: any) {
     );
   });
 
+  restoreWalkingFacing(target);
   globalStateRevision++;
   if (target.wt) {
     await sendPositionAnimation(
@@ -10862,6 +10876,40 @@ function faceToward(caster: any, x: number, y: number): void {
   playerCache.set(caster.id, caster);
 }
 
+/**
+ * Undo faceToward once the cast no longer needs it: a caster still walking
+ * (a can_move spell) turns back to the way they are walking, including any
+ * direction they switched to mid-cast. Returns true if the facing changed.
+ */
+function restoreWalkingFacing(caster: any): boolean {
+  const pos = caster?.location?.position;
+  const walking = String(caster?._movementState?.targetDirection ?? "");
+  if (!caster?.moving || !pos || !VALID_DIRECTIONS.has(walking) || pos.direction === walking) return false;
+  pos.direction = walking;
+  playerCache.set(caster.id, caster);
+  return true;
+}
+
+/**
+ * Refuse equipping or removing any equipment (armor and weapons) while the
+ * PvP flag is set, and resend equipment + inventory so a client that moved the
+ * item optimistically snaps back. Returns true when the change was blocked.
+ */
+async function blockEquipmentChangeWhilePvp(wt: any, currentPlayer: any, slot: unknown): Promise<boolean> {
+  if (!currentPlayer?.pvp || !slot) return false;
+  sendPacket(wt, packetManager.notify({ message: "You can't change equipment while in combat." }));
+  sendPacket(wt, packetManager.equipment(currentPlayer.equipment));
+  sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
+  return true;
+}
+
+/** restoreWalkingFacing, then show the turn with a walking animation. */
+async function resumeWalkingFacing(wt: any, caster: any): Promise<void> {
+  if (!restoreWalkingFacing(caster)) return;
+  globalStateRevision++;
+  await sendPositionAnimation(wt, caster.location.position.direction, true, caster.mounted || false, caster.mount_type || "unicorn", undefined, globalStateRevision, caster.casting || false);
+}
+
 async function castSpellOnCreature(wt: any, currentPlayer: any, spell: SpellData, creatureId: number) {
   const spellId = spell.id as number;
   const fail = (reason: string, message?: string) => {
@@ -10934,14 +10982,17 @@ async function castSpellOnCreature(wt: any, currentPlayer: any, spell: SpellData
     delete after.manualSpellCancel;
     after.casting = false;
     playerCache.set(after.id, after);
+    await resumeWalkingFacing(wt, after);
     return resetCooldown();
   }
   if (!spell.can_move && !after.casting) return resetCooldown();
   after.casting = false;
   playerCache.set(after.id, after);
-  // The creature may have moved during the cast: finish facing where it is now.
+  // The creature may have moved during the cast: finish facing where it is
+  // now, unless still walking, in which case turn back to the walk direction.
   const creatureNow = creatures.getCreature(creatureId);
   if (creatureNow) faceToward(after, creatureNow.x, creatureNow.y);
+  restoreWalkingFacing(after);
   globalStateRevision++;
   await sendPositionAnimation(wt, after.location.position?.direction || direction, after.moving || false, false, after.mount_type || "unicorn", undefined, globalStateRevision, false);
 

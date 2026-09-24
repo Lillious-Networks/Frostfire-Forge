@@ -180,14 +180,22 @@ const AOI_CONFIG = {
   DEBUG: false
 };
 
-if (!fs.existsSync(path.join(configPath, "aoi.json"))) {
-  fs.writeFileSync(
-    path.join(configPath, "aoi.json"),
-    JSON.stringify(AOI_CONFIG, null, 2)
-  );
-  console.log(`Created AOI config file at ${path.join(configPath, "aoi.json")}`);
+const aoiPath = path.join(configPath, "aoi.json");
+if (!fs.existsSync(aoiPath)) {
+  fs.writeFileSync(aoiPath, JSON.stringify(AOI_CONFIG, null, 2));
+  console.log(`Created AOI config file at ${aoiPath}`);
 } else {
-  console.log(`AOI config loaded from ${path.join(configPath, "aoi.json")}`);
+  // aoi.json survives rebuilds (src/config is bind-mounted in Docker), so an
+  // old file never picks up new defaults. Backfill missing keys and force the
+  // spatial grid on: creature aggro and AOI lookups rely on it.
+  const existing = JSON.parse(fs.readFileSync(aoiPath, "utf-8"));
+  const merged = { ...AOI_CONFIG, ...existing, USE_SPATIAL_GRID: true };
+  if (JSON.stringify(merged) !== JSON.stringify(existing)) {
+    fs.writeFileSync(aoiPath, JSON.stringify(merged, null, 2));
+    console.log(`AOI config updated at ${aoiPath}`);
+  } else {
+    console.log(`AOI config loaded from ${aoiPath}`);
+  }
 }
 
 const security_definitions = `# Security Definitions
