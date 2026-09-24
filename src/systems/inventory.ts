@@ -23,19 +23,32 @@ const inventory = {
     const resolvedName = matchedItem.name;
     const response = (await inventory.find(name, { name: resolvedName, quantity: 0 })) as InventoryItem[];
 
+    let result;
     if (response.length === 0)
-      return await query(
+      result = await query(
         "INSERT IGNORE INTO inventory (username, item, quantity) VALUES (?, ?, ?)",
         [name, resolvedName, Number(item.quantity)]
       );
-    return await query(
-      "UPDATE inventory SET quantity = ? WHERE item = ? AND username = ?",
-      [
-        (Number(response[0].quantity) + Number(item.quantity)).toString(),
-        resolvedName,
-        name,
-      ]
-    );
+    else
+      result = await query(
+        "UPDATE inventory SET quantity = ? WHERE item = ? AND username = ?",
+        [
+          (Number(response[0].quantity) + Number(item.quantity)).toString(),
+          resolvedName,
+          name,
+        ]
+      );
+    // Collect objectives treat the inventory as the source of truth: sync the
+    // new total so picking up quest items credits immediately.
+    try {
+      const { sync: syncObjective } = await import("./quests/objectives");
+      const rows = (await inventory.find(name, { name: resolvedName, quantity: 0 })) as InventoryItem[];
+      const total = rows?.reduce((sum, r) => sum + (Number(r.quantity) || 0), 0) ?? 0;
+      await syncObjective(name, "collect", resolvedName, total);
+    } catch {
+      // Quest sync is best-effort on the inventory path.
+    }
+    return result;
   },
   async setEquipped(name: string, item: string, equipped: boolean, targetSlot?: number, targetBagSlot?: number) {
     if (!name || !item || typeof equipped !== "boolean") return;
@@ -76,19 +89,31 @@ const inventory = {
     const resolvedName = matchedItem.name;
     const response = (await inventory.find(name, { name: resolvedName, quantity: 0 })) as InventoryItem[];
     if (response.length === 0) return;
+    let result;
     if (Number(item.quantity) >= Number(response[0].quantity))
-      return await query(
+      result = await query(
         "DELETE FROM inventory WHERE item = ? AND username = ?",
         [resolvedName, name]
       );
-    return await query(
-      "UPDATE inventory SET quantity = ? WHERE item = ? AND username = ?",
-      [
-        (Number(response[0].quantity) - Number(item.quantity)).toString(),
-        resolvedName,
-        name,
-      ]
-    );
+    else
+      result = await query(
+        "UPDATE inventory SET quantity = ? WHERE item = ? AND username = ?",
+        [
+          (Number(response[0].quantity) - Number(item.quantity)).toString(),
+          resolvedName,
+          name,
+        ]
+      );
+    // Dropping or using a quest item walks progress back down.
+    try {
+      const { sync: syncObjective } = await import("./quests/objectives");
+      const rows = (await inventory.find(name, { name: resolvedName, quantity: 0 })) as InventoryItem[];
+      const total = rows?.reduce((sum, r) => sum + (Number(r.quantity) || 0), 0) ?? 0;
+      await syncObjective(name, "collect", resolvedName, total);
+    } catch {
+      // Quest sync is best-effort on the inventory path.
+    }
+    return result;
   },
   async delete(name: string, item: InventoryItem) {
     if (!name || !item.name) return;

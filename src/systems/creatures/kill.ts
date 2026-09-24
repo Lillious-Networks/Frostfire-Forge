@@ -12,7 +12,8 @@ import { Events, listener } from "../events";
 import inventory from "../inventory";
 import lootTable from "../lootTable";
 import playerSystem from "../player";
-import { questKills } from "../questlog";
+import { credit } from "../quests/objectives";
+import { markersFor } from "../quests/markers";
 import { CORPSE_EMPTY_MS, CORPSE_WITH_LOOT_MS, CreatureFlags, randInt, yards } from "./constants";
 import { CorpseLootStore, type CorpseItem } from "./loot";
 import { distributeKillXp, REWARD_RANGE_YD } from "./rewards";
@@ -130,9 +131,33 @@ async function awardXp(member: any, amount: number, creatureId: number): Promise
 async function creditQuests(members: any[], creature: CreatureInstance, template: CreatureTemplate): Promise<void> {
   for (const member of members) {
     try {
-      const updates = await questKills.creditKill(member.username, template.id);
+      const updates = await credit(member.username, "kill", String(template.id), 1);
+      if (updates.length === 0) {
+        listener.emit(Events.CREATURE_KILL_CREDIT, { player: member, templateId: template.id, creature, updates });
+        continue;
+      }
+      const byQuest = new Map<number, typeof updates>();
       for (const u of updates) {
-        send(member.wt, packetManager.notify({ message: `${template.name} slain: ${u.count}/${u.required}` }));
+        const list = byQuest.get(u.questId) || [];
+        list.push(u);
+        byQuest.set(u.questId, list);
+      }
+      for (const [questId, questUpdates] of byQuest) {
+        send(member.wt, packetManager.questProgress({ questId, updates: questUpdates }));
+        for (const u of questUpdates) {
+          if (!u.questReady) {
+            send(member.wt, packetManager.notify({ message: `${template.name} slain: ${u.count}/${u.required}` }));
+          }
+        }
+      }
+      try {
+        const map = member?.location?.map;
+        if (map) {
+          const markers = await markersFor(member.username, String(map));
+          send(member.wt, packetManager.questMarkers({ map: String(map).replaceAll(".json", ""), markers }));
+        }
+      } catch {
+        // Markers are best-effort on the kill path.
       }
       listener.emit(Events.CREATURE_KILL_CREDIT, { player: member, templateId: template.id, creature, updates });
     } catch (error) {

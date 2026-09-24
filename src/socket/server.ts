@@ -38,7 +38,7 @@ import { pluginHandlers, warpInterceptors, packetInterceptors } from "./receiver
 import { startWebTransportServer, TransportConnection } from "./transport.ts";
 import { topicBus } from "./topics.ts";
 import { WebTransport } from "@lillious-networks/webtransport-bun";
-import { ensureLocalCertificate, computeCertificateHash, certificateSupportsPinning } from "../utility/local_cert.ts";
+import { ensureLocalCertificate, computeCertificateHash, certificateSupportsPinning, getCertificateStatus } from "../utility/local_cert.ts";
 import { startHttpsServers, getInternalServerOptions } from "../modules/https_servers.ts";
 
 const httpRouteHandlers = new Map<string, (req: Request) => Promise<Response>>();
@@ -105,6 +105,21 @@ if (!webTransportTls) {
 }
 
 const localCertHash = computeCertificateHash(webTransportTls.certPem);
+
+// Fail fast on an expired certificate instead of serving cryptic QUIC
+// handshake failures (error 46 / CERTIFICATE_VERIFY_FAILED). CA-signed
+// certificates are never auto-regenerated, so expiry needs operator action:
+// reissue via your CA, or `bun renew-lan-cert` for local mkcert setups.
+const certStatus = getCertificateStatus(webTransportTls.certPem);
+if (!certStatus.parseable || certStatus.expired) {
+  log.error(`WebTransport TLS certificate is expired or unreadable (valid: ${certStatus.validFrom} -> ${certStatus.validTo}).`);
+  log.error(`Clients fail with CERTIFICATE_VERIFY_FAILED until it is renewed. Reissue the certificate (CA-signed setups: renew via your CA or run \`bun renew-lan-cert\`), then restart the server.`);
+  throw new Error(`WebTransport TLS certificate expired on ${certStatus.validTo}. Renew the certificate and restart.`);
+}
+log.info(`WebTransport TLS certificate valid until ${certStatus.validTo} (${certStatus.daysRemaining} days remaining)`);
+if ((certStatus.daysRemaining ?? 0) < 3) {
+  log.warn(`WebTransport TLS certificate expires in ${certStatus.daysRemaining} days (${certStatus.validTo}). Renew it soon to avoid client handshake failures.`);
+}
 const RateLimitOptions: RateLimitOptions = {
 
   maxRequests: settings?.packetRatelimit?.maxRequests || 2000,

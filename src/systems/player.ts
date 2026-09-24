@@ -1474,6 +1474,7 @@ const player = {
       friendsResult,
       configResult,
       questResult,
+      questProgressResult,
       equipResult,
       guildResult,
     ] = await Promise.all([
@@ -1482,7 +1483,8 @@ const player = {
       query("SELECT copper, silver, gold FROM currency WHERE username = ?", [username]) as Promise<any[]>,
       query("SELECT friends FROM friendslist WHERE username = ?", [username]) as Promise<any[]>,
       query("SELECT fps, music_volume, effects_volume, muted, hotbar_config, inventory_config FROM clientconfig WHERE username = ?", [username]) as Promise<any[]>,
-      query("SELECT completed_quests, incomplete_quests FROM quest_log WHERE username = ?", [username]) as Promise<any[]>,
+      query("SELECT quest_id, state, accepted_at, completed_at, times_completed FROM quest_log WHERE username = ?", [username]) as Promise<any[]>,
+      query("SELECT quest_id, objective_id, count FROM quest_objective_progress WHERE username = ?", [username]) as Promise<any[]>,
       query("SELECT head, body, helmet, necklace, shoulderguards, chestplate, wristguards, gloves, belt, pants, boots, ring_1, ring_2, trinket_1, trinket_2, weapon FROM equipment WHERE username = ?", [username]) as Promise<any[]>,
       data.guild_id ? query("SELECT name AS guild_name FROM guilds WHERE id = ?", [data.guild_id]) as Promise<any[]> : Promise.resolve([]),
     ]);
@@ -1492,9 +1494,35 @@ const player = {
     const currency = currencyResult?.[0] || {};
     const friends = friendsResult?.[0]?.friends || "";
     const config = configResult?.[0] || {};
-    const quests = questResult?.[0] || {};
+    const questRows = questResult || [];
+    const questProgressRows = questProgressResult || [];
     const equip = equipResult?.[0] || {};
     const guild = guildResult?.[0] || {};
+
+    const questProgressByQuest = new Map<number, Record<number, number>>();
+    for (const r of questProgressRows) {
+      const qid = Number(r.quest_id);
+      const bucket = questProgressByQuest.get(qid) || {};
+      bucket[Number(r.objective_id)] = Number(r.count) || 0;
+      questProgressByQuest.set(qid, bucket);
+    }
+    const questActive: QuestLogEntry[] = [];
+    const questCompleted: number[] = [];
+    for (const r of questRows) {
+      const qid = Number(r.quest_id);
+      if (r.state === "completed") {
+        if (!questCompleted.includes(qid)) questCompleted.push(qid);
+      } else {
+        questActive.push({
+          quest_id: qid,
+          state: r.state === "ready" ? "ready" : "active",
+          accepted_at: Number(r.accepted_at) || 0,
+          completed_at: Number(r.completed_at) || 0,
+          times_completed: Number(r.times_completed) || 0,
+          progress: questProgressByQuest.get(qid) || {},
+        });
+      }
+    }
 
     return {
       id: data.id,
@@ -1545,8 +1573,8 @@ const player = {
         inventory_config: config.inventory_config || null
       }] : [],
       questlog: {
-        completed: quests.completed_quests ? quests.completed_quests.split(",") : [],
-        incomplete: quests.incomplete_quests ? quests.incomplete_quests.split(",") : []
+        active: questActive,
+        completed: questCompleted,
       },
       isAdmin: data.role === 1,
       isGuest: data.guest_mode === 1,

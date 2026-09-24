@@ -2,7 +2,7 @@
   "name": "frostfire-forge",
   "module": "./src/socket/server.ts",
   "dependencies": {
-    "@lillious-networks/webtransport-bun": "^0.1.5",
+    "@lillious-networks/webtransport-bun": "^0.1.6",
     "node-forge": "^1.4.0",
     "openai": "^4.104.0",
     "typescript": "^5.9.3"
@@ -15,7 +15,7 @@
     "chalk": "^5.6.2",
     "eslint": "^9.39.5",
     "husky": "^9.1.7",
-    "typescript-eslint": "^8.70.0"
+    "typescript-eslint": "^8.70.1"
   },
   "scripts": {
     "production": "bun create-config --environment production && bun --env-file=.env.production ./src/socket/server.ts --sql-preconnect",
@@ -28,6 +28,7 @@
     "migrate-entities": "bun --env-file=.env.development ./src/utility/migrate_entities_to_creatures.ts",
     "migrate-entities:production": "bun --env-file=.env.production ./src/utility/migrate_entities_to_creatures.ts",
     "generate-local-cert": "bun ./src/utility/generate_local_cert.ts",
+    "renew-lan-cert": "bun ./src/utility/renew_lan_cert.ts",
     "docker:dev": "docker compose -f src/docker/docker-compose.dev.yml up -d",
     "docker:dev:down": "docker compose -f src/docker/docker-compose.dev.yml down",
     "docker:dev:logs": "docker compose -f src/docker/docker-compose.dev.yml logs -f",

@@ -446,6 +446,8 @@ bun setup-production
 - **Aliases**: `ne`
 - **Permission**: `tools.npc_editor` | `tools.*`
 
+Creates and edits NPCs: name, dialog, scripts, particles, placement, and the same sprite appearance pickers as the creature editor. The **Quest giver** flag allows quests to be linked through the **Quests Given** / **Quests Ended** pickers. The **gossip chain** (one line per step) plays in the overhead speech bubble on chat-like timing when spoken to, and supports `${player.*}` placeholders (see Quest System Guide).
+
 </details>
 
 <details>
@@ -482,6 +484,19 @@ Edits creature templates, abilities, spawns, patrol paths, link groups and spawn
 - **Permission**: `tools.item_editor` | `tools.*`
 
 Creates and edits items: name, type, quality, icon, description, equipment slot, level requirement, bag slots and every stat. Weapons also carry `damage_min`, `damage_max` and `attack_speed_ms`, which drive melee auto-attack damage and swing timing — a weapon with no damage range falls back to its flat damage stat.
+
+</details>
+
+<details>
+<summary><strong>Quest Editor</strong></summary>
+
+```bash
+/questeditor
+```
+- **Aliases**: `qe`
+- **Permission**: `tools.quest_editor` | `tools.*`
+
+Creates and edits quests: offer/progress/completion text, level and prerequisites, chains, kill/collect/talk/explore objectives, guaranteed and choice-of-one rewards, repeatable and daily flags, and the NPCs that give and end each quest.
 
 </details>
 
@@ -812,6 +827,58 @@ Players learn spells through the `learned_spells` table by linking a spell name 
 
 ---
 
+## Quest System Guide
+
+Quests are authored in the quest editor (`/questeditor`, alias `qe`, permission `tools.quest_editor` | `tools.*`) and linked to NPCs through the NPC editor's **Quests Given** / **Quests Ended** pickers (NPCs need the **Quest giver** flag first).
+
+### Talking to NPCs
+
+- Press **E** near an NPC (or tap them on mobile) to talk. An NPC is interactable when it has quests or gossip to share.
+- **L** opens the quest log. A tracked-quest HUD lists live objective counts; clicking a tracked quest jumps to it.
+- Quest markers float above NPC heads: gold `!` = quest available, grey `?` = in progress, gold `?` = ready to turn in.
+- NPCs with no quests show their gossip in the overhead speech bubble only — no popup.
+
+### Quest Flow
+
+Offer → accept → complete objectives → turn in. Turn-ins can chain straight into a follow-up quest. Abandoning returns to the quest list. The log holds up to **25** active quests.
+
+### Objective Types
+
+| Type | Description |
+|------|-------------|
+| `kill` | Defeat N of a creature |
+| `collect` | Hold N of an item (progress follows your inventory up and down) |
+| `talk` | Speak to an NPC |
+| `explore` | Visit a map, or a point within a radius of one |
+
+### Rewards
+
+Quests grant guaranteed items, a choice of one from a set, XP, and gold/silver/copper. Turn-in is refused when the rewards don't fit in your bags, so rewards are never half-granted.
+
+### Repeatable and Daily Quests
+
+Quests can be one-time, `repeatable`, or `daily`. Dailies reset at **03:00 UTC** and become available again after the reset.
+
+### Gossip Chains and Placeholders
+
+An NPC's gossip chain (one line per step) plays in order when spoken to, each line lingering like a chat message. Lines support `${player.*}` placeholders filled from the talking player:
+
+| Placeholder | Value |
+|-------------|-------|
+| `${player.name}` | Username |
+| `${player.username}` | Login name |
+| `${player.userid}` | Account id |
+| `${player.level}` | Level |
+| `${player.guild_name}` | Guild name |
+| `${player.mounted}` | Mounted? |
+| `${player.isAdmin}` / `${player.isGuest}` | Flags |
+| `${player.stats.*}` | Any stat, e.g. `${player.stats.health}`, `${player.stats.level}` |
+| `${player.currency.*}` | `copper`, `silver` or `gold` |
+
+Unknown paths stay as written. The NPC editor's gossip field autocompletes these inside `${...}`.
+
+---
+
 ## 📚 API Documentation
 
 ### Plugin System
@@ -1011,6 +1078,16 @@ import { listener } from "@engine/systems/events";
 | `onPlayerLootDropped` | `{ player, itemName, quantity, mapName, x, y }` | After loot is dropped/spawned on the ground. |
 | `onPlayerLootDespawned` | `{ player, itemName, quantity, mapName, x, y }` | After loot despawns from the ground (timeout or cleanup). |
 | `onPlayerLootRetrieved` | `{ player, itemName, quantity, mapName, x, y }` | After a player picks up loot. |
+
+##### Quests
+
+| Event | Payload | When |
+|-------|---------|------|
+| `onQuestAccepted` | `{ username, questId }` | After a quest is accepted. |
+| `onQuestObjectiveProgress` | `{ username, questId, objectiveId, count, required }` | After any objective credit. |
+| `onQuestReady` | `{ username, questId }` | After all objectives of a quest are met. |
+| `onQuestCompleted` | `{ username, questId, rewards }` | After a quest is turned in. |
+| `onQuestAbandoned` | `{ username, questId }` | After a quest is abandoned. |
 
 ---
 

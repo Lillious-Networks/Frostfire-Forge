@@ -70,6 +70,11 @@ export const Events = {
     PLAYER_LEFT_AOE: "onPlayerLeftAOE",
     CREATURE_KILLED: "onCreatureKilled",
     CREATURE_KILL_CREDIT: "onCreatureKillCredit",
+    QUEST_ACCEPTED: "onQuestAccepted",
+    QUEST_OBJECTIVE_PROGRESS: "onQuestObjectiveProgress",
+    QUEST_READY: "onQuestReady",
+    QUEST_COMPLETED: "onQuestCompleted",
+    QUEST_ABANDONED: "onQuestAbandoned",
 } as const;
 
 // ── Event payload types ──

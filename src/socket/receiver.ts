@@ -23,6 +23,44 @@ const draggedPlayersMap = new Map<number, number>();
 // Track active tile editors per map (mapName -> Set<playerId>)
 const chatRateLimit = new Map<number, number[]>();
 
+/** Player-triggered NPC/quest packets share the chat-style rate limit bucket. */
+const questRateLimit = new Map<string, number[]>();
+const QUEST_RATE_MAX = 5;
+const QUEST_RATE_WINDOW = 3000;
+/** Must be within this distance (px) to talk to an NPC. Matches loot chests. */
+const NPC_INTERACT_RADIUS = 120;
+
+registerExploreHooks();
+registerLevelUpHook();
+
+function isQuestRateLimited(id: string): boolean {
+  const now = Date.now();
+  const hits = questRateLimit.get(id) || [];
+  const fresh = hits.filter((t) => now - t < QUEST_RATE_WINDOW);
+  fresh.push(now);
+  questRateLimit.set(id, fresh);
+  return fresh.length > QUEST_RATE_MAX;
+}
+
+async function sendQuestMarkersFor(wt: any, username: string, map: string): Promise<void> {
+  try {
+    const markers = await markersFor(username, String(map ?? "").replaceAll(".json", ""));
+    sendPacket(wt, packetManager.questMarkers({ map: String(map ?? "").replaceAll(".json", ""), markers }));
+  } catch {
+    // Markers are best-effort.
+  }
+}
+
+function questDefsForEntries(active: QuestLogEntry[], completed: number[]): Quest[] {
+  const ids = new Set<number>([...active.map((e) => e.quest_id), ...completed]);
+  const defs: Quest[] = [];
+  for (const id of ids) {
+    const q = questDefinitions.find(id);
+    if (q) defs.push(q);
+  }
+  return defs;
+}
+
 const MAX_CHAT_LENGTH = 500;
 const CHAT_RATE_MAX = 5;
 const CHAT_RATE_WINDOW = 3000;
@@ -41,7 +79,13 @@ import effectManager from "../services/effectmanager";
 import { reloadMap } from "../modules/assetloader";
 import { serverFetch } from "../modules/https_servers.ts";
 import language from "../systems/language";
-import quests from "../systems/quests";
+import questDefinitions from "../systems/quests/definitions";
+import questLogApi from "../systems/quests/log";
+import { credit as creditObjective, trackRadiusPlayer } from "../systems/quests/objectives";
+import { markersFor } from "../systems/quests/markers";
+import * as questEditor from "../systems/quests/editor";
+import { registerExploreHooks } from "../systems/quests/objectives";
+import { registerLevelUpHook } from "../systems/quests/markers";
 import friends from "../systems/friends";
 import parties from "../systems/parties.ts";
 import guilds from "../systems/guild.ts";
@@ -57,10 +101,12 @@ import { rollHeal, spellManaCost } from "../systems/spellmath";
 import creatures from "../systems/creatures";
 import { projectileTravelMs } from "../systems/creatures/projectile";
 import * as itemEditor from "../systems/itemeditor";
+import { listSpriteSheets, listIcons } from "../systems/creatures/editor";
 import { setCreatureEngineBridge } from "../systems/creatures/bridge";
 import { spellMissChance } from "../systems/creatures/combat";
 import { spawnZone, setPlayerDeathHandler, getZonesOnMap } from "../systems/groundaoe";
 import bags from "../systems/bags";
+import currencySystem from "../systems/currency";
 import query from "../controllers/sqldatabase";
 import loot from "../systems/loot";
 import lootChest from "../systems/lootChest";
@@ -1089,8 +1135,8 @@ async function transitionPlayerToMap(
             script: npc.script,
             hidden: npc.hidden,
             dialog: npc.dialog,
+            gossip: npc.gossip || null,
             particles: particleArray,
-            quest: npc.quest,
             map: npc.map,
             position: npc.position,
             sprite_type: npc.sprite_type,
@@ -1106,6 +1152,10 @@ async function transitionPlayerToMap(
     } catch (e) {
       log.warn(`Failed to fetch NPC data for ${newMapName}: ${e}`);
     }
+
+    // Quest markers for the new map. Map-wide explore objectives credit via
+    // the MAP_ENTER listener in the quest objectives module.
+    await sendQuestMarkersFor(wt, player.username, newMapName);
 
     try {
       const lootOnMap = loot.getOnMap(newMapName);
@@ -1475,8 +1525,8 @@ authWorker.on("message", async (result: any) => {
 
     spawnLocation.map = map.name;
 
-    const incompleteQuest = (playerData.questlog?.incomplete as unknown as Quest[]) || [];
-    const completedQuest = (playerData.questlog?.completed as unknown as Quest[]) || [];
+    const questActive: QuestLogEntry[] = Array.isArray(playerData.questlog?.active) ? playerData.questlog.active : [];
+    const questCompleted: number[] = Array.isArray(playerData.questlog?.completed) ? playerData.questlog.completed : [];
 
     const worldsResult = await assetCache.get("worlds").catch(err => {
       log.error(`[WorldsFetchError] Failed to fetch worlds: ${err}`);
@@ -1579,6 +1629,7 @@ authWorker.on("message", async (result: any) => {
       inventory: limitedInventory,
       equipment: playerData.equipment || {},
       equipmentRevision: 0,
+      questlog: { active: questActive, completed: questCompleted },
     });
 
     const _pcache = playerCache.get(wt.data.id);
@@ -1899,8 +1950,8 @@ authWorker.on("message", async (result: any) => {
           npcDataArray.push({
             id: npc.id, last_updated: npc.last_updated, name: npc.name || null,
             location: { x: npc.position.x, y: npc.position.y, direction: npc.position.direction || "down" },
-            script: npc.script, hidden: npc.hidden, dialog: npc.dialog,
-            particles: particleArray, quest: npc.quest, map: npc.map, position: npc.position,
+            script: npc.script, hidden: npc.hidden, dialog: npc.dialog, gossip: npc.gossip || null,
+            particles: particleArray, map: npc.map, position: npc.position,
             sprite_type: npc.sprite_type, spriteLayers: getNpcSpriteLayers(npc),
           });
         }
@@ -2009,7 +2060,17 @@ authWorker.on("message", async (result: any) => {
     sendPacket(wt, packetManager.bags(playerBags));
     sendPacket(wt, packetManager.collectables(collectablesWithIconUrls));
     sendPacket(wt, packetManager.spells(spellsWithSpriteUrls));
-    sendPacket(wt, packetManager.questlog(completedQuest, incompleteQuest));
+    // Quest log + definitions so the client needs no second fetch, then markers.
+    try {
+      trackRadiusPlayer(playerData.username);
+    } catch {
+      // Best-effort.
+    }
+    sendPacket(
+      wt,
+      packetManager.questLog({ active: questActive, completed: questCompleted, definitions: questDefsForEntries(questActive, questCompleted) })
+    );
+    await sendQuestMarkersFor(wt, playerData.username, spawnLocation.map);
   }
 });
 
@@ -4921,10 +4982,336 @@ export default async function packetReceiver(
         }
         break;
       }
-      case "QUESTDETAILS": {
-        const questId = data as unknown as number;
-        const quest = await quests.find(questId);
-        sendPacket(wt, packetManager.questDetails(quest));
+      case "NPC_INTERACT": {
+        if (!currentPlayer) return;
+        if (currentPlayer.isDead || currentPlayer.isGhost) return;
+        if (isQuestRateLimited(`npc:${wt.data.id}`)) return;
+        const npcId = Number((data as any)?.npcId ?? (data as any)?.id);
+        if (!Number.isFinite(npcId)) return;
+        const npcsData = ((await assetCache.get("npcs")) || []) as Npc[];
+        const npc = npcsData.find((n) => Number(n.id) === npcId);
+        if (!npc || npc.hidden) return;
+        const playerMap = String(currentPlayer.location.map ?? "").replaceAll(".json", "");
+        if (String(npc.map ?? "").replaceAll(".json", "") !== playerMap) return;
+        const pos = currentPlayer.location.position;
+        if (!pos) return;
+        const dist = Math.hypot(Number(pos.x) - Number(npc.position.x), Number(pos.y) - Number(npc.position.y));
+        if (dist > NPC_INTERACT_RADIUS) {
+          sendPacket(wt, packetManager.questError({ code: "too_far", message: "You are too far from that NPC." }));
+          break;
+        }
+        // Talk objectives credit on interaction, before the offer list is built.
+        try {
+          const talkUpdates = await creditObjective(currentPlayer.username, "talk", String(npcId), 1);
+          if (talkUpdates.length > 0) {
+            const byQuest = new Map<number, ObjectiveUpdate[]>();
+            for (const u of talkUpdates) {
+              const list = byQuest.get(u.questId) || [];
+              list.push(u);
+              byQuest.set(u.questId, list);
+            }
+            for (const [questId, questUpdates] of byQuest) {
+              sendPacket(wt, packetManager.questProgress({ questId, updates: questUpdates }));
+            }
+            await sendQuestMarkersFor(wt, currentPlayer.username, playerMap);
+          }
+        } catch {
+          // Talk credit is best-effort.
+        }
+        const offers = await questLogApi.offersFor(currentPlayer.username, npcId);
+        // Locked quests (level-gated, prerequisite-locked) are hidden from
+        // the player, so they must not count toward the skip-the-menu
+        // decision: one visible quest opens its frame directly.
+        const visibleOffers = offers.filter(
+          (o) => !(o.marker === "available_future" && (o.reason === "level_too_low" || o.reason === "missing_prerequisite"))
+        );
+        if (visibleOffers.length === 0) {
+          sendPacket(
+            wt,
+            packetManager.npcGossip({ npcId, name: npc.name || null, gossipText: npc.dialog || null, quests: [] })
+          );
+          break;
+        }
+        if (visibleOffers.length === 1) {
+          const offer = visibleOffers[0]!;
+          const quest = questDefinitions.find(offer.questId);
+          if (!quest) break;
+          if (offer.action === "offer") {
+            const eligibility = await questLogApi.eligibility(currentPlayer.username, quest.id);
+            sendPacket(
+              wt,
+              packetManager.questOffer({ npcId, quest, canAccept: eligibility === "available", reason: eligibility })
+            );
+          } else if (offer.action === "incomplete") {
+            const cached = questLogApi.getCachedLog(currentPlayer.username);
+            const entry = cached?.active.find((e) => e.quest_id === quest.id);
+            const progress: ObjectiveUpdate[] = (quest.objectives || []).map((o) => ({
+              questId: quest.id,
+              objectiveId: o.id,
+              type: o.type,
+              target: o.target,
+              count: Math.min(Number(entry?.progress[o.id]) || 0, o.required_count),
+              required: o.required_count,
+              questReady: false,
+            }));
+            sendPacket(wt, packetManager.questIncomplete({ npcId, quest, progress }));
+          } else {
+            sendPacket(wt, packetManager.questTurnInOffer({ npcId, quest }));
+          }
+          break;
+        }
+        sendPacket(
+          wt,
+          packetManager.npcGossip({ npcId, name: npc.name || null, gossipText: npc.dialog || null, quests: offers })
+        );
+        break;
+      }
+      case "QUEST_SELECT": {
+        if (!currentPlayer) return;
+        if (isQuestRateLimited(`qs:${wt.data.id}`)) return;
+        const npcId = Number((data as any)?.npcId);
+        const questId = Number((data as any)?.questId);
+        if (!Number.isFinite(npcId) || !Number.isFinite(questId)) return;
+        const npcsData = ((await assetCache.get("npcs")) || []) as Npc[];
+        const npc = npcsData.find((n) => Number(n.id) === npcId);
+        if (!npc || npc.hidden) return;
+        const playerMap = String(currentPlayer.location.map ?? "").replaceAll(".json", "");
+        if (String(npc.map ?? "").replaceAll(".json", "") !== playerMap) return;
+        const pos = currentPlayer.location.position;
+        if (!pos) return;
+        if (Math.hypot(Number(pos.x) - Number(npc.position.x), Number(pos.y) - Number(npc.position.y)) > NPC_INTERACT_RADIUS) {
+          sendPacket(wt, packetManager.questError({ code: "too_far", message: "You are too far from that NPC." }));
+          break;
+        }
+        const offers = await questLogApi.offersFor(currentPlayer.username, npcId);
+        const offer = offers.find((o) => o.questId === questId);
+        if (!offer) return;
+        const quest = questDefinitions.find(questId);
+        if (!quest) return;
+        if (offer.action === "offer") {
+          const eligibility = await questLogApi.eligibility(currentPlayer.username, quest.id);
+          sendPacket(
+            wt,
+            packetManager.questOffer({ npcId, quest, canAccept: eligibility === "available", reason: eligibility })
+          );
+        } else if (offer.action === "incomplete") {
+          const cached = questLogApi.getCachedLog(currentPlayer.username);
+          const entry = cached?.active.find((e) => e.quest_id === quest.id);
+          const progress: ObjectiveUpdate[] = (quest.objectives || []).map((o) => ({
+            questId: quest.id,
+            objectiveId: o.id,
+            type: o.type,
+            target: o.target,
+            count: Math.min(Number(entry?.progress[o.id]) || 0, o.required_count),
+            required: o.required_count,
+            questReady: false,
+          }));
+          sendPacket(wt, packetManager.questIncomplete({ npcId, quest, progress }));
+        } else {
+          sendPacket(wt, packetManager.questTurnInOffer({ npcId, quest }));
+        }
+        break;
+      }
+      case "QUEST_ACCEPT": {
+        if (!currentPlayer) return;
+        if (isQuestRateLimited(`qa:${wt.data.id}`)) return;
+        const npcId = Number((data as any)?.npcId);
+        const questId = Number((data as any)?.questId);
+        if (!Number.isFinite(npcId) || !Number.isFinite(questId)) return;
+        // Never trust a client-supplied quest id without checking range.
+        const npcsData = ((await assetCache.get("npcs")) || []) as Npc[];
+        const npc = npcsData.find((n) => Number(n.id) === npcId);
+        if (!npc) return;
+        const playerMap = String(currentPlayer.location.map ?? "").replaceAll(".json", "");
+        if (String(npc.map ?? "").replaceAll(".json", "") !== playerMap) return;
+        const pos = currentPlayer.location.position;
+        if (!pos) return;
+        if (Math.hypot(Number(pos.x) - Number(npc.position.x), Number(pos.y) - Number(npc.position.y)) > NPC_INTERACT_RADIUS) {
+          sendPacket(wt, packetManager.questError({ code: "too_far", message: "You are too far from that NPC." }));
+          break;
+        }
+        const result = await questLogApi.accept(currentPlayer.username, questId, npcId);
+        if (!result.ok || !result.entry || !result.quest) {
+          sendPacket(wt, packetManager.questError({ code: result.code || "ineligible", message: result.error || "You cannot accept that quest." }));
+          break;
+        }
+        sendPacket(wt, packetManager.questLogEntry({ entry: result.entry, quest: result.quest }));
+        // The accept backfill may have credited collect/explore immediately.
+        const backfilled: ObjectiveUpdate[] = (result.quest.objectives || [])
+          .filter((o) => (Number(result.entry!.progress[o.id]) || 0) > 0)
+          .map((o) => ({
+            questId: result.quest!.id,
+            objectiveId: o.id,
+            type: o.type,
+            target: o.target,
+            count: Number(result.entry!.progress[o.id]) || 0,
+            required: o.required_count,
+            questReady: result.entry!.state === "ready",
+          }));
+        if (backfilled.length > 0) {
+          sendPacket(wt, packetManager.questProgress({ questId: result.quest.id, updates: backfilled }));
+        }
+        await sendQuestMarkersFor(wt, currentPlayer.username, currentPlayer.location.map);
+        break;
+      }
+      case "QUEST_DECLINE": {
+        // Closes the frame client-side. No state change; exists so packet
+        // interceptors and plugins can observe it.
+        break;
+      }
+      case "QUEST_ABANDON": {
+        if (!currentPlayer) return;
+        if (isQuestRateLimited(`qab:${wt.data.id}`)) return;
+        const questId = Number((data as any)?.questId);
+        if (!Number.isFinite(questId)) return;
+        const cached = questLogApi.getCachedLog(currentPlayer.username);
+        const entry = cached?.active.find((e) => e.quest_id === questId);
+        if (!entry) {
+          sendPacket(wt, packetManager.questError({ code: "not_active", message: "That quest is not in your log." }));
+          break;
+        }
+        const quest = questDefinitions.find(questId);
+        await questLogApi.abandon(currentPlayer.username, questId);
+        if (quest) {
+          sendPacket(wt, packetManager.questLogEntry({ entry: null, quest, removed: true }));
+        }
+        await sendQuestMarkersFor(wt, currentPlayer.username, currentPlayer.location.map);
+        break;
+      }
+      case "QUEST_TURN_IN": {
+        if (!currentPlayer) return;
+        if (isQuestRateLimited(`qt:${wt.data.id}`)) return;
+        const npcId = Number((data as any)?.npcId);
+        const questId = Number((data as any)?.questId);
+        const rewardChoiceIndex = (data as any)?.rewardChoiceIndex;
+        if (!Number.isFinite(npcId) || !Number.isFinite(questId)) return;
+        // Range check before anything else; never trust client-supplied ids.
+        const npcsData = ((await assetCache.get("npcs")) || []) as Npc[];
+        const npc = npcsData.find((n) => Number(n.id) === npcId);
+        if (!npc) return;
+        const playerMap = String(currentPlayer.location.map ?? "").replaceAll(".json", "");
+        if (String(npc.map ?? "").replaceAll(".json", "") !== playerMap) return;
+        const pos = currentPlayer.location.position;
+        if (!pos) return;
+        if (Math.hypot(Number(pos.x) - Number(npc.position.x), Number(pos.y) - Number(npc.position.y)) > NPC_INTERACT_RADIUS) {
+          sendPacket(wt, packetManager.questError({ code: "too_far", message: "You are too far from that NPC." }));
+          break;
+        }
+        const result = await questLogApi.turnIn(currentPlayer.username, questId, npcId, rewardChoiceIndex);
+        if (!result.ok) {
+          sendPacket(
+            wt,
+            packetManager.questError({ code: result.code || "turnin_failed", message: result.error || "Could not turn in that quest." })
+          );
+          break;
+        }
+        const quest = questDefinitions.find(questId);
+        if (quest) {
+          sendPacket(wt, packetManager.questLogEntry({ entry: null, quest, removed: true }));
+        }
+        sendPacket(
+          wt,
+          packetManager.questCompleted({
+            questId: result.questId!,
+            xp: result.xp || 0,
+            copper: result.copper || 0,
+            items: result.items || [],
+            nextQuestId: result.nextQuestId ?? null,
+          })
+        );
+        // Sync the client with the granted rewards.
+        try {
+          currentPlayer.inventory = await patchInventoryBagSlots(await inventory.get(currentPlayer.username), currentPlayer.username);
+          playerCache.set(currentPlayer.id, currentPlayer);
+          sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
+        } catch {
+          // Best-effort.
+        }
+        try {
+          const balance = await currencySystem.get(currentPlayer.username);
+          currentPlayer.currency = balance;
+          playerCache.set(currentPlayer.id, currentPlayer);
+          sendPacket(wt, packetManager.currency(balance));
+        } catch {
+          // Best-effort.
+        }
+        try {
+          // Merge the fresh XP first: synchronizeStats rebuilds from the
+          // in-memory copy and would otherwise wipe the just-granted
+          // xp/level back to their pre-turn-in values (same pattern as the
+          // creature-kill XP path).
+          const levelBefore = Number(currentPlayer.stats?.level) || 1;
+          const xpResult = result.xpResult;
+          if (xpResult) {
+            currentPlayer.stats.xp = xpResult.xp;
+            currentPlayer.stats.max_xp = xpResult.max_xp;
+            currentPlayer.stats.level = xpResult.level;
+          }
+          const leveled = !!xpResult && xpResult.level > levelBefore;
+          if (leveled) {
+            currentPlayer.stats.max_health = player.getMaxHealthForLevel(xpResult!.level);
+            currentPlayer.stats.max_stamina = player.getMaxStaminaForLevel(xpResult!.level);
+            const synced = await player.synchronizeStats(currentPlayer.username);
+            if (synced) currentPlayer.stats = synced;
+            currentPlayer.stats.health = currentPlayer.stats.total_max_health ?? currentPlayer.stats.max_health;
+            currentPlayer.stats.stamina = currentPlayer.stats.total_max_stamina ?? currentPlayer.stats.max_stamina;
+          } else {
+            const syncedStats = await player.synchronizeStats(currentPlayer.username);
+            if (syncedStats) currentPlayer.stats = syncedStats;
+          }
+          playerCache.set(currentPlayer.id, currentPlayer);
+          // XP bar: UPDATESTATS handlers only merge health/mana, so push the
+          // dedicated XP packet too.
+          if (xpResult) {
+            sendPacket(
+              wt,
+              packetManager.updateXp({ id: currentPlayer.id, xp: xpResult.xp, level: xpResult.level, max_xp: xpResult.max_xp })
+            );
+          }
+          const statsPacket = packetManager.updateStats({ id: currentPlayer.id, target: currentPlayer.id, stats: currentPlayer.stats });
+          if (leveled) {
+            broadcastToAOI(currentPlayer, statsPacket);
+            listener.emit(Events.PLAYER_LEVEL_UP, { player: currentPlayer, level: xpResult!.level });
+          } else {
+            sendPacket(wt, statsPacket);
+          }
+        } catch {
+          // Best-effort.
+        }
+        await sendQuestMarkersFor(wt, currentPlayer.username, currentPlayer.location.map);
+        break;
+      }
+      case "TOGGLE_QUEST_EDITOR":
+      case "QUEST_EDITOR_DATA":
+      case "QUEST_EDITOR_SEARCH":
+      case "QUEST_EDITOR_SAVE":
+      case "QUEST_EDITOR_DELETE": {
+        if (!currentPlayer) return;
+        if (!questEditor.canUseEditor(currentPlayer)) {
+          sendPacket(wt, packetManager.notify({ message: "You do not have permission to use the quest editor." }));
+          break;
+        }
+        const outcome = await questEditor.handleEditorPacket(type, data);
+        if (outcome.kind === "data") {
+          sendPacket(wt, packetManager.questEditorData(outcome.data));
+        } else if (outcome.kind === "search") {
+          sendPacket(wt, packetManager.questEditorResults(outcome.data));
+        } else {
+          sendPacket(wt, packetManager.questEditorResult({ ok: outcome.ok, errors: outcome.errors, id: outcome.id }));
+          if (outcome.ok && (type === "QUEST_EDITOR_SAVE" || type === "QUEST_EDITOR_DELETE")) {
+            const viewers = Object.values(playerCache.list() as Record<string, any>).filter(
+              (p) => p?.wt?.readyState === 1 && questEditor.canUseEditor(p)
+            );
+            for (const viewer of viewers) {
+              if (viewer.id !== wt.data.id) {
+                sendPacket(viewer.wt, packetManager.questEditorUpdated({ by: currentPlayer.username }));
+              }
+            }
+          }
+        }
+        break;
+      }
+      case "QUEST_EDITOR_CLOSE": {
         break;
       }
       case "STOPTYPING": {
@@ -5280,9 +5667,19 @@ export default async function packetReceiver(
           const npcsInMap = (allNpcs || []).filter((npc: Npc) => npc.map === mapName);
           // Resolve particles to include all particle data (including time fields)
           const resolvedNpcs = await Promise.all(npcsInMap.map(resolveNpcForClient));
+          // Quest links for the NPC editor's given/ended pickers.
+          for (const npc of resolvedNpcs) {
+            const npcId = Number((npc as any).id);
+            if (Number.isFinite(npcId)) {
+              (npc as any).questsGiven = questDefinitions.questsGivenBy(npcId);
+              (npc as any).questsEnded = questDefinitions.questsEndedBy(npcId);
+            }
+          }
+          const questCatalog = questDefinitions.getCachedQuestsSync().map((q) => ({ id: q.id, name: q.name }));
+          // Sprite data for the appearance tab, same feed as the creature editor.
+          const [spriteSheets, icons] = await Promise.all([listSpriteSheets(), listIcons()]);
 
-
-          sendPacket(wt, packetManager.npcList(resolvedNpcs));
+          sendPacket(wt, packetManager.npcList(resolvedNpcs, questCatalog, { spriteSheets, icons }));
         } catch (error: any) {
           log.error(`Error listing NPCs: ${error.message}`);
           sendPacket(wt, packetManager.notify({ message: "Error loading NPCs." }));
@@ -5317,8 +5714,9 @@ export default async function packetReceiver(
             hidden: clientData?.hidden ?? false,
             script: clientData?.script ?? null,
             dialog: clientData?.dialog ?? null,
+            gossip: clientData?.gossip ?? null,
             particles: clientData?.particles ?? [],
-            quest: clientData?.quest ?? null,
+            quest_giver: clientData?.quest_giver === true || clientData?.quest_giver === 1,
             sprite_type: clientData?.sprite_type ?? 'animated',
             sprite_body: clientData?.sprite_body ?? null,
             sprite_head: clientData?.sprite_head ?? null,
@@ -5339,6 +5737,27 @@ export default async function packetReceiver(
           const createdNpc = updatedNpcs
             .filter((n: Npc) => n.map === mapName)
             .sort((a: Npc, b: Npc) => (b.id ?? 0) - (a.id ?? 0))[0];
+
+          // Quest links arrive as questsGiven / questsEnded arrays.
+          if (createdNpc?.id) {
+            const given: number[] = Array.isArray(clientData?.questsGiven) ? clientData.questsGiven : [];
+            const ended: number[] = Array.isArray(clientData?.questsEnded) ? clientData.questsEnded : [];
+            try {
+              await query("DELETE FROM npc_quests WHERE npc_id = ?", [createdNpc.id]);
+              for (const qid of [...new Set([...given.map(Number), ...ended.map(Number)])]) {
+                if (!Number.isFinite(qid)) continue;
+                if (given.map(Number).includes(qid)) {
+                  await query("INSERT INTO npc_quests (npc_id, quest_id, `role`) VALUES (?, ?, 'giver')", [createdNpc.id, qid]);
+                }
+                if (ended.map(Number).includes(qid)) {
+                  await query("INSERT INTO npc_quests (npc_id, quest_id, `role`) VALUES (?, ?, 'ender')", [createdNpc.id, qid]);
+                }
+              }
+              await questDefinitions.reload();
+            } catch {
+              // Quest links are best-effort on NPC create.
+            }
+          }
 
           if (createdNpc) {
             const resolvedNpc = await resolveNpcForClient(createdNpc);
@@ -5380,6 +5799,27 @@ export default async function packetReceiver(
           await npcSystem.update(npcData);
           const updatedNpcs = await npcSystem.list();
           await assetCache.set("npcs", updatedNpcs);
+
+          // Quest links arrive as questsGiven / questsEnded arrays.
+          try {
+            const given: number[] = Array.isArray((npcData as any)?.questsGiven) ? (npcData as any).questsGiven : [];
+            const ended: number[] = Array.isArray((npcData as any)?.questsEnded) ? (npcData as any).questsEnded : [];
+            if ((npcData as any)?.questsGiven !== undefined || (npcData as any)?.questsEnded !== undefined) {
+              await query("DELETE FROM npc_quests WHERE npc_id = ?", [npcData.id]);
+              for (const qid of [...new Set([...given.map(Number), ...ended.map(Number)])]) {
+                if (!Number.isFinite(qid)) continue;
+                if (given.map(Number).includes(qid)) {
+                  await query("INSERT INTO npc_quests (npc_id, quest_id, `role`) VALUES (?, ?, 'giver')", [npcData.id, qid]);
+                }
+                if (ended.map(Number).includes(qid)) {
+                  await query("INSERT INTO npc_quests (npc_id, quest_id, `role`) VALUES (?, ?, 'ender')", [npcData.id, qid]);
+                }
+              }
+              await questDefinitions.reload();
+            }
+          } catch {
+            // Quest links are best-effort on NPC save.
+          }
 
           const updatedNpc = updatedNpcs.find((n: Npc) => n.id === npcData.id);
           if (updatedNpc) {
@@ -6956,6 +7396,16 @@ export default async function packetReceiver(
               break;
             }
             sendPacket(wt, packetManager.toggleItemEditor());
+            break;
+          }
+
+          case "QE":
+          case "QUESTEDITOR": {
+            if (!questEditor.canUseEditor(currentPlayer)) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(wt, packetManager.toggleQuestEditor());
             break;
           }
 

@@ -12,6 +12,101 @@ export interface LocalCertificateOptions {
   caPath?: string;
   validityDays?: number;
   hostnames?: string[];
+  /**
+   * Replace the existing files even when they look usable. Needed to recover
+   * from an expired CA-signed certificate, which is otherwise never touched
+   * (see certificateNeedsRegeneration) and would be reported as valid.
+   */
+  force?: boolean;
+}
+
+export interface CertificateStatus {
+  /** The PEM parsed as X.509 at all. */
+  parseable: boolean;
+  /** The certificate is its own issuer. Only these are auto-regenerated. */
+  selfSigned: boolean;
+  /** Short-lived EC cert with localhost/127.0.0.1 SANs: pinnable via /wt-cert-hash. */
+  supportsPinning: boolean;
+  /** Whether ensureLocalCertificate would replace this certificate. */
+  needsRegeneration: boolean;
+  /** Outside its validity window right now. */
+  expired: boolean;
+  /** Whole days until expiry (negative when expired, null when unparseable). */
+  daysRemaining: number | null;
+  validFrom: string | null;
+  validTo: string | null;
+}
+
+/**
+ * Truthful one-shot summary of a certificate file. Unlike
+ * certificateNeedsRegeneration this reports expiry for CA-signed
+ * certificates too, so callers can tell "expired, renew via your CA" apart
+ * from "valid".
+ */
+export function getCertificateStatus(certPem: string): CertificateStatus {
+  const unusable: CertificateStatus = {
+    parseable: false,
+    selfSigned: false,
+    supportsPinning: false,
+    needsRegeneration: true,
+    expired: true,
+    daysRemaining: null,
+    validFrom: null,
+    validTo: null,
+  };
+
+  let cert: X509Certificate;
+  try {
+    cert = new X509Certificate(certPem);
+  } catch {
+    return unusable;
+  }
+
+  const validFromMs = Date.parse(cert.validFrom);
+  const validToMs = Date.parse(cert.validTo);
+  if (!Number.isFinite(validFromMs) || !Number.isFinite(validToMs)) {
+    return unusable;
+  }
+
+  const now = Date.now();
+  const expired = now < validFromMs || now > validToMs;
+  const daysRemaining = Math.floor((validToMs - now) / 86400000);
+
+  let selfSigned = false;
+  try {
+    selfSigned = cert.verify(cert.publicKey);
+  } catch {
+    return {
+      ...unusable,
+      parseable: true,
+      validFrom: cert.validFrom,
+      validTo: cert.validTo,
+      daysRemaining,
+      expired,
+    };
+  }
+
+  const validityDays = (validToMs - validFromMs) / 86400000;
+  const san = cert.subjectAltName || "";
+  const supportsPinning =
+    !expired &&
+    validityDays <= MAX_VALIDITY_DAYS &&
+    (cert.publicKey as any).asymmetricKeyType === "ec" &&
+    san.includes("localhost") &&
+    san.includes("127.0.0.1");
+
+  return {
+    parseable: true,
+    selfSigned,
+    supportsPinning,
+    // Only self-signed certificates are ours to replace; a CA-signed one
+    // that omits a name or has expired is the operator's to reissue.
+    needsRegeneration: selfSigned ? !supportsPinning : false,
+    expired,
+    daysRemaining,
+    validFrom: cert.validFrom,
+    validTo: cert.validTo,
+  };
 }
 
 export interface GeneratedCertificate {
@@ -22,7 +117,7 @@ export interface GeneratedCertificate {
 
 type Forge = typeof import("node-forge");
 
-async function loadForge(): Promise<Forge> {
+export async function loadForge(): Promise<Forge> {
   try {
     const module = await import("node-forge");
     return (module.default ?? module) as Forge;
@@ -62,19 +157,32 @@ function dateToAsn1(forge: Forge, date: Date): any {
   return asn1.create(asn1.Class.UNIVERSAL, asn1.Type.GENERALIZEDTIME, false, generalized);
 }
 
-function buildTbsCertificate(forge: Forge, cert: any, publicKeySpki: ArrayBuffer): any {
+export const SHA256_WITH_RSA_OID = "1.2.840.113549.1.1.11";
+
+export function buildTbsCertificate(
+  forge: Forge,
+  cert: any,
+  publicKeySpki: ArrayBuffer,
+  signatureOid: string = ECDSA_SHA256_OID,
+  // RFC 5758 section 3.2: ecdsa-with-SHA256 parameters MUST be absent.
+  // Including the NULL parameter causes strict TLS stacks (rustls/wtransport
+  // trust-anchor verification) to reject the certificate. RSA signatures
+  // (sha256WithRSAEncryption) require the NULL parameter instead.
+  includeSignatureNullParams = false
+): any {
   const { asn1, pki, util } = forge;
+  const sigAlgValue: any[] = [
+    asn1.create(asn1.Class.UNIVERSAL, asn1.Type.OID, false, asn1.oidToDer(signatureOid).getBytes()),
+  ];
+  if (includeSignatureNullParams) {
+    sigAlgValue.push(asn1.create(asn1.Class.UNIVERSAL, asn1.Type.NULL, false, ""));
+  }
   return asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
     asn1.create(asn1.Class.CONTEXT_SPECIFIC, 0, true, [
       asn1.create(asn1.Class.UNIVERSAL, asn1.Type.INTEGER, false, asn1.integerToDer(2).getBytes()),
     ]),
     asn1.create(asn1.Class.UNIVERSAL, asn1.Type.INTEGER, false, util.hexToBytes(cert.serialNumber)),
-    // RFC 5758 section 3.2: ecdsa-with-SHA256 parameters MUST be absent.
-    // Including the NULL parameter causes strict TLS stacks (rustls/wtransport
-    // trust-anchor verification) to reject the certificate.
-    asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
-      asn1.create(asn1.Class.UNIVERSAL, asn1.Type.OID, false, asn1.oidToDer(ECDSA_SHA256_OID).getBytes()),
-    ]),
+    asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, sigAlgValue),
     dnToAsn1(forge, cert.issuer.attributes),
     asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
       dateToAsn1(forge, cert.validity.notBefore),
@@ -86,7 +194,7 @@ function buildTbsCertificate(forge: Forge, cert: any, publicKeySpki: ArrayBuffer
   ]);
 }
 
-function positiveSerialHex(): string {
+export function positiveSerialHex(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(9));
   let hex = Buffer.from(bytes).toString("hex").replace(/^0+/, "") || "1";
   const firstDigit = parseInt(hex[0], 16);
@@ -231,33 +339,12 @@ export function computeCertificateHash(certPem: string): string {
 }
 
 export function certificateSupportsPinning(certPem: string): boolean {
-  try {
-    const cert = new X509Certificate(certPem);
-
-    // Being self-signed is deliberately not required. serverCertificateHashes
-    // constrains the key and the validity period, not the issuer, so a
-    // short-lived certificate signed by a local CA is pinnable by Chromium
-    // *and* validates normally in Safari, which does not implement pinning at
-    // all and refuses a self-signed leaf. One certificate then serves both.
-    const now = Date.now();
-    if (now < Date.parse(cert.validFrom) || now > Date.parse(cert.validTo)) {
-      return false;
-    }
-
-    const validityDays = (Date.parse(cert.validTo) - Date.parse(cert.validFrom)) / 86400000;
-    if (validityDays > MAX_VALIDITY_DAYS) {
-      return false;
-    }
-
-    if ((cert.publicKey as any).asymmetricKeyType !== "ec") {
-      return false;
-    }
-
-    const san = cert.subjectAltName || "";
-    return san.includes("localhost") && san.includes("127.0.0.1");
-  } catch {
-    return false;
-  }
+  // Being self-signed is deliberately not required. serverCertificateHashes
+  // constrains the key and the validity period, not the issuer, so a
+  // short-lived certificate signed by a local CA is pinnable by Chromium
+  // *and* validates normally in Safari, which does not implement pinning at
+  // all and refuses a self-signed leaf. One certificate then serves both.
+  return getCertificateStatus(certPem).supportsPinning;
 }
 
 /**
@@ -288,19 +375,7 @@ export function certificateCoversHostnames(certPem: string, hostnames: string[])
 }
 
 export function certificateNeedsRegeneration(certPem: string): boolean {
-  let selfSigned = false;
-  try {
-    const cert = new X509Certificate(certPem);
-    selfSigned = cert.verify(cert.publicKey);
-  } catch {
-    return true;
-  }
-
-  if (!selfSigned) {
-    return false;
-  }
-
-  return !certificateSupportsPinning(certPem);
+  return getCertificateStatus(certPem).needsRegeneration;
 }
 
 async function certificateHasNullSignatureParams(certPem: string): Promise<boolean> {
@@ -362,7 +437,10 @@ export async function ensureLocalCertificate(options: LocalCertificateOptions): 
   const keyExists = fs.existsSync(keyPath);
 
   let generated: GeneratedCertificate | null = null;
-  if (certExists && keyExists) {
+  if (certExists && keyExists && options.force) {
+    log.warn("Forcing regeneration of the WebTransport certificate (--force)...");
+    generated = await writeGeneratedCertificate(certPath, keyPath, caPath, options);
+  } else if (certExists && keyExists) {
     const certPem = fs.readFileSync(certPath, "utf8");
     let needsRegen = certificateNeedsRegeneration(certPem);
     if (!needsRegen && options.hostnames?.length) {

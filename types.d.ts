@@ -78,10 +78,106 @@ declare interface Player {
   mount_type: Nullable<string>;
 }
 
-declare interface QuestLogData {
-  completed: number[];
-  incomplete: number[];
+type QuestObjectiveType = "kill" | "collect" | "talk" | "explore";
+type QuestRepeatable = "none" | "repeatable" | "daily";
+type QuestState = "active" | "ready" | "completed";
+
+declare interface QuestObjective {
+  id: number;
+  quest_id: number;
+  sort_order: number;
+  type: QuestObjectiveType;
+  target: string;
+  required_count: number;
+  target_x: Nullable<number>;
+  target_y: Nullable<number>;
+  target_radius: Nullable<number>;
+  description: Nullable<string>;
 }
+
+declare interface QuestReward {
+  id: number;
+  quest_id: number;
+  item_name: string;
+  quantity: number;
+  is_choice: boolean;
+  sort_order: number;
+}
+
+declare interface Quest {
+  id: number;
+  name: string;
+  zone: Nullable<string>;
+  offer_text: string;
+  description: string;
+  progress_text: string;
+  completion_text: string;
+  required_level: number;
+  quest_level: number;
+  xp_reward: number;
+  copper_reward: number;
+  repeatable: QuestRepeatable;
+  next_quest_id: Nullable<number>;
+  sort_order: number;
+  /** Hydrated at asset-load time, not columns on the quests row. */
+  objectives: QuestObjective[];
+  rewards: QuestReward[];
+  prerequisites: number[];
+}
+
+declare interface QuestLogEntry {
+  quest_id: number;
+  state: QuestState;
+  accepted_at: number;
+  completed_at: number;
+  times_completed: number;
+  /** objective_id -> current count */
+  progress: Record<number, number>;
+}
+
+declare interface QuestLogData {
+  active: QuestLogEntry[];
+  completed: number[];
+}
+
+declare interface QuestOffer {
+  questId: number;
+  name: string;
+  questLevel: number;
+  requiredLevel: number;
+  marker: QuestMarkerState;
+  action: "offer" | "incomplete" | "turnin";
+  reason: QuestEligibility;
+}
+
+declare interface ObjectiveUpdate {
+  questId: number;
+  objectiveId: number;
+  type: QuestObjectiveType;
+  target: string;
+  count: number;
+  required: number;
+  /** This update pushed the whole quest to 'ready'. */
+  questReady: boolean;
+}
+
+type QuestMarkerState =
+  | "available"
+  | "available_future"
+  | "in_progress"
+  | "ready"
+  | "none";
+
+type QuestEligibility =
+  | "available"
+  | "active"
+  | "ready"
+  | "completed"
+  | "level_too_low"
+  | "missing_prerequisite"
+  | "log_full"
+  | "daily_not_reset"
+  | "unknown_quest";
 
 declare interface Particle {
   name: string | null;
@@ -196,8 +292,11 @@ declare interface Npc {
   hidden: boolean;
   script: Nullable<string>;
   dialog: Nullable<string>;
+  /** Gossip chain, one line per conversation step. Cycles into dialog. */
+  gossip?: Nullable<string>;
   particles: Nullable<Particle[]>;
-  quest: Nullable<number>;
+  /** Whether quests can be assigned to this NPC in the editors. */
+  quest_giver: boolean;
   sprite_type: 'none' | 'static' | 'animated';
   sprite_body: Nullable<string>;
   sprite_head: Nullable<string>;
@@ -329,7 +428,7 @@ declare interface WorldData {
   players: Nullable<number>;
 }
 
-declare interface Quest {
+declare interface LegacyQuest {
   id: number;
   name: string;
   description: string;
@@ -431,10 +530,7 @@ declare interface PlayerData {
     muted: boolean;
     hotbar_config: any[];
   }>;
-  questlog: {
-    completed: string[];
-    incomplete: string[];
-  };
+  questlog: QuestLogData;
   isAdmin: boolean;
   isGuest: boolean;
   isStealth: boolean;

@@ -7,7 +7,7 @@ import npc from "../systems/npcs";
 import creatureRepository from "../systems/creatures/repository";
 import particle from "../systems/particles";
 import worlds from "../systems/worlds";
-import quest from "../systems/quests";
+import questDefinitions from "../systems/quests/definitions";
 
 import assetCache from "../services/assetCache";
 import zlib from "zlib";
@@ -84,8 +84,7 @@ const particles = await assetCache.get("particles") as Particle[];
 log.success(`Loaded ${particles.length} particle(s) from the database in ${(performance.now() - particleNow).toFixed(2)}ms`);
 
 const questNow = performance.now();
-await assetCache.add("quests", await quest.list());
-const quests = await assetCache.get("quests") as Quest[];
+const quests = await questDefinitions.list();
 log.success(`Loaded ${quests.length} quest(s) from the database in ${(performance.now() - questNow).toFixed(2)}ms`);
 
 const mapProperties: MapProperties[] = [];

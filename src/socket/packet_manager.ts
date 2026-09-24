@@ -179,17 +179,79 @@ export const packetManager = {
       )
     ] as any[];
   },
-  questlog: (completedQuest: Quest[], incompleteQuest: Quest[]) => {
+  questLog: (data: { active: QuestLogEntry[]; completed: number[]; definitions: Quest[] }) => {
     return [
       packet.encode(
         JSON.stringify({
-          type: "QUESTLOG",
-          data: {
-            completed: completedQuest,
-            incomplete: incompleteQuest,
-          },
+          type: "QUEST_LOG",
+          data,
         })
       )
+    ] as any[];
+  },
+  questLogEntry: (data: { entry: QuestLogEntry | null; quest: Quest; removed?: boolean }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "QUEST_LOG_ENTRY", data })),
+    ] as any[];
+  },
+  questProgress: (data: { questId: number; updates: ObjectiveUpdate[] }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "QUEST_PROGRESS", data })),
+    ] as any[];
+  },
+  questOffer: (data: { npcId: number; quest: Quest; canAccept: boolean; reason?: QuestEligibility }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "QUEST_OFFER", data })),
+    ] as any[];
+  },
+  questIncomplete: (data: { npcId: number; quest: Quest; progress: ObjectiveUpdate[] }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "QUEST_INCOMPLETE", data })),
+    ] as any[];
+  },
+  questTurnInOffer: (data: { npcId: number; quest: Quest }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "QUEST_TURN_IN_OFFER", data })),
+    ] as any[];
+  },
+  questCompleted: (data: { questId: number; xp: number; copper: number; items: Array<{ name: string; quantity: number }>; nextQuestId: Nullable<number> }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "QUEST_COMPLETED", data })),
+    ] as any[];
+  },
+  questError: (data: { code: string; message: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "QUEST_ERROR", data })),
+    ] as any[];
+  },
+  questMarkers: (data: { map: string; markers: Record<number, QuestMarkerState> }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "QUEST_MARKERS", data })),
+    ] as any[];
+  },
+  npcGossip: (data: { npcId: number; name: string | null; gossipText: string | null; quests: QuestOffer[] }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "NPC_GOSSIP", data })),
+    ] as any[];
+  },
+  questEditorData: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "QUEST_EDITOR_DATA", data })),
+    ] as any[];
+  },
+  questEditorResults: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "QUEST_EDITOR_RESULTS", data })),
+    ] as any[];
+  },
+  questEditorResult: (data: { ok: boolean; errors: string[]; id?: number; action?: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "QUEST_EDITOR_RESULT", data })),
+    ] as any[];
+  },
+  questEditorUpdated: (data: { by: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "QUEST_EDITOR_UPDATED", data })),
     ] as any[];
   },
   stats: (data: any) => {
@@ -229,8 +291,8 @@ export const packetManager = {
             script: data.script,
             hidden: data.hidden,
             dialog: data.dialog,
+            gossip: data.gossip || null,
             particles: data.particles,
-            quest: data.quest,
             map: data.map,
             position: data.position,
             sprite_type: data.sprite_type || 'animated',
@@ -489,9 +551,9 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "UPDATESTATS", data })),
     ] as any[];
   },
-  questDetails: (data: any) => {
+  toggleQuestEditor: () => {
     return [
-      packet.encode(JSON.stringify({ type: "QUESTDETAILS", data })),
+      packet.encode(JSON.stringify({ type: "TOGGLE_QUEST_EDITOR", data: null })),
     ] as any[];
   },
   notify: (data: any) => {
@@ -636,9 +698,9 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "TOGGLE_NPC_EDITOR", data: null })),
     ] as any[];
   },
-  npcList: (npcs: any[]) => {
+  npcList: (npcs: any[], quests?: Array<{ id: number; name: string }>, assets?: { spriteSheets: Record<string, Array<{ name: string; image: string | null }>>; icons: Array<{ name: string; image: string | null }> }) => {
     return [
-      packet.encode(JSON.stringify({ type: "NPC_LIST", data: npcs })),
+      packet.encode(JSON.stringify({ type: "NPC_LIST", data: npcs, quests: quests || [], spriteSheets: assets?.spriteSheets || {}, icons: assets?.icons || [] })),
     ] as any[];
   },
   npcUpdated: (npc: any) => {

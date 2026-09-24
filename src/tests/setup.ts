@@ -13,7 +13,7 @@ export const mockAssetCache = {
       audio: [{ name: "test_audio" }],
       mounts: [{ name: "test_mount", description: "A test mount" }],
       spells: [{ name: "test_spell", id: 1, damage: 10, mana: 5 }],
-      quests: [{ id: 1, name: "test_quest", description: "A test quest", reward: 100, xp_gain: 50, required_quest: 0, required_level: 1 }],
+      quests: [{ id: 1, name: "test_quest", zone: null, offer_text: "", description: "A test quest", progress_text: "", completion_text: "", required_level: 1, quest_level: 1, xp_reward: 50, copper_reward: 0, repeatable: "none", next_quest_id: null, sort_order: 0, objectives: [], rewards: [], prerequisites: [] }],
       weather: [{ name: "clear", temperature: 20, humidity: 50, wind_speed: 0, wind_direction: "N", precipitation: 0, ambience: "clear" }],
       worlds: [{ name: "test_world", weather: "clear" }],
       mapProperties: [{ name: "main", warps: [], tileWidth: 32, tileHeight: 32 }],

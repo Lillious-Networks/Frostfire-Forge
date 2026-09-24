@@ -16,14 +16,14 @@ const npcs = {
     const particles = Array.isArray(npc.particles)
       ? npc.particles.join(",")
       : (npc.particles || "");
-    const quest = npc.quest || null;
     const sprite_type = npc.sprite_type || "none";
+    const quest_giver = npc.quest_giver ? 1 : 0;
 
     const response = await query(
-      `INSERT INTO npcs (last_updated, map, name, position, direction, hidden, script, dialog, particles, quest,
+      `INSERT INTO npcs (last_updated, map, name, position, direction, hidden, script, dialog, gossip, particles, quest_giver,
         sprite_type, sprite_body, sprite_head, sprite_helmet, sprite_shoulderguards, sprite_neck,
         sprite_hands, sprite_chest, sprite_feet, sprite_legs, sprite_weapon)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         last_updated,
         npc.map,
@@ -33,8 +33,9 @@ const npcs = {
         hidden,
         npc.script || null,
         npc.dialog || null,
+        npc.gossip || null,
         particles,
-        quest,
+        quest_giver,
         sprite_type,
         npc.sprite_body || null,
         npc.sprite_head || null,
@@ -84,8 +85,9 @@ const npcs = {
         hidden: npc?.hidden === 1,
         script: npc?.script as string,
         dialog: npc?.dialog as string,
+        gossip: (npc?.gossip ?? null) as Nullable<string>,
         particles: npc?.particles as Particle[],
-        quest: npc?.quest as number,
+        quest_giver: npc?.quest_giver === 1 || npc?.quest_giver === true,
         sprite_type: (npc?.sprite_type as 'none' | 'static' | 'animated') || 'none',
         sprite_body: npc?.sprite_body || null,
         sprite_head: npc?.sprite_head || null,
@@ -122,12 +124,12 @@ const npcs = {
     const particles = Array.isArray(npc.particles)
       ? npc.particles.join(",")
       : (npc.particles || "");
-    const quest = npc.quest || null;
     const sprite_type = npc.sprite_type || "none";
+    const quest_giver = npc.quest_giver ? 1 : 0;
 
     const response = await query(
       `UPDATE npcs SET last_updated = ?, map = ?, name = ?, position = ?, direction = ?, hidden = ?, script = ?,
-        dialog = ?, particles = ?, quest = ?, sprite_type = ?, sprite_body = ?, sprite_head = ?,
+        dialog = ?, gossip = ?, particles = ?, quest_giver = ?, sprite_type = ?, sprite_body = ?, sprite_head = ?,
         sprite_helmet = ?, sprite_shoulderguards = ?, sprite_neck = ?, sprite_hands = ?,
         sprite_chest = ?, sprite_feet = ?, sprite_legs = ?, sprite_weapon = ? WHERE id = ?`,
       [
@@ -139,8 +141,9 @@ const npcs = {
         hidden,
         npc.script,
         npc.dialog,
+        npc.gossip || null,
         particles,
-        quest,
+        quest_giver,
         sprite_type,
         npc.sprite_body || null,
         npc.sprite_head || null,

@@ -340,6 +340,7 @@ const createPermissionTypesTable = async () => {
         ('tools.npc_editor'),
       ('tools.creature_editor'),
       ('tools.item_editor'),
+      ('tools.quest_editor'),
           ('tools.particle_editor'),
         ('admin.loot')
     `;
@@ -353,6 +354,28 @@ const createPermissionTypesTable = async () => {
   await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.kill')`);
 };
 
+/** Quest-giver flag added to npcs after its first release. */
+const addNpcQuestGiverColumn = async () => {
+  const exists = (await query(
+    `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'npcs' AND COLUMN_NAME = 'quest_giver'`,
+    [database]
+  )) as any[];
+  if (!exists[0] || Number(exists[0].count) === 0) {
+    await query(`ALTER TABLE npcs ADD COLUMN quest_giver TINYINT NOT NULL DEFAULT 0`);
+  }
+};
+
+/** Gossip chain added to npcs after its first release. One line per step. */
+const addNpcGossipColumn = async () => {
+  const exists = (await query(
+    `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'npcs' AND COLUMN_NAME = 'gossip'`,
+    [database]
+  )) as any[];
+  if (!exists[0] || Number(exists[0].count) === 0) {
+    await query(`ALTER TABLE npcs ADD COLUMN gossip TEXT`);
+  }
+};
+
 const createNpcTable = async () => {
   log.info("Creating npcs table...");
   const sql = `
@@ -364,10 +387,11 @@ const createNpcTable = async () => {
       position VARCHAR(255) NOT NULL,
       direction VARCHAR(10) NOT NULL,
       dialog VARCHAR(500) DEFAULT NULL,
+      gossip TEXT,
       hidden INT NOT NULL DEFAULT 0,
       script VARCHAR(5000) DEFAULT NULL,
       particles VARCHAR(500) DEFAULT NULL,
-      quest INT DEFAULT NULL,
+      quest_giver TINYINT NOT NULL DEFAULT 0,
       sprite_type VARCHAR(10) NOT NULL DEFAULT 'animated',
       sprite_body VARCHAR(255) DEFAULT NULL,
       sprite_head VARCHAR(255) DEFAULT NULL,
@@ -478,31 +502,87 @@ const createWorld = async (name: string, weather: string) => {
 
 const createQuestsTable = async () => {
   log.info("Creating quests table...");
-  const sql = `
+  await query(`
     CREATE TABLE IF NOT EXISTS quests (
       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
       name VARCHAR(255) NOT NULL,
-      description VARCHAR(5000) NOT NULL,
-      reward INT NOT NULL,
-      xp_gain INT NOT NULL,
-      required_quest INT NOT NULL,
-      required_level INT NOT NULL
+      zone VARCHAR(255) DEFAULT NULL,
+      offer_text TEXT NOT NULL,
+      description TEXT NOT NULL,
+      progress_text TEXT NOT NULL,
+      completion_text TEXT NOT NULL,
+      required_level INT NOT NULL DEFAULT 1,
+      quest_level INT NOT NULL DEFAULT 0,
+      xp_reward INT NOT NULL DEFAULT 0,
+      copper_reward INT NOT NULL DEFAULT 0,
+      repeatable VARCHAR(16) NOT NULL DEFAULT 'none',
+      next_quest_id INT DEFAULT NULL,
+      sort_order INT NOT NULL DEFAULT 0
     )
-  `;
-  await query(sql);
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS quest_prerequisites (
+      quest_id INT NOT NULL,
+      required_quest_id INT NOT NULL,
+      PRIMARY KEY (quest_id, required_quest_id)
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS quest_objectives (
+      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+      quest_id INT NOT NULL,
+      sort_order INT NOT NULL DEFAULT 0,
+      type VARCHAR(16) NOT NULL,
+      target VARCHAR(255) NOT NULL,
+      required_count INT NOT NULL DEFAULT 1,
+      target_x INT DEFAULT NULL,
+      target_y INT DEFAULT NULL,
+      target_radius INT DEFAULT NULL,
+      description VARCHAR(255) DEFAULT NULL
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS quest_rewards (
+      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
+      quest_id INT NOT NULL,
+      item_name VARCHAR(255) NOT NULL,
+      quantity INT NOT NULL DEFAULT 1,
+      is_choice TINYINT NOT NULL DEFAULT 0,
+      sort_order INT NOT NULL DEFAULT 0
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS npc_quests (
+      npc_id INT NOT NULL,
+      quest_id INT NOT NULL,
+      \`role\` VARCHAR(16) NOT NULL,
+      PRIMARY KEY (npc_id, quest_id, \`role\`)
+    )
+  `);
 };
 
 const createQuestLogTable = async () => {
   log.info("Creating quest log table...");
-  const sql = `
+  await query(`
     CREATE TABLE IF NOT EXISTS quest_log (
-      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
-      username VARCHAR(255) UNIQUE NOT NULL,
-      completed_quests VARCHAR(5000) NOT NULL default '0',
-      incomplete_quests VARCHAR(5000) NOT NULL default '0'
+      username VARCHAR(255) NOT NULL,
+      quest_id INT NOT NULL,
+      state VARCHAR(16) NOT NULL DEFAULT 'active',
+      accepted_at BIGINT NOT NULL DEFAULT 0,
+      completed_at BIGINT NOT NULL DEFAULT 0,
+      times_completed INT NOT NULL DEFAULT 0,
+      PRIMARY KEY (username, quest_id)
     )
-  `;
-  await query(sql);
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS quest_objective_progress (
+      username VARCHAR(255) NOT NULL,
+      quest_id INT NOT NULL,
+      objective_id INT NOT NULL,
+      count INT NOT NULL DEFAULT 0,
+      PRIMARY KEY (username, quest_id, objective_id)
+    )
+  `);
 };
 
 const createFriendsListTable = async () => {
@@ -809,20 +889,6 @@ const createCreatureTables = async () => {
     pool_id INT DEFAULT NULL,
     FOREIGN KEY (template_id) REFERENCES creature_templates(id) ON DELETE CASCADE
   )`);
-  await query(`CREATE TABLE IF NOT EXISTS quest_kill_objectives (
-    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
-    quest_id INT NOT NULL,
-    template_id INT NOT NULL,
-    required_count INT NOT NULL DEFAULT 1,
-    UNIQUE KEY unique_quest_template (quest_id, template_id)
-  )`);
-  await query(`CREATE TABLE IF NOT EXISTS quest_kill_progress (
-    username VARCHAR(255) NOT NULL,
-    quest_id INT NOT NULL,
-    template_id INT NOT NULL,
-    kill_count INT NOT NULL DEFAULT 0,
-    PRIMARY KEY (username, quest_id, template_id)
-  )`);
 };
 
 const insertDemoAccount = async () => {
@@ -918,18 +984,52 @@ const insertDemoClientConfig = async () => {
   }
 }
 
-const insertDemoQuestLog = async () => {
-  log.info("Inserting demo quest log...");
-  const checkSql = `SELECT COUNT(*) as count FROM quest_log WHERE username = 'demo_user'`;
-  const result = await query(checkSql) as Array<{ count: number }>;
-
-  if (result[0]?.count === 0) {
-    const sql = `INSERT INTO quest_log (username) VALUES ('demo_user')`;
-    await query(sql);
-  } else {
-    log.debug("Demo quest log for 'demo_user' already exists - skipping");
+const insertDemoQuests = async () => {
+  log.info("Inserting demo quests...");
+  const existing = (await query(`SELECT COUNT(*) as count FROM quests`)) as Array<{ count: number }>;
+  if ((existing[0]?.count ?? 0) > 0) {
+    log.debug("Quests already exist - skipping demo seed");
+    return;
   }
-}
+  const first = (await query(
+    `INSERT INTO quests (name, zone, offer_text, description, progress_text, completion_text, required_level, quest_level, xp_reward, copper_reward, repeatable, sort_order)
+     VALUES (?, ?, ?, ?, ?, ?, 1, 1, 50, 100, 'none', 0)`,
+    [
+      "Rats in the Cellar",
+      "overworld",
+      "The cellar is overrun with rats. Please, deal with them!",
+      "Slay rats, gather their tails, and speak with the innkeeper.",
+      "You still have work to do. Check your objectives.",
+      "Thank you! The cellar is safe once more.",
+    ]
+  )) as any;
+  const quest1Id = Number(first?.insertId ?? first?.lastInsertRowid ?? 1) || 1;
+  await query(`INSERT INTO quest_objectives (quest_id, sort_order, type, target, required_count, description) VALUES (?, 0, 'kill', ?, 3, ?)`, [quest1Id, "1", "Rats slain"]);
+  await query(`INSERT INTO quest_objectives (quest_id, sort_order, type, target, required_count, description) VALUES (?, 1, 'collect', ?, 2, ?)`, [quest1Id, "Rat Tail", "Rat tails collected"]);
+  await query(`INSERT INTO quest_objectives (quest_id, sort_order, type, target, required_count, description) VALUES (?, 2, 'talk', ?, 1, ?)`, [quest1Id, "1", "Speak with the innkeeper"]);
+  await query(`INSERT INTO quest_objectives (quest_id, sort_order, type, target, required_count, description) VALUES (?, 3, 'explore', ?, 1, ?)`, [quest1Id, "overworld", "Explore the overworld"]);
+  await query(`INSERT INTO quest_rewards (quest_id, item_name, quantity, is_choice, sort_order) VALUES (?, ?, 1, 0, 0)`, [quest1Id, "Bread"]);
+  const second = (await query(
+    `INSERT INTO quests (name, zone, offer_text, description, progress_text, completion_text, required_level, quest_level, xp_reward, copper_reward, repeatable, next_quest_id, sort_order)
+     VALUES (?, ?, ?, ?, ?, ?, 1, 2, 100, 200, 'none', NULL, 1)`,
+    [
+      "The Cellar Aftermath",
+      "overworld",
+      "Now that the rats are gone, take this bread to the traveler.",
+      "A chained follow-up to the first quest.",
+      "You have not finished helping yet.",
+      "You have done well, traveler.",
+    ]
+  )) as any;
+  const quest2Id = Number(second?.insertId ?? second?.lastInsertRowid ?? 2) || 2;
+  if (quest2Id !== quest1Id) {
+    await query(`INSERT INTO quest_prerequisites (quest_id, required_quest_id) VALUES (?, ?)`, [quest2Id, quest1Id]);
+    await query(`UPDATE quests SET next_quest_id = ? WHERE id = ?`, [quest2Id, quest1Id]);
+    await query(`INSERT INTO quest_objectives (quest_id, sort_order, type, target, required_count) VALUES (?, 0, 'talk', ?, 1)`, [quest2Id, "1"]);
+    await query(`INSERT INTO quest_rewards (quest_id, item_name, quantity, is_choice, sort_order) VALUES (?, ?, 1, 1, 0)`, [quest2Id, "Bread"]);
+    await query(`INSERT INTO quest_rewards (quest_id, item_name, quantity, is_choice, sort_order) VALUES (?, ?, 1, 1, 1)`, [quest2Id, "Apple"]);
+  }
+};
 
 const insertDefaultLearnedSpell = async () => {
   log.info("Inserting default learned spells for demo user...");
@@ -1056,6 +1156,72 @@ const createIndexes = async () => {
   log.success("Index creation complete!");
 };
 
+/**
+ * Clean break from the stub quest system: drop legacy tables/columns on
+ * existing databases. Drop-only — table creation always happens afterwards
+ * in setupDatabase, so the quests tables exist no matter what state the
+ * database was in before.
+ */
+const dropLegacyQuestTables = async () => {
+  let dropQuests = false;
+  try {
+    const questCols = (await query(
+      `SELECT COLUMN_NAME as name FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'quests'`,
+      [database]
+    )) as any[];
+    const names = new Set((questCols || []).map((c: any) => String(c.name ?? c.COLUMN_NAME ?? "")));
+    dropQuests = names.has("reward") || names.has("xp_gain") || names.has("required_quest");
+  } catch (error) {
+    log.warn(`Quest schema migration check failed: ${error}`);
+  }
+  try {
+    const logCols = (await query(
+      `SELECT COLUMN_NAME as name FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'quest_log'`,
+      [database]
+    )) as any[];
+    const names = new Set((logCols || []).map((c: any) => String(c.name ?? c.COLUMN_NAME ?? "")));
+    if (names.has("completed_quests") || names.has("incomplete_quests") || dropQuests) {
+      log.info("Dropping legacy quest tables...");
+      await query(`DROP TABLE IF EXISTS quest_kill_progress`);
+      await query(`DROP TABLE IF EXISTS quest_kill_objectives`);
+      await query(`DROP TABLE IF EXISTS quest_objective_progress`);
+      await query(`DROP TABLE IF EXISTS quest_rewards`);
+      await query(`DROP TABLE IF EXISTS quest_objectives`);
+      await query(`DROP TABLE IF EXISTS quest_prerequisites`);
+      await query(`DROP TABLE IF EXISTS npc_quests`);
+      await query(`DROP TABLE IF EXISTS quest_log`);
+      if (dropQuests) {
+        await query(`DROP TABLE IF EXISTS quests`);
+      }
+    }
+  } catch (error) {
+    log.warn(`Quest log migration check failed: ${error}`);
+  }
+  try {
+    const npcCols = (await query(
+      `SELECT COLUMN_NAME as name FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'npcs' AND COLUMN_NAME = 'quest'`,
+      [database]
+    )) as any[];
+    if (npcCols && npcCols.length > 0) {
+      await query(`ALTER TABLE npcs DROP COLUMN quest`);
+      log.info("Dropped legacy npcs.quest column");
+    }
+  } catch (error) {
+    log.warn(`npcs.quest drop failed (may not exist): ${error}`);
+  }
+  try {
+    await query(`DROP TABLE IF EXISTS quest_kill_progress`);
+    await query(`DROP TABLE IF EXISTS quest_kill_objectives`);
+  } catch (error) {
+    log.warn(`Legacy quest kill table drop failed: ${error}`);
+  }
+  try {
+    await query(`INSERT IGNORE INTO permission_types (name) VALUES ('tools.quest_editor')`);
+  } catch {
+    // Ignore.
+  }
+};
+
 const setupDatabase = async () => {
   await createDatabase();
   await useDatabase();
@@ -1070,11 +1236,14 @@ const setupDatabase = async () => {
   await createPermissionsTable();
   await createPermissionTypesTable();
   await createNpcTable();
+  await addNpcQuestGiverColumn();
+  await addNpcGossipColumn();
   await createParticleTable();
   await createWeatherTable();
   await createDefaultWeather();
   await createWorldTable();
   await createWorld('overworld', 'rainy');
+  await dropLegacyQuestTables();
   await createQuestsTable();
   await createQuestLogTable();
   await createFriendsListTable();
@@ -1096,7 +1265,7 @@ const setupDatabase = async () => {
   await insertDemoAccount();
   await insertDemoStats();
   await insertDemoClientConfig();
-  await insertDemoQuestLog();
+  await insertDemoQuests();
   await insertDefaultLearnedSpell();
   await addPermissionsToDemoAccount();
   await insertDemoMount();
