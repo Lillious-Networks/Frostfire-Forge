@@ -1,0 +1,10 @@
+cancel_queued_tasks = true
+cancel_running_tasks = true
+
+connectivity_policy {
+    allow_deployments_to_no_targets = true
+}
+
+versioning_strategy {
+    template = "#{Octopus.Version.LastMajor}.#{Octopus.Version.LastMinor}.#{Octopus.Version.NextPatch}"
+}
