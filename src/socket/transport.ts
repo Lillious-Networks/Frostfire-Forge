@@ -25,7 +25,7 @@ function isSessionClosedError(error: any): boolean {
 const MOVEMENT_HEADERS = new Set<number>([0x01, 0x02, 0x03]);
 const BATCH_MOVEXY_HEADER = 0x01;
 const BATCH_HEADER_BYTES = 3;
-const BATCH_ENTRY_BYTES = 9;
+const BATCH_ENTRY_BYTES = 13; // [u32 id][i32 x][i32 y][u8 dir|stealth]
 
 export const CLOSE_NORMAL = 0;
 export const CLOSE_ABNORMAL = 1;

@@ -491,15 +491,17 @@ function startMovementSimulation(client: any, initialDelay: number = 0) {
         if (bytes.length < 11) return;
 
         if (bytes[0] === 0x02) {
-            const view = new DataView(bytes.buffer, bytes.byteOffset, 11);
-            const x = view.getInt16(5, true);
-            const y = view.getInt16(7, true);
+            // [u8 header][u32 id][i32 x][i32 y][u8 dir|stealth][u8 pad][u32 s][u16 ms]
+            if (bytes.length < 15) return;
+            const view = new DataView(bytes.buffer, bytes.byteOffset, 15);
+            const x = view.getInt32(5, true);
+            const y = view.getInt32(9, true);
             behavior.position = { x, y };
             if (!behavior.home) behavior.home = { x, y };
 
-            if (bytes.length >= 17) {
-                const seconds = new DataView(bytes.buffer, bytes.byteOffset + 11, 4).getUint32(0, true);
-                const ms = new DataView(bytes.buffer, bytes.byteOffset + 15, 2).getUint16(0, true);
+            if (bytes.length >= 21) {
+                const seconds = new DataView(bytes.buffer, bytes.byteOffset + 15, 4).getUint32(0, true);
+                const ms = new DataView(bytes.buffer, bytes.byteOffset + 19, 2).getUint16(0, true);
                 recordUdpLatency(client, seconds * 1000 + ms);
             }
             return;
@@ -508,7 +510,7 @@ function startMovementSimulation(client: any, initialDelay: number = 0) {
         if (bytes[0] === 0x01) {
             const view = new DataView(bytes.buffer, bytes.byteOffset);
             const count = view.getUint16(1, true);
-            const entriesEnd = 3 + count * 9;
+            const entriesEnd = 3 + count * 13;
             if (bytes.length >= entriesEnd + 10) {
                 const seq = view.getUint32(entriesEnd, true);
                 const seconds = view.getUint32(entriesEnd + 4, true);

@@ -405,20 +405,22 @@ export const packetManager = {
     const direction = DIRECTION_MAP[data.d?.dr as string] ?? 1;
     const stealth = data.s === 1 ? 1 : 0;
 
-    const packetData = new Uint8Array(17);
+    // Layout: [u8 header][u32 id][i32 x][i32 y][u8 dir|stealth][u8 pad][u32 s][u16 ms].
+    // Positions are 32-bit: 16-bit wrapped past 32767 px (maps over 2047 tiles).
+    const packetData = new Uint8Array(21);
     const view = new DataView(packetData.buffer);
 
     packetData[0] = HEADER_BYTE;
     view.setUint32(1, playerId, true);
-    view.setInt16(5, x, true);
-    view.setInt16(7, y, true);
-    packetData[9] = direction | (stealth << 4);
+    view.setInt32(5, x, true);
+    view.setInt32(9, y, true);
+    packetData[13] = direction | (stealth << 4);
 
     // Trailing one-way latency probe: [u32 seconds][u16 ms] (ignored by clients
-    // that parse exactly 11 bytes). Date.now() overflows a single u32.
+    // that parse exactly 15 bytes). Date.now() overflows a single u32.
     const serverSendTime = Date.now();
-    view.setUint32(11, Math.floor(serverSendTime / 1000), true);
-    view.setUint16(15, serverSendTime % 1000, true);
+    view.setUint32(15, Math.floor(serverSendTime / 1000), true);
+    view.setUint16(19, serverSendTime % 1000, true);
 
     return [packetData];
   },
@@ -451,12 +453,12 @@ export const packetManager = {
       const direction = DIRECTION_MAP[m.d?.dr as string] ?? 1;
       const stealth = m.s === 1 ? 1 : 0;
 
-      const moveData = new Uint8Array(5);
+      const moveData = new Uint8Array(9);
       const moveView = new DataView(moveData.buffer);
 
-      moveView.setInt16(0, x, true);
-      moveView.setInt16(2, y, true);
-      moveData[4] = direction | (stealth << 4);
+      moveView.setInt32(0, x, true);
+      moveView.setInt32(4, y, true);
+      moveData[8] = direction | (stealth << 4);
 
       chunks.push(Array.from(moveData));
     }

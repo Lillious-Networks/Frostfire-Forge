@@ -40,7 +40,7 @@ test("encodeBatch probe roundtrips seq + seconds/ms timestamp", () => {
 
     const view = new DataView(frame.buffer, frame.byteOffset);
     const count = view.getUint16(1, true);
-    const entriesEnd = 3 + count * 9;
+    const entriesEnd = 3 + count * 13;
 
     expect(frame.length).toBe(entriesEnd + 10);
 
@@ -56,7 +56,7 @@ test("encodeBatch probe roundtrips seq + seconds/ms timestamp", () => {
   expect(parsedFrames).toBe(offsets.length - 1);
 });
 
-test("encodeBatch without probe matches the legacy 9-byte-stride layout", () => {
+test("encodeBatch without probe uses the 13-byte-stride layout (32-bit positions)", () => {
   const entries = buildEntries(5);
   const { data, offsets } = encodeBatch(entries);
 
@@ -65,5 +65,14 @@ test("encodeBatch without probe matches the legacy 9-byte-stride layout", () => 
   const view = new DataView(frame.buffer, frame.byteOffset);
 
   expect(view.getUint16(1, true)).toBe(5);
-  expect(frame.length).toBe(3 + 5 * 9);
+  expect(frame.length).toBe(3 + 5 * 13);
+});
+
+test("encodeBatch positions past 32767 px do not wrap", () => {
+  const { data, offsets } = encodeBatch([{ id: 1, x: 40000, y: 163000, direction: 3, stealth: 0 }]);
+  const view = new DataView(data.buffer, data.byteOffset + offsets[0]);
+  expect(view.getUint32(3, true)).toBe(1);
+  expect(view.getInt32(7, true)).toBe(40000);
+  expect(view.getInt32(11, true)).toBe(163000);
+  expect(view.getUint8(15)).toBe(3);
 });

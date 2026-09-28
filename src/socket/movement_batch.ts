@@ -4,7 +4,7 @@ export const BATCH_HEADER = 0x01;
 // raising it risks PMTU black-holing, which shows up as intermittent movement
 // loss rather than a clean error.
 export const MAX_DATAGRAM_SIZE = 1200;
-const ENTRY_BYTES = 9;
+const ENTRY_BYTES = 13; // [u32 id][i32 x][i32 y][u8 dir|stealth]
 const PROBE_BYTES = 10; // [u32 seq][u32 seconds][u16 ms]
 const MAX_ENTRIES = Math.floor((MAX_DATAGRAM_SIZE - 3 - PROBE_BYTES) / ENTRY_BYTES);
 
@@ -86,9 +86,9 @@ export function encodeBatch(entries: any[], probe?: MovementProbe): { data: Uint
     for (let j = 0; j < chunkEntries; j++) {
       const mover = entries[i + j];
       view.setUint32(offset, mover.id, true);
-      view.setInt16(offset + 4, mover.x, true);
-      view.setInt16(offset + 6, mover.y, true);
-      frame[offset + 8] = mover.direction | (mover.stealth << 4);
+      view.setInt32(offset + 4, mover.x, true);
+      view.setInt32(offset + 8, mover.y, true);
+      frame[offset + 12] = mover.direction | (mover.stealth << 4);
       offset += ENTRY_BYTES;
     }
 
