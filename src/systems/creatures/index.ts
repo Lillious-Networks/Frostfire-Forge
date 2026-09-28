@@ -407,7 +407,7 @@ async function refreshNavGrids(spawns: Iterable<CreatureSpawn>): Promise<void> {
   for (const map of maps) {
     const prop = props.find((m) => normMap(m?.name) === map);
     const rle = await assetCache.getNested(map, "collision");
-    const built = navGrids.update(map, Array.isArray(rle) ? rle : null, Number(prop?.tileWidth) || 32, Number(prop?.tileHeight) || 32);
+    const built = navGrids.update(map, Array.isArray(rle) ? rle : null,Number(prop?.tileWidth) || 32, Number(prop?.tileHeight) || 32);
     if (built) log.debug(`Creature nav grid built for ${map}`);
     else if (!navGrids.get(map)) log.warn(`No collision data for creature map "${map}"; creatures there will not move`);
   }
