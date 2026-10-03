@@ -428,6 +428,9 @@ const createParticleTable = async () => {
       affected_by_weather INT NOT NULL DEFAULT 0,
       zIndex INT NOT NULL DEFAULT 0,
       glow_intensity FLOAT NOT NULL DEFAULT 0,
+      glow_radius FLOAT NOT NULL DEFAULT 0,
+      static_light INT NOT NULL DEFAULT 0,
+      brightness FLOAT NOT NULL DEFAULT 1,
       affected_by_time INT DEFAULT 0,
       time_on VARCHAR(5) DEFAULT NULL,
       time_off VARCHAR(5) DEFAULT NULL
@@ -473,6 +476,17 @@ const createDefaultWeather = async () => {
     await query(sql);
   } else {
     log.debug("Default weather 'thunderstorm' already exists - skipping");
+  }
+
+  // "darkness": no shadows and a near-black scene (the client's ambience keys off the name); still air, no precipitation
+  const checkDarkness = `SELECT COUNT(*) as count FROM weather WHERE name = 'darkness'`;
+  const darknessResult = await query(checkDarkness) as Array<{ count: number }>;
+
+  if (darknessResult[0]?.count === 0) {
+    const sql = `INSERT INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('darkness', 0.9, 'none', 0, 40, 50, 0)`;
+    await query(sql);
+  } else {
+    log.debug("Default weather 'darkness' already exists - skipping");
   }
 }
 

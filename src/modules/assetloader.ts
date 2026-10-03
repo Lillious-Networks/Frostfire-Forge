@@ -88,6 +88,10 @@ const quests = await questDefinitions.list();
 log.success(`Loaded ${quests.length} quest(s) from the database in ${(performance.now() - questNow).toFixed(2)}ms`);
 
 const mapProperties: MapProperties[] = [];
+/** Particle-only NPCs read from the maps' "Particles" object layers (extractAndCompressLayers). */
+const mapNpcList: Npc[] = [];
+/** Where the client draws an NPC's particles relative to its position (client npc.ts: position + 16, + 24). */
+const MAP_NPC_PARTICLE_OFFSET = { x: 16, y: 24 } as const;
 
 async function syncMapsBeforeLoading(): Promise<void> {
   const assetServerUrl = process.env.ASSET_SERVER_INTERNAL_URL || process.env.ASSET_SERVER_URL;
@@ -377,6 +381,48 @@ function extractAndCompressLayers(map: MapData) {
                 y: Math.floor(obj.y),
               },
               layer: layerName,
+            });
+            break;
+          }
+          // A point on a "Particles" layer is a particle-only NPC: hidden, named after the object, emitting the
+          // particles in its "Particle List" property (a Tiled list of strings, or a comma-separated string)
+          case "particles": {
+            const listProp = propsArray.find((p: any) => /^particle\s*list$|^particles$/i.test(String(p?.name ?? "")));
+            const raw = listProp?.value;
+            const names = (Array.isArray(raw) ? raw.map((p: any) => p?.value ?? p) : String(raw ?? "").split(","))
+              .map((n: any) => String(n).trim())
+              .filter(Boolean);
+            if (!names.length) {
+              log.warn(`Particle object without a Particle List in map ${map.name}: ${JSON.stringify(obj)}`);
+              break;
+            }
+            const unknown = names.filter((n: string) => !particles.some((p: Particle) => p.name === n));
+            if (unknown.length) log.warn(`Particle object "${obj.name}" in map ${map.name} names unknown particle(s): ${unknown.join(", ")}`);
+            mapNpcList.push({
+              id: -(mapNpcList.length + 1),
+              last_updated: null,
+              map: map.name.replace(".json", ""),
+              name: obj.name || null,
+              // the client emits an NPC's particles at its position + (16, 24) (a sprite NPC's body centre, client
+              // npc.ts); the object's point is where the particles belong, so the NPC stands that far up-left of it
+              position: { x: Math.floor(obj.x) - MAP_NPC_PARTICLE_OFFSET.x, y: Math.floor(obj.y) - MAP_NPC_PARTICLE_OFFSET.y, direction: "down" },
+              hidden: true,
+              script: null,
+              dialog: null,
+              gossip: null,
+              particles: names.join(",") as unknown as Particle[], // same form as database rows (names, resolved when sent)
+              quest_giver: false,
+              sprite_type: "none",
+              sprite_body: null,
+              sprite_head: null,
+              sprite_helmet: null,
+              sprite_shoulderguards: null,
+              sprite_neck: null,
+              sprite_hands: null,
+              sprite_chest: null,
+              sprite_feet: null,
+              sprite_legs: null,
+              sprite_weapon: null,
             });
             break;
           }
@@ -963,6 +1009,11 @@ export function refreshMapVersion(mapName: string): void {
 
 await syncMapsBeforeLoading();
 loadAllMaps();
+
+// The maps' particle-only NPCs join the NPC cache (and every later npc.list() reload of it)
+npc.setMapNpcs(mapNpcList);
+await assetCache.set("npcs", [...npcs.filter((n) => !npc.isMapNpc(n)), ...mapNpcList]);
+if (mapNpcList.length) log.success(`Loaded ${mapNpcList.length} particle npc(s) from the maps`);
 
 function tryParse(data: string): any {
   try {

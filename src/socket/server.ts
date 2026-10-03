@@ -13,6 +13,7 @@ let lastSessionValidationTime = 0;
 // Fix the double-dispatch in handleBackpressure before lowering this.
 const MAX_BUFFER_SIZE = 1024 * 1024 * 1024;
 const packetQueue = new Map<string, (() => void)[]>();
+import { forgetNpcStream } from "../systems/npcStreaming";
 import "../utility/validate_config.ts";
 import crypto from "crypto";
 import { packetManager } from "./packet_manager.ts";
@@ -989,6 +990,7 @@ function cleanupPlayerState(playerData: any) {
     spellEffects.clearSlows(id);
     spellEffects.clearVanishes(id);
     playerCache.remove(id);
+    forgetNpcStream(id);
     mapIndex.removePlayer(id);
     clearBatchQueuesForPlayer(id);
     clearPlayerTarget(id);
@@ -1158,6 +1160,7 @@ listener.on(Events.SAVE, async () => {
       return { success: true, playerId };
     } catch (e) {
       playerCache.remove(playerId);
+      forgetNpcStream(playerId);
       log.error(`Failed to save player ${playerId}: ${e as string}`);
       return { success: false, playerId, error: e };
     }

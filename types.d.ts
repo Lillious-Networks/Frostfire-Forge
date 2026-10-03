@@ -213,7 +213,14 @@ declare interface Particle {
   weather: WeatherData | 'none';
   affected_by_weather: Nullable<boolean>;
   zIndex: number;
+  /** Brightness of the glow (0 = none). */
   glow_intensity: number;
+  /** How far the glow reaches past the particle, in px (0 = derived from size and intensity, the old look). */
+  glow_radius?: number;
+  /** One steady light at the particle's position instead of an emitted stream (no lifetime, movement or spread). */
+  static_light?: boolean;
+  /** How much light the whole particle (core and glow) gives off, day and night: 1 = as drawn, 0 = none, above 1 brighter. */
+  brightness?: number;
   affected_by_time: Nullable<boolean>;
   time_on: Nullable<string>;
   time_off: Nullable<string>;

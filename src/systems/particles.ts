@@ -21,9 +21,20 @@ const resolveWeather = (weatherName: string | undefined) => {
 
 const particlesNow = performance.now();
 
+/** A comma-separated particle list with one name swapped for another (other names and their order kept). */
+export function renameInList(list: string, from: string, to: string): string {
+  return list.split(",").map((n) => (n.trim() === from ? to : n.trim())).filter(Boolean).join(",");
+}
+
+/** A particle's brightness: 1 when unset (rows saved before the column existed), never negative. */
+function brightnessOf(v: unknown): number {
+  const n = Number(v);
+  return v === null || v === undefined || v === "" || !Number.isFinite(n) ? 1 : Math.max(0, n);
+}
+
 const particles = {
   async add(particle: Particle) {
-    const response = await query("INSERT INTO particles (size, color, velocity, lifetime, opacity, visible, gravity, name, localposition, `interval`, amount, staggertime, spread, affected_by_weather, zIndex, glow_intensity, affected_by_time, time_on, time_off) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [particle.size, particle.color, particle.velocity, particle.lifetime, particle.opacity, particle.visible ? 1 : 0, particle.gravity, particle.name, particle.localposition, particle.interval, particle.amount, particle.staggertime, particle.spread, particle.affected_by_weather ? 1 : 0, particle.zIndex || 0, particle.glow_intensity || 0, particle.affected_by_time ? 1 : 0, particle.time_on || null, particle.time_off || null]);
+    const response = await query("INSERT INTO particles (size, color, velocity, lifetime, opacity, visible, gravity, name, localposition, `interval`, amount, staggertime, spread, affected_by_weather, zIndex, glow_intensity, glow_radius, static_light, brightness, affected_by_time, time_on, time_off) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [particle.size, particle.color, particle.velocity, particle.lifetime, particle.opacity, particle.visible ? 1 : 0, particle.gravity, particle.name, particle.localposition, particle.interval, particle.amount, particle.staggertime, particle.spread, particle.affected_by_weather ? 1 : 0, particle.zIndex || 0, particle.glow_intensity || 0, particle.glow_radius || 0, particle.static_light ? 1 : 0, brightnessOf(particle.brightness), particle.affected_by_time ? 1 : 0, particle.time_on || null, particle.time_off || null]);
     await assetCache.set("particles", response);
     return response;
   },
@@ -35,7 +46,7 @@ const particles = {
   },
 
   async update(particle: Particle) {
-    const response = await query("UPDATE particles SET size = ?, color = ?, velocity = ?, lifetime = ?, opacity = ?, visible = ?, gravity = ?, name = ?, localposition = ?, `interval` = ?, amount = ?, staggertime = ?, spread = ?, affected_by_weather = ?, zIndex = ?, glow_intensity = ?, affected_by_time = ?, time_on = ?, time_off = ? WHERE name = ?", [particle.size, particle.color, particle.velocity, particle.lifetime, particle.opacity, particle.visible ? 1 : 0, particle.gravity, particle.name, particle.localposition, particle.interval, particle.amount, particle.staggertime, particle.spread, particle.affected_by_weather ? 1 : 0, particle.zIndex || 0, particle.glow_intensity || 0, particle.affected_by_time ? 1 : 0, particle.time_on || null, particle.time_off || null, particle.name]);
+    const response = await query("UPDATE particles SET size = ?, color = ?, velocity = ?, lifetime = ?, opacity = ?, visible = ?, gravity = ?, name = ?, localposition = ?, `interval` = ?, amount = ?, staggertime = ?, spread = ?, affected_by_weather = ?, zIndex = ?, glow_intensity = ?, glow_radius = ?, static_light = ?, brightness = ?, affected_by_time = ?, time_on = ?, time_off = ? WHERE name = ?", [particle.size, particle.color, particle.velocity, particle.lifetime, particle.opacity, particle.visible ? 1 : 0, particle.gravity, particle.name, particle.localposition, particle.interval, particle.amount, particle.staggertime, particle.spread, particle.affected_by_weather ? 1 : 0, particle.zIndex || 0, particle.glow_intensity || 0, particle.glow_radius || 0, particle.static_light ? 1 : 0, brightnessOf(particle.brightness), particle.affected_by_time ? 1 : 0, particle.time_on || null, particle.time_off || null, particle.name]);
     await assetCache.set("particles", response);
     return response;
   },
@@ -78,6 +89,9 @@ const particles = {
         affected_by_weather: particle.affected_by_weather === 1,
         zIndex: particle.zIndex || 0,
         glow_intensity: Number(particle.glow_intensity) || 0,
+        glow_radius: Number(particle.glow_radius) || 0,
+        static_light: particle.static_light === 1 || particle.static_light === true,
+        brightness: brightnessOf(particle.brightness),
         affected_by_time: particle.affected_by_time === 1,
         time_on: particle.time_on || null,
         time_off: particle.time_off || null
@@ -86,6 +100,28 @@ const particles = {
     }
     await assetCache.set("particles", particles);
     return particles;
+  },
+
+  /**
+   * Renames a particle and every reference to it: the comma-separated particle lists of npcs, spells and mounts.
+   * Returns how many rows of each referred to it. The caller refreshes the caches.
+   */
+  async rename(from: string, to: string): Promise<{ npcs: number; spells: number; mounts: number }> {
+    await query("UPDATE particles SET name = ? WHERE name = ?", [to, from]);
+    const counts = { npcs: 0, spells: 0, mounts: 0 };
+    const tables: Array<[keyof typeof counts, string]> = [["npcs", "id"], ["spells", "name"], ["mounts", "name"]];
+    for (const [table, key] of tables) {
+      const rows = (await query(`SELECT ${key} AS k, particles FROM ${table} WHERE particles LIKE ?`, [`%${from}%`])) as any[];
+      for (const row of rows || []) {
+        if (typeof row.particles !== "string") continue;
+        const names = row.particles.split(",").map((n: string) => n.trim());
+        if (!names.includes(from)) continue;
+        await query(`UPDATE ${table} SET particles = ? WHERE ${key} = ?`, [renameInList(row.particles, from, to), row.k]);
+        counts[table]++;
+      }
+    }
+    await particles.list();
+    return counts;
   },
 
   async find(particle: Particle) {
@@ -123,6 +159,9 @@ const particles = {
       affected_by_weather: response[0]?.affected_by_weather === 1,
       zIndex: response[0]?.zIndex || 0,
       glow_intensity: Number(response[0]?.glow_intensity) || 0,
+      glow_radius: Number(response[0]?.glow_radius) || 0,
+      static_light: response[0]?.static_light === 1 || response[0]?.static_light === true,
+      brightness: brightnessOf(response[0]?.brightness),
       affected_by_time: response[0]?.affected_by_time === 1,
       time_on: response[0]?.time_on || null,
       time_off: response[0]?.time_off || null
@@ -130,6 +169,27 @@ const particles = {
     await assetCache.set("particles", p);
     return p;
   },
+}
+
+// Columns added to particles after their first release: a database set up before then gets them here, so saving
+// particles never fails on them. glow_radius: how far a particle's glow reaches (glow_intensity is its brightness
+// only); static_light: the particle is one steady light at its position instead of an emitted stream; brightness: how
+// much light the whole particle gives off (1 = as drawn).
+for (const col of [
+  { name: "glow_radius", type: "FLOAT NOT NULL DEFAULT 0" },
+  { name: "static_light", type: "INT NOT NULL DEFAULT 0" },
+  { name: "brightness", type: "FLOAT NOT NULL DEFAULT 1" },
+]) {
+  try {
+    await query(`SELECT ${col.name} FROM particles LIMIT 1`);
+  } catch {
+    try {
+      await query(`ALTER TABLE particles ADD COLUMN ${col.name} ${col.type}`);
+      log.info(`Added the ${col.name} column to the particles table`);
+    } catch (e) {
+      log.warn(`Could not add the ${col.name} column to the particles table: ${e}`);
+    }
+  }
 }
 
 // Initialize particles cache on startup

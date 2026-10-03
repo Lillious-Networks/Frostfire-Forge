@@ -355,6 +355,9 @@ const createParticleTable = async () => {
         affected_by_weather INTEGER NOT NULL DEFAULT 0,
         zIndex INTEGER NOT NULL DEFAULT 0,
         glow_intensity FLOAT NOT NULL DEFAULT 0,
+      glow_radius FLOAT NOT NULL DEFAULT 0,
+      static_light INTEGER NOT NULL DEFAULT 0,
+      brightness FLOAT NOT NULL DEFAULT 1,
         affected_by_time INTEGER DEFAULT 0,
         time_on TEXT DEFAULT NULL,
         time_off TEXT DEFAULT NULL
@@ -385,6 +388,8 @@ const createDefaultWeather = async () => {
     INSERT OR IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('clear', 0, 'none', 0, 30, 68, 0);
   `;
   await query(sql);
+  // "darkness": no shadows and a near-black scene (the client's ambience keys off the name)
+  await query(`INSERT OR IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('darkness', 0.9, 'none', 0, 40, 50, 0);`);
 }
 
 const createWorldTable = async () => {

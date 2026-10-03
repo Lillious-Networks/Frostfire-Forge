@@ -5,7 +5,26 @@ function toMysqlDatetime(ms: number): string {
   return new Date(ms).toISOString().slice(0, 19).replace("T", " ");
 }
 
+/**
+ * NPCs placed by the maps themselves (particle emitters from a "Particles" object layer, see assetloader). They never
+ * touch the database; list() appends them so every cache reload keeps them.
+ */
+let mapNpcs: Npc[] = [];
+
 const npcs = {
+  setMapNpcs(list: Npc[]) {
+    mapNpcs = list;
+  },
+
+  getMapNpcs(): Npc[] {
+    return mapNpcs;
+  },
+
+  /** Map-placed NPCs carry negative ids so they never collide with database rows. */
+  isMapNpc(npc: Pick<Npc, "id"> | null | undefined): boolean {
+    return typeof npc?.id === "number" && npc.id < 0;
+  },
+
   async add(npc: Npc) {
     if (!npc || !npc?.map || !npc?.position) return;
     const last_updated = toMysqlDatetime(Date.now());
@@ -102,7 +121,7 @@ const npcs = {
       });
     }
 
-    return npcs;
+    return [...npcs, ...mapNpcs];
   },
 
   async find(npc: Npc) {

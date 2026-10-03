@@ -92,9 +92,10 @@ import guilds from "../systems/guild.ts";
 import spells from "../systems/spells";
 import equipment from "../systems/equipment.ts";
 import inventory from "../systems/inventory";
-import particles from "../systems/particles";
+import particles, { renameInList } from "../systems/particles";
 import worlds from "../systems/worlds";
 import npcSystem from "../systems/npcs";
+import { syncNpcChunks, preloadNpcsAt, forgetNpcStream } from "../systems/npcStreaming";
 import spellEffects, { registerSpellEffect, spellHasHostileEffects, cancelEffect, setStunsForPlayer, setSlowsForPlayer } from "../systems/spelleffects";
 import dots from "../systems/dots";
 import { rollHeal, spellManaCost } from "../systems/spellmath";
@@ -1113,45 +1114,8 @@ async function transitionPlayerToMap(
     }
 
     try {
-      const npcsData = await assetCache.get("npcs") as Npc[];
-      const npcsInMap = (npcsData || []).filter((npc: Npc) => npc.map === newMapName);
-      const particlesCache = await assetCache.get("particles") as Particle[] | null;
-      const npcPackets = await npcsInMap.reduce(
-        async (packetsPromise: Promise<any[]>, npc: Npc) => {
-          const packets = await packetsPromise;
-          const particleArray =
-            typeof npc.particles === "string" && particlesCache
-              ? (
-                (npc.particles as string)
-                  .split(",")
-                  .map((name) =>
-                    particlesCache.find((p: Particle) => p.name === name.trim())
-                  )
-              ).filter(Boolean)
-              : [];
-          const npcData = {
-            id: npc.id,
-            last_updated: npc.last_updated,
-            name: npc.name || null,
-            location: {
-              x: npc.position.x,
-              y: npc.position.y,
-              direction: npc.position.direction || "down",
-            },
-            script: npc.script,
-            hidden: npc.hidden,
-            dialog: npc.dialog,
-            gossip: npc.gossip || null,
-            particles: particleArray,
-            map: npc.map,
-            position: npc.position,
-            sprite_type: npc.sprite_type,
-            spriteLayers: getNpcSpriteLayers(npc),
-          };
-          return [...packets, ...packetManager.createNpc(npcData)];
-        },
-        Promise.resolve([] as any[])
-      );
+      // the NPCs of the map chunks round the arrival point; the rest stream in as the player moves (npcStreaming)
+      const npcPackets = await syncNpcChunks({ id: player.id, location: { map: newMapName, position: { x: newPosition.x, y: newPosition.y } } }, true);
       if (npcPackets.length) {
         sendPacket(wt, npcPackets);
       }
@@ -1371,6 +1335,16 @@ export function removeFromAuthenticationQueues(sessionId: string, token: string)
     authentication_session_queue.delete(sessionId);
 }
 
+/** Streams the NPCs round a player's position now (after a jump within the map: teleports, editor go-to). */
+async function resyncNpcChunks(playerObj: any, wt: any): Promise<void> {
+  try {
+    const packets = await syncNpcChunks(playerObj);
+    if (packets.length) sendPacket(wt, packets);
+  } catch (e) {
+    log.warn(`Failed to stream NPCs after a teleport: ${e}`);
+  }
+}
+
 export async function teleportPlayerWrapper(playerObj: any, mapName: string, x: number, y: number): Promise<void> {
   const wt = playerObj.wt;
   if (!wt) return;
@@ -1476,6 +1450,7 @@ authWorker.on("message", async (result: any) => {
           p.wt.close(1000, "Logged in from another location");
         }
         playerCache.remove(p.id);
+        forgetNpcStream(p.id);
         break;
       }
     }
@@ -1943,26 +1918,9 @@ authWorker.on("message", async (result: any) => {
         }
       }
 
-      // NPCs
-      const npcsData = await assetCache.get("npcs") as Npc[];
-      const npcsInMap = npcsData.filter((npc: Npc) => npc.map === spawnLocation.map.replace(".json", ""));
-      if (npcsInMap.length) {
-        const particlesCache = await assetCache.get("particles") as Particle[] | null;
-        const npcDataArray: any[] = [];
-        for (const npc of npcsInMap) {
-          const particleArray = typeof npc.particles === "string" && particlesCache
-            ? (npc.particles as string).split(",").map((name) => particlesCache.find((p: Particle) => p.name === name.trim())).filter(Boolean)
-            : [];
-          npcDataArray.push({
-            id: npc.id, last_updated: npc.last_updated, name: npc.name || null,
-            location: { x: npc.position.x, y: npc.position.y, direction: npc.position.direction || "down" },
-            script: npc.script, hidden: npc.hidden, dialog: npc.dialog, gossip: npc.gossip || null,
-            particles: particleArray, map: npc.map, position: npc.position,
-            sprite_type: npc.sprite_type, spriteLayers: getNpcSpriteLayers(npc),
-          });
-        }
-        sendPacket(wt, packetManager.loadNpcs(npcDataArray));
-      }
+      // NPCs: those of the map chunks round the spawn point; the rest stream in as the player moves (npcStreaming)
+      const spawnNpcPackets = await syncNpcChunks({ id: wt.data.id, location: { map: spawnLocation.map, position: { x: spawnLocation.x, y: spawnLocation.y } } }, true);
+      if (spawnNpcPackets.length) sendPacket(wt, spawnNpcPackets);
 
       const mapName = spawnLocation.map.replace(".json", "");
 
@@ -2657,6 +2615,12 @@ export default async function packetReceiver(
                       }
                     }
 
+                    // and the NPCs round the arrival point (warp.x / warp.y), held by the client for that map
+                    if (Number.isFinite(Number(warp.x)) && Number.isFinite(Number(warp.y))) {
+                      const npcPreload = await preloadNpcsAt(currentPlayer, destMapName, Number(warp.x), Number(warp.y));
+                      if (npcPreload.length) sendPacket(wt, npcPreload);
+                    }
+
                     if (chunksToPreload.length > 0) {
                       sendPacket(
                         wt,
@@ -2678,6 +2642,12 @@ export default async function packetReceiver(
                 }
               }
             }
+          }
+
+          // NPCs follow the map chunks round the player (npcStreaming); only does work when the player's chunk changed
+          if (shouldScanWarps) {
+            const npcPackets = await syncNpcChunks(currentPlayer);
+            if (npcPackets.length) sendPacket(wt, npcPackets);
           }
 
           const aoiUpdateCounter = gameLoop.getAOIUpdateCounter(currentPlayer.id);
@@ -2764,6 +2734,8 @@ export default async function packetReceiver(
           s: currentPlayer.isStealth ? 1 : 0
         };
         broadcastToAOI(currentPlayer, packetManager.moveXY(movementData), true);
+        // a teleport skips the walk that would stream in the NPCs round the new spot (npcStreaming)
+        await resyncNpcChunks(currentPlayer, wt);
         break;
       }
       case "CHAT": {
@@ -3441,6 +3413,7 @@ export default async function packetReceiver(
               r: globalStateRevision,
               s: currentPlayer.isStealth ? 1 : 0,
             }), true);
+            await resyncNpcChunks(currentPlayer, wt);
           } else {
             await teleportPlayerWrapper(currentPlayer, result.goto.map, result.goto.x, result.goto.y);
           }
@@ -5657,6 +5630,64 @@ export default async function packetReceiver(
         }
         break;
       }
+      // Renames a particle and every NPC / spell / mount reference to it (particles.rename), and the in-memory lists
+      // of the maps' particle NPCs (their map files still name the old particle until edited)
+      case "RENAME_PARTICLE": {
+        if (!currentPlayer) return;
+
+        const userPermissions = await permissions.get(currentPlayer.username) as string;
+        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
+        if (!perms.includes('server.admin') && !perms.includes('server.*')) {
+          sendPacket(wt, packetManager.notify({ message: 'You do not have permission to rename particles.' }));
+          return;
+        }
+
+        try {
+          const { from, to } = data as unknown as { from: string; to: string };
+          const oldName = String(from ?? "").trim(), newName = String(to ?? "").trim();
+          if (!oldName || !newName || newName.length > 255 || newName.includes(",")) {
+            sendPacket(wt, packetManager.notify({ message: 'Invalid particle name.' }));
+            return;
+          }
+          if (oldName === newName) return;
+          const existing = await particles.list();
+          if (!existing.some((p) => p.name === oldName)) {
+            sendPacket(wt, packetManager.notify({ message: `Particle ${oldName} not found.` }));
+            return;
+          }
+          if (existing.some((p) => p.name === newName)) {
+            sendPacket(wt, packetManager.notify({ message: `A particle named ${newName} already exists.` }));
+            return;
+          }
+
+          const counts = await particles.rename(oldName, newName);
+          let mapRefs = 0;
+          for (const n of npcSystem.getMapNpcs()) {
+            if (typeof n.particles === "string" && (n.particles as string).split(",").some((x) => x.trim() === oldName)) {
+              (n as any).particles = renameInList(n.particles as string, oldName, newName);
+              mapRefs++;
+            }
+          }
+          await assetCache.set("npcs", await npcSystem.list());
+          for (const key of ["spells", "mounts"]) {
+            const list = (await assetCache.get(key)) as any[] | null;
+            if (!Array.isArray(list)) continue;
+            for (const row of list) if (typeof row?.particles === "string") row.particles = renameInList(row.particles, oldName, newName);
+            await assetCache.set(key, list);
+          }
+          log.info(`Particle renamed by ${currentPlayer.username}: ${oldName} -> ${newName} (npcs ${counts.npcs}, spells ${counts.spells}, mounts ${counts.mounts}, map objects ${mapRefs})`);
+
+          const parts = [`Renamed ${oldName} to ${newName}`];
+          const refs = counts.npcs + counts.spells + counts.mounts;
+          if (refs) parts.push(`updated ${refs} NPC/spell/mount reference(s)`);
+          if (mapRefs) parts.push(`${mapRefs} map object(s) still say ${oldName} in their map file: rename it there too`);
+          sendPacket(wt, packetManager.notify({ message: parts.join("; ") }));
+        } catch (error: any) {
+          log.error(`Error renaming particle: ${error.message}`);
+          sendPacket(wt, packetManager.notify({ message: 'Error renaming particle.' }));
+        }
+        break;
+      }
       case "LIST_PARTICLES": {
         if (!currentPlayer) return;
 
@@ -5680,7 +5711,8 @@ export default async function packetReceiver(
         try {
           const allNpcs = await assetCache.get("npcs") as Npc[];
           const mapName = currentPlayer.location.map;
-          const npcsInMap = (allNpcs || []).filter((npc: Npc) => npc.map === mapName);
+          // map-placed particle NPCs are edited in the map (Particles layer), not here
+          const npcsInMap = (allNpcs || []).filter((npc: Npc) => npc.map === mapName && !npcSystem.isMapNpc(npc));
           // Resolve particles to include all particle data (including time fields)
           const resolvedNpcs = await Promise.all(npcsInMap.map(resolveNpcForClient));
           // Quest links for the NPC editor's given/ended pickers.
@@ -6547,6 +6579,7 @@ export default async function packetReceiver(
 
               await updatePlayerAOI(targetPlayer, spawnBatchQueue, despawnBatchQueue);
               await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
+              await resyncNpcChunks(targetPlayer, targetPlayer.wt); // summoned within the map
 
               const targetAnimationNameForSprite = getAnimationNameForDirection(
                 targetPlayer.location.position?.direction || "down",
@@ -6799,6 +6832,7 @@ export default async function packetReceiver(
 
               await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
               await updatePlayerAOI(targetPlayer, spawnBatchQueue, despawnBatchQueue);
+              await resyncNpcChunks(currentPlayer, wt); // teleported within the map
 
               const targetAnimationNameForSpriteTeleport = getAnimationNameForDirection(
                 targetPlayer.location.position?.direction || "down",
@@ -7640,6 +7674,7 @@ export default async function packetReceiver(
                 targetPlayer.stats.stamina = targetPlayer.stats.total_max_stamina;
               }
               playerCache.set(targetPlayer.id, targetPlayer);
+              await resyncNpcChunks(targetPlayer, targetPlayer.wt); // respawned at the map's centre
               try {
                 await player.setDeadState(targetPlayer.username, 0, null);
               } catch (e: any) {
@@ -9842,6 +9877,7 @@ export default async function packetReceiver(
           if (!p || !p.isGhost || !p.ghostTeleportPending) return;
           p.ghostTeleportPending = false;
           playerCache.set(p.id, p);
+          void resyncNpcChunks(p, p.wt); // the graveyard's NPCs
           globalStateRevision++;
           filterPlayersByMap(p.location.map).forEach((v) => {
             sendPacket(

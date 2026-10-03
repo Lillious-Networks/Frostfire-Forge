@@ -312,6 +312,17 @@ export const packetManager = {
       )
     ] as any[];
   },
+  /** NPCs whose map chunks left the player's range (systems/npcStreaming.ts): the client drops them. */
+  unloadNpcs: (ids: number[]) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "UNLOAD_NPCS",
+          data: { ids },
+        })
+      )
+    ] as any[];
+  },
   loadMap: (data: any) => {
     return [
       packet.encode(
