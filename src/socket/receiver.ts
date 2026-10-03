@@ -143,10 +143,16 @@ function resolveSpellParticles(spell: SpellData, particleList: Particle[] | null
   return resolved.length > 0 ? resolved : null;
 }
 
+// The current worlds list. `worlds.update` stores it back as a JSON string, so
+// accept both shapes.
+async function getLiveWorlds(): Promise<WorldData[]> {
+  const worldsResult = await assetCache.get("worlds").catch(() => worldsCache) as WorldData[] | string;
+  return Array.isArray(worldsResult) ? worldsResult : JSON.parse(worldsResult as string);
+}
+
 async function resolveWorldWeather(worldName: string): Promise<{ weather: string; weatherData: WeatherData | null }> {
   const normalized = worldName.replace(".json", "");
-  const worldsResult = await assetCache.get("worlds").catch(() => worldsCache) as WorldData[] | string;
-  const worlds: WorldData[] = Array.isArray(worldsResult) ? worldsResult : JSON.parse(worldsResult as string);
+  const worlds = await getLiveWorlds();
   const world = worlds.find((w) => w.name === normalized);
   if (!world) return { weather: "clear", weatherData: null };
 
@@ -11586,7 +11592,9 @@ function scheduleLightning() {
   const delay = 2000 + Math.random() * 3000;
   setTimeout(async () => {
     try {
-      for (const world of worldsCache) {
+      // Same list the rain comes from (resolveWorldWeather), not the startup
+      // snapshot in worldsCache.
+      for (const world of await getLiveWorlds()) {
         const resolved = resolvedWeatherCache.get(world.name);
         const activeWeather = resolved ? resolved.weather : world.weather;
         if (activeWeather !== "thunderstorm") continue;
