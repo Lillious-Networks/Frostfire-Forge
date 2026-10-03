@@ -2262,8 +2262,9 @@ export default async function packetReceiver(
 
         // Mid-cast (a can_move spell; the rest were interrupted above) the key
         // changes where the caster walks, not where they face: they stay turned
-        // toward the target until restoreWalkingFacing runs at cast end.
-        const facing = currentPlayer.casting
+        // toward the target until restoreWalkingFacing runs at cast end. A cast
+        // on self has no target to face, so the caster turns as usual.
+        const facing = currentPlayer.casting && !currentPlayer.castOnSelf
           ? currentPlayer.location.position.direction || direction
           : direction;
         currentPlayer.location.position.direction = facing || "down";
@@ -3721,6 +3722,7 @@ export default async function packetReceiver(
         // --- AoE branch: cast on self, hit everything around the caster ---
         if (isAoeSpell && !isGroundAoe) {
           currentPlayer.casting = true;
+          currentPlayer.castOnSelf = true;
           currentPlayer.castId = (currentPlayer.castId || 0) + 1;
           playerCache.set(currentPlayer.id, currentPlayer);
           const thisAoeCastId = currentPlayer.castId;
@@ -3932,6 +3934,7 @@ export default async function packetReceiver(
           }
 
           currentPlayer.casting = true;
+          currentPlayer.castOnSelf = false;
           currentPlayer.castId = (currentPlayer.castId || 0) + 1;
           playerCache.set(currentPlayer.id, currentPlayer);
           const thisGroundCastId = currentPlayer.castId;
@@ -4432,6 +4435,7 @@ export default async function packetReceiver(
         }
 
         currentPlayer.casting = true;
+        currentPlayer.castOnSelf = isSelf;
         currentPlayer.castId = (currentPlayer.castId || 0) + 1;
         playerCache.set(currentPlayer.id, currentPlayer);
         const thisCastId = currentPlayer.castId;
@@ -11003,6 +11007,7 @@ async function castSpellOnCreature(wt: any, currentPlayer: any, spell: SpellData
   currentPlayer.lastCastTime = performance.now();
   currentPlayer.castingSpellId = spellId;
   currentPlayer.casting = true;
+  currentPlayer.castOnSelf = false;
   currentPlayer.castId = (currentPlayer.castId || 0) + 1;
   currentPlayer.mounted = false;
   const thisCastId = currentPlayer.castId;
