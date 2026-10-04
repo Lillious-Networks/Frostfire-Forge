@@ -249,18 +249,51 @@ jobs:
           echo "Image: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:latest"
           echo "Image: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:${{ github.sha }}"
 
+  deploy:
+    name: Octopus Deployment
+    runs-on: ubuntu-latest
+    env:
+      OCTOPUS_SPACE: 'Default'
+      OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
+      OCTOPUS_URL: ${{ secrets.OCTOPUS_URL }}
+    permissions:
+      id-token: write
+    needs: [test-integration]
+    if: success()
+    steps:
+    - name: Create a release in Octopus Deploy 🐙
+      uses: OctopusDeploy/create-release-action@v3
+      with:
+        project: 'Frostfire Forge Engine'
+        release_number: '1.0.${{ github.run_number }}'
+
+    - name: Deploy a release in Octopus Deploy 🐙
+      id: deploy_release
+      uses: OctopusDeploy/deploy-release-action@v3
+      with:
+        project: 'Frostfire Forge Engine'
+        release_number: '1.0.${{ github.run_number }}'
+        environments: |
+            Production
+    - name: Await task in Octopus Deploy 🐙
+      id: await_task_in_octopus_deploy
+      uses: OctopusDeploy/await-task-action@v4
+      with:
+        server_task_id: ${{ fromJson(steps.deploy_release.outputs.server_tasks)[0].serverTaskId }}
+
   notify-completion:
     name: Pipeline Complete
     runs-on: ubuntu-latest
-    needs: [test-integration, publish]
+    needs: [test-integration, publish, deploy]
     if: always()
     steps:
       - name: Notify Pipeline Complete
         run: |
           INTEGRATION_STATUS="${{ needs.test-integration.result }}"
           PUBLISH_STATUS="${{ needs.publish.result }}"
+          DEPLOY_STATUS="${{ needs.deploy.result }}"
 
-          if [ "$INTEGRATION_STATUS" = "success" ] && [ "$PUBLISH_STATUS" = "success" ]; then
+          if [ "$INTEGRATION_STATUS" = "success" ] && [ "$PUBLISH_STATUS" = "success" ] && [ "$DEPLOY_STATUS" = "success" ]; then
             echo "✅ Gateway and Game Server Integration Tests Passed"
             echo "✅ Docker Image Published to GitHub Packages"
             echo "✅ Development Pipeline Complete"
@@ -268,4 +301,5 @@ jobs:
             echo "⚠️  Pipeline did not complete successfully"
             echo "Integration Status: $INTEGRATION_STATUS"
             echo "Publish Status: $PUBLISH_STATUS"
+            echo "Deploy Status: $DEPLOY_STATUS"
           fi
