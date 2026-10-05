@@ -4,7 +4,7 @@ import log from "../../modules/logger";
 import { listener } from "../../modules/event_bus";
 import { Events } from "../events";
 import { find, indexes, getCachedQuestsSync } from "./definitions";
-import { getCachedLog, setCachedLog } from "./log";
+import { getCachedLog, setCachedLog, writeQuestRows, ofQuest, type QuestProgressRow } from "./log";
 
 const lower = (s: unknown): string => String(s ?? "").toLowerCase();
 const normMap = (m: unknown): string => String(m ?? "").replaceAll(".json", "").toLowerCase();
@@ -30,26 +30,30 @@ function candidateQuestIds(type: QuestObjectiveType, target: string): number[] {
   return [];
 }
 
-async function writeProgress(username: string, questId: number, objectiveId: number, count: number): Promise<void> {
+/** Whether the count was written. The entry the player carries is given it only then. */
+async function writeProgress(username: string, questId: number, objectiveId: number, count: number): Promise<boolean> {
   const uname = lower(username);
+  const same = (row: QuestProgressRow) => ofQuest(questId)(row) && Number(row.objective_id) === Number(objectiveId);
   try {
-    const existing = (await query(
-      "SELECT count FROM quest_objective_progress WHERE username = ? AND quest_id = ? AND objective_id = ?",
-      [uname, questId, objectiveId]
-    )) as any[];
-    if (existing && existing.length > 0) {
-      await query(
-        "UPDATE quest_objective_progress SET count = ? WHERE username = ? AND quest_id = ? AND objective_id = ?",
-        [count, uname, questId, objectiveId]
-      );
-    } else {
-      await query(
-        "INSERT INTO quest_objective_progress (username, quest_id, objective_id, count) VALUES (?, ?, ?, ?)",
-        [uname, questId, objectiveId, count]
-      );
-    }
+    await writeQuestRows(username, async (rows) => {
+      if (rows.progress.some(same)) {
+        await query(
+          "UPDATE quest_objective_progress SET count = ? WHERE username = ? AND quest_id = ? AND objective_id = ?",
+          [count, uname, questId, objectiveId]
+        );
+        rows.progress = rows.progress.map((row) => (same(row) ? { ...row, count } : row));
+      } else {
+        await query(
+          "INSERT INTO quest_objective_progress (username, quest_id, objective_id, count) VALUES (?, ?, ?, ?)",
+          [uname, questId, objectiveId, count]
+        );
+        rows.progress = [...rows.progress, { quest_id: questId, objective_id: objectiveId, count }];
+      }
+    });
+    return true;
   } catch (error) {
     log.error(`Quest progress write failed for ${uname} quest ${questId} objective ${objectiveId}: ${error}`);
+    return false;
   }
 }
 
@@ -67,25 +71,64 @@ function entryIsComplete(quest: Quest, entry: QuestLogEntry): boolean {
   return true;
 }
 
-async function markReady(username: string, entry: QuestLogEntry): Promise<void> {
+/**
+ * Whether the quest is ready in the table. The entry the player carries is
+ * ready only then: after a write that failed it has been put back in step
+ * with the table, so it says whether the write got there after all.
+ */
+async function markReady(username: string, entry: QuestLogEntry): Promise<boolean> {
   const uname = lower(username);
-  entry.state = "ready";
   try {
-    await query("UPDATE quest_log SET state = 'ready' WHERE username = ? AND quest_id = ?", [uname, entry.quest_id]);
+    await writeQuestRows(username, async (rows) => {
+      await query("UPDATE quest_log SET state = 'ready' WHERE username = ? AND quest_id = ?", [uname, entry.quest_id]);
+      rows.log = rows.log.map((row) => (ofQuest(entry.quest_id)(row) ? { ...row, state: "ready" } : row));
+    });
   } catch (error) {
     log.error(`Quest ready transition failed for ${uname} quest ${entry.quest_id}: ${error}`);
+    return entry.state === "ready";
   }
+  entry.state = "ready";
+  return true;
 }
 
-async function markActive(username: string, entry: QuestLogEntry): Promise<void> {
+/** Whether the quest is active again in the table. The entry the player carries is active only then, as with markReady. */
+async function markActive(username: string, entry: QuestLogEntry): Promise<boolean> {
   const uname = lower(username);
-  if (entry.state !== "ready") return;
-  entry.state = "active";
+  if (entry.state !== "ready") return true;
   try {
-    await query("UPDATE quest_log SET state = 'active' WHERE username = ? AND quest_id = ? AND state = 'ready'", [uname, entry.quest_id]);
+    await writeQuestRows(username, async (rows) => {
+      await query("UPDATE quest_log SET state = 'active' WHERE username = ? AND quest_id = ? AND state = 'ready'", [uname, entry.quest_id]);
+      rows.log = rows.log.map((row) => (ofQuest(entry.quest_id)(row) && row.state === "ready" ? { ...row, state: "active" } : row));
+    });
   } catch (error) {
     log.error(`Quest un-ready transition failed for ${uname} quest ${entry.quest_id}: ${error}`);
+    return entry.state !== "ready";
   }
+  entry.state = "active";
+  return true;
+}
+
+/**
+ * The state an entry's progress calls for, written when the entry is not in
+ * it: ready once every objective is met and, where a count can fall
+ * (`falls`), active again once one is not. Answers whether this made the
+ * quest ready, and null when the write failed. The entry is then not in the
+ * state its progress calls for, and stays so until the quest is next
+ * credited: an objective found at its count already tries this again.
+ */
+async function settle(username: string, quest: Quest, entry: QuestLogEntry, falls = false): Promise<boolean | null> {
+  if (entryIsComplete(quest, entry)) {
+    if (entry.state === "ready") return false;
+    return (await markReady(username, entry)) ? true : null;
+  }
+  if (falls && entry.state === "ready") return (await markActive(username, entry)) ? false : null;
+  return false;
+}
+
+/** A quest that became ready with no count changing, as an update of the objective that was looked at. */
+function readied(uname: string, quest: Quest, o: QuestObjective, count: number): ObjectiveUpdate {
+  listener.emit(Events.QUEST_READY, { username: uname, questId: quest.id });
+  return { questId: quest.id, objectiveId: o.id, type: o.type, target: o.target, count, required: o.required_count, questReady: true };
 }
 
 export function trackRadiusPlayer(username: string): void {
@@ -146,7 +189,10 @@ export async function credit(
 
   const updates: ObjectiveUpdate[] = [];
   let cacheDirty = false;
+  // A write that fails ends the work: what was written before it is reported, the rest is left for the next credit.
+  let failed = false;
   for (const qid of relevant) {
+    if (failed) break;
     const quest = find(qid) || getCachedQuestsSync().find((q) => q.id === qid);
     if (!quest) continue;
     const entry = activeByQuest.get(qid)!;
@@ -161,18 +207,26 @@ export async function credit(
         continue;
       }
       const current = Number(entry.progress[o.id]) || 0;
-      if (current >= o.required_count) continue;
+      if (current >= o.required_count) {
+        // Nothing to add. A quest whose ready write failed is made ready now.
+        const settled = await settle(username, quest, entry);
+        if (settled) {
+          updates.push(readied(uname, quest, o, current));
+          cacheDirty = true;
+        }
+        failed = settled === null;
+        if (failed) break;
+        continue;
+      }
       const next = Math.min(o.required_count, current + amount);
       if (next === current) continue;
-      await writeProgress(username, qid, o.id, next);
+      failed = !(await writeProgress(username, qid, o.id, next));
+      if (failed) break;
       entry.progress[o.id] = next;
       cacheDirty = true;
-      const wasComplete = entry.state === "ready";
-      let questReady = false;
-      if (!wasComplete && entryIsComplete(quest, entry)) {
-        await markReady(username, entry);
-        questReady = true;
-      }
+      const settled = await settle(username, quest, entry);
+      const questReady = settled === true;
+      failed = settled === null;
       const update: ObjectiveUpdate = {
         questId: qid,
         objectiveId: o.id,
@@ -193,6 +247,7 @@ export async function credit(
       if (questReady) {
         listener.emit(Events.QUEST_READY, { username: uname, questId: qid });
       }
+      if (failed) break;
     }
   }
   if (cacheDirty) setCachedLog(username, cached);
@@ -229,7 +284,10 @@ export async function sync(
 
   const updates: ObjectiveUpdate[] = [];
   let cacheDirty = false;
+  // A write that fails ends the work: what was written before it is reported, the rest is left for the next sync.
+  let failed = false;
   for (const qid of relevant) {
+    if (failed) break;
     const quest = find(qid) || getCachedQuestsSync().find((q) => q.id === qid);
     if (!quest) continue;
     const entry = activeByQuest.get(qid)!;
@@ -245,19 +303,24 @@ export async function sync(
       }
       const clamped = Math.min(o.required_count, safeTotal);
       const current = Number(entry.progress[o.id]) || 0;
-      if (clamped === current) continue;
-      await writeProgress(username, qid, o.id, clamped);
+      if (clamped === current) {
+        // Nothing to change. A quest whose ready (or un-ready) write failed is put in the state its progress calls for now.
+        const settled = await settle(username, quest, entry, true);
+        if (settled) {
+          updates.push(readied(uname, quest, o, current));
+          cacheDirty = true;
+        }
+        failed = settled === null;
+        if (failed) break;
+        continue;
+      }
+      failed = !(await writeProgress(username, qid, o.id, clamped));
+      if (failed) break;
       entry.progress[o.id] = clamped;
       cacheDirty = true;
-      let questReady = false;
-      if (entryIsComplete(quest, entry)) {
-        if (entry.state !== "ready") {
-          await markReady(username, entry);
-          questReady = true;
-        }
-      } else if (entry.state === "ready") {
-        await markActive(username, entry);
-      }
+      const settled = await settle(username, quest, entry, true);
+      const questReady = settled === true;
+      failed = settled === null;
       const update: ObjectiveUpdate = {
         questId: qid,
         objectiveId: o.id,
@@ -278,6 +341,7 @@ export async function sync(
       if (questReady) {
         listener.emit(Events.QUEST_READY, { username: uname, questId: qid });
       }
+      if (failed) break;
     }
   }
   if (cacheDirty) setCachedLog(username, cached);
@@ -299,9 +363,14 @@ export function isComplete(username: string, questId: number): boolean {
 export async function clear(username: string, questId: number): Promise<void> {
   const uname = lower(username);
   try {
-    await query("DELETE FROM quest_objective_progress WHERE username = ? AND quest_id = ?", [uname, Number(questId)]);
+    await writeQuestRows(username, async (rows) => {
+      await query("DELETE FROM quest_objective_progress WHERE username = ? AND quest_id = ?", [uname, Number(questId)]);
+      rows.progress = rows.progress.filter((row) => !ofQuest(questId)(row));
+    });
   } catch (error) {
     log.error(`Quest progress clear failed for ${uname} quest ${questId}: ${error}`);
+    // Not written, as far as is known: the entry the player carries keeps the counts the table holds.
+    return;
   }
   const cached = getCachedLog(username);
   const entry = cached?.active.find((e) => e.quest_id === Number(questId));
@@ -311,7 +380,8 @@ export async function clear(username: string, questId: number): Promise<void> {
       const quest = find(Number(questId));
       // Zero-objective quests stay ready even with empty progress.
       if (quest && (quest.objectives || []).length > 0) {
-        entry.state = "active";
+        // In the table as on the entry: a quest left ready there would be ready again at the next login.
+        await markActive(username, entry);
       }
     }
     setCachedLog(username, cached!);
@@ -332,7 +402,10 @@ export async function checkExplorePosition(
   const normalized = normMap(mapName);
   const updates: ObjectiveUpdate[] = [];
   let cacheDirty = false;
+  // A write that fails ends the work: what was written before it is reported, the rest is left for the next check.
+  let failed = false;
   for (const entry of cached.active) {
+    if (failed) break;
     if (entry.state === "completed") continue;
     const quest = find(entry.quest_id) || getCachedQuestsSync().find((q) => q.id === entry.quest_id);
     if (!quest) continue;
@@ -343,16 +416,25 @@ export async function checkExplorePosition(
       const dist = Math.hypot(Number(x) - Number(o.target_x), Number(y) - Number(o.target_y));
       if (dist > Number(o.target_radius)) continue;
       const current = Number(entry.progress[o.id]) || 0;
-      if (current >= o.required_count) continue;
+      if (current >= o.required_count) {
+        // Nothing to add. A quest whose ready write failed is made ready now.
+        const settled = await settle(username, quest, entry);
+        if (settled) {
+          updates.push(readied(uname, quest, o, current));
+          cacheDirty = true;
+        }
+        failed = settled === null;
+        if (failed) break;
+        continue;
+      }
       const next = o.required_count;
-      await writeProgress(username, entry.quest_id, o.id, next);
+      failed = !(await writeProgress(username, entry.quest_id, o.id, next));
+      if (failed) break;
       entry.progress[o.id] = next;
       cacheDirty = true;
-      let questReady = false;
-      if (entryIsComplete(quest, entry) && entry.state !== "ready") {
-        await markReady(username, entry);
-        questReady = true;
-      }
+      const settled = await settle(username, quest, entry);
+      const questReady = settled === true;
+      failed = settled === null;
       const update: ObjectiveUpdate = {
         questId: entry.quest_id,
         objectiveId: o.id,
@@ -373,6 +455,7 @@ export async function checkExplorePosition(
       if (questReady) {
         listener.emit(Events.QUEST_READY, { username: uname, questId: entry.quest_id });
       }
+      if (failed) break;
     }
   }
   if (cacheDirty) setCachedLog(username, cached);

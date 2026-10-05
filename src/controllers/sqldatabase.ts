@@ -102,3 +102,10 @@ export default async function query<T>(sql: string, values?: any[]): Promise<T[]
     worker.postMessage({ id: queryId, sql, values: values || [] });
   });
 }
+
+/** Resolves once every query sent so far has been answered or has timed out. */
+export async function drainQueries(): Promise<void> {
+  while (pendingQueries.size > 0) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}

@@ -2,8 +2,6 @@ import { parentPort, workerData } from "worker_threads";
 import player from "../systems/player.ts";
 import query from "../controllers/sqldatabase.ts";
 import log from "../modules/logger.ts";
-import parties from "../systems/parties.ts";
-import guilds from "../systems/guild.ts";
 import collectables from "../systems/collectables.ts";
 
 const items = workerData?.assets?.items ? JSON.parse(workerData.assets.items) : [];
@@ -102,9 +100,12 @@ const authentication = {
                 })
             );
 
+            // By id, from the database: on this thread the guild and party
+            // systems hold no copy of their tables and would read every row.
+            const membersOf = (rows: any) => String(rows?.[0]?.members ?? "").split(",").map((member) => member.trim()).filter((member) => member);
             const [partyMembers, guildMembers] = await Promise.all([
-                playerData.party_id ? parties.getPartyMembers(Number(playerData.party_id)) : null,
-                playerData.guild_id ? guilds.getGuildMembers(Number(playerData.guild_id)) : null,
+                playerData.party_id ? query("SELECT members FROM parties WHERE id = ?", [Number(playerData.party_id)]).then(membersOf) : null,
+                playerData.guild_id ? query("SELECT members FROM guilds WHERE id = ?", [Number(playerData.guild_id)]).then(membersOf) : null,
             ]);
 
             playerData.inventory = playerInventoryData;
@@ -185,7 +186,23 @@ const authentication = {
     }
 }
 
-parentPort?.on("message", async (data: { token: string, id: string }) => {
+parentPort?.on("message", async (data: { token: string, id: string, spells?: string | null, items?: string | null }) => {
+    // The spell editor changed the spell list: replace the copy taken at startup.
+    if (data.spells !== undefined) {
+        for (const name of Object.keys(spellsByName)) delete spellsByName[name];
+        for (const spell of (data.spells ? JSON.parse(data.spells) : []) as SpellData[]) {
+            spellsByName[spell.name] = spell;
+        }
+        return;
+    }
+    // The item editor changed the item list: replace the copy taken at startup.
+    if (data.items !== undefined) {
+        itemsByName.clear();
+        for (const item of (data.items ? JSON.parse(data.items) : []) as Item[]) {
+            itemsByName.set(String(item.name || "").toLowerCase(), item);
+        }
+        return;
+    }
     const result = await authentication.process(data.token, data.id);
     parentPort?.postMessage({ ...result, token: data.token, id: data.id });
 });

@@ -1,53 +1,15 @@
 import { SQL } from 'bun';
 import { getSqlCert } from "./utils";
+import { sqlWrapper } from "./sqlescape";
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
 
 let sqlController: any = null;
 
-function sqlWrapper(query: string, params: any[]): string {
-  const parts = query.split("?");
-  if (parts.length - 1 !== params.length) {
-    throw new Error("Number of placeholders does not match number of parameters");
-  }
-
-  let result = parts[0];
-  for (let i = 0; i < params.length; i++) {
-    const param = params[i];
-
-    if (Array.isArray(param)) {
-      if (param.length === 0) {
-        throw new Error("Cannot use empty array as SQL parameter");
-      }
-      const escapedArray = param.map(p => escapeValue(p)).join(", ");
-      result += escapedArray + parts[i + 1];
-    } else {
-      result += escapeValue(param) + parts[i + 1];
-    }
-  }
-
-  return result;
-}
-
-function escapeValue(param: any): string {
-  if (param === null || param === undefined) {
-    return "NULL";
-  } else if (typeof param === "string") {
-    return "'" + param.replace(/'/g, "''") + "'";
-  } else if (typeof param === "number") {
-    return param.toString();
-  } else if (typeof param === "boolean") {
-    return param ? "1" : "0";
-  } else if (param instanceof Date) {
-    return "'" + param.toISOString().slice(0, 19).replace("T", " ") + "'";
-  } else {
-    return "'" + String(param).replace(/'/g, "''") + "'";
-  }
-}
+const _databaseEngine = (process.env.DATABASE_ENGINE || "mysql") as DatabaseEngine;
 
 async function createSQLController(): Promise<any> {
-  const _databaseEngine = process.env.DATABASE_ENGINE || "mysql" as DatabaseEngine;
   if (_databaseEngine === "mysql") {
     if (!process.env.DATABASE_HOST || !process.env.DATABASE_USER || !process.env.DATABASE_PASSWORD || !process.env.DATABASE_NAME) {
       throw new Error("MySQL connection parameters are not set in environment variables.");
@@ -186,7 +148,7 @@ self.onmessage = async (event: MessageEvent) => {
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const queryPromise = sqlController.unsafe(sqlWrapper(sql, values || []));
+      const queryPromise = sqlController.unsafe(sqlWrapper(sql, values || [], _databaseEngine));
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error(`Query timeout after ${queryTimeout}ms`)), queryTimeout)
       );

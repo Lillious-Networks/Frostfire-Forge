@@ -1,0 +1,59 @@
+// Builds the SQL text the database worker sends. Kept apart from the worker so it can be tested without a connection.
+
+export function sqlWrapper(query: string, params: any[], engine: DatabaseEngine): string {
+  const parts = query.split("?");
+  if (parts.length - 1 !== params.length) {
+    throw new Error("Number of placeholders does not match number of parameters");
+  }
+
+  let result = parts[0];
+  for (let i = 0; i < params.length; i++) {
+    const param = params[i];
+
+    if (Array.isArray(param)) {
+      if (param.length === 0) {
+        throw new Error("Cannot use empty array as SQL parameter");
+      }
+      const escapedArray = param.map(p => escapeValue(p, engine)).join(", ");
+      result += escapedArray + parts[i + 1];
+    } else {
+      result += escapeValue(param, engine) + parts[i + 1];
+    }
+  }
+
+  return result;
+}
+
+export function escapeValue(param: any, engine: DatabaseEngine): string {
+  if (param === null || param === undefined) {
+    return "NULL";
+  } else if (typeof param === "string") {
+    return escapeString(param, engine);
+  } else if (typeof param === "number") {
+    return param.toString();
+  } else if (typeof param === "boolean") {
+    return param ? "1" : "0";
+  } else if (param instanceof Date) {
+    return "'" + param.toISOString().slice(0, 19).replace("T", " ") + "'";
+  } else {
+    return escapeString(String(param), engine);
+  }
+}
+
+/**
+ * MySQL reads a backslash inside a string literal as an escape character, so an unescaped one
+ * changes the next character and, at the end of a value, escapes the closing quote. SQLite and
+ * Postgres (with its default standard_conforming_strings) read a backslash as itself: doubling it
+ * there would store two.
+ *
+ * On MySQL only the backslash and NUL are escaped. The quote stays doubled rather than written as
+ * \', and line breaks and the like stay raw, so the literal still ends where it should on a server
+ * running with NO_BACKSLASH_ESCAPES (which would store the doubled backslash as two).
+ */
+function escapeString(value: string, engine: DatabaseEngine): string {
+  if (engine === "mysql") {
+    value = value.replaceAll("\\", "\\\\").replaceAll("\0", "\\0");
+  }
+
+  return "'" + value.replace(/'/g, "''") + "'";
+}

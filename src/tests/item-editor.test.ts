@@ -1,14 +1,17 @@
-import { describe, expect, mock, test } from "bun:test";
+import { beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 
 const queries: Array<{ sql: string; params: any[] }> = [];
+/** The items table, for the one read the editor ever makes of it: all of it, after a write that failed. */
 let itemRows: any[] = [];
+/** A statement matching this is refused, as a lost connection would refuse it. */
+let failing: RegExp | null = null;
 
 mock.module("../controllers/sqldatabase", () => ({
   default: async (sql: string, params: any[] = []) => {
     queries.push({ sql, params });
-    if (sql.startsWith("SELECT name FROM items")) {
-      return itemRows.filter((i) => i.name === params[0]).map((i) => ({ name: i.name }));
-    }
+    if (failing?.test(sql)) throw new Error("Connection lost");
+    if (sql === "SELECT * FROM items") return itemRows.map((row) => ({ ...row }));
+    if (sql.startsWith("SELECT")) throw new Error(`The item editor asked the database: ${sql}`);
     return [];
   },
 }));
@@ -22,7 +25,27 @@ mock.module("../services/assetCache", () => ({
   },
 }));
 
+// Item names in the cache each time the login workers were handed the list.
+const handedToLoginWorkers: string[][] = [];
+let loginWorkersFail = false;
+mock.module("../socket/authentication_pool", () => ({
+  refreshAuthItems: async () => {
+    if (loginWorkersFail) throw new Error("worker gone");
+    handedToLoginWorkers.push(((cache.get("items") || []) as Item[]).map((i) => i.name));
+  },
+  refreshAuthSpells: async () => {},
+  getAuthWorker: async () => null,
+  resetAuthWorker: () => {},
+}));
+
+const { default: log } = await import("../modules/logger");
 const editor = await import("../systems/itemeditor");
+
+beforeEach(() => {
+  handedToLoginWorkers.length = 0;
+  loginWorkersFail = false;
+  failing = null;
+});
 
 const weapon = (over: Partial<Item> = {}) => ({
   name: "wooden staff",
@@ -147,6 +170,89 @@ describe("saving", () => {
     expect(queries.some((q) => q.sql.startsWith("DELETE FROM items"))).toBe(true);
     expect(cache.get("items")).toHaveLength(0);
   });
+
+  test("whether a save is of a new item is read from the items held: the database is sent the write and nothing else", async () => {
+    queries.length = 0;
+    cache.set("items", [editor.normalizeItem(weapon())]);
+
+    await editor.saveItem(weapon({ name: "oak staff" }), null);
+    // The item is found whatever case its name comes in, as the table would find it.
+    await editor.saveItem(weapon({ description: "A better stick." }), "WOODEN STAFF");
+    await editor.deleteItem("oak staff");
+
+    expect(queries.map((q) => q.sql.split(" ").slice(0, 3).join(" "))).toEqual(["INSERT INTO items", "UPDATE items SET", "DELETE FROM items"]);
+    expect(queries[1]!.params.at(-1)).toBe("WOODEN STAFF");
+    expect((cache.get("items") as Item[]).map((i) => [i.name, i.description])).toEqual([["wooden staff", "A better stick."]]);
+  });
+
+  for (const [what, statement, change] of [
+    ["save of a new item", /^INSERT INTO items/, () => editor.saveItem(weapon({ name: "oak staff" }), null)],
+    ["save of an item that is there", /^UPDATE items/, () => editor.saveItem(weapon({ description: "A better stick." }), "wooden staff")],
+    ["delete", /^DELETE FROM items/, () => editor.deleteItem("wooden staff")],
+  ] as Array<[string, RegExp, () => Promise<unknown>]>) {
+    test(`a ${what} the database refused: the table is read again, once, and what is held and handed to the login workers is what it holds`, async () => {
+      queries.length = 0;
+      cache.set("items", [editor.normalizeItem(weapon())]);
+      // What the table holds afterwards: the statement may have been applied all the same (one that timed out, say).
+      itemRows = [{ name: "wooden staff", description: "As the database has it." }, { name: "iron sword", description: "Only the database knew." }];
+      failing = statement;
+
+      await expect(change()).rejects.toThrow("Connection lost");
+
+      expect(queries.map((q) => q.sql).slice(1)).toEqual(["SELECT * FROM items"]);
+      expect(cache.get("items")).toEqual(itemRows);
+      expect(handedToLoginWorkers).toEqual([["wooden staff", "iron sword"]]);
+    });
+  }
+
+  test("a write the database refused while the table cannot be read either leaves the error the write's own, and the items as they were", async () => {
+    cache.set("items", [editor.normalizeItem(weapon())]);
+    failing = /^(DELETE FROM|SELECT \* FROM) items/;
+    const logged = spyOn(log, "error").mockImplementation(() => {});
+    try {
+      await expect(editor.deleteItem("wooden staff")).rejects.toThrow("Connection lost");
+      expect(cache.get("items")).toHaveLength(1);
+      expect(logged).toHaveBeenCalledTimes(1);
+    } finally {
+      logged.mockRestore();
+    }
+  });
+});
+
+describe("login workers", () => {
+  test("a saved item is handed to the login workers once it is in the cache", async () => {
+    itemRows = [];
+    cache.set("items", []);
+
+    await editor.saveItem(weapon(), null);
+
+    expect(handedToLoginWorkers).toEqual([["wooden staff"]]);
+  });
+
+  test("a deleted item is handed over as gone", async () => {
+    cache.set("items", [editor.normalizeItem(weapon())]);
+
+    await editor.deleteItem("wooden staff");
+
+    expect(handedToLoginWorkers).toEqual([[]]);
+  });
+
+  test("a save still succeeds when the login workers cannot be reached", async () => {
+    itemRows = [];
+    cache.set("items", []);
+    loginWorkersFail = true;
+    const logged = spyOn(log, "error").mockImplementation(() => {});
+
+    try {
+      const saved = await editor.saveItem(weapon(), null);
+
+      expect(saved.name).toBe("wooden staff");
+      expect(cache.get("items")).toHaveLength(1);
+      expect(logged).toHaveBeenCalledTimes(1);
+    } finally {
+      logged.mockRestore();
+    }
+  });
 });
 
 describe("searching", () => {
@@ -211,6 +317,7 @@ describe("editor packets", () => {
       expect(result.errors).toContain("An item with that name already exists.");
     }
     expect(queries.some((q) => q.sql.startsWith("INSERT") || q.sql.startsWith("UPDATE"))).toBe(false);
+    expect(handedToLoginWorkers).toEqual([]);
   });
 
   test("an unknown action is rejected", async () => {

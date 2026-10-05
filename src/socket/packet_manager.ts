@@ -929,6 +929,11 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "LOOT_TABLE_LIST", data: { tables } })),
     ] as any[];
   },
+  lootEditorResult: (data: { ok: boolean; errors: string[]; action?: string; request?: number; id?: number; tables: any[] | null }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "LOOT_EDITOR_RESULT", data })),
+    ] as any[];
+  },
   creatureSpawn: (creatures: any[]) => {
     return [
       packet.encode(JSON.stringify({ type: "CREATURE_SPAWN", data: { creatures } })),
@@ -1042,6 +1047,71 @@ export const packetManager = {
   itemEditorUpdated: (data: { by: string }) => {
     return [
       packet.encode(JSON.stringify({ type: "ITEM_EDITOR_UPDATED", data })),
+    ] as any[];
+  },
+  toggleSpellEditor: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "TOGGLE_SPELL_EDITOR", data: null })),
+    ] as any[];
+  },
+  spellEditorData: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "SPELL_EDITOR_DATA", data })),
+    ] as any[];
+  },
+  spellEditorResults: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "SPELL_EDITOR_RESULTS", data })),
+    ] as any[];
+  },
+  spellEditorResult: (data: { ok: boolean; errors: string[]; fields?: Record<string, string>; name?: string; action?: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "SPELL_EDITOR_RESULT", data })),
+    ] as any[];
+  },
+  spellEditorUpdated: (data: { by: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "SPELL_EDITOR_UPDATED", data })),
+    ] as any[];
+  },
+  playerEditorOpen: (data: { target: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "PLAYER_EDITOR_OPEN", data })),
+    ] as any[];
+  },
+  playerEditorData: (data: { options: PlayerEditorOptions; snapshot: PlayerEditorSnapshot }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "PLAYER_EDITOR_DATA", data })),
+    ] as any[];
+  },
+  playerEditorResults: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "PLAYER_EDITOR_RESULTS", data })),
+    ] as any[];
+  },
+  playerEditorResult: (data: { ok: boolean; errors: string[]; action?: string; snapshot?: PlayerEditorSnapshot | null }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "PLAYER_EDITOR_RESULT", data })),
+    ] as any[];
+  },
+  toggleControlPanel: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "TOGGLE_CONTROL_PANEL", data: null })),
+    ] as any[];
+  },
+  controlPanelData: (data: ControlPanelData) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CONTROL_PANEL_DATA", data })),
+    ] as any[];
+  },
+  controlPanelResults: (data: ControlPanelResults) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CONTROL_PANEL_RESULTS", data })),
+    ] as any[];
+  },
+  controlPanelResult: (data: ControlPanelResult) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CONTROL_PANEL_RESULT", data })),
     ] as any[];
   },
   creatureDebug: (data: { creatures: any[] }) => {

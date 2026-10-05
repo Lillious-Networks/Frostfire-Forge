@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildTbsCertificate,
+  certificateSanHostnames,
   computeCertificateHash,
   getCertificateStatus,
   loadForge,
@@ -67,9 +68,16 @@ if (!Number.isInteger(validityDays) || validityDays < 1 || validityDays > 13) {
 }
 
 // Same hostname set the server expects at startup: everything a browser
-// might dial must be in the SAN, even when pinned.
+// might dial must be in the SAN, even when pinned. Names on the certificate
+// being replaced are kept too: bare `bun renew-lan-cert` loads
+// .env.development, whose PUBLIC_HOST/SERVER_HOST lack the LAN address a
+// server started with .env.production advertises, and dropping it breaks
+// /wt-cert-hash and the WebTransport handshake for every LAN client.
+const previousHostnames = fs.existsSync(certPath)
+  ? certificateSanHostnames(fs.readFileSync(certPath, "utf8"))
+  : [];
 const hostnames = ["localhost", "127.0.0.1", "::1"];
-for (const host of [process.env.PUBLIC_HOST, process.env.SERVER_HOST, ...argValues("--host")]) {
+for (const host of [...previousHostnames, process.env.PUBLIC_HOST, process.env.SERVER_HOST, ...argValues("--host")]) {
   const trimmed = host?.trim();
   if (trimmed && !hostnames.includes(trimmed)) {
     hostnames.push(trimmed);

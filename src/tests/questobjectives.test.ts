@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { beforeEach, describe, expect, mock, test } from "bun:test";
 
 const killQuest: Quest = {
   id: 1, name: "Rats", zone: null, offer_text: "", description: "", progress_text: "", completion_text: "",
@@ -94,6 +94,12 @@ mock.module("../services/playermanager", () => ({
 const defs = await import("../systems/quests/definitions");
 const objectives = await import("../systems/quests/objectives");
 const questLog = await import("../systems/quests/log");
+const { clearCaches } = await import("../services/datacache");
+
+// The tables are new for every test, so nothing held from the last one still holds.
+beforeEach(async () => {
+  await clearCaches();
+});
 
 function seedActive(questIds: number[]) {
   players.clear();

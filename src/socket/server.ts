@@ -18,7 +18,7 @@ import "../utility/validate_config.ts";
 import crypto from "crypto";
 import { packetManager } from "./packet_manager.ts";
 import { packetTypes } from "./types.ts";
-import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady, teleportPlayerWrapper, removePlayerFromCleanupMaps, removeFromAuthenticationQueues } from "./receiver.ts";
+import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady, teleportPlayerWrapper, removePlayerFromCleanupMaps, removeFromAuthenticationQueues, releaseDraggedBy } from "./receiver.ts";
 import eventEmitter from "node:events";
 import { listener } from "../modules/event_bus.ts";
 import { Events, setPlayerPvp } from "../systems/events";
@@ -27,6 +27,7 @@ import log from "../modules/logger.ts";
 import player from "../systems/player.ts";
 import worlds from "../systems/worlds.ts";
 import playerCache from "../services/playermanager.ts";
+import { loadTables, forgetPlayer } from "../services/datacache.ts";
 import mapIndex from "../services/mapindex";
 import gameLoop from "../services/gameloop";
 import packet from "../modules/packet.ts";
@@ -39,7 +40,7 @@ import { pluginHandlers, warpInterceptors, packetInterceptors } from "./receiver
 import { startWebTransportServer, TransportConnection } from "./transport.ts";
 import { topicBus } from "./topics.ts";
 import { WebTransport } from "@lillious-networks/webtransport-bun";
-import { ensureLocalCertificate, computeCertificateHash, certificateSupportsPinning, getCertificateStatus } from "../utility/local_cert.ts";
+import { ensureLocalCertificate, computeCertificateHash, certificateSupportsPinning, getCertificateStatus, certificateSanHostnames } from "../utility/local_cert.ts";
 import { startHttpsServers, getInternalServerOptions } from "../modules/https_servers.ts";
 
 const httpRouteHandlers = new Map<string, (req: Request) => Promise<Response>>();
@@ -59,19 +60,20 @@ const _cert = process.env.TLS_CERT_PATH;
 const _key = process.env.TLS_KEY_PATH;
 const _ca = process.env.TLS_CA_PATH;
 
-if (_cert && _key) {
-  // Chrome will not accept a system or locally installed root CA for
-  // WebTransport, only a publicly trusted one or a certificate pinned by
-  // hash, so this certificate has to stay self-signed and short lived. It
-  // must therefore carry every address a browser might dial, including the
-  // LAN one: a name missing from the SAN fails validation even when pinned.
-  const certHostnames = ["localhost", "127.0.0.1", "::1"];
-  for (const host of [process.env.PUBLIC_HOST, process.env.SERVER_HOST]) {
-    const trimmed = host?.trim();
-    if (trimmed && !certHostnames.includes(trimmed)) {
-      certHostnames.push(trimmed);
-    }
+// Chrome will not accept a system or locally installed root CA for
+// WebTransport, only a publicly trusted one or a certificate pinned by
+// hash, so this certificate has to stay self-signed and short lived. It
+// must therefore carry every address a browser might dial, including the
+// LAN one: a name missing from the SAN fails validation even when pinned.
+const certHostnames = ["localhost", "127.0.0.1", "::1"];
+for (const host of [process.env.PUBLIC_HOST, process.env.SERVER_HOST]) {
+  const trimmed = host?.trim();
+  if (trimmed && !certHostnames.includes(trimmed)) {
+    certHostnames.push(trimmed);
   }
+}
+
+if (_cert && _key) {
   await ensureLocalCertificate({
     certPath: _cert,
     keyPath: _key,
@@ -121,6 +123,15 @@ log.info(`WebTransport TLS certificate valid until ${certStatus.validTo} (${cert
 if ((certStatus.daysRemaining ?? 0) < 3) {
   log.warn(`WebTransport TLS certificate expires in ${certStatus.daysRemaining} days (${certStatus.validTo}). Renew it soon to avoid client handshake failures.`);
 }
+
+// A self-signed certificate missing a name was regenerated above; a CA-signed
+// one is the operator's to reissue, and until then browsers dialing that name
+// fail both /wt-cert-hash ("Failed to fetch") and the WebTransport handshake.
+const certSanHostnames = certificateSanHostnames(webTransportTls.certPem);
+const uncoveredHostnames = certHostnames.filter((host) => !certSanHostnames.includes(host));
+if (uncoveredHostnames.length > 0) {
+  log.warn(`WebTransport TLS certificate does not cover ${uncoveredHostnames.join(", ")} (covers: ${certSanHostnames.join(", ")}). Clients connecting to those addresses will fail. Reissue it with them included (local mkcert setups: \`bun renew-lan-cert ${uncoveredHostnames.map((host) => `--host ${host}`).join(" ")}\`), then restart the server.`);
+}
 const RateLimitOptions: RateLimitOptions = {
 
   maxRequests: settings?.packetRatelimit?.maxRequests || 2000,
@@ -143,6 +154,10 @@ const ClientRateLimit = new Map<string, ClientRateLimit>();
 const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
 
 // Load realm whitelist from database if WHITELIST=true
+// Every system is imported by now, so each cached table is known: read them
+// before a connection can ask for one.
+await loadTables();
+
 export const realmWhitelist = new Set<string>();
 export const isWhitelistEnabled = process.env.WHITELIST === 'true';
 
@@ -1002,9 +1017,11 @@ function cleanupPlayerState(playerData: any) {
 listener.on("onDisconnect", async (data) => {
   if (!data) return;
 
+  let left: string | null = null;
   try {
     const playerData = playerCache.get(data.id);
     if (!playerData) return;
+    left = playerData.username || null;
 
     if (data.reason === "session_stolen" && playerData.wt?.readyState === 1) {
       try {
@@ -1037,6 +1054,10 @@ listener.on("onDisconnect", async (data) => {
     }
 
     cleanupPlayerState(playerData);
+    releaseDraggedBy(playerData.id);
+    // Before the saves below: they wait on the database, and what listens
+    // (creature combat, plugins) should not wait with them or miss a throw.
+    listener.emit(Events.PLAYER_DISCONNECT, { player: playerData });
 
     if (playerData.wt?.data?.connectionToken) {
         removeFromAuthenticationQueues(
@@ -1095,6 +1116,12 @@ listener.on("onDisconnect", async (data) => {
     await player.clearSessionId(playerData.id);
   } catch (e) {
     log.error(e as string);
+  } finally {
+    // Last, so the saves above are not held again once they are forgotten.
+    // Not when the player is already back in: those are the new login's rows.
+    if (left && !playerCache.getByUsername(left)) {
+      await forgetPlayer(left).catch((e) => log.error(e as string));
+    }
   }
 });
 
@@ -1261,5 +1288,5 @@ async function gracefulShutdown(signal: string) {
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
-export { gatewayClient };
+export { gatewayClient, gracefulShutdown };
 

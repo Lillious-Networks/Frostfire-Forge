@@ -131,6 +131,36 @@ export async function listIcons(force = false): Promise<SpriteSheetOption[]> {
   }
 }
 
+/** Sprites, cached after the first successful fetch. */
+let spriteCache: SpriteSheetOption[] | null = null;
+
+/**
+ * Ask the asset server which sprites exist. A spell's icon is one of these:
+ * the hotbar and the spell book draw it from /sprite?name=<icon>.
+ */
+export async function listSprites(force = false): Promise<SpriteSheetOption[]> {
+  if (spriteCache && !force) return spriteCache;
+  const assetServerUrl = process.env.ASSET_SERVER_INTERNAL_URL || process.env.ASSET_SERVER_URL;
+  if (!assetServerUrl) return [];
+  try {
+    const response = await serverFetch(`${assetServerUrl}/sprites`);
+    if (!response.ok) throw new Error(`status ${response.status}`);
+    const body = (await response.json()) as { sprites?: Array<{ name: string }> };
+    spriteCache = (body?.sprites ?? [])
+      .filter((s) => s?.name)
+      .map((s) => ({ name: s.name, image: spritePath(s.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    if (spriteCache.length === 0) {
+      // An older asset server has no /sprites route and redirects to its homepage.
+      log.warn(`Asset server returned no sprites for the editors (${assetServerUrl}/sprites) - is it running the current build?`);
+    }
+    return spriteCache;
+  } catch (error) {
+    log.warn(`Could not list sprites for the spell editor: ${(error as Error).message}`);
+    return spriteCache ?? [];
+  }
+}
+
 /** Everything the editor window needs in one payload. */
 export async function buildEditorData(): Promise<EditorData> {
   const [templates, abilities, spawns, patrolPaths, linkGroups, pools] = await Promise.all([

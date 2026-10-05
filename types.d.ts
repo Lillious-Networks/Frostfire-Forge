@@ -224,6 +224,8 @@ declare interface Particle {
   affected_by_time: Nullable<boolean>;
   time_on: Nullable<string>;
   time_off: Nullable<string>;
+  /** The sprite (asset server, assets/sprites) emitted in place of the round dot, `size` px wide; null = the dot. */
+  image?: Nullable<string>;
 }
 
 type NullablePlayer = Player | null;
@@ -633,6 +635,192 @@ declare interface LootTableEntry {
 }
 declare interface LootRollResult {
   index: number; itemName: string; quantity: number; quality: string; iconUrl: string;
+}
+
+/** The stats the player editor sets: what the stats table holds, before equipment. */
+declare interface PlayerEditorStats {
+  level: number;
+  xp: number;
+  max_xp: number;
+  health: number;
+  max_health: number;
+  stamina: number;
+  max_stamina: number;
+  stat_damage: number;
+  stat_armor: number;
+  stat_critical_chance: number;
+  stat_critical_damage: number;
+  stat_avoidance: number;
+}
+
+declare interface PlayerEditorItem {
+  name: string;
+  quantity: number;
+  equipped: boolean;
+  quality: Nullable<string>;
+  type: Nullable<string>;
+  icon: Nullable<string>;
+  equipment_slot: Nullable<string>;
+  level_requirement: Nullable<number>;
+  /** False when the item's definition has been deleted: the row can only be removed. */
+  known: boolean;
+}
+
+/** One player as the server holds them; the player editor is sent a fresh one after every change. */
+declare interface PlayerEditorSnapshot {
+  username: string;
+  userid: number;
+  online: boolean;
+  /** The connection id while online: what the other admin commands take as an id. */
+  sessionId: Nullable<string>;
+  isAdmin: boolean;
+  isGuest: boolean;
+  banned: boolean;
+  /** 0 alive, 1 a corpse awaiting release, 2 a ghost. */
+  dead: number;
+  location: { map: string; x: number; y: number; direction: string };
+  stats: PlayerEditorStats;
+  /** Totals with equipment and effects applied, known only while the player is online. */
+  totals: Nullable<Record<string, number>>;
+  currency: Currency;
+  inventory: PlayerEditorItem[];
+  inventorySlots: number;
+  equipment: Record<string, Nullable<string>>;
+  bags: Record<string, Nullable<string>>;
+  collectables: Array<{ type: string; item: string; icon: Nullable<string>; known: boolean }>;
+  spells: string[];
+  friends: string[];
+  guild: Nullable<{ id: number; name: string; leader: string; members: string[] }>;
+  party: Nullable<{ id: number; leader: string; members: string[] }>;
+  quests: {
+    active: Array<{
+      id: number;
+      name: string;
+      state: QuestState;
+      objectives: Array<{ id: number; label: string; count: number; required: number }>;
+    }>;
+    completed: Array<{ id: number; name: string }>;
+  };
+  permissions: string[];
+}
+
+/** What the player editor offers in its pickers, and the limits it validates against. */
+declare interface PlayerEditorOptions {
+  /** The admin using the editor: their own permissions and admin status are not theirs to change. */
+  editor: string;
+  slots: string[];
+  directions: string[];
+  collectableTypes: string[];
+  /** Map sizes are in pixels, the unit positions are stored in. */
+  maps: Array<{ name: string; width: number; height: number }>;
+  mounts: Array<{ name: string; icon: Nullable<string> }>;
+  spells: Array<{ name: string; icon: Nullable<string> }>;
+  quests: Array<{ id: number; name: string; level: number }>;
+  guilds: Array<{ id: number; name: string; leader: string; members: number }>;
+  permissionTypes: string[];
+  limits: { level: number; value: number; currency: Currency };
+}
+
+/** One online player as the control panel lists them. */
+declare interface ControlPanelPlayer {
+  /** The connection id: what the admin commands take as an id. */
+  id: string;
+  username: string;
+  level: number;
+  map: string;
+  isAdmin: boolean;
+  isStealth: boolean;
+  isGuest: boolean;
+  /** 0 alive, 1 a corpse awaiting release, 2 a ghost. */
+  dead: number;
+  /** Seconds since they logged in, or null where that is not known. */
+  onlineFor: Nullable<number>;
+}
+
+/**
+ * One reading of the control panel's history: seconds since the epoch, players
+ * online, event loop delay in ms, memory in MB, creatures awake. A figure that
+ * was not known is null.
+ */
+declare type ControlPanelReading = Array<Nullable<number>>;
+
+/** One thing an admin did through the control panel. */
+declare interface ControlPanelActivity {
+  /** Counts up from 1: the panel asks for what came after the last one it holds. */
+  seq: number;
+  /** When, in milliseconds since the epoch. */
+  at: number;
+  /** The admin, as stored. */
+  by: string;
+  action: string;
+  /** The player it was done to, as stored. */
+  target: Nullable<string>;
+  /** The values that went with it: the item, the map, the message. */
+  details: Record<string, string | number | boolean>;
+  /** What the command answered. */
+  said: string;
+}
+
+/** What the control panel shows. It is rebuilt from memory every time the panel asks. */
+declare interface ControlPanelData {
+  /** The admin looking at the panel. */
+  viewer: { id: string; username: string; map: string; isNoclip: boolean; isStealth: boolean };
+  /** Everyone online the viewer may see. */
+  players: ControlPanelPlayer[];
+  status: {
+    /** Seconds since the server process started. */
+    uptime: number;
+    online: number;
+    /** The most players online at once since the server started, and when (ms since the epoch). */
+    peak: { online: number; at: number };
+    memoryMb: number;
+    eventLoopLagMs: Nullable<number>;
+    restartScheduled: boolean;
+    whitelist: { enabled: boolean; size: number };
+    /** What the /creature-stats route reports. */
+    creatures: Nullable<Record<string, unknown>>;
+  };
+  /** The viewer's map with its weather, and every world. `showing` is the weather a "random" world has settled on. */
+  world: { map: string; weather: string; showing: string; worlds: Array<{ name: string; weather: string; showing: string; players: number }> };
+  /** Sent when asked in full: which controls the viewer's permissions allow, by action. */
+  can?: Record<string, boolean>;
+  /** Sent when asked in full: what the map and weather controls pick from. */
+  options?: { maps: string[]; weathers: string[] };
+  /** Sent when asked in full: how many accounts there are, guests aside, and how many are banned. Null if that could not be read. */
+  accounts?: Nullable<{ registered: number; banned: number }>;
+  /**
+   * The readings the charts are drawn from: every 15 seconds for the last hour,
+   * every minute for the last 24. All of them when asked in full; on a refresh,
+   * the ones newer than the panel says it holds.
+   */
+  history?: { recent: ControlPanelReading[]; day: ControlPanelReading[] };
+  /** What admins did through the panel, oldest first: sent as the history is. */
+  activity?: ControlPanelActivity[];
+}
+
+/** A list the control panel asked for. */
+declare type ControlPanelResults =
+  | { kind: "players"; query: string; players: Array<{ username: string; userid: number; online: boolean }>; truncated: number }
+  | { kind: "items"; query: string; items: Array<Pick<Item, "name" | "quality" | "type" | "icon" | "equipment_slot" | "level_requirement">>; truncated: number }
+  | { kind: "permissions"; target: string; held: string[]; types: string[]; isAdmin: boolean }
+  | { kind: "lootTables"; tables: Array<{ id: number; name: string; items: Array<{ id: number; item_name: string; min_quantity: number; max_quantity: number; drop_chance: number; quality: string }> }> };
+
+/** The answer to one control panel request. */
+declare interface ControlPanelResult {
+  ok: boolean;
+  /** Why it was refused. */
+  errors: string[];
+  /** What the command said when it ran. */
+  replies: string[];
+  action: string;
+  /** The id the panel gave the request, to match the answer to it. */
+  requestId: Nullable<string>;
+  /** The player may not use the panel at all. */
+  denied?: boolean;
+  /** The same request had already arrived: it was not run a second time. */
+  duplicate?: boolean;
+  /** How things stand after an action. */
+  data?: ControlPanelData;
 }
 
 declare interface PluginHandlerFn {

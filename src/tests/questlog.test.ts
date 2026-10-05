@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { beforeEach, describe, expect, mock, test } from "bun:test";
 
 const makeQuest = (over: Partial<Quest> = {}): Quest => ({
   id: 1,
@@ -151,6 +151,10 @@ mock.module("../controllers/sqldatabase", () => ({
         .filter((r) => r.item === params[0] && r.username === params[1])
         .map((r) => ({ item: r.item, quantity: r.quantity }));
     }
+    // The inventory system's read of a player's rows, which is where the quest log asks what they hold.
+    if (sql.includes("SELECT * FROM inventory WHERE username = ?")) {
+      return inventoryRows.filter((r) => r.username === params[0]).map((r) => ({ ...r }));
+    }
     if (sql.includes("SELECT * FROM bags")) {
       return [];
     }
@@ -191,6 +195,12 @@ mock.module("../services/playermanager", () => ({
 
 const defs = await import("../systems/quests/definitions");
 const questLog = await import("../systems/quests/log");
+const { clearCaches } = await import("../services/datacache");
+
+// The tables are new for every test, so nothing held from the last one still holds.
+beforeEach(async () => {
+  await clearCaches();
+});
 
 function seedPlayer() {
   players.clear();

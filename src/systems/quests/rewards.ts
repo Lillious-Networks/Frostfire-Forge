@@ -1,7 +1,7 @@
-import query from "../../controllers/sqldatabase";
 import assetCache from "../../services/assetCache";
 import log from "../../modules/logger";
 import inventory from "../inventory";
+import bags from "../bags";
 import currency from "../currency";
 import playerSystem from "../player";
 
@@ -44,8 +44,8 @@ export function validateChoice(quest: Quest, rewardChoiceIndex?: number): boolea
 async function getMaxSlots(username: string): Promise<number> {
   let slots = BASE_INVENTORY_SLOTS;
   try {
-    const bagRows = (await query("SELECT * FROM bags WHERE username = ?", [username.toLowerCase()])) as any[];
-    const bagRow = bagRows?.[0];
+    // The bags the player has equipped are the bag system's to say, from the row it holds.
+    const bagRow = await bags.get(username.toLowerCase());
     if (bagRow) {
       const items = ((await assetCache.get("items")) || []) as Item[];
       for (const slot of ["slot_1", "slot_2", "slot_3", "slot_4"]) {
@@ -65,7 +65,8 @@ async function getMaxSlots(username: string): Promise<number> {
 async function hasBagSpace(username: string, rewards: QuestReward[]): Promise<boolean> {
   if (rewards.length === 0) return true;
   try {
-    const rows = (await query("SELECT item FROM inventory WHERE username = ?", [username.toLowerCase()])) as any[];
+    // What the player holds is the inventory's to say, from the rows it holds.
+    const rows = (await inventory.get(username.toLowerCase())) as any[];
     const owned = new Set((rows || []).map((r: any) => String(r.item ?? r.name ?? "").toLowerCase()));
     const needed = new Set<string>();
     for (const r of rewards) {

@@ -10,6 +10,7 @@ import {
   certificateNeedsRegeneration,
   ensureLocalCertificate,
   getCertificateStatus,
+  certificateSanHostnames,
 } from "../utility/local_cert";
 
 process.env.SKIP_CERT_TRUST = "true";
@@ -154,6 +155,85 @@ test("getCertificateStatus reports expiry on CA-signed certs that needRegenerati
   expect(certificateNeedsRegeneration(expiredPem)).toBe(false);
 });
 
+test("certificateSanHostnames lists SAN names in the form the scripts take them", async () => {
+  const generated = await generateLocalCertificate({
+    hostnames: ["localhost", "127.0.0.1", "::1", "192.168.40.15", "frostfire-forge-dev"],
+  });
+
+  // IPv6 comes back compressed, not as the "0:0:0:0:0:0:0:1" X509Certificate prints.
+  expect(certificateSanHostnames(generated.certPem)).toEqual([
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "192.168.40.15",
+    "frostfire-forge-dev",
+  ]);
+  expect(certificateSanHostnames("not a certificate")).toEqual([]);
+});
+
+// Regression test for the "Failed to fetch WebTransport certificate hash"
+// outage: bare `bun renew-lan-cert` loads .env.development, whose
+// PUBLIC_HOST/SERVER_HOST lack the LAN address a server started with
+// .env.production advertises. The renewal must keep the names already on the
+// certificate it replaces instead of silently dropping them.
+test("renew-lan-cert keeps the SAN names of the certificate it replaces", async () => {
+  const forge = await import("node-forge");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "renew-lan-cert-test-"));
+  const certPath = path.join(dir, "cert.pem");
+  const keyPath = path.join(dir, "key.pem");
+  const caPath = path.join(dir, "cert.ca-bundle");
+  const caKeyPath = path.join(dir, "rootCA-key.pem");
+
+  const caKeys = forge.pki.rsa.generateKeyPair({ bits: 1024 });
+  const ca = (forge.pki as any).createCertificate();
+  ca.serialNumber = "01";
+  ca.validity.notBefore = new Date(Date.now() - 86400000);
+  ca.validity.notAfter = new Date(Date.now() + 30 * 86400000);
+  ca.setSubject([{ shortName: "CN", value: "test-ca" }]);
+  ca.setIssuer([{ shortName: "CN", value: "test-ca" }]);
+  ca.publicKey = caKeys.publicKey;
+  ca.setExtensions([{ name: "basicConstraints", cA: true }]);
+  ca.sign(caKeys.privateKey, (forge.md as any).sha256.create());
+  fs.writeFileSync(caPath, forge.pki.certificateToPem(ca));
+  fs.writeFileSync(caKeyPath, forge.pki.privateKeyToPem(caKeys.privateKey));
+
+  const previous = await generateLocalCertificate({
+    hostnames: ["localhost", "127.0.0.1", "::1", "192.168.40.15"],
+  });
+  fs.writeFileSync(certPath, previous.certPem);
+  fs.writeFileSync(keyPath, previous.keyPem);
+
+  const proc = Bun.spawn(
+    [
+      process.execPath,
+      path.join(import.meta.dir, "../utility/renew_lan_cert.ts"),
+      "--cert", certPath,
+      "--key", keyPath,
+      "--ca", caPath,
+      "--ca-key", caKeyPath,
+    ],
+    {
+      env: { ...process.env, PUBLIC_HOST: "127.0.0.1", SERVER_HOST: "frostfire-forge-dev" },
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  const exitCode = await proc.exited;
+  expect(exitCode).toBe(0);
+
+  const renewedPem = fs.readFileSync(certPath, "utf8");
+  expect(renewedPem).not.toBe(previous.certPem);
+  expect(certificateSanHostnames(renewedPem)).toEqual([
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "192.168.40.15",
+    "frostfire-forge-dev",
+  ]);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("ensureLocalCertificate writes files when missing and is idempotent afterwards", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "local-cert-test-"));
   const certPath = path.join(dir, "cert.pem");
@@ -176,6 +256,33 @@ test("ensureLocalCertificate writes files when missing and is idempotent afterwa
   const certPem = fs.readFileSync(certPath, "utf8");
   expect(certificateSupportsPinning(certPem)).toBe(true);
   expect(fs.readFileSync(caPath, "utf8")).toBe("");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Regression test for the certificate (and its pin hash) being regenerated on
+// every server start: server.ts always asks for "::1", which X509Certificate
+// prints expanded ("0:0:0:0:0:0:0:1") under Bun, so a textual match against
+// the SAN never found it and the certificate was never reused.
+test("ensureLocalCertificate reuses a certificate that already covers the requested hostnames", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "local-cert-test-"));
+  const certPath = path.join(dir, "cert.pem");
+  const keyPath = path.join(dir, "key.pem");
+  const caPath = path.join(dir, "cert.ca-bundle");
+  const hostnames = ["localhost", "127.0.0.1", "::1"];
+
+  const first = await ensureLocalCertificate({ certPath, keyPath, caPath, hostnames });
+  expect(first).not.toBeNull();
+
+  const certMtime = fs.statSync(certPath).mtimeMs;
+  const keyMtime = fs.statSync(keyPath).mtimeMs;
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const second = await ensureLocalCertificate({ certPath, keyPath, caPath, hostnames });
+  expect(second).toBeNull();
+  expect(fs.statSync(certPath).mtimeMs).toBe(certMtime);
+  expect(fs.statSync(keyPath).mtimeMs).toBe(keyMtime);
 
   fs.rmSync(dir, { recursive: true, force: true });
 });

@@ -1,4 +1,5 @@
 import query from "../controllers/sqldatabase";
+import log from "../modules/logger";
 import assetCache from "../services/assetCache";
 
 function toMysqlDatetime(ms: number): string {
@@ -10,6 +11,126 @@ function toMysqlDatetime(ms: number): string {
  * touch the database; list() appends them so every cache reload keeps them.
  */
 let mapNpcs: Npc[] = [];
+
+/**
+ * Whether this server has read the npcs table. Until it has, list() reads it; after that list() answers the NPCs
+ * held, which every write here keeps in step. Lowered when a write failed and the table could not be read again.
+ */
+let loaded = false;
+
+/** The columns add() and update() write, in the order their statements name them. */
+const COLUMNS = [
+  "last_updated", "map", "name", "position", "direction", "hidden", "script", "dialog", "gossip", "particles", "quest_giver",
+  "sprite_type", "sprite_body", "sprite_head", "sprite_helmet", "sprite_shoulderguards", "sprite_neck",
+  "sprite_hands", "sprite_chest", "sprite_feet", "sprite_legs", "sprite_weapon",
+] as const;
+type Written = Record<(typeof COLUMNS)[number], unknown>;
+
+/** An npcs row as the server holds it. `row` is what the table gives, or what was just written to it. */
+function fromRow(npc: any): Npc {
+  const position: PositionData = {
+    x: Number(npc?.position?.split(",")[0]),
+    y: Number(npc?.position?.split(",")[1]),
+    direction: npc?.direction || "down",
+  };
+
+  return {
+    id: npc?.id as number,
+    last_updated: (npc?.last_updated as number) || null,
+    map: npc?.map as string,
+    name: npc?.name || null,
+    position,
+    hidden: npc?.hidden === 1,
+    script: npc?.script as string,
+    dialog: npc?.dialog as string,
+    gossip: (npc?.gossip ?? null) as Nullable<string>,
+    particles: npc?.particles as Particle[],
+    quest_giver: npc?.quest_giver === 1 || npc?.quest_giver === true,
+    sprite_type: (npc?.sprite_type as 'none' | 'static' | 'animated') || 'none',
+    sprite_body: npc?.sprite_body || null,
+    sprite_head: npc?.sprite_head || null,
+    sprite_helmet: npc?.sprite_helmet || null,
+    sprite_shoulderguards: npc?.sprite_shoulderguards || null,
+    sprite_neck: npc?.sprite_neck || null,
+    sprite_hands: npc?.sprite_hands || null,
+    sprite_chest: npc?.sprite_chest || null,
+    sprite_feet: npc?.sprite_feet || null,
+    sprite_legs: npc?.sprite_legs || null,
+    sprite_weapon: npc?.sprite_weapon || null,
+  };
+}
+
+/** When a row was written, as its DATETIME column keeps it: to the second. */
+const writtenAt = (last_updated: string) => new Date(`${last_updated.replace(" ", "T")}Z`) as unknown as number;
+
+/**
+ * The NPC a row holds once `written` has been written to it: every column but the two flags keeps text (a statement
+ * sends anything else as its text), and nothing where it was given nothing.
+ */
+function asWritten(id: Nullable<number>, written: Written): Npc {
+  const row: Record<string, unknown> = { id };
+  for (const column of COLUMNS) {
+    const value = written[column];
+    row[column] = column === "hidden" || column === "quest_giver" || value === null || value === undefined ? value ?? null : String(value);
+  }
+  return { ...fromRow(row), last_updated: writtenAt(String(written.last_updated)) };
+}
+
+const sameId = (id: unknown) => (npc: Npc) => Number(npc.id) === Number(id);
+
+/** The table's NPCs as held: the maps' own are not rows of it. */
+async function stored(): Promise<Npc[]> {
+  const list = await assetCache.get("npcs");
+  return (Array.isArray(list) ? (list as Npc[]) : []).filter((npc) => !npcs.isMapNpc(npc));
+}
+
+/** Holds `rows` as the table's NPCs, the maps' own after them, and answers the whole list. */
+async function hold(rows: Npc[]): Promise<Npc[]> {
+  const list = [...rows, ...mapNpcs];
+  await assetCache.set("npcs", list);
+  return list;
+}
+
+/** Reads the table and holds what it has: at startup, and after a write whose outcome is not known. */
+async function load(): Promise<Npc[]> {
+  const response = (await query("SELECT * FROM npcs")) as any[];
+  const list = await hold(response.map(fromRow));
+  loaded = true;
+  return list;
+}
+
+// One write at a time: each changes the NPCs held and puts them back.
+let writing: Promise<unknown> = Promise.resolve();
+
+/**
+ * A statement that changes the npcs table, then `change` made to the NPCs held (it is handed them and the statement's
+ * answer; null when the answer does not say what the table now holds, and the table is read instead). A statement
+ * that throws may still have been applied (a timeout, say), so the table is read again rather than the NPCs left as
+ * they were; if it cannot be read either, the next list() reads it.
+ */
+function write(sql: string, values: unknown[], change: (rows: Npc[], response: any) => Npc[] | null): Promise<any> {
+  const work = async () => {
+    let response;
+    try {
+      response = await query(sql, values as any[]);
+    } catch (error) {
+      loaded = false;
+      await load().catch((again) => log.error(`Could not read the NPCs again after a write that failed: ${again}`));
+      throw error;
+    }
+    const next = change(await stored(), response);
+    if (next) {
+      await hold(next);
+    } else {
+      loaded = false;
+      await load();
+    }
+    return response;
+  };
+  const run = writing.then(work, work);
+  writing = run.catch(() => {});
+  return run;
+}
 
 const npcs = {
   setMapNpcs(list: Npc[]) {
@@ -27,174 +148,123 @@ const npcs = {
 
   async add(npc: Npc) {
     if (!npc || !npc?.map || !npc?.position) return;
-    const last_updated = toMysqlDatetime(Date.now());
-    const hidden = npc.hidden ? 1 : 0;
-    const x = npc.position.x || 0;
-    const y = npc.position.y || 0;
-    const direction = npc.position.direction || "down";
-    const particles = Array.isArray(npc.particles)
-      ? npc.particles.join(",")
-      : (npc.particles || "");
-    const sprite_type = npc.sprite_type || "none";
-    const quest_giver = npc.quest_giver ? 1 : 0;
+    const written: Written = {
+      last_updated: toMysqlDatetime(Date.now()),
+      map: npc.map,
+      name: npc.name || null,
+      position: `${npc.position.x || 0},${npc.position.y || 0}`,
+      direction: npc.position.direction || "down",
+      hidden: npc.hidden ? 1 : 0,
+      script: npc.script || null,
+      dialog: npc.dialog || null,
+      gossip: npc.gossip || null,
+      particles: Array.isArray(npc.particles)
+        ? npc.particles.join(",")
+        : (npc.particles || ""),
+      quest_giver: npc.quest_giver ? 1 : 0,
+      sprite_type: npc.sprite_type || "none",
+      sprite_body: npc.sprite_body || null,
+      sprite_head: npc.sprite_head || null,
+      sprite_helmet: npc.sprite_helmet || null,
+      sprite_shoulderguards: npc.sprite_shoulderguards || null,
+      sprite_neck: npc.sprite_neck || null,
+      sprite_hands: npc.sprite_hands || null,
+      sprite_chest: npc.sprite_chest || null,
+      sprite_feet: npc.sprite_feet || null,
+      sprite_legs: npc.sprite_legs || null,
+      sprite_weapon: npc.sprite_weapon || null,
+    };
 
-    const response = await query(
+    return await write(
       `INSERT INTO npcs (last_updated, map, name, position, direction, hidden, script, dialog, gossip, particles, quest_giver,
         sprite_type, sprite_body, sprite_head, sprite_helmet, sprite_shoulderguards, sprite_neck,
         sprite_hands, sprite_chest, sprite_feet, sprite_legs, sprite_weapon)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        last_updated,
-        npc.map,
-        npc.name || null,
-        `${x},${y}`,
-        direction,
-        hidden,
-        npc.script || null,
-        npc.dialog || null,
-        npc.gossip || null,
-        particles,
-        quest_giver,
-        sprite_type,
-        npc.sprite_body || null,
-        npc.sprite_head || null,
-        npc.sprite_helmet || null,
-        npc.sprite_shoulderguards || null,
-        npc.sprite_neck || null,
-        npc.sprite_hands || null,
-        npc.sprite_chest || null,
-        npc.sprite_feet || null,
-        npc.sprite_legs || null,
-        npc.sprite_weapon || null,
-      ]
+      COLUMNS.map((column) => written[column]),
+      // The new NPC is what was written, under the id the database answered with. An NPC is addressed by its id:
+      // an answer without one leaves it unknown, and the table is read instead.
+      (rows, response) => {
+        const id = Number(response?.lastInsertRowid);
+        return Number.isInteger(id) && id > 0 ? [...rows, asWritten(id, written)] : null;
+      }
     );
-
-    assetCache.set("npcs", response);
-
-    return response;
   },
 
   async remove(npc: Npc) {
     if (!npc?.id) return;
-    const response = await query("DELETE FROM npcs WHERE id = ?", [npc.id]);
-
-    assetCache.set("npcs", response);
-
-    return response;
+    return await write("DELETE FROM npcs WHERE id = ?", [npc.id], (rows) => rows.filter((held) => !sameId(npc.id)(held)));
   },
 
+  /** Every NPC: the table's, as held, and the maps' own. The table is read the first time a server asks. */
   async list() {
-    const response = (await query("SELECT * FROM npcs")) as any[];
-    const npcs: Npc[] = [];
-
-    for (const npc of response) {
-      const map = npc?.map as string;
-      const position: PositionData = {
-        x: Number(npc?.position?.split(",")[0]),
-        y: Number(npc?.position?.split(",")[1]),
-        direction: npc?.direction || "down",
-      };
-
-      npcs.push({
-        id: npc?.id as number,
-        last_updated: (npc?.last_updated as number) || null,
-        map,
-        name: npc?.name || null,
-        position,
-        hidden: npc?.hidden === 1,
-        script: npc?.script as string,
-        dialog: npc?.dialog as string,
-        gossip: (npc?.gossip ?? null) as Nullable<string>,
-        particles: npc?.particles as Particle[],
-        quest_giver: npc?.quest_giver === 1 || npc?.quest_giver === true,
-        sprite_type: (npc?.sprite_type as 'none' | 'static' | 'animated') || 'none',
-        sprite_body: npc?.sprite_body || null,
-        sprite_head: npc?.sprite_head || null,
-        sprite_helmet: npc?.sprite_helmet || null,
-        sprite_shoulderguards: npc?.sprite_shoulderguards || null,
-        sprite_neck: npc?.sprite_neck || null,
-        sprite_hands: npc?.sprite_hands || null,
-        sprite_chest: npc?.sprite_chest || null,
-        sprite_feet: npc?.sprite_feet || null,
-        sprite_legs: npc?.sprite_legs || null,
-        sprite_weapon: npc?.sprite_weapon || null,
-      });
-    }
-
-    return [...npcs, ...mapNpcs];
+    if (!loaded || !Array.isArray(await assetCache.get("npcs"))) return load();
+    return [...(await stored()), ...mapNpcs];
   },
 
+  /** Reads the table again and holds what it has. */
+  async reload() {
+    return load();
+  },
+
+  /** The NPC of that id as held, in a list as the table's rows were: an empty one when there is none. */
   async find(npc: Npc) {
     if (!npc?.id) return;
-    const response = await query("SELECT * FROM npcs WHERE id = ?", [npc.id]);
-
-    assetCache.set("npcs", response);
-
-    return response;
+    return (await this.list()).filter((held) => !this.isMapNpc(held) && sameId(npc.id)(held));
   },
 
   async update(npc: Npc) {
     if (!npc?.id || !npc?.map || !npc?.position) return;
-    const last_updated = toMysqlDatetime(Date.now());
-    const hidden = npc.hidden ? 1 : 0;
-    const x = npc.position.x || 0;
-    const y = npc.position.y || 0;
-    const direction = npc.position.direction;
-    const particles = Array.isArray(npc.particles)
-      ? npc.particles.join(",")
-      : (npc.particles || "");
-    const sprite_type = npc.sprite_type || "none";
-    const quest_giver = npc.quest_giver ? 1 : 0;
+    const written: Written = {
+      last_updated: toMysqlDatetime(Date.now()),
+      map: npc.map,
+      name: npc.name || null,
+      position: `${npc.position.x || 0},${npc.position.y || 0}`,
+      direction: npc.position.direction,
+      hidden: npc.hidden ? 1 : 0,
+      script: npc.script,
+      dialog: npc.dialog,
+      gossip: npc.gossip || null,
+      particles: Array.isArray(npc.particles)
+        ? npc.particles.join(",")
+        : (npc.particles || ""),
+      quest_giver: npc.quest_giver ? 1 : 0,
+      sprite_type: npc.sprite_type || "none",
+      sprite_body: npc.sprite_body || null,
+      sprite_head: npc.sprite_head || null,
+      sprite_helmet: npc.sprite_helmet || null,
+      sprite_shoulderguards: npc.sprite_shoulderguards || null,
+      sprite_neck: npc.sprite_neck || null,
+      sprite_hands: npc.sprite_hands || null,
+      sprite_chest: npc.sprite_chest || null,
+      sprite_feet: npc.sprite_feet || null,
+      sprite_legs: npc.sprite_legs || null,
+      sprite_weapon: npc.sprite_weapon || null,
+    };
 
-    const response = await query(
+    return await write(
       `UPDATE npcs SET last_updated = ?, map = ?, name = ?, position = ?, direction = ?, hidden = ?, script = ?,
         dialog = ?, gossip = ?, particles = ?, quest_giver = ?, sprite_type = ?, sprite_body = ?, sprite_head = ?,
         sprite_helmet = ?, sprite_shoulderguards = ?, sprite_neck = ?, sprite_hands = ?,
         sprite_chest = ?, sprite_feet = ?, sprite_legs = ?, sprite_weapon = ? WHERE id = ?`,
-      [
-        last_updated,
-        npc.map,
-        npc.name || null,
-        `${x},${y}`,
-        direction,
-        hidden,
-        npc.script,
-        npc.dialog,
-        npc.gossip || null,
-        particles,
-        quest_giver,
-        sprite_type,
-        npc.sprite_body || null,
-        npc.sprite_head || null,
-        npc.sprite_helmet || null,
-        npc.sprite_shoulderguards || null,
-        npc.sprite_neck || null,
-        npc.sprite_hands || null,
-        npc.sprite_chest || null,
-        npc.sprite_feet || null,
-        npc.sprite_legs || null,
-        npc.sprite_weapon || null,
-        npc.id,
-      ]
+      [...COLUMNS.map((column) => written[column]), npc.id],
+      (rows) => rows.map((held) => (sameId(npc.id)(held) ? asWritten(held.id, written) : held))
     );
-
-    assetCache.set("npcs", response);
-
-    return response;
   },
 
   async move(npc: Npc) {
     if (!npc?.id || !npc?.position) return;
     const last_updated = toMysqlDatetime(Date.now());
+    // The position as add() and update() write it, and as list() reads it.
+    const x = npc.position.x || 0;
+    const y = npc.position.y || 0;
 
-    const response = await query(
+    return await write(
       "UPDATE npcs SET last_updated = ?, position = ? WHERE id = ?",
-      [last_updated, JSON.stringify(npc.position), npc.id]
+      [last_updated, `${x},${y}`, npc.id],
+      (rows) => rows.map((held) => (sameId(npc.id)(held)
+        ? { ...held, last_updated: writtenAt(last_updated), position: { ...held.position, x: Number(x), y: Number(y) } }
+        : held))
     );
-
-    assetCache.set("npcs", response);
-
-    return response;
   },
 };
 

@@ -166,7 +166,7 @@ const createSpellsTable = async () => {
       mana INT NULL DEFAULT 0,
       \`range\` INT NULL DEFAULT 0,
       type VARCHAR(255) NULL DEFAULT 'cast',
-      cast_time INT NULL DEFAULT 0,
+      cast_time DOUBLE NULL DEFAULT 0,
       cooldown INT NULL DEFAULT 0,
       can_move INT NULL DEFAULT 0,
       description VARCHAR(255) NULL,
@@ -182,6 +182,23 @@ const createSpellsTable = async () => {
     )
   `;
   await query(sql);
+};
+
+/**
+ * cast_time was first created as INT, which rounds a 1.5 second cast to 2.
+ * Cast times are fractional in the game (the cast timer and the heal
+ * coefficient both use them as such), so let the column hold them.
+ */
+const widenSpellCastTime = async () => {
+  const rows = (await query(
+    `SELECT DATA_TYPE as type FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'spells' AND COLUMN_NAME = 'cast_time'`,
+    [database]
+  )) as any[];
+  const type = String(rows[0]?.type ?? rows[0]?.DATA_TYPE ?? "").toLowerCase();
+  if (type.includes("int")) {
+    await query(`ALTER TABLE spells MODIFY COLUMN cast_time DOUBLE NULL DEFAULT 0`);
+    log.info("Widened spells.cast_time to hold fractions of a second");
+  }
 };
 
 const insertDefaultSpell = async () => {
@@ -340,6 +357,7 @@ const createPermissionTypesTable = async () => {
         ('tools.npc_editor'),
       ('tools.creature_editor'),
       ('tools.item_editor'),
+      ('tools.spell_editor'),
       ('tools.quest_editor'),
           ('tools.particle_editor'),
         ('admin.loot')
@@ -433,7 +451,8 @@ const createParticleTable = async () => {
       brightness FLOAT NOT NULL DEFAULT 1,
       affected_by_time INT DEFAULT 0,
       time_on VARCHAR(5) DEFAULT NULL,
-      time_off VARCHAR(5) DEFAULT NULL
+      time_off VARCHAR(5) DEFAULT NULL,
+      image VARCHAR(255) DEFAULT NULL
     )
   `;
   await query(sql);
@@ -1231,6 +1250,7 @@ const dropLegacyQuestTables = async () => {
   }
   try {
     await query(`INSERT IGNORE INTO permission_types (name) VALUES ('tools.quest_editor')`);
+    await query(`INSERT IGNORE INTO permission_types (name) VALUES ('tools.spell_editor')`);
   } catch {
     // Ignore.
   }
@@ -1246,6 +1266,7 @@ const setupDatabase = async () => {
   await createStatsTable();
   await createClientConfig();
   await createSpellsTable();
+  await widenSpellCastTime();
   await insertDefaultSpell();
   await createPermissionsTable();
   await createPermissionTypesTable();

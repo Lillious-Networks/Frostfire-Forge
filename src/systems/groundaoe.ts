@@ -5,6 +5,8 @@ import { packetManager } from "../socket/packet_manager";
 import log from "../modules/logger";
 import { setPlayerPvp, listener, Events } from "./events";
 import { broadcastToAOIBestEffort } from "../socket/aoi";
+import playerSystem from "./player";
+import { areaSpellHarms, PVP_BODY } from "./pvpzone";
 
 export interface GroundAoeZone {
   id: string;
@@ -277,6 +279,8 @@ async function processZoneTicks(): Promise<void> {
           if (!player || player.isGuest) continue;
           // Ghosts and corpses are unaffected by ground effects.
           if (player.isGhost || player.isDead) continue;
+          // An admin in stealth is out of the game for everyone else: the zone neither touches nor counts them.
+          if (player.isStealth) continue;
           const pPos = player.location?.position;
           if (!pPos) continue;
           const dist = Math.sqrt((pPos.x - zone.position.x) ** 2 + (pPos.y - zone.position.y) ** 2);
@@ -290,6 +294,9 @@ async function processZoneTicks(): Promise<void> {
             if (player.id !== zone.casterId && !inParty) continue;
           } else {
             if (player.id === zone.casterId || inParty) continue;
+            // A hostile zone harms nobody standing in a no-PvP zone, nor anyone while its caster stands in one.
+            const allowed = (position: { x: number; y: number }) => playerSystem.isInPvPZone(mapName, position as PositionData, PVP_BODY);
+            if (!(await areaSpellHarms(caster?.location?.position, pPos, allowed))) continue;
           }
           affectedPlayers.push(player);
         }

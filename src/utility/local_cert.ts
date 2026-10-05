@@ -348,13 +348,30 @@ export function certificateSupportsPinning(certPem: string): boolean {
 }
 
 /**
- * Whether `certPem` covers every name in `hostnames`.
- *
- * Regeneration otherwise keys only off expiry and pinning suitability, so
- * adding a hostname (a LAN address, say) leaves the old certificate in place
- * and the new name silently fails to validate. The comparison is textual
- * against the SAN because that is the form Node exposes.
+ * DNS names and IP addresses in the certificate's SAN, in the form the cert
+ * scripts take them: X509Certificate prints IPv6 expanded
+ * ("0:0:0:0:0:0:0:1"), which comes back here as "::1".
  */
+export function certificateSanHostnames(certPem: string): string[] {
+  let san: string;
+  try {
+    san = new X509Certificate(certPem).subjectAltName || "";
+  } catch {
+    return [];
+  }
+
+  const names: string[] = [];
+  for (const entry of san.split(",")) {
+    const match = entry.trim().match(/^(DNS|IP Address):(.+)$/);
+    if (!match) continue;
+    const value = match[2];
+    names.push(match[1] === "IP Address" && value.includes(":")
+      ? new URL(`http://[${value}]`).hostname.slice(1, -1)
+      : value);
+  }
+  return names;
+}
+
 /** Whether the certificate is its own issuer. */
 export function isSelfSigned(certPem: string): boolean {
   try {
@@ -365,13 +382,18 @@ export function isSelfSigned(certPem: string): boolean {
   }
 }
 
+/**
+ * Whether `certPem` covers every name in `hostnames`.
+ *
+ * Regeneration otherwise keys only off expiry and pinning suitability, so
+ * adding a hostname (a LAN address, say) leaves the old certificate in place
+ * and the new name silently fails to validate. The comparison goes through
+ * certificateSanHostnames, not the raw SAN text, which prints IPv6 expanded
+ * and so never contains a requested "::1".
+ */
 export function certificateCoversHostnames(certPem: string, hostnames: string[]): boolean {
-  try {
-    const san = new X509Certificate(certPem).subjectAltName || "";
-    return hostnames.every((host) => san.includes(host));
-  } catch {
-    return false;
-  }
+  const names = certificateSanHostnames(certPem);
+  return hostnames.every((host) => names.includes(host));
 }
 
 export function certificateNeedsRegeneration(certPem: string): boolean {

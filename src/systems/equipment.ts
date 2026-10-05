@@ -1,14 +1,45 @@
 import query from "../controllers/sqldatabase";
 import assetCache from "../services/assetCache";
+import { rowCache, turns } from "../services/datacache";
 import inventory from "./inventory";
 import log from "../modules/logger";
+
+/** Every slot an item can be worn in: the item columns of the equipment table. */
+export const EQUIPMENT_SLOTS = [
+    "helmet", "necklace", "shoulderguards", "cape", "chestplate", "wristguards", "gloves", "belt",
+    "pants", "boots", "ring_1", "ring_2", "trinket_1", "trinket_2", "weapon", "off_hand_weapon",
+] as const;
+
+// Each player's equipment row (null: they have none).
+const rows = rowCache<any>("equipment", async (username) => {
+    const response = await query("SELECT * FROM equipment WHERE username = ?", [username]) as any[];
+    return response[0] ?? null;
+}, { perPlayer: true });
+
+// One change to a player's row at a time: statements sent side by side reach the database in no set order, so two
+// for one slot could leave the row held with one item and the database with the other.
+const oneAtATime = turns();
+
+/**
+ * Write one slot of a player's row with `write`, then make the same change to the row held. When the write fails,
+ * the row held is forgotten and the next read loads it: a write that threw may still have been made.
+ */
+function setSlot(username: string, slot: string, item: string | null, write: () => Promise<unknown>) {
+    return oneAtATime(username, async () => {
+        try {
+            await write();
+        } catch (error) {
+            await rows.drop(username);
+            throw error;
+        }
+        await rows.patch(username, { [slot]: item });
+    });
+}
 
 const equipment = {
     async list(username: string) {
         if (!username) return null;
-        const response = await query("SELECT * FROM equipment WHERE username = ?", [username]) as any[];
-        if (response.length === 0) return null;
-        return response[0];
+        return await rows.get(username);
     },
     async equipItem(username: string, slot: string, item: string | null) {
         if (!username || !slot) return false;
@@ -36,7 +67,7 @@ const equipment = {
                     return false;
                 }
 
-                await query(`UPDATE equipment SET ${slot} = ? WHERE username = ?`, [itemObj.name, username]);
+                await setSlot(username, slot, itemObj.name, () => query(`UPDATE equipment SET ${slot} = ? WHERE username = ?`, [itemObj.name, username]));
                 await inventory.setEquipped(username, itemObj.name, true);
                 return true;
             }
@@ -52,7 +83,7 @@ const equipment = {
             return false;
         }
         try {
-            await query(`UPDATE equipment SET ${slot} = NULL WHERE username = ?`, [username]);
+            await setSlot(username, slot, null, () => query(`UPDATE equipment SET ${slot} = NULL WHERE username = ?`, [username]));
             await inventory.setEquipped(username, item, false);
             return true;
         } catch (error) {

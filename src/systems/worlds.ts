@@ -1,5 +1,10 @@
 import query from "../controllers/sqldatabase";
+import log from "../modules/logger";
 import assetCache from "../services/assetCache";
+
+// The worlds a WHERE on a name picks: MySQL compares text without regard to case, the other engines exactly.
+const sameName = (a: string, b: string) =>
+  (process.env.DATABASE_ENGINE || "mysql") === "mysql" ? String(a).toLowerCase() === String(b).toLowerCase() : a === b;
 
 let worldsCountMutex: Promise<void> = Promise.resolve();
 
@@ -25,6 +30,33 @@ async function getRedisClient(): Promise<any | null> {
   }
 }
 
+/**
+ * A statement that changes the worlds table, then `change` made to the worlds
+ * held. A statement that throws may still have been applied (a timeout, say),
+ * so the table is read again rather than the list left as it was. Either way
+ * the player counts, which only the list holds, are kept.
+ */
+async function write(sql: string, values: any[], change: (list: WorldData[]) => WorldData[]): Promise<void> {
+  try {
+    await query(sql, values);
+  } catch (error) {
+    try {
+      const rows = await worlds.list();
+      await withWorldsLock(async () => {
+        const counts = await readWorldsCache();
+        const read = rows.map((row) => ({ ...row, players: counts.find((w) => w.name === row.name)?.players || 0 }));
+        await assetCache.set("worlds", JSON.stringify(read));
+      });
+    } catch (again) {
+      log.error(`Could not read the worlds again after a write that failed: ${again}`);
+    }
+    throw error;
+  }
+  await withWorldsLock(async () => {
+    await assetCache.set("worlds", JSON.stringify(change(await readWorldsCache())));
+  });
+}
+
 const worlds = {
   async list() {
     const results = await query("SELECT * FROM worlds") as WorldData[];
@@ -35,7 +67,8 @@ const worlds = {
     return worlds;
   },
   async get(world: string) {
-    const worlds = await assetCache.get("worlds") as WorldData[];
+    // The list is held as text once a player count has been written to it.
+    const worlds = await readWorldsCache();
     return worlds.find((w) => w.name === world);
   },
   async getCurrentWeather(world: string) {
@@ -43,24 +76,16 @@ const worlds = {
     return worldData?.weather || "clear";
   },
   async add(world: WorldData) {
-    await query("INSERT INTO worlds (name, weather) VALUES (?, ?)", [world.name, world.weather]);
+    await write("INSERT INTO worlds (name, weather) VALUES (?, ?)", [world.name, world.weather],
+      (list) => [...list, { name: world.name, weather: world.weather, players: 0 }]);
   },
   async remove(world: WorldData) {
-    await query("DELETE FROM worlds WHERE name = ?", [world.name]);
+    await write("DELETE FROM worlds WHERE name = ?", [world.name], (list) => list.filter((w) => !sameName(w.name, world.name)));
   },
   async update(world: WorldData) {
-    await query("UPDATE worlds SET name = ?, weather = ? WHERE name = ?", [world.name, world.weather, world.name]);
-
-    // Preserve existing player counts instead of resetting them to zero
-    await withWorldsLock(async () => {
-      const worldsList = await readWorldsCache();
-      const updatedWorlds = worldsList.map((w) =>
-        w.name === world.name
-          ? { ...w, name: world.name, weather: world.weather, players: w.players || 0 }
-          : w
-      );
-      await assetCache.set("worlds", JSON.stringify(updatedWorlds));
-    });
+    await write("UPDATE worlds SET name = ?, weather = ? WHERE name = ?", [world.name, world.weather, world.name],
+      // Preserve existing player counts instead of resetting them to zero
+      (list) => list.map((w) => (sameName(w.name, world.name) ? { ...w, name: world.name, weather: world.weather, players: w.players || 0 } : w)));
   },
   async adjustPlayerCount(mapName: string, delta: number): Promise<number | null> {
     return withWorldsLock(async () => {

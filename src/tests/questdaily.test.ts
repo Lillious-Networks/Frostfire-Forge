@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { beforeEach, describe, expect, mock, test } from "bun:test";
 
 const repeatable: Quest = {
   id: 10, name: "Daily Grind", zone: null, offer_text: "", description: "", progress_text: "", completion_text: "",
@@ -130,6 +130,19 @@ mock.module("../services/playermanager", () => ({
 
 const defs = await import("../systems/quests/definitions");
 const questLog = await import("../systems/quests/log");
+const { clearCaches } = await import("../services/datacache");
+
+// The tables are new for every test, so nothing held from the last one still holds.
+beforeEach(async () => {
+  await clearCaches();
+});
+
+/** The player logs in again: their rows are read from the tables as a test has just changed them. */
+async function relog() {
+  await clearCaches();
+  players.set("conn1", { id: "conn1", username: "hero", stats: { level: 5 }, questlog: null as any });
+  await questLog.load("hero");
+}
 
 function seed() {
   players.clear();
@@ -162,8 +175,7 @@ describe("repeatable and daily re-accept", () => {
     row.completed_at = Date.now();
     row.times_completed = 1;
     progressRows.push({ username: "hero", quest_id: 10, objective_id: 1001, count: 2 });
-    players.set("conn1", { id: "conn1", username: "hero", stats: { level: 5 }, questlog: null as any });
-    await questLog.load("hero");
+    await relog();
     expect(await questLog.eligibility("hero", 10)).toBe("available");
     const second = await questLog.accept("hero", 10, 1);
     expect(second.ok).toBe(true);
@@ -180,13 +192,11 @@ describe("repeatable and daily re-accept", () => {
     const boundary = questLog.lastResetBoundary(now);
     // Completed after the most recent reset: not yet available.
     logRows.push({ username: "hero", quest_id: 11, state: "completed", accepted_at: now - 1000, completed_at: boundary + 1000, times_completed: 1 });
-    players.set("conn1", { id: "conn1", username: "hero", stats: { level: 5 }, questlog: null as any });
-    await questLog.load("hero");
+    await relog();
     expect(await questLog.eligibility("hero", 11)).toBe("daily_not_reset");
     // Completed before the reset: available again.
     logRows.find((r) => r.quest_id === 11)!.completed_at = boundary - 1000;
-    players.set("conn1", { id: "conn1", username: "hero", stats: { level: 5 }, questlog: null as any });
-    await questLog.load("hero");
+    await relog();
     expect(await questLog.eligibility("hero", 11)).toBe("available");
   });
 });

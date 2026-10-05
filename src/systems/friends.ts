@@ -1,14 +1,47 @@
 import query from "../controllers/sqldatabase";
 import log from "../modules/logger";
+import { rowCache, turns } from "../services/datacache";
+import player from "./player";
+
+/** A row of the friendslist table: `friends` is the comma-separated list. */
+type FriendsRow = { friends: string };
+
+// Each player's rows of the friends list, as the table has them: one, or none
+// for a player who has never added a friend. Reads are answered from these,
+// and every change below is written to the database and then to them.
+const rows = rowCache<FriendsRow[]>("friends", async (username) =>
+  (await query("SELECT friends FROM friendslist WHERE username = ?", [username])) as FriendsRow[] || []
+, { perPlayer: true });
+
+// One write to a player's list at a time: statements sent side by side reach
+// the database in no set order, so the rows held could end as one left them
+// and the table as the other did.
+const oneAtATime = turns();
+
+/**
+ * A write of a player's list: the statement, then what it left as the rows
+ * held. A statement that fails may still have been written (one that timed
+ * out, say), so the rows are forgotten and the next read asks the database.
+ */
+function write(username: string, sql: string, values: unknown[], left: (held: FriendsRow[]) => FriendsRow[]): Promise<any> {
+  return oneAtATime(username, async () => {
+    const held = (await rows.get(username)) ?? [];
+    try {
+      const result = await query(sql, values);
+      await rows.set(username, left(held));
+      return result;
+    } catch (error) {
+      await rows.drop(username);
+      throw error;
+    }
+  });
+}
 
 const friends = {
   async list(username: string) {
     if (!username) return [];
     try {
-      const response = await query(
-        "SELECT friends FROM friendslist WHERE username = ?",
-        [username]
-      ) as any[];
+      const response = (await rows.get(username)) ?? [];
       if (response.length === 0 || !response[0].friends) {
         return [];
       }
@@ -25,16 +58,11 @@ const friends = {
     if (!username || !friend_username) return [];
 
     try {
-      const queryResult = (await query(
-        "SELECT username FROM accounts WHERE username = ?",
-        [friend_username]
-      )) as any;
-      console.log("Query Result:", queryResult);
-      const user = queryResult[0]?.username;
-      console.log("User:", user);
+      // Whether there is such an account is the player system's to say, from the accounts it holds.
+      const account = (await player.findByUsername(friend_username)) as { username: string }[] | undefined;
+      const user = account?.[0]?.username;
       if (!user) return await this.list(username);
       const currentFriends = await this.list(username);
-      console.log("Current Friends:", currentFriends);
 
       if (currentFriends.includes(user.toString())) {
         return currentFriends;
@@ -43,12 +71,12 @@ const friends = {
       currentFriends.push(user.toString());
       const friendsString = currentFriends.join(",");
 
-      const result = (await query(
+      const result = await write(
+        username,
         "INSERT INTO friendslist (username, friends) VALUES (?, ?) ON DUPLICATE KEY UPDATE friends = ?",
-        [username, friendsString, friendsString]
-      )) as any;
-
-      console.log(result);
+        [username, friendsString, friendsString],
+        () => [{ friends: friendsString }]
+      );
 
       if (result.affectedRows > 0) {
         return currentFriends;
@@ -62,17 +90,12 @@ const friends = {
     }
   },
   async remove(username: string, friend_username: string) {
-    console.log("Removing friend:", username, friend_username);
     if (!username || !friend_username) return [];
 
     try {
 
-      const queryResult = (await query(
-        "SELECT username FROM accounts WHERE username = ?",
-        [friend_username]
-      )) as any;
-
-      const user = queryResult[0]?.username;
+      const account = (await player.findByUsername(friend_username)) as { username: string }[] | undefined;
+      const user = account?.[0]?.username;
       if (!user) return [];
 
       const currentFriends = await this.list(username);
@@ -85,12 +108,12 @@ const friends = {
       currentFriends.splice(friendIndex, 1);
       const friendsString = currentFriends.join(",");
 
-      const result = (await query(
+      const result = await write(
+        username,
         "UPDATE friendslist SET friends = ? WHERE username = ?",
-        [friendsString, username]
-      )) as any;
-
-      console.log("Update result:", result);
+        [friendsString, username],
+        (held) => held.map((row) => ({ ...row, friends: friendsString }))
+      );
 
       if (result.affectedRows > 0) {
         return currentFriends;

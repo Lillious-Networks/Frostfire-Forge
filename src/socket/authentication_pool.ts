@@ -81,3 +81,35 @@ export function resetAuthWorker(): void {
     authWorkers.length = 0;
     serializedAssets = null;
 }
+
+/**
+ * The spell list changed while the server is running (spell editor). Each
+ * worker builds a logging-in player's spell book from the copy of the list it
+ * was started with, so hand every worker the new list, and keep it for any
+ * worker started later.
+ */
+export async function refreshAuthSpells(): Promise<void> {
+    if (authWorkers.length === 0) return;
+    const spells = await assetCache.get("spells");
+    const serialized = spells ? JSON.stringify(spells) : null;
+    if (serializedAssets) serializedAssets.spells = serialized;
+    for (const w of authWorkers) {
+        w.postMessage({ spells: serialized });
+    }
+}
+
+/**
+ * The item list changed while the server is running (item editor). Each
+ * worker builds a logging-in player's inventory from the copy of the list it
+ * was started with, so hand every worker the new list, and keep it for any
+ * worker started later.
+ */
+export async function refreshAuthItems(): Promise<void> {
+    if (authWorkers.length === 0) return;
+    const items = await assetCache.get("items");
+    const serialized = items ? JSON.stringify(items) : null;
+    if (serializedAssets) serializedAssets.items = serialized;
+    for (const w of authWorkers) {
+        w.postMessage({ items: serialized });
+    }
+}

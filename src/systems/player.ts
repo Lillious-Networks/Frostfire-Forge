@@ -4,8 +4,194 @@ import log from "../modules/logger";
 import assetCache from "../services/assetCache";
 import * as settings from "../config/settings.json";
 import playerCache from "../services/playermanager.ts";
+import { rowCache, tableCache, dropRows, dropAllRows, reloadTable, type RowCache } from "../services/datacache";
+import { Events, listener } from "./events";
 import { isSick, applySicknessToStats } from "./resurrection";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
+
+// What the engine writes of an account. The rest of the row (session, token,
+// e-mail, password, two-factor) is the gateway's to write and is not held:
+// who is online is asked of the player cache instead.
+interface AccountRow {
+  id: number;
+  username: string;
+  role: number;
+  banned: number;
+  guest_mode: number;
+  stealth: number;
+  noclip: number;
+  is_dead: number;
+  corpse_map: string | null;
+  corpse_x: number | null;
+  corpse_y: number | null;
+  map: string;
+  position: string;
+  direction: string;
+  party_id: number | null;
+  guild_id: number | null;
+}
+
+// The id and name of every account: what a search of the accounts asks,
+// instead of the database. It is read at startup with the other tables. The
+// gateway makes accounts without the engine hearing of it, so it is read
+// again on the server's tick (below), and an account whose row is read from
+// the database, as a login does, is added if it is not listed.
+const allAccounts = tableCache<{ id: number; username: string }>("account_names", async () =>
+  ((await query("SELECT id, username FROM accounts")) as { id: number; username: string }[]) || []
+);
+
+// How long the names are held before they are read again: 5 minutes. An
+// account the gateway made, and that has not logged in to the game since, is
+// found by a search at most this much later.
+const ACCOUNT_NAMES_REFRESH_MS = 5 * 60 * 1000;
+let accountNamesReadAt = Date.now();
+
+listener.on(Events.SERVER_TICK, async function refreshAccountNames() {
+  const since = Date.now() - accountNamesReadAt;
+  // Less than nothing: the clock was set back, and how long it has been is not known.
+  if (since >= 0 && since < ACCOUNT_NAMES_REFRESH_MS) return;
+  accountNamesReadAt = Date.now();
+  try {
+    await allAccounts.reload();
+  } catch (error) {
+    log.error(`Failed to read the account names again: ${error}`);
+  }
+});
+
+/** An account just read from the database joins the names a search asks, unless it is listed already. */
+async function listAccount(account: AccountRow): Promise<void> {
+  // Not in a login worker: nothing is held there, and asking would read every account.
+  if (!Bun.isMainThread) return;
+  const name = String(account.username).toLowerCase();
+  try {
+    if (await allAccounts.find((listed) => Number(listed.id) === Number(account.id) && listed.username === account.username)) return;
+    // In place of whoever held the name before, if it was given to a new account.
+    await allAccounts.put({ id: account.id, username: account.username }, (listed) => String(listed.username).toLowerCase() === name);
+  } catch (error) {
+    // The account itself was read: only a search is the poorer for this.
+    log.error(`Failed to list the account ${name} for searches: ${error}`);
+  }
+}
+
+const accountRows = rowCache<AccountRow>("accounts", async (username) => {
+  const rows = (await query(
+    "SELECT id, username, role, banned, guest_mode, stealth, noclip, is_dead, corpse_map, corpse_x, corpse_y, map, position, direction, party_id, guild_id FROM accounts WHERE username = ?",
+    [username]
+  )) as AccountRow[];
+  if (rows?.[0]) await listAccount(rows[0]);
+  return rows?.[0];
+}, { perPlayer: true });
+
+// Account id -> username, for the lookups made by id. Only the name is held
+// here: what is known of the account is its row above, so the two cannot
+// disagree.
+const accountNames = rowCache<string>("account_ids", async (id) => {
+  const rows = (await query("SELECT username FROM accounts WHERE id = ?", [Number(id)])) as { username: string }[];
+  return rows?.[0]?.username;
+});
+
+const statRows = rowCache<StatsData>("stats", async (username) => {
+  const rows = (await query("SELECT * FROM stats WHERE username = ?", [username])) as StatsData[];
+  return rows?.[0];
+}, { perPlayer: true });
+
+const configRows = rowCache<Record<string, any>>("clientconfig", async (username) => {
+  const rows = (await query("SELECT * FROM clientconfig WHERE username = ?", [username])) as Record<string, any>[];
+  return rows?.[0];
+}, { perPlayer: true });
+
+/** The account with this id. */
+async function accountById(id: number): Promise<AccountRow | null> {
+  const username = await accountNames.get(id);
+  if (!username) return null;
+  const account = await accountRows.get(username);
+  if (account && Number(account.id) === Number(id)) return account;
+  // The name is no longer that account's (it was deleted): look the id up again next time.
+  await accountNames.drop(id);
+  return null;
+}
+
+/** The account `WHERE username = ? OR session_id = ?` found: of the player online under that session id, or by name. */
+async function accountByNameOrSession(identifier: string | null | undefined): Promise<AccountRow | null> {
+  if (!identifier) return null;
+  return accountRows.get(playerCache.get(identifier)?.username || identifier);
+}
+
+/** The id of the session a username is online under. */
+function sessionOf(username: string): string | undefined {
+  const id = playerCache.getByUsername(username)?.id;
+  return id === undefined || id === null ? undefined : String(id);
+}
+
+const whole = (...values: unknown[]) => values.every((value) => Number.isInteger(value));
+const text = (...values: unknown[]) => values.every((value) => typeof value === "string");
+
+/**
+ * What SQL's `LIKE pattern` accepts, in any case: % stands for any run of
+ * characters and _ for any one. Every other character stands for itself, a
+ * backslash too (the searches made here are of letters, digits and _).
+ */
+function like(pattern: string): (value: unknown) => boolean {
+  const source = [...pattern]
+    .map((character) => (character === "%" ? ".*" : character === "_" ? "." : character.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+    .join("");
+  const expression = new RegExp(`^${source}$`, "isu");
+  return (value) => expression.test(String(value));
+}
+
+/**
+ * Runs a write to a player's row. When the database does not answer it, the
+ * row is read again: a statement that timed out may still have been applied,
+ * so what is held can be trusted no longer.
+ */
+async function writing<T>(rows: RowCache<any>, username: string | undefined, write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (error) {
+    if (username) await rows.drop(username);
+    throw error;
+  }
+}
+
+/**
+ * After a write to a player's row: the columns written, on the row held.
+ * `asGiven` false: the database stores one of them differently from what it
+ * was handed (a fraction in a whole-number column, say), so the row is read
+ * again rather than guessed at.
+ */
+async function wrote<T>(rows: RowCache<T>, username: string, columns: Partial<T>, asGiven = true): Promise<void> {
+  if (asGiven) await rows.patch(username, columns);
+  else await rows.drop(username);
+}
+
+/**
+ * Whose row a write `WHERE session_id = ?` changes: the player online under
+ * that session. A session that has already left the player cache (a
+ * disconnect's last save) is nobody here, and its rows are forgotten with
+ * the player.
+ */
+const usernameOfSession = (session_id: string): string | undefined => playerCache.get(session_id)?.username;
+
+/** False when the database says a write changed no row: the session was not that account's any more. */
+const changedRows = (response: any) => !(response && typeof response === "object" && "affectedRows" in response && Number(response.affectedRows) === 0);
+
+/**
+ * After a layout is saved to a config column: the same on the row held, in
+ * the form the database gives that column back. That is the text written
+ * where the column is text and the parsed value where it is JSON, which the
+ * row held shows; a row that shows neither is read again.
+ */
+async function wroteLayout(username: string, column: "hotbar_config" | "inventory_config", json: string | undefined): Promise<void> {
+  if (json === undefined) return configRows.patch(username, { [column]: null });
+  const held = await configRows.get(username);
+  const shown = [held?.hotbar_config, held?.inventory_config].find((value) => value !== null && value !== undefined);
+  if (typeof shown === "string") await configRows.patch(username, { [column]: json });
+  else if (typeof shown === "object") await configRows.patch(username, { [column]: JSON.parse(json) });
+  else await configRows.drop(username);
+}
+
+// The caches of the per-player tables the guest clean-up deletes from.
+const CLEANED = ["accounts", "account_ids", "inventory", "stats", "clientconfig", "quest_log", "currency", "collectables", "equipment", "learned_spells", "spell_usage", "permissions", "friends"];
 
 const TOKEN_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
@@ -154,41 +340,49 @@ export async function hasLineOfSight(
 
 const player = {
   clear: async () => {
-    // Reset all accounts
-    await query(
-      "UPDATE accounts SET verification_code = NULL, party_id = NULL, twofa_pending = 0"
-    );
+    try {
+      // Reset all accounts
+      await query(
+        "UPDATE accounts SET verification_code = NULL, party_id = NULL, twofa_pending = 0"
+      );
 
-    // Get guest usernames for cleanup
-    const guestUsernames = "(SELECT username FROM accounts WHERE guest_mode = 1)";
+      // Get guest usernames for cleanup
+      const guestUsernames = "(SELECT username FROM accounts WHERE guest_mode = 1)";
 
-    // Delete guest data from all related tables with username columns
-    await query(`DELETE FROM inventory WHERE username IN ${guestUsernames}`);
-    await query(`DELETE FROM stats WHERE username IN ${guestUsernames}`);
-    await query(`DELETE FROM clientconfig WHERE username IN ${guestUsernames}`);
-    await query(`DELETE FROM quest_log WHERE username IN ${guestUsernames}`);
-    await query(`DELETE FROM currency WHERE username IN ${guestUsernames}`);
-    await query(`DELETE FROM collectables WHERE username IN ${guestUsernames}`);
-    await query(`DELETE FROM equipment WHERE username IN ${guestUsernames}`);
-    await query(`DELETE FROM learned_spells WHERE username IN ${guestUsernames}`);
-    await query(`DELETE FROM permissions WHERE username IN ${guestUsernames}`);
-    await query(`DELETE FROM friendslist WHERE username IN ${guestUsernames}`);
+      // Delete guest data from all related tables with username columns
+      await query(`DELETE FROM inventory WHERE username IN ${guestUsernames}`);
+      await query(`DELETE FROM stats WHERE username IN ${guestUsernames}`);
+      await query(`DELETE FROM clientconfig WHERE username IN ${guestUsernames}`);
+      await query(`DELETE FROM quest_log WHERE username IN ${guestUsernames}`);
+      await query(`DELETE FROM currency WHERE username IN ${guestUsernames}`);
+      await query(`DELETE FROM collectables WHERE username IN ${guestUsernames}`);
+      await query(`DELETE FROM equipment WHERE username IN ${guestUsernames}`);
+      await query(`DELETE FROM learned_spells WHERE username IN ${guestUsernames}`);
+      await query(`DELETE FROM permissions WHERE username IN ${guestUsernames}`);
+      await query(`DELETE FROM friendslist WHERE username IN ${guestUsernames}`);
 
-    // Delete parties led by guests
-    await query(`DELETE FROM parties WHERE leader IN ${guestUsernames}`);
+      // Delete parties led by guests
+      await query(`DELETE FROM parties WHERE leader IN ${guestUsernames}`);
 
-    // Delete guilds led by guests
-    await query(`DELETE FROM guilds WHERE leader IN ${guestUsernames}`);
+      // Delete guilds led by guests
+      await query(`DELETE FROM guilds WHERE leader IN ${guestUsernames}`);
 
-    // Clear all parties
-    if (process.env.DATABASE_ENGINE === "sqlite") {
-      await query("DELETE FROM parties");
-    } else {
-      await query("TRUNCATE TABLE parties");
+      // Clear all parties
+      if (process.env.DATABASE_ENGINE === "sqlite") {
+        await query("DELETE FROM parties");
+      } else {
+        await query("TRUNCATE TABLE parties");
+      }
+
+      // Delete guest accounts
+      await query("DELETE FROM accounts WHERE guest_mode = 1");
+    } finally {
+      // None of this names the rows it wrote: every account lost its party,
+      // and the guests are picked by the database. So the caches of these
+      // tables forget everything and read again, also when it stopped half way.
+      await Promise.all(CLEANED.map((name) => dropAllRows(name)));
+      await Promise.all([reloadTable("parties"), reloadTable("guilds"), allAccounts.reload()]);
     }
-
-    // Delete guest accounts
-    await query("DELETE FROM accounts WHERE guest_mode = 1");
   },
   register: async (
     username: string,
@@ -232,31 +426,43 @@ const player = {
     });
     if (!response) return { error: "An unexpected error occurred" };
 
-    await query(
-      "INSERT INTO stats (username, health, max_health, stamina, max_stamina, xp, max_xp, level, stat_critical_damage, stat_critical_chance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [username, 100, 100, 100, 100, 0, 100, 1, 10, 10]
-    );
+    try {
+      await query(
+        "INSERT INTO stats (username, health, max_health, stamina, max_stamina, xp, max_xp, level, stat_critical_damage, stat_critical_chance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [username, 100, 100, 100, 100, 0, 100, 1, 10, 10]
+      );
 
-    await query(
-      "INSERT INTO clientconfig (username, fps, music_volume, effects_volume, muted) VALUES (?, ?, ?, ?, ?)",
-      [username, 60, 50, 50, 0]
-    );
+      await query(
+        "INSERT INTO clientconfig (username, fps, music_volume, effects_volume, muted) VALUES (?, ?, ?, ?, ?)",
+        [username, 60, 50, 50, 0]
+      );
 
-    await query("INSERT INTO quest_log (username) VALUES (?)", [username]);
+      await query("INSERT INTO quest_log (username) VALUES (?)", [username]);
 
-    await query(
-      "INSERT INTO currency (username, copper, silver, gold) VALUES (?, ?, ?, ?)",
-      [username, 0, 0, 0]
-    );
+      await query(
+        "INSERT INTO currency (username, copper, silver, gold) VALUES (?, ?, ?, ?)",
+        [username, 0, 0, 0]
+      );
 
-    await query(
-      "INSERT INTO equipment (username) VALUES (?)",
-      [username]
-    );
+      await query(
+        "INSERT INTO equipment (username) VALUES (?)",
+        [username]
+      );
 
-    await query("INSERT INTO collectables (type, item, username) VALUES (?, ?, ?)", ["mount", "unicorn", username]);
+      await query("INSERT INTO collectables (type, item, username) VALUES (?, ?, ?)", ["mount", "unicorn", username]);
 
-    await query("INSERT INTO learned_spells (spell, username) VALUES (?, ?)", ["frost_bolt", username]);
+      await query("INSERT INTO learned_spells (spell, username) VALUES (?, ?)", ["frost_bolt", username]);
+    } finally {
+      // A cache that looked for this name before now holds that it has no rows: the new ones are read.
+      await Promise.all([
+        accountRows.drop(username),
+        statRows.drop(username),
+        configRows.drop(username),
+        ...["quest_log", "currency", "equipment", "collectables", "learned_spells"].map((name) => dropRows(name, username)),
+        // Who knows the spell every new account is given.
+        dropRows("spell_usage", "frost_bolt"),
+      ]);
+    }
 
     return username;
   },
@@ -270,23 +476,57 @@ const player = {
     if (response[0]?.verified) return true;
     return false;
   },
-  findByUsername: async (username: string) => {
+  findByUsername: async (username: string): Promise<unknown[] | undefined> => {
     if (!username) return;
     username = username.toLowerCase();
-    const response = await query(
-      "SELECT username FROM accounts WHERE username = ?",
-      [username]
-    );
-    return response || [];
+    const account = await accountRows.get(username);
+    return account ? [{ username: account.username }] : [];
   },
+  /** The accounts with this username or, for a player who is online, this session id. */
   findPlayerInDatabase: async (username?: string, id?: string) => {
     if (!username && !id) return;
     if (username) username = username.toLowerCase();
-    const response = await query(
-      "SELECT username, banned FROM accounts WHERE username = ? OR session_id = ?",
-      [username, id]
-    );
-    return response || [];
+    const found: AccountRow[] = [];
+    for (const name of [username, id ? playerCache.get(id)?.username : undefined]) {
+      const account = name ? await accountRows.get(name) : null;
+      if (account && !found.some((other) => other.id === account.id)) found.push(account);
+    }
+    return found.map((account) => ({ username: account.username, banned: account.banned }));
+  },
+  /**
+   * One account for the admin tools: by account id when `id` is given, otherwise by username.
+   * `session_id` is the session they are online under, null when they are not.
+   */
+  findAccount: async (username?: string, id?: number) => {
+    if (!username && !id) return null;
+    const account = id ? await accountById(id) : await accountRows.get(username as string);
+    if (!account) return null;
+    return {
+      id: account.id,
+      username: account.username,
+      session_id: sessionOf(account.username) ?? null,
+      banned: account.banned,
+      is_dead: account.is_dead,
+    };
+  },
+  /**
+   * Accounts whose username contains `search`, for the admin tools' player lists:
+   * what `username LIKE '%search%' ORDER BY username LIMIT limit` gave, asked of
+   * the names held. An account the gateway made since they were last read is not
+   * among them until it logs in or they are read again.
+   */
+  searchAccounts: async (search: string, limit: number) => {
+    if (!search) return [];
+    const matches = like(`%${search.toLowerCase()}%`);
+    const found = await allAccounts.filter((account) => matches(account.username));
+    return found
+      .sort((a, b) => String(a.username).localeCompare(String(b.username)))
+      .slice(0, Math.max(1, Math.trunc(limit) || 1));
+  },
+  /** What the engine holds of an account: the columns it writes, as the database has them. Null when there is no such account. */
+  getAccount: async (username: string) => {
+    if (!username) return null;
+    return accountRows.get(username);
   },
   findByEmail: async (email: string) => {
     if (!email) return;
@@ -297,15 +537,12 @@ const player = {
   },
   getLocation: async (player: Player) => {
     const username = player.username || player.id;
-    const response = (await query(
-      "SELECT map, position, direction FROM accounts WHERE username = ? OR session_id = ?",
-      [username, username]
-    )) as LocationData[];
-    const map = response[0]?.map as string;
+    const account = await accountByNameOrSession(username);
+    const map = account?.map as string;
     const position: PositionData = {
-      x: Math.round(Number(response[0]?.position?.split(",")[0])),
-      y: Math.round(Number(response[0]?.position?.split(",")[1])),
-      direction: response[0]?.direction || "down",
+      x: Math.round(Number(account?.position?.split(",")[0])),
+      y: Math.round(Number(account?.position?.split(",")[1])),
+      direction: account?.direction || "down",
     };
 
     if (
@@ -324,10 +561,30 @@ const player = {
     position: PositionData
   ) => {
     if (!session_id || !map || !position) return;
-    const response = await query(
+    const at = `${Math.round(position.x)},${Math.round(position.y)}`;
+    const username = usernameOfSession(session_id);
+    const response = await writing(accountRows, username, () => query(
       "UPDATE accounts SET map = ?, position = ?, direction = ? WHERE session_id = ?",
-      [map, `${Math.round(position.x)},${Math.round(position.y)}`, position.direction, session_id]
-    );
+      [map, at, position.direction, session_id]
+    ));
+    if (username && changedRows(response)) {
+      await wrote(accountRows, username, { map, position: at, direction: position.direction as string }, text(map, position.direction));
+    }
+    return response;
+  },
+  /** setLocation for a player who is offline, and so has no session id to be found by. */
+  setLocationByUsername: async (
+    username: string,
+    map: string,
+    position: PositionData
+  ) => {
+    if (!username || !map || !position) return;
+    const at = `${Math.round(position.x)},${Math.round(position.y)}`;
+    const response = await writing(accountRows, username, () => query(
+      "UPDATE accounts SET map = ?, position = ?, direction = ? WHERE username = ?",
+      [map, at, position.direction, username.toLowerCase()]
+    ));
+    await wrote(accountRows, username, { map, position: at, direction: position.direction as string }, text(map, position.direction));
     return response;
   },
   setDeadState: async (
@@ -336,10 +593,17 @@ const player = {
     corpse: { map: string; x: number; y: number } | null
   ) => {
     if (!username) return;
-    const response = await query(
+    const state = {
+      is_dead: isDead,
+      corpse_map: corpse?.map || null,
+      corpse_x: corpse ? Math.round(corpse.x) : null,
+      corpse_y: corpse ? Math.round(corpse.y) : null,
+    };
+    const response = await writing(accountRows, username, () => query(
       "UPDATE accounts SET is_dead = ?, corpse_map = ?, corpse_x = ?, corpse_y = ? WHERE username = ?",
-      [isDead, corpse?.map || null, corpse ? Math.round(corpse.x) : null, corpse ? Math.round(corpse.y) : null, username.toLowerCase()]
-    );
+      [state.is_dead, state.corpse_map, state.corpse_x, state.corpse_y, username.toLowerCase()]
+    ));
+    await wrote(accountRows, username, state, whole(isDead) && (!corpse || (text(corpse.map) && whole(state.corpse_x, state.corpse_y))));
     return response;
   },
   setSessionId: async (
@@ -484,29 +748,18 @@ const player = {
   },
   getUsernameBySession: async (session_id: string) => {
     if (!session_id) return;
-    const response = await query(
-      "SELECT username, id FROM accounts WHERE session_id = ?",
-      [session_id]
-    );
-    return response;
+    const online = playerCache.get(session_id);
+    return online?.username ? [{ username: online.username, id: online.userid }] : [];
   },
-  getSessionIdByUsername: async (username: string) => {
+  /** The session a username is online under: nothing when they are not online. */
+  getSessionIdByUsername: async (username: string): Promise<any> => {
     if (!username) return;
-    username = username.toLowerCase();
-    const response = (await query(
-      "SELECT session_id FROM accounts WHERE username = ?",
-      [username]
-    )) as any;
-    return response[0]?.session_id;
+    return sessionOf(username);
   },
   getPartyIdByUsername: async (username: string) => {
     if (!username) return;
     username = username.toLowerCase();
-    const response = (await query(
-      "SELECT party_id FROM accounts WHERE username = ?",
-      [username]
-    )) as any;
-    return response[0]?.party_id;
+    return (await accountRows.get(username))?.party_id;
   },
   getUsernameByToken: async (token: string) => {
     if (!token) return;
@@ -531,10 +784,12 @@ const player = {
   },
   returnHome: async (session_id: string) => {
     if (!session_id) return;
-    const response = await query(
+    const username = usernameOfSession(session_id);
+    const response = await writing(accountRows, username, () => query(
       "UPDATE accounts SET map = ?, position = '0,0' WHERE session_id = ?",
       [defaultMap, session_id]
-    );
+    ));
+    if (username && changedRows(response)) await wrote(accountRows, username, { map: defaultMap, position: "0,0" });
     return response;
   },
   setToken: async (username: string) => {
@@ -550,146 +805,136 @@ const player = {
     trackToken(token);
     return token;
   },
+  /** Whether a username is online on this server, as the rows `SELECT online` gave. */
   isOnline: async (username: string) => {
     if (!username) return;
-    username = username.toLowerCase();
-    const response = await query(
-      "SELECT online FROM accounts WHERE username = ?",
-      [username]
-    );
-    return response;
+    return [{ online: playerCache.getByUsername(username) ? 1 : 0 }];
   },
   isBanned: async (username: string) => {
     if (!username) return;
     username = username.toLowerCase();
-    const response = await query(
-      "SELECT banned FROM accounts WHERE username = ?",
-      [username]
-    );
-    return response;
+    const account = await accountRows.get(username);
+    return account ? [{ banned: account.banned }] : [];
   },
+  /** The players online on a map, with their position as it is stored. */
   getPlayers: async (map: string) => {
     if (!map) return;
-    const response = await query(
-      "SELECT username, session_id as id, position, map FROM accounts WHERE online = 1 and map = ?",
-      [map]
-    );
-    return response;
+    const on = map.replace(".json", "");
+    return Object.values(playerCache.list())
+      .filter((online: any) => online?.username && String(online.location?.map ?? "").replace(".json", "") === on)
+      .map((online: any) => ({
+        username: online.username,
+        id: String(online.id),
+        position: `${Math.round(online.location.position?.x)},${Math.round(online.location.position?.y)}`,
+        map: online.location.map,
+      }));
   },
+  /** The map the player online under a session is on. */
   getMap: async (session_id: string) => {
     if (!session_id) return;
-    const response = (await query(
-      "SELECT map FROM accounts WHERE session_id = ?",
-      [session_id]
-    )) as any;
-    return response[0]?.map as string;
+    return playerCache.get(session_id)?.location?.map as string;
   },
   isAdmin: async (username: string) => {
     if (!username) return;
     username = username.toLowerCase();
-    const response = (await query(
-      "SELECT role FROM accounts WHERE username = ?",
-      [username]
-    )) as any;
-    return response[0]?.role === 1;
+    return (await accountRows.get(username))?.role === 1;
   },
   isGuest: async (username: string) => {
     if (!username) return;
     username = username.toLowerCase();
-    const response = (await query(
-      "SELECT guest_mode FROM accounts WHERE username = ?",
-      [username]
-    )) as any;
-    return response[0]?.guest_mode === 1;
+    return (await accountRows.get(username))?.guest_mode === 1;
   },
   toggleAdmin: async (username: string) => {
     if (!username) return;
     username = username.toLowerCase();
-    const response = (await query(
-      "UPDATE accounts SET role = !role WHERE username = ?",
-      [username]
-    )) as any;
+    const account = await accountRows.get(username);
+    if (!account) return false;
+    // Written as the value it becomes, not as "the other one": the database
+    // and the row held then end the same whatever either held before.
+    const role = account.role === 1 ? 0 : 1;
+    const response = (await writing(accountRows, username, () => query(
+      "UPDATE accounts SET role = ? WHERE username = ?",
+      [role, username]
+    ))) as any;
     if (!response) return;
-    const admin = await player.isAdmin(username);
+    await accountRows.patch(username, { role });
+    const admin = role === 1;
 
-    if (!admin)
-      (await query(
+    if (!admin) {
+      (await writing(accountRows, username, () => query(
         "UPDATE accounts SET stealth = 0, noclip = 0 WHERE username = ?",
         [username]
-      )) as any;
+      ))) as any;
+      await accountRows.patch(username, { stealth: 0, noclip: 0 });
+    }
     log.debug(`${username} admin status has been updated to ${admin}`);
     return admin;
   },
   isStealth: async (username: string) => {
     if (!username) return;
     username = username.toLowerCase();
-    const response = (await query(
-      "SELECT stealth FROM accounts WHERE username = ?",
-      [username]
-    )) as any;
-    return response[0]?.stealth === 1;
+    return (await accountRows.get(username))?.stealth === 1;
   },
   toggleStealth: async (username: string) => {
     if (!username) return;
     username = username.toLowerCase();
-    (await query(
-      "UPDATE accounts SET stealth = CASE WHEN stealth = 1 THEN 0 ELSE 1 END WHERE username = ? AND role = 1",
-      [username]
-    )) as any;
-    return await player.isStealth(username);
+    const account = await accountRows.get(username);
+    if (!account) return false;
+    // Only an admin's stealth changes.
+    if (account.role !== 1) return account.stealth === 1;
+    const stealth = account.stealth === 1 ? 0 : 1;
+    (await writing(accountRows, username, () => query(
+      "UPDATE accounts SET stealth = ? WHERE username = ?",
+      [stealth, username]
+    ))) as any;
+    await accountRows.patch(username, { stealth });
+    return stealth === 1;
   },
   isNoclip: async (username: string) => {
     if (!username) return;
     username = username.toLowerCase();
-    const response = (await query(
-      "SELECT noclip FROM accounts WHERE username = ?",
-      [username]
-    )) as any;
-    return response[0]?.noclip === 1;
+    return (await accountRows.get(username))?.noclip === 1;
   },
   toggleNoclip: async (username: string) => {
     if (!username) return;
     username = username.toLowerCase();
-    (await query(
-      "UPDATE accounts SET noclip = CASE WHEN noclip = 1 THEN 0 ELSE 1 END WHERE username = ?",
-      [username]
-    )) as any;
-    return await player.isNoclip(username);
+    const account = await accountRows.get(username);
+    if (!account) return false;
+    const noclip = account.noclip === 1 ? 0 : 1;
+    (await writing(accountRows, username, () => query(
+      "UPDATE accounts SET noclip = ? WHERE username = ?",
+      [noclip, username]
+    ))) as any;
+    await accountRows.patch(username, { noclip });
+    return noclip === 1;
   },
-  getSession: async (username: string) => {
+  /** The session a username is online under: nothing when they are not online. */
+  getSession: async (username: string): Promise<any> => {
     if (!username) return;
-    username = username.toLowerCase();
-    const response = (await query(
-      "SELECT session_id FROM accounts WHERE username = ?",
-      [username]
-    )) as any;
-    return response[0]?.session_id;
+    return sessionOf(username);
   },
   getStats: async (username: string) => {
     if (!username) return;
     username = username.toLowerCase();
-    const response = (await query(
-      "SELECT * FROM stats WHERE username = ?",
-      [username]
-    )) as StatsData[];
-    if (!response || response.length === 0) return [];
+    const stats = await statRows.get(username);
+    if (!stats) return [];
     return {
-      health: response[0].health,
-      max_health: response[0].max_health,
-      total_max_health: response[0].max_health,
-      stamina: response[0].stamina,
-      max_stamina: response[0].max_stamina,
-      total_max_stamina: response[0].max_stamina,
-      level: response[0].level,
-      xp: response[0].xp,
-      max_xp: response[0].max_xp,
-      stat_critical_chance: response[0].stat_critical_chance,
-      stat_critical_damage: response[0].stat_critical_damage,
-      stat_armor: response[0].stat_armor,
-      stat_damage: response[0].stat_damage,
-      stat_health: response[0].stat_health,
-      stat_stamina: response[0].stat_stamina,
-      stat_avoidance: response[0].stat_avoidance,
+      health: stats.health,
+      max_health: stats.max_health,
+      total_max_health: stats.max_health,
+      stamina: stats.stamina,
+      max_stamina: stats.max_stamina,
+      total_max_stamina: stats.max_stamina,
+      level: stats.level,
+      xp: stats.xp,
+      max_xp: stats.max_xp,
+      stat_critical_chance: stats.stat_critical_chance,
+      stat_critical_damage: stats.stat_critical_damage,
+      stat_armor: stats.stat_armor,
+      stat_damage: stats.stat_damage,
+      stat_health: stats.stat_health,
+      stat_stamina: stats.stat_stamina,
+      stat_avoidance: stats.stat_avoidance,
     };
   },
   setStats: async (username: string, stats: StatsData) => {
@@ -702,17 +947,49 @@ const player = {
       !stats.max_stamina
     )
       return;
-    const response = await query(
+    const saved = {
+      health: stats.health,
+      max_health: stats.max_health,
+      stamina: stats.stamina,
+      max_stamina: stats.max_stamina,
+    };
+    const response = await writing(statRows, username, () => query(
       "UPDATE stats SET health = ?, max_health = ?, stamina = ?, max_stamina = ? WHERE username = ?",
       [
-        stats.health,
-        stats.max_health,
-        stats.stamina,
-        stats.max_stamina,
+        saved.health,
+        saved.max_health,
+        saved.stamina,
+        saved.max_stamina,
         username,
       ]
-    );
+    ));
+    await wrote(statRows, username, saved, whole(...Object.values(saved)));
     if (!response) return [];
+    return response;
+  },
+  /** Every column a player's stats row holds; setStats writes only the four that change in play. */
+  setBaseStats: async (username: string, stats: StatsData) => {
+    if (!username || !stats) return;
+    username = username.toLowerCase();
+    const saved = {
+      health: stats.health,
+      max_health: stats.max_health,
+      stamina: stats.stamina,
+      max_stamina: stats.max_stamina,
+      xp: stats.xp,
+      max_xp: stats.max_xp,
+      level: stats.level,
+      stat_critical_damage: stats.stat_critical_damage,
+      stat_critical_chance: stats.stat_critical_chance,
+      stat_armor: stats.stat_armor,
+      stat_damage: stats.stat_damage,
+      stat_avoidance: stats.stat_avoidance,
+    };
+    const response = await writing(statRows, username, () => query(
+      "UPDATE stats SET health = ?, max_health = ?, stamina = ?, max_stamina = ?, xp = ?, max_xp = ?, level = ?, stat_critical_damage = ?, stat_critical_chance = ?, stat_armor = ?, stat_damage = ?, stat_avoidance = ? WHERE username = ?",
+      [...Object.values(saved), username]
+    ));
+    await wrote(statRows, username, saved, whole(...Object.values(saved)));
     return response;
   },
   increaseXp: async (username: string, xp: number) => {
@@ -743,14 +1020,16 @@ const player = {
       }
     }
 
-    const response = await query(
+    const saved: Partial<StatsData> = leveledUp
+      ? { xp: stats.xp, max_xp: stats.max_xp, level: stats.level, max_health: stats.max_health, health: stats.health, max_stamina: stats.max_stamina, stamina: stats.stamina }
+      : { xp: stats.xp, max_xp: stats.max_xp, level: stats.level };
+    const response = await writing(statRows, username, () => query(
       leveledUp
         ? "UPDATE stats SET xp = ?, max_xp = ?, level = ?, max_health = ?, health = ?, max_stamina = ?, stamina = ? WHERE username = ?"
         : "UPDATE stats SET xp = ?, max_xp = ?, level = ? WHERE username = ?",
-      leveledUp
-        ? [stats.xp, stats.max_xp, stats.level, stats.max_health, stats.health, stats.max_stamina, stats.stamina, username]
-        : [stats.xp, stats.max_xp, stats.level, username]
-    );
+      [...Object.values(saved), username]
+    ));
+    await wrote(statRows, username, saved, whole(...Object.values(saved)));
     if (leveledUp) {
       await player.synchronizeStats(username);
     }
@@ -777,20 +1056,19 @@ const player = {
   increaseLevel: async (username: string) => {
     if (!username) return;
     username = username.toLowerCase();
-    const response = await query(
+    const response = await writing(statRows, username, () => query(
       "UPDATE stats SET level = level + 1 WHERE username = ?",
       [username]
-    );
+    ));
+    // One more than whatever the database held: read it rather than work it out.
+    await statRows.drop(username);
     return response;
   },
   getConfig: async (username: string) => {
     if (!username) return;
     username = username.toLowerCase();
-    const response = await query(
-      "SELECT * FROM clientconfig WHERE username = ?",
-      [username]
-    );
-    return response || [];
+    const config = await configRows.get(username);
+    return config ? [config] : [];
   },
   setConfig: async (session_id: string, data: any) => {
     if (!session_id) return;
@@ -801,21 +1079,25 @@ const player = {
       typeof data.muted != "boolean"
     )
       return [];
-    const result = (await query(
-      "SELECT username FROM accounts WHERE session_id = ?",
-      [session_id]
-    )) as any;
-    if (!result[0].username) return [];
-    const response = await query(
+    const username = playerCache.get(session_id)?.username;
+    if (!username) return [];
+    const saved = {
+      fps: data.fps,
+      music_volume: data.music_volume || 0,
+      effects_volume: data.effects_volume || 0,
+    };
+    const response = await writing(configRows, username, () => query(
       "UPDATE clientconfig SET fps = ?, music_volume = ?, effects_volume = ?, muted = ? WHERE username = ?",
       [
-        data.fps,
-        data.music_volume || 0,
-        data.effects_volume || 0,
+        saved.fps,
+        saved.music_volume,
+        saved.effects_volume,
         data.muted,
-        result[0].username,
+        username,
       ]
-    );
+    ));
+    // A yes or no is stored, and read back, as 1 or 0.
+    await wrote(configRows, username, { ...saved, muted: data.muted ? 1 : 0 }, whole(...Object.values(saved)));
     if (!response) return [];
     return response;
   },
@@ -1039,25 +1321,23 @@ const player = {
     return { value: false, reason: "no_collision" };
   },
   kick: async (username: string, wt: any) => {
-    const response = (await query(
-      "SELECT session_id FROM accounts WHERE username = ?",
-      [username]
-    )) as any;
-    if (response[0]?.session_id) {
-      player.logout(response[0]?.session_id);
+    const session_id = sessionOf(username);
+    if (session_id) {
+      player.logout(session_id);
     }
     if (wt) wt.close();
   },
   ban: async (username: string, wt: any) => {
     if (!username) return;
     username = username.toLowerCase();
-    const response = await query(
+    const response = await writing(accountRows, username, () => query(
       "UPDATE accounts SET banned = 1 WHERE username = ?",
       [username]
-    );
-    const session_id = (await player.getSession(username)) as any;
-    if (session_id[0]?.session_id) {
-      player.logout(session_id[0]?.session_id);
+    ));
+    await accountRows.patch(username, { banned: 1 });
+    const session_id = await player.getSession(username);
+    if (session_id) {
+      player.logout(session_id);
     }
     if (wt) wt.close();
     return response;
@@ -1065,10 +1345,11 @@ const player = {
   unban: async (username: string) => {
     if (!username) return;
     username = username.toLowerCase();
-    const response = await query(
+    const response = await writing(accountRows, username, () => query(
       "UPDATE accounts SET banned = 0 WHERE username = ?",
       [username]
-    );
+    ));
+    await accountRows.patch(username, { banned: 0 });
     return response;
   },
   canAttack: async (
@@ -1333,10 +1614,11 @@ const player = {
     if (!username) return;
     username = username.toLowerCase();
     const hotbarString = JSON.stringify(hotbar);
-    const response = await query(
+    const response = await writing(configRows, username, () => query(
       "UPDATE clientconfig SET hotbar_config = ? WHERE username = ?",
       [hotbarString, username]
-    );
+    ));
+    await wroteLayout(username, "hotbar_config", hotbarString);
     return response;
   },
   saveInventoryConfig: async (username: string, inventoryConfig: any) => {
@@ -1345,10 +1627,11 @@ const player = {
 
     const inventoryString = JSON.stringify(inventoryConfig);
 
-    const response = await query(
+    const response = await writing(configRows, username, () => query(
       "UPDATE clientconfig SET inventory_config = ? WHERE username = ?",
       [inventoryString, username]
-    );
+    ));
+    await wroteLayout(username, "inventory_config", inventoryString);
     return response;
   },
 

@@ -222,18 +222,19 @@ function spawnValues(s: CreatureSpawn): any[] {
 async function upsert(table: string, columns: readonly string[], values: any[], id: number | null): Promise<number> {
   if (id && id > 0) {
     const assignments = columns.map((c) => `${quote(c)} = ?`).join(", ");
-    await query(`UPDATE ${table} SET ${assignments} WHERE id = ?`, [...values, id]);
+    await write(`UPDATE ${table} SET ${assignments} WHERE id = ?`, [...values, id]);
     return id;
   }
   const placeholders = columns.map(() => "?").join(", ");
-  const result = (await query(
+  const result = (await write(
     `INSERT INTO ${table} (${columns.map(quote).join(", ")}) VALUES (${placeholders})`,
     values
   )) as any;
   return Number(result?.lastInsertRowid ?? result?.insertId ?? 0);
 }
 
-async function select(table: string): Promise<any[]> {
+/** Every row of `table`, or null when it cannot be read. */
+async function read(table: string): Promise<any[] | null> {
   try {
     const rows = await query<any>(`SELECT * FROM ${table}`);
     return Array.isArray(rows) ? rows : [];
@@ -241,28 +242,79 @@ async function select(table: string): Promise<any[]> {
     // An existing database that predates the creature tables must not stop
     // the server from booting; the setup script creates them.
     log.warn(`Could not read ${table} (run the database setup script): ${error}`);
-    return [];
+    return null;
+  }
+}
+
+/** Each creature table: the key its rows are held under, and how a row of it is held. */
+const TABLES = {
+  templates: { table: "creature_templates", normalize: normalizeTemplate },
+  abilities: { table: "creature_abilities", normalize: normalizeAbility },
+  spawns: { table: "creature_spawns", normalize: normalizeSpawn },
+  patrolPaths: { table: "creature_patrol_paths", normalize: normalizePatrolPath },
+  linkGroups: { table: "creature_link_groups", normalize: normalizeLinkGroup },
+  pools: { table: "creature_spawn_pools", normalize: normalizeSpawnPool },
+} as const;
+type TableKey = keyof typeof TABLES;
+
+/**
+ * Whether this process holds every creature table as the database has it: loadIntoCache has read them all. A script
+ * run without the server never has, and neither has a server whose database lacks one of them or could not be read
+ * again after a write that failed; there, each list is read from the database when it is asked for.
+ */
+let loaded = false;
+
+/**
+ * The rows of one table: what loadIntoCache holds of it, without the database. The list handed out is the caller's
+ * own. Until every table is held, it is read from the database, an unreadable table being an empty one.
+ */
+async function list<T>(key: TableKey): Promise<T[]> {
+  if (loaded) {
+    const held = await assetCache.get(CACHE_KEYS[key]);
+    if (Array.isArray(held)) return [...held] as T[];
+  }
+  return ((await read(TABLES[key].table)) ?? []).map(TABLES[key].normalize as (row: any) => T);
+}
+
+/**
+ * A statement that changes a creature table. What is held follows when the caller loads the tables again
+ * (loadIntoCache), as the editor does after each change. A statement that throws may still have been applied (a
+ * timeout, say), and its caller loads nothing: so the tables are read again here. One that cannot be read keeps
+ * what was held of it, and the lists are read from the database until the tables are next loaded.
+ */
+async function write(sql: string, values: any[]): Promise<any> {
+  try {
+    return await query(sql, values);
+  } catch (error) {
+    if (loaded) {
+      for (const key of Object.keys(TABLES) as TableKey[]) {
+        const rows = await read(TABLES[key].table);
+        if (rows === null) loaded = false;
+        else await assetCache.set(CACHE_KEYS[key], rows.map(TABLES[key].normalize as (row: any) => unknown));
+      }
+    }
+    throw error;
   }
 }
 
 const repository = {
   async listTemplates(): Promise<CreatureTemplate[]> {
-    return (await select("creature_templates")).map(normalizeTemplate);
+    return list<CreatureTemplate>("templates");
   },
   async listAbilities(): Promise<CreatureAbility[]> {
-    return (await select("creature_abilities")).map(normalizeAbility);
+    return list<CreatureAbility>("abilities");
   },
   async listSpawns(): Promise<CreatureSpawn[]> {
-    return (await select("creature_spawns")).map(normalizeSpawn);
+    return list<CreatureSpawn>("spawns");
   },
   async listPatrolPaths(): Promise<CreaturePatrolPath[]> {
-    return (await select("creature_patrol_paths")).map(normalizePatrolPath);
+    return list<CreaturePatrolPath>("patrolPaths");
   },
   async listLinkGroups(): Promise<CreatureLinkGroup[]> {
-    return (await select("creature_link_groups")).map(normalizeLinkGroup);
+    return list<CreatureLinkGroup>("linkGroups");
   },
   async listSpawnPools(): Promise<CreatureSpawnPool[]> {
-    return (await select("creature_spawn_pools")).map(normalizeSpawnPool);
+    return list<CreatureSpawnPool>("pools");
   },
 
 
@@ -271,9 +323,9 @@ const repository = {
     return upsert("creature_templates", TEMPLATE_COLUMNS, templateValues(template), template.id || null);
   },
   async deleteTemplate(id: number): Promise<void> {
-    await query("DELETE FROM creature_abilities WHERE template_id = ?", [id]);
-    await query("DELETE FROM creature_spawns WHERE template_id = ?", [id]);
-    await query("DELETE FROM creature_templates WHERE id = ?", [id]);
+    await write("DELETE FROM creature_abilities WHERE template_id = ?", [id]);
+    await write("DELETE FROM creature_spawns WHERE template_id = ?", [id]);
+    await write("DELETE FROM creature_templates WHERE id = ?", [id]);
   },
 
   async saveAbility(input: any): Promise<number> {
@@ -281,7 +333,7 @@ const repository = {
     return upsert("creature_abilities", ABILITY_COLUMNS, abilityValues(ability), ability.id || null);
   },
   async deleteAbility(id: number): Promise<void> {
-    await query("DELETE FROM creature_abilities WHERE id = ?", [id]);
+    await write("DELETE FROM creature_abilities WHERE id = ?", [id]);
   },
 
   async saveSpawn(input: any): Promise<number> {
@@ -289,7 +341,7 @@ const repository = {
     return upsert("creature_spawns", SPAWN_COLUMNS, spawnValues(spawn), spawn.id || null);
   },
   async deleteSpawn(id: number): Promise<void> {
-    await query("DELETE FROM creature_spawns WHERE id = ?", [id]);
+    await write("DELETE FROM creature_spawns WHERE id = ?", [id]);
   },
 
   async savePatrolPath(input: any): Promise<number> {
@@ -297,8 +349,8 @@ const repository = {
     return upsert("creature_patrol_paths", PATH_COLUMNS, [path.map, path.loop ? 1 : 0, JSON.stringify(path.points)], path.id || null);
   },
   async deletePatrolPath(id: number): Promise<void> {
-    await query("UPDATE creature_spawns SET patrol_path_id = NULL WHERE patrol_path_id = ?", [id]);
-    await query("DELETE FROM creature_patrol_paths WHERE id = ?", [id]);
+    await write("UPDATE creature_spawns SET patrol_path_id = NULL WHERE patrol_path_id = ?", [id]);
+    await write("DELETE FROM creature_patrol_paths WHERE id = ?", [id]);
   },
 
   async saveLinkGroup(input: any): Promise<number> {
@@ -307,8 +359,8 @@ const repository = {
     return upsert("creature_link_groups", ["name"], [name], id || null);
   },
   async deleteLinkGroup(id: number): Promise<void> {
-    await query("UPDATE creature_spawns SET link_group_id = NULL WHERE link_group_id = ?", [id]);
-    await query("DELETE FROM creature_link_groups WHERE id = ?", [id]);
+    await write("UPDATE creature_spawns SET link_group_id = NULL WHERE link_group_id = ?", [id]);
+    await write("DELETE FROM creature_link_groups WHERE id = ?", [id]);
   },
 
   async saveSpawnPool(input: any): Promise<number> {
@@ -316,26 +368,21 @@ const repository = {
     return upsert("creature_spawn_pools", POOL_COLUMNS, [pool.max_active, pool.rare_chance_pct, pool.rare_template_id], pool.id || null);
   },
   async deleteSpawnPool(id: number): Promise<void> {
-    await query("UPDATE creature_spawns SET pool_id = NULL WHERE pool_id = ?", [id]);
-    await query("DELETE FROM creature_spawn_pools WHERE id = ?", [id]);
+    await write("UPDATE creature_spawns SET pool_id = NULL WHERE pool_id = ?", [id]);
+    await write("DELETE FROM creature_spawn_pools WHERE id = ?", [id]);
   },
 
-  /** Load every creature table into assetCache. */
+  /**
+   * Load every creature table into assetCache: the one place they are read from the database while the server
+   * runs. Startup does it, and the editor after each change it makes.
+   */
   async loadIntoCache(): Promise<void> {
-    const [templates, abilities, spawns, patrolPaths, linkGroups, pools] = await Promise.all([
-      this.listTemplates(),
-      this.listAbilities(),
-      this.listSpawns(),
-      this.listPatrolPaths(),
-      this.listLinkGroups(),
-      this.listSpawnPools(),
-    ]);
-    await assetCache.add(CACHE_KEYS.templates, templates);
-    await assetCache.add(CACHE_KEYS.abilities, abilities);
-    await assetCache.add(CACHE_KEYS.spawns, spawns);
-    await assetCache.add(CACHE_KEYS.patrolPaths, patrolPaths);
-    await assetCache.add(CACHE_KEYS.linkGroups, linkGroups);
-    await assetCache.add(CACHE_KEYS.pools, pools);
+    const keys = Object.keys(TABLES) as TableKey[];
+    const rows = await Promise.all(keys.map((key) => read(TABLES[key].table)));
+    for (const [i, key] of keys.entries()) {
+      await assetCache.add(CACHE_KEYS[key], (rows[i] ?? []).map(TABLES[key].normalize as (row: any) => unknown));
+    }
+    loaded = rows.every((read) => read !== null);
   },
 };
 

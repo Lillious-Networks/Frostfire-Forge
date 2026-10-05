@@ -199,14 +199,19 @@ const createSpellsTable = async () => {
         mana INTEGER NOT NULL,
         \`range\` INTEGER NOT NULL,
         type TEXT NOT NULL,
-        cast_time INTEGER NOT NULL,
+        cast_time REAL NOT NULL,
         cooldown INTEGER NOT NULL,
         can_move INTEGER NOT NULL DEFAULT 0,
         description TEXT DEFAULT NULL,
         icon TEXT DEFAULT NULL,
         effects TEXT DEFAULT NULL,
         particles TEXT DEFAULT NULL,
-        aoe_radius INT DEFAULT NULL
+        aoe_radius INT DEFAULT NULL,
+        ground_aoe INTEGER DEFAULT 0,
+        ground_duration INTEGER DEFAULT 0,
+        is_thrown INTEGER DEFAULT 0,
+        charge_distance INTEGER DEFAULT 0,
+        teleport_behind INTEGER DEFAULT 0
     );
   `;
   await query(sql);
@@ -360,7 +365,8 @@ const createParticleTable = async () => {
       brightness FLOAT NOT NULL DEFAULT 1,
         affected_by_time INTEGER DEFAULT 0,
         time_on TEXT DEFAULT NULL,
-        time_off TEXT DEFAULT NULL
+        time_off TEXT DEFAULT NULL,
+        image TEXT DEFAULT NULL
     );
   `;
   await query(sql);
@@ -787,6 +793,21 @@ const addMissingColumns = async (table: string, columns: Array<{ name: string; t
   }
 };
 
+/**
+ * Spell columns the MySQL schema has and this one was missing: the game reads
+ * them and the spell editor writes them. An existing cast_time column needs no
+ * change: SQLite keeps a 1.5 in an INTEGER column as it is.
+ */
+const addSpellColumns = async () => {
+  await addMissingColumns("spells", [
+    { name: "ground_aoe", type: "INTEGER DEFAULT 0" },
+    { name: "ground_duration", type: "INTEGER DEFAULT 0" },
+    { name: "is_thrown", type: "INTEGER DEFAULT 0" },
+    { name: "charge_distance", type: "INTEGER DEFAULT 0" },
+    { name: "teleport_behind", type: "INTEGER DEFAULT 0" },
+  ]);
+};
+
 /** Weapon damage columns added to items after their first release. */
 const addItemWeaponColumns = async () => {
   await addMissingColumns("items", [
@@ -1011,6 +1032,7 @@ const setupDatabase = async () => {
   await createCreatureTables();
   await addCreatureTemplateColumns();
   await addItemWeaponColumns();
+  await addSpellColumns();
   await insertDemoAccount();
   await insertDemoStats();
   await insertDemoClientConfig();

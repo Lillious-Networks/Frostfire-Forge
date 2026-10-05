@@ -74,6 +74,7 @@ import layerManager from "../services/layermanager";
 import mapIndex from "../services/mapindex";
 import gameLoop from "../services/gameloop";
 import assetCache from "../services/assetCache";
+import { refreshPlayer } from "../services/datacache";
 import cooldownManager from "../services/cooldownmanager";
 import effectManager from "../services/effectmanager";
 import { reloadMap } from "../modules/assetloader";
@@ -102,13 +103,19 @@ import { rollHeal, spellManaCost } from "../systems/spellmath";
 import creatures from "../systems/creatures";
 import { projectileTravelMs } from "../systems/creatures/projectile";
 import * as itemEditor from "../systems/itemeditor";
+import * as spellEditor from "../systems/spelleditor";
+import * as lootEditor from "../systems/looteditor";
+import * as playerEditor from "../systems/playereditor";
+import * as controlPanel from "../systems/controlpanel";
+import { pickPlayerAt } from "../systems/playerpick";
+import { areaCastRefusal, areaSpellHarms, PVP_BODY, type PvpAllowed } from "../systems/pvpzone";
 import { listSpriteSheets, listIcons } from "../systems/creatures/editor";
 import { setCreatureEngineBridge } from "../systems/creatures/bridge";
 import { spellMissChance } from "../systems/creatures/combat";
 import { spawnZone, setPlayerDeathHandler, getZonesOnMap } from "../systems/groundaoe";
 import bags from "../systems/bags";
 import currencySystem from "../systems/currency";
-import query from "../controllers/sqldatabase";
+import query, { drainQueries } from "../controllers/sqldatabase";
 import loot from "../systems/loot";
 import lootChest from "../systems/lootChest";
 import lootTable, { normalizeDropChance } from "../systems/lootTable";
@@ -124,9 +131,9 @@ import * as settings from "../config/settings.json";
 import AOI_CONFIG from "../config/aoi.json";
 import { randomBytes } from "../modules/hash";
 import { saveMapChunks, saveMapProperties, applyChunksWithRebase } from "../modules/assetloader";
-import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getMountSpriteUrl, getNpcSpriteLayers } from "../modules/spriteSheetManager";
+import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getSpriteUrl, getMountSpriteUrl, getNpcSpriteLayers } from "../modules/spriteSheetManager";
 import { setLayerChangeHandler, initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, broadcastToAOIBestEffort, broadcastStatsUpdateToAOI, broadcastToAOIBestEffortAtPosition, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate, sendLoadPlayersChunked, cleanupKickedSession, aoiProf } from "./aoi";
-import { realmWhitelist, isWhitelistEnabled } from "./server.ts";
+import { realmWhitelist, isWhitelistEnabled, gracefulShutdown } from "./server.ts";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
 const useSpriteSheets = (settings as any).animation_system?.use_sprite_sheets ?? true;
@@ -194,6 +201,14 @@ export const spriteDataCacheReady = waitForSpritesReady();
 
 let restartScheduled: boolean;
 let restartTimers: ReturnType<typeof setTimeout>[];
+let shutdownStarted = false;
+
+// Commands the control panel is running (runForControlPanel). The packet that
+// stands for one carries no chat text: its command and arguments are kept
+// here, already split. What the command tells the admin while it runs is
+// collected as the panel's answer.
+const panelCommands = new WeakMap<object, { name: string; args: string[] }>();
+const panelReplies = new Map<any, string[]>();
 
 let globalStateRevision: number = 0;
 
@@ -1309,6 +1324,27 @@ export function clearTargetOnMapChange(playerId: string) {
   }
 }
 
+/**
+ * Lets go of every player this admin is dragging and tells the players on
+ * their maps, as stopping the drag by hand does. Run when the admin's
+ * connection ends: nobody else can release the players they were holding.
+ */
+export function releaseDraggedBy(adminId: string | number) {
+  for (const [draggedId, dragByAdminId] of [...draggedPlayersMap.entries()]) {
+    if (String(dragByAdminId) !== String(adminId)) continue;
+    draggedPlayersMap.delete(draggedId);
+
+    const draggedPlayer = playerCache.get(draggedId.toString());
+    if (!draggedPlayer) continue;
+    const dragStopData = { id: draggedId, adminId };
+    for (const p of filterPlayersByMap(draggedPlayer.location.map)) {
+      if (p.wt && p.wt.readyState === 1) {
+        sendPacket(p.wt, packetManager.dragPlayerStop(dragStopData));
+      }
+    }
+  }
+}
+
 export function removePlayerFromCleanupMaps(playerId: string | number) {
     const id = Number(playerId);
     chatRateLimit.delete(id);
@@ -1539,6 +1575,10 @@ authWorker.on("message", async (result: any) => {
         sendPacket(wt, packetManager.weather({ weather: resolved.weather, weatherData: resolved.weatherData }));
       }
     }
+
+    // What the caches hold of this player is read again: the gateway, or an
+    // admin's edit on another server, may have written it since they left.
+    await refreshPlayer(playerData.username);
 
     const inventorySlots = await getInventorySlots(playerData);
     const limitedInventory = Array.isArray(playerData.inventory) ? playerData.inventory.slice(0, inventorySlots) : [];
@@ -2183,33 +2223,7 @@ export default async function packetReceiver(
         player.clearSessionId(currentPlayer.id);
 
         // If this admin was dragging any players, release them
-        const adminId = currentPlayer.id;
-        const draggedPlayerIds: number[] = [];
-        for (const [draggedId, dragByAdminId] of draggedPlayersMap.entries()) {
-          if (dragByAdminId === adminId) {
-            draggedPlayerIds.push(draggedId);
-          }
-        }
-
-        // Release all dragged players
-        for (const draggedPlayerId of draggedPlayerIds) {
-          draggedPlayersMap.delete(draggedPlayerId);
-
-          const draggedPlayer = playerCache.get(draggedPlayerId.toString());
-          if (draggedPlayer) {
-            // Notify all players that the dragged player was released
-            const dragStopData = {
-              id: draggedPlayerId,
-              adminId: adminId,
-            };
-            const playersInMap = filterPlayersByMap(draggedPlayer.location.map);
-            playersInMap.forEach((p) => {
-              if (p.wt && p.wt.readyState === 1) {
-                sendPacket(p.wt, packetManager.dragPlayerStop(dragStopData));
-              }
-            });
-          }
-        }
+        releaseDraggedBy(currentPlayer.id);
 
         break;
       }
@@ -2963,51 +2977,33 @@ export default async function packetReceiver(
         );
 
         // Taps from touch devices get a wider pick area: a fingertip is far
-        // less precise than a cursor. With the wider area two players can both
-        // qualify, so the nearest one wins.
+        // less precise than a cursor. Where players overlap under the click,
+        // the one the client draws on top wins; otherwise the nearest.
         const pickRange = (data as any)?.touch === true ? 49 : 35;
         const pickX = Math.floor(Number(location.x));
         const pickY = Math.floor(Number(location.y));
-        let selectedPlayer: any = null;
-        let selectedDistSq = Infinity;
-        for (const p of players) {
-          const dx = p.location.position.x - pickX;
-          const dy = p.location.position.y - pickY;
-          if (Math.abs(dx) >= pickRange || Math.abs(dy) >= pickRange) continue;
-          const distSq = dx * dx + dy * dy;
-          if (distSq < selectedDistSq) {
-            selectedPlayer = p;
-            selectedDistSq = distSq;
-          }
-        }
-
-        if (!selectedPlayer) break;
         // Corpses cannot be targeted (despawned for observers). Ghosts can be
         // targeted and interacted with, except while their graveyard teleport
-        // is still pending (not rendered anywhere yet).
-        if (selectedPlayer.isDead || (selectedPlayer.isGhost && selectedPlayer.ghostTeleportPending)) {
-          const selectPlayerData = {
-            id: wt.data.id,
-            data: null,
-          };
-          sendPacket(wt, packetManager.selectPlayer(selectPlayerData));
+        // is still pending (not rendered anywhere yet). Stealthed players are
+        // drawn for admins only. None of them can be the one on top.
+        const shown = players.filter(
+          (p) => !p.isDead && !(p.isGhost && p.ghostTeleportPending) && !(p.isStealth && !currentPlayer.isAdmin)
+        );
+        const selectedPlayer: any = pickPlayerAt(shown, pickX, pickY, pickRange, currentPlayer.id);
+
+        if (!selectedPlayer) {
+          // Clicking only a corpse or a hidden player clears the selection.
+          if (pickPlayerAt(players, pickX, pickY, pickRange, currentPlayer.id)) {
+            sendPacket(wt, packetManager.selectPlayer({ id: wt.data.id, data: null }));
+          }
           break;
         }
-        if (selectedPlayer.isStealth && !currentPlayer.isAdmin) {
-          const selectPlayerData = {
-            id: wt.data.id,
-            data: null,
-          };
-          sendPacket(wt, packetManager.selectPlayer(selectPlayerData));
-          break;
-        } else {
-          const selectPlayerData = {
-            id: selectedPlayer.id,
-            username: selectedPlayer.username,
-            stats: selectedPlayer.stats,
-          };
-          sendPacket(wt, packetManager.selectPlayer(selectPlayerData));
-        }
+        const selectPlayerData = {
+          id: selectedPlayer.id,
+          username: selectedPlayer.username,
+          stats: selectedPlayer.stats,
+        };
+        sendPacket(wt, packetManager.selectPlayer(selectPlayerData));
         break;
       }
       case "TARGETCLOSEST": {
@@ -3277,6 +3273,14 @@ export default async function packetReceiver(
             sendPacket(p.wt, packetManager.dragPlayerStop(dragStopData));
           }
         });
+
+        // Save where they were put down. Once, here: the updates while they
+        // are carried arrive twenty a second.
+        try {
+          await player.setLocation(targetPlayer.id, targetPlayer.location.map, targetPlayer.location.position);
+        } catch (e) {
+          log.error(`Failed to set location for dragged player: ${e}`);
+        }
         break;
       }
       case "DRAG_UPDATE": {
@@ -3302,23 +3306,11 @@ export default async function packetReceiver(
         targetPlayer.location.position.x = newX;
         targetPlayer.location.position.y = newY;
 
-        // Persist to database
-        try {
-          await player.setLocation(
-            targetPlayer.session_id,
-            targetPlayer.location.map,
-            {
-              x: newX,
-              y: newY,
-              direction: targetPlayer.location.position.direction,
-            }
-          );
-        } catch (e) {
-          log.error(`Failed to set location for dragged player: ${e}`);
-        }
-
-        // Update AOI boundaries for the dragged player to handle visibility changes
-        await updatePlayerAOI(targetPlayer);
+        // Update AOI boundaries for the dragged player to handle visibility changes.
+        // The queues are what deliver the spawns: without them a player dragged
+        // out of someone's range and back was marked visible but never re-sent,
+        // so they stayed invisible (to the dragging admin included).
+        await updatePlayerAOI(targetPlayer, spawnBatchQueue, despawnBatchQueue);
 
         // Broadcast position update to all players in AOI
         globalStateRevision++;
@@ -3462,6 +3454,84 @@ export default async function packetReceiver(
             if (itemEditor.canUseEditor(other)) sendPacket(other.wt, updated);
           }
         }
+        break;
+      }
+      case "SPELL_EDITOR_LIST":
+      case "SPELL_EDITOR_SEARCH":
+      case "SPELL_EDITOR_SAVE":
+      case "SPELL_EDITOR_DELETE":
+      case "SPELL_EDITOR_LEARN": {
+        if (!currentPlayer) return;
+        // The handler checks permission first, against the database, on every one of these.
+        const result = await spellEditor.handleEditorPacket(currentPlayer, type, data);
+        if (result.kind === "data") {
+          sendPacket(wt, packetManager.spellEditorData(result.data));
+          break;
+        }
+        if (result.kind === "search") {
+          sendPacket(wt, packetManager.spellEditorResults(result.data));
+          break;
+        }
+        if (result.denied) sendPacket(wt, packetManager.notify({ message: spellEditor.DENIED }));
+        sendPacket(wt, packetManager.spellEditorResult({
+          ok: result.ok, errors: result.errors, fields: result.fields, name: result.name, action: type,
+        }));
+        if (result.ok && result.changed) {
+          // Spells are cached per process; tell every other editor to reload.
+          const updated = packetManager.spellEditorUpdated({ by: currentPlayer.username });
+          for (const other of Object.values(playerCache.list()) as any[]) {
+            if (!other?.wt || other.id === currentPlayer.id) continue;
+            if (spellEditor.mayHaveEditorOpen(other)) sendPacket(other.wt, updated);
+          }
+        }
+        break;
+      }
+      case "LOOT_EDITOR_CREATE_TABLE":
+      case "LOOT_EDITOR_DELETE_TABLE":
+      case "LOOT_EDITOR_ADD_ITEM":
+      case "LOOT_EDITOR_REMOVE_ITEM":
+      case "LOOT_EDITOR_UPDATE_ITEM": {
+        if (!currentPlayer) return;
+        // The handler checks permission first, on every one of these, and its
+        // answer says whether the change was made and how the tables now stand.
+        const result = await lootEditor.handleEditorPacket(currentPlayer, type, data);
+        sendPacket(wt, packetManager.lootEditorResult({ ...result, action: type }));
+        break;
+      }
+      case "PLAYER_EDITOR_LOAD":
+      case "PLAYER_EDITOR_SEARCH":
+      case "PLAYER_EDITOR_ACTION": {
+        if (!currentPlayer) return;
+        // The handler checks permission first, against the database, on every one of these.
+        const result = await playerEditor.handleEditorPacket(currentPlayer, type, data);
+        if (result.kind === "data") {
+          sendPacket(wt, packetManager.playerEditorData(result.data));
+          break;
+        }
+        if (result.kind === "search") {
+          sendPacket(wt, packetManager.playerEditorResults(result.data));
+          break;
+        }
+        if (result.denied) sendPacket(wt, packetManager.notify({ message: playerEditor.DENIED }));
+        sendPacket(wt, packetManager.playerEditorResult({ ok: result.ok, errors: result.errors, action: result.action, snapshot: result.snapshot }));
+        break;
+      }
+      case "CONTROL_PANEL_LOAD":
+      case "CONTROL_PANEL_QUERY":
+      case "CONTROL_PANEL_ACTION": {
+        if (!currentPlayer) return;
+        // The handler checks who is asking first, on every one of these. An
+        // action is one of the admin commands: it is run by this receiver.
+        const result = await controlPanel.handlePanelPacket(currentPlayer, type, data, (run) => runForControlPanel(wt, run));
+        if (result.kind === "data") {
+          sendPacket(wt, packetManager.controlPanelData(result.data));
+          break;
+        }
+        if (result.kind === "results") {
+          sendPacket(wt, packetManager.controlPanelResults(result.data));
+          break;
+        }
+        sendPacket(wt, packetManager.controlPanelResult(result.data));
         break;
       }
       case "CREATURE_DEBUG_SUBSCRIBE": {
@@ -3640,6 +3710,21 @@ export default async function packetReceiver(
           return;
         }
 
+        // A harmful spell with no target (an area around the caster, or one
+        // placed on the ground) answers to the no-PvP zones as a targeted one
+        // does through player.canAttack. Asked here, before the cooldown is
+        // read: nothing may wait between that read and the cooldown being set.
+        const pvpAllowed: PvpAllowed = (position) => player.isInPvPZone(currentPlayer.location.map, position as PositionData, PVP_BODY);
+        if ((isAoeSpell || isGroundAoe) && ((spell?.damage ?? 0) > 0 || spellHasHostileEffects(spell))) {
+          const aim = isGroundAoe ? { x: Number((data as any).groundX), y: Number((data as any).groundY) } : null;
+          const refused = await areaCastRefusal(currentPlayer.location.position, aim, pvpAllowed);
+          if (refused) {
+            sendPacket(wt, packetManager.notify({ message: refused === "aim" ? "You cannot cast that into a no-PvP area" : "You are not in a PvP area" }));
+            listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "nopvp" } as any);
+            return;
+          }
+        }
+
         // These are re-evaluated later if the target changes (auto-self-cast)
         let isSelf = (target.id === currentPlayer.id) || (currentPlayer.username === target.username);
 
@@ -3813,6 +3898,9 @@ export default async function packetReceiver(
             if (p.isGuest) continue;
             // Ghosts cannot be damaged or healed.
             if (p.isGhost) continue;
+            // An admin in stealth is out of the game for everyone else: no spell touches them
+            // (player.canAttack refuses one as a target).
+            if (p.isStealth) continue;
             const inParty = currentPlayer?.party?.includes(p?.username) || false;
             if (aoeIsHeal) {
               // Healing AoE: only hit self and party members
@@ -3824,7 +3912,10 @@ export default async function packetReceiver(
             const pPos = p.location?.position;
             if (!pPos) continue;
             const dist = Math.sqrt((pPos.x - aoeX) ** 2 + (pPos.y - aoeY) ** 2);
-            if (dist <= aoeRadius) splashTargets.push({ target: p });
+            if (dist > aoeRadius) continue;
+            // Nobody in a no-PvP zone is harmed, nor anyone when the caster walked into one during the cast.
+            if (!aoeIsHeal && !(await areaSpellHarms(currentPlayer.location.position, pPos, pvpAllowed))) continue;
+            splashTargets.push({ target: p });
           }
 
           // Creatures don't receive healing AoE
@@ -4085,6 +4176,8 @@ export default async function packetReceiver(
             const splashTargets: Array<{ target: any }> = [];
             for (const p of groundPlayersInMap) {
               if (p.isGuest) continue;
+              // An admin in stealth is out of the game for everyone else: no spell touches them.
+              if (p.isStealth) continue;
               const inParty = currentPlayer?.party?.includes(p.username) || false;
               if (isHeal) {
                 if (p.id !== currentPlayer.id && !inParty) continue;
@@ -4094,7 +4187,10 @@ export default async function packetReceiver(
               const pPos = p.location?.position;
               if (!pPos) continue;
               const dist = Math.sqrt((pPos.x - groundX) ** 2 + (pPos.y - groundY) ** 2);
-              if (dist <= groundAoERadius) splashTargets.push({ target: p });
+              if (dist > groundAoERadius) continue;
+              // Nobody in a no-PvP zone is harmed, nor anyone when the caster walked into one during the cast.
+              if (!isHeal && !(await areaSpellHarms(currentPlayer.location.position, pPos, pvpAllowed))) continue;
+              splashTargets.push({ target: p });
             }
 
             if (!isHeal) splashCreatures(currentPlayer, spell, groundX, groundY, groundAoERadius, null);
@@ -4824,13 +4920,16 @@ export default async function packetReceiver(
             if (p.isGuest) continue;
             // Ghosts cannot be damaged or healed.
             if (p.isGhost) continue;
+            // An admin in stealth is out of the game for everyone else: no spell touches them.
+            if (p.isStealth) continue;
             if (isInParty && currentPlayer?.party?.includes(p?.username)) continue;
             const pPos = p.location?.position;
             if (!pPos) continue;
             const dist = Math.sqrt((pPos.x - targetX) ** 2 + (pPos.y - targetY) ** 2);
-            if (dist <= aoeRadius) {
-              splashTargets.push({ target: p, distance: dist });
-            }
+            if (dist > aoeRadius) continue;
+            // The target passed player.canAttack; the players beside it are asked the same about no-PvP zones.
+            if ((spell_damage > 0 || spellIsHostileEffect) && !(await areaSpellHarms(currentPlayer.location.position, pPos, pvpAllowed))) continue;
+            splashTargets.push({ target: p, distance: dist });
           }
 
           // Creatures near the target take the splash too.
@@ -5165,6 +5264,11 @@ export default async function packetReceiver(
         }
         const quest = questDefinitions.find(questId);
         await questLogApi.abandon(currentPlayer.username, questId);
+        // Still in the log: the abandon could not be written, so the quest is not gone.
+        if (questLogApi.getCachedLog(currentPlayer.username)?.active.some((e) => e.quest_id === questId)) {
+          sendPacket(wt, packetManager.questError({ code: "db_error", message: "Could not abandon the quest." }));
+          break;
+        }
         if (quest) {
           sendPacket(wt, packetManager.questLogEntry({ entry: null, quest, removed: true }));
         }
@@ -5694,6 +5798,8 @@ export default async function packetReceiver(
       }
       case "LIST_PARTICLES": {
         if (!currentPlayer) return;
+        // Only the particle editor and the NPC editor ask for this, and /pe and /ne open them for those they let through.
+        if (!currentPlayer.permissions?.some((p: string) => p === "tools.particle_editor" || p === "tools.npc_editor" || p === "tools.*")) return;
 
         try {
           const particleList = await particles.list();
@@ -5807,7 +5913,10 @@ export default async function packetReceiver(
               }
               await questDefinitions.reload();
             } catch {
-              // Quest links are best-effort on NPC create.
+              // Quest links are best-effort on NPC create. Some may have been
+              // written: the links held are read again, so they are what the
+              // database has.
+              await questDefinitions.reload().catch(() => {});
             }
           }
 
@@ -5870,7 +5979,10 @@ export default async function packetReceiver(
               await questDefinitions.reload();
             }
           } catch {
-            // Quest links are best-effort on NPC save.
+            // Quest links are best-effort on NPC save. Some may have been
+            // written: the links held are read again, so they are what the
+            // database has.
+            await questDefinitions.reload().catch(() => {});
           }
 
           const updatedNpc = updatedNpcs.find((n: Npc) => n.id === npcData.id);
@@ -6068,7 +6180,10 @@ export default async function packetReceiver(
         }
 
         const commandParts = decryptedMessage.match(/[^\s"]+|"([^"]*)"/g) || [];
-        const commandName = commandParts[0]?.toUpperCase();
+        // A command run for the control panel arrives already split: its
+        // arguments are values, not chat text to parse.
+        const panelCommand = panelCommands.get(parsedMessage);
+        const commandName = panelCommand?.name ?? commandParts[0]?.toUpperCase();
 
         // Corpses may use chat channels only: no admin, tool, or other
         // commands while awaiting release.
@@ -6083,7 +6198,7 @@ export default async function packetReceiver(
           return;
         }
 
-        const args = commandParts
+        const args = panelCommand?.args ?? commandParts
           .slice(1)
           .map((arg: any) => (arg.startsWith('"') ? arg.slice(1, -1) : arg));
 
@@ -6957,7 +7072,7 @@ export default async function packetReceiver(
               sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
-            const identifier = args[0].toLowerCase() || null;
+            const identifier = args[0]?.toLowerCase() || null;
             if (!identifier) {
               const notifyData = {
                 message: "Please provide a username or ID",
@@ -7094,7 +7209,7 @@ export default async function packetReceiver(
               sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
-            const identifier = args[0].toLowerCase() || null;
+            const identifier = args[0]?.toLowerCase() || null;
             if (!identifier) {
               const notifyData = {
                 message: "Please provide a username or ID",
@@ -7190,7 +7305,8 @@ export default async function packetReceiver(
             const targetPlayer = (await player.findPlayerInDatabase(
               identifier
             )) as { username: string; banned: number }[] as any[];
-            if (!targetPlayer) {
+            // A name with no account is an empty list, not nothing.
+            if (!targetPlayer?.length) {
               const notifyData = {
                 message: "Player not found or is not online",
               };
@@ -7228,7 +7344,7 @@ export default async function packetReceiver(
               sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
-            const identifier = args[0].toLowerCase() || null;
+            const identifier = args[0]?.toLowerCase() || null;
             if (!identifier) {
               const notifyData = {
                 message: "Please provide a username or ID",
@@ -7254,6 +7370,14 @@ export default async function packetReceiver(
                 identifier
               )) as { username: string; banned: number }[];
               targetPlayer = dbPlayer.length > 0 ? dbPlayer[0] : null;
+            }
+
+            if (!targetPlayer) {
+              const notifyData = {
+                message: "Player not found",
+              };
+              sendPacket(wt, packetManager.notify(notifyData));
+              break;
             }
 
             if (targetPlayer?.id === currentPlayer.id) {
@@ -7376,6 +7500,13 @@ export default async function packetReceiver(
               sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
+            // Two admins asking at once would each warn, disconnect and
+            // spawn: the second is told the first is under way.
+            if (shutdownStarted) {
+              sendPacket(wt, packetManager.notify({ message: "The server is already shutting down" }));
+              break;
+            }
+            shutdownStarted = true;
             const players = Object.values(playerCache.list());
             players.forEach((player) => {
               const notifyData = {
@@ -7399,7 +7530,10 @@ export default async function packetReceiver(
               if (remainingPlayers.length === 0) {
                 clearInterval(checkInterval);
                 await player.clear();
-                Bun.spawn(["bun", "transpile-production"]);
+                // Each disconnect saves its player after leaving the cache:
+                // let the database answer those writes before the process ends.
+                await drainQueries();
+                await gracefulShutdown("/shutdown");
               }
             }, 100);
             break;
@@ -7453,6 +7587,16 @@ export default async function packetReceiver(
             break;
           }
 
+          case "SE":
+          case "SPELLEDITOR": {
+            if (!(await spellEditor.canUseEditor(currentPlayer))) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(wt, packetManager.toggleSpellEditor());
+            break;
+          }
+
           case "QE":
           case "QUESTEDITOR": {
             if (!questEditor.canUseEditor(currentPlayer)) {
@@ -7489,6 +7633,35 @@ export default async function packetReceiver(
             }
 
             sendPacket(wt, packetManager.toggleNpcEditor());
+            break;
+          }
+
+          case "PLAYER": {
+            // /player edit <username | id>: open the player editor on that player.
+            if (!(await playerEditor.canUseEditor(currentPlayer))) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            if (args[0]?.toUpperCase() !== "EDIT" || !args[1]) {
+              sendPacket(wt, packetManager.notify({ message: "Usage: /player edit <username | id>" }));
+              break;
+            }
+            const editTarget = await playerEditor.resolveTarget(args[1]);
+            if (!editTarget) {
+              sendPacket(wt, packetManager.notify({ message: "Player not found" }));
+              break;
+            }
+            sendPacket(wt, packetManager.playerEditorOpen({ target: editTarget.username }));
+            break;
+          }
+
+          case "CP":
+          case "CONTROLPANEL": {
+            if (!controlPanel.canUsePanel(currentPlayer)) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(wt, packetManager.toggleControlPanel());
             break;
           }
 
@@ -7583,7 +7756,10 @@ export default async function packetReceiver(
                   if (remainingPlayers.length === 0) {
                     clearInterval(checkInterval);
                     await player.clear();
-                    Bun.spawn(["bun", "transpile-production"]);
+                    await drainQueries();
+                    // The process ends here. Starting it again is its
+                    // supervisor's job (the Docker restart policy).
+                    await gracefulShutdown("/restart");
                   }
                 }, 100);
               }, RESTART_DELAY)
@@ -7606,7 +7782,7 @@ export default async function packetReceiver(
             }
 
             let targetPlayer;
-            const identifier = args[0].toLowerCase() || null;
+            const identifier = args[0]?.toLowerCase() || null;
 
             if (!identifier) {
               targetPlayer = currentPlayer;
@@ -7649,7 +7825,8 @@ export default async function packetReceiver(
               ? (defaultMapProps.height * defaultMapProps.tileHeight) / 2
               : 0;
 
-            await player.setLocation(targetPlayer.username, `${defaultMap}`, {
+            // By username: the target may be offline, and has a session id only while online.
+            await player.setLocationByUsername(targetPlayer.username, `${defaultMap}`, {
               x: centerX,
               y: centerY,
               direction: "down",
@@ -7718,7 +7895,10 @@ export default async function packetReceiver(
                 }`,
             };
             sendPacket(wt, packetManager.notify(notifyData));
-            listener.emit(Events.PLAYER_RESPAWN, { player: targetPlayer, mapName: targetPlayer.location.map, x: targetPlayer.location.position.x, y: targetPlayer.location.position.y });
+            // An offline target is an account, not a player in the world: only where they will log in changed.
+            if (targetPlayer.location) {
+              listener.emit(Events.PLAYER_RESPAWN, { player: targetPlayer, mapName: targetPlayer.location.map, x: targetPlayer.location.position.x, y: targetPlayer.location.position.y });
+            }
             break;
           }
 
@@ -7971,11 +8151,14 @@ export default async function packetReceiver(
               break;
             }
 
-            // Check database if target player is an admin
-            // Do not rely on cache for this check
-            if(!player.isAdmin(targetPlayer.username)) {
+            // Whether the target is an admin is asked of the account the player
+            // system holds (which every change of role is written to), not of
+            // the copy made at login, and so holds for a target who is offline.
+            // Only granting is held to this: what a former admin still holds
+            // has to stay listable and removable.
+            if((mode === "ADD" || mode === "SET") && !(await player.isAdmin(targetPlayer.username))) {
               const notifyData = {
-                message: "You can only modify permissions for admin players",
+                message: "You can only grant permissions to admin players",
               };
               sendPacket(wt, packetManager.notify(notifyData));
               break;
@@ -8023,7 +8206,10 @@ export default async function packetReceiver(
             // Perform the permission modification
             switch (mode) {
               case "ADD": {
-                await permissions.add(targetPlayer.username, permissionsArray.join(","));
+                // permissions.add takes one name: a joined list is stored again beside the names already held.
+                for (const permission of permissionsArray) {
+                  await permissions.add(targetPlayer.username, permission);
+                }
 
                 if (targetPlayer.wt) {
                   const existingPerms = targetPlayer.permissions || [];
@@ -8050,10 +8236,10 @@ export default async function packetReceiver(
                 break;
               }
               case "REMOVE": {
-                await permissions.remove(
-                  targetPlayer.username,
-                  permissionsArray.join(",")
-                );
+                // permissions.remove takes one name: a joined list matches nothing.
+                for (const permission of permissionsArray) {
+                  await permissions.remove(targetPlayer.username, permission);
+                }
 
                 if (targetPlayer.wt) {
                   targetPlayer.permissions = (targetPlayer.permissions || []).filter(
@@ -8290,13 +8476,17 @@ export default async function packetReceiver(
                   message: "Failed to update location",
                 };
                 sendPacket(wt, packetManager.notify(notifyData));
+              }
+              break;
             }
-            listener.emit(Events.GUILD_CHANGED, { type: "join", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username });
-            break;
-        }
-        listener.emit(Events.PLAYER_DISCONNECT, { player: currentPlayer });
 
-        break;
+            // /warp moves only the admin who typed it: /summon is the command
+            // that moves another player.
+            sendPacket(
+              wt,
+              packetManager.notify({ message: "Warping another player is not supported. Usage: /warp <map>" })
+            );
+            break;
           }
           case "WEATHER": {
             if (
@@ -8678,7 +8868,8 @@ export default async function packetReceiver(
 
         const result = await parties.remove(member);
 
-        if (typeof result === "boolean" && !result) {
+        // An empty list is the party system's answer when nobody was removed.
+        if (result === false || (Array.isArray(result) && result.length === 0)) {
           sendPacket(
             wt,
             packetManager.notify({
@@ -8718,19 +8909,16 @@ export default async function packetReceiver(
                 } has been kicked from the party`,
             })
           );
-          currentPlayer.party = [];
-          playerCache.set(currentPlayer.id, currentPlayer);
-          sendPacket(wt, packetManager.updateParty({ members: [] }));
-
+          // Those still in the party, the leader among them, get the list as it now is.
           result.forEach(async (m: string) => {
             const session_id = await player.getSessionIdByUsername(m);
             const p = session_id && playerCache.get(session_id);
             if (p) {
-              if (m !== member) {
-                sendPacket(
-                  p.wt,
-                  packetManager.updateParty({ members: result })
-                );
+              sendPacket(
+                p.wt,
+                packetManager.updateParty({ members: result })
+              );
+              if (p.id !== currentPlayer.id) {
                 sendPacket(
                   p.wt,
                   packetManager.notify({
@@ -8740,29 +8928,30 @@ export default async function packetReceiver(
                       } from the party`,
                   })
                 );
-                p.party = result;
-              } else {
-                sendPacket(p.wt, packetManager.updateParty({ members: [] }));
-                sendPacket(
-                  p.wt,
-                  packetManager.notify({
-                    message: `You have been kicked from the party`,
-                  })
-                );
-                p.party = [];
               }
+              p.party = result;
               playerCache.set(p.id, p);
             }
           });
 
-          const partyLeader = await parties.getPartyLeader(currentPlayer.party_id as number);
+          const partyLeader = await parties.getPartyLeader(partyId);
           if (partyLeader && result.length > 0) {
             await syncPartyLayers(partyLeader, result, playerCache, sendAnimationTo);
           }
 
+          // The kicked player is not on that list: they are told they have no party.
           const kickedSessionId = await player.getSessionIdByUsername(member);
           const kickedPlayer = kickedSessionId && playerCache.get(kickedSessionId);
           if (kickedPlayer) {
+            sendPacket(kickedPlayer.wt, packetManager.updateParty({ members: [] }));
+            sendPacket(
+              kickedPlayer.wt,
+              packetManager.notify({
+                message: `You have been kicked from the party`,
+              })
+            );
+            kickedPlayer.party = [];
+            playerCache.set(kickedPlayer.id, kickedPlayer);
             listener.emit(Events.PARTY_CHANGED, { type: "kick", username: currentPlayer.username, kickedUsername: member, members: [member] });
           }
         }
@@ -8793,7 +8982,8 @@ export default async function packetReceiver(
         const result = await parties.leave(currentPlayer.username);
 
         const type = typeof result;
-        if (type === "boolean" && !result) {
+        // An empty list is the party system's answer when nobody was removed.
+        if (result === false || (Array.isArray(result) && result.length === 0)) {
           sendPacket(
             wt,
             packetManager.notify({ message: "Failed to leave party" })
@@ -9467,7 +9657,8 @@ export default async function packetReceiver(
                   currentPlayer.username.toLowerCase(),
                   partyId
                 );
-                if (!updatedPartyMembers) {
+                // An empty list is the party system's answer when the player was not added.
+                if (!updatedPartyMembers || updatedPartyMembers.length === 0) {
                   sendPacket(
                     wt,
                     packetManager.notify({ message: "Failed to join party" })
@@ -9608,7 +9799,10 @@ export default async function packetReceiver(
 
               }
             }
-            listener.emit(Events.PARTY_CHANGED, { type: "join", username: currentPlayer.username, members: updatedPartyMembers as string[] } as any);
+            // Only a join is a join: a declined invitation leaves this false.
+            if (Array.isArray(updatedPartyMembers) && updatedPartyMembers.length > 0) {
+              listener.emit(Events.PARTY_CHANGED, { type: "join", username: currentPlayer.username, members: updatedPartyMembers } as any);
+            }
             break;
           }
           case "INVITE_GUILD": {
@@ -9667,6 +9861,7 @@ export default async function packetReceiver(
                   playerCache.set(p.id, p);
                 }
               }
+              listener.emit(Events.GUILD_CHANGED, { type: "join", guildId, guildName, playerUsername: currentPlayer.username });
             }
             break;
           }
@@ -10298,10 +10493,7 @@ export default async function packetReceiver(
         await bags.setBag(currentPlayer.username, bagSlot, canonicalName);
         await inventory.setEquipped(currentPlayer.username, canonicalName, true);
         if (alreadyEquippedCount + 1 >= inventoryItem.quantity) {
-          await query(
-            "UPDATE inventory SET slot = NULL, bag_slot = NULL WHERE item = ? AND username = ?",
-            [canonicalName, currentPlayer.username]
-          );
+          await inventory.clearSlot(currentPlayer.username, canonicalName);
         }
         const freshInventory = await inventory.get(currentPlayer.username);
         currentPlayer.inventory = await patchInventoryBagSlots(freshInventory, currentPlayer.username);
@@ -10566,6 +10758,8 @@ export default async function packetReceiver(
       }
       case "LIST_LOOT_TABLES": {
         if (!currentPlayer) return;
+        // Only the loot editor window asks for this, and /le opens it for those it lets through.
+        if (!lootEditor.canUseEditor(currentPlayer)) return;
         const tables = await lootTable.list();
         sendPacket(wt, packetManager.lootTableList(tables));
         break;
@@ -11162,6 +11356,104 @@ setCreatureEngineBridge({
 });
 setPlayerDeathHandler(handlePlayerDeath);
 
+// What the player editor (systems/playereditor.ts) needs from the socket layer
+// to bring an online player's client, and the clients around them, up to date.
+playerEditor.setPlayerEditorBridge({
+  syncInventory: async (target) => {
+    target.inventory = await patchInventoryBagSlots(await inventory.get(target.username), target.username);
+    sendPacket(target.wt, packetManager.inventory(target.inventory, await getInventorySlots(target)));
+  },
+  broadcastStats: async (target) => {
+    broadcastToAOIBestEffort(target, packetManager.updateStats({ target: target.id, stats: target.stats }), false);
+    await sendStatsToPartyMembers(target.username, target.id, target.stats);
+  },
+  refreshAppearance: async (target) => {
+    const animationName = getAnimationNameForDirection(
+      target.location.position?.direction || "down",
+      !!target.moving,
+      !!target.mounted,
+      target.mount_type || undefined,
+      !!target.casting
+    );
+    await sendSpriteSheetAnimation(target.wt, animationName, target.id);
+  },
+  sendCollectables: (target) => {
+    // Icon names become asset server URLs, as at login.
+    const withIconUrls = (target.collectables || []).map((c: any) => ({ ...c, iconUrl: getIconUrl(c.icon), icon: undefined }));
+    sendPacket(target.wt, packetManager.collectables(withIconUrls));
+  },
+  sendSpells: (target) => {
+    const spellBook: Record<string, any> = {};
+    for (const [name, spell] of Object.entries(target.learnedSpells || {}) as [string, any][]) {
+      spellBook[name] = { ...spell, spriteUrl: getSpriteUrl(spell.icon) };
+    }
+    sendPacket(target.wt, packetManager.spells(spellBook));
+  },
+  announce: (target) => broadcastPlayerUpdate(target),
+  syncPartyLayers: (leader, members) => syncPartyLayers(leader, members, playerCache, sendAnimationTo),
+  relocate: async (target, map, x, y, direction) => {
+    await forceStopPlayerMovement(target);
+    if (map !== String(target.location?.map ?? "").replace(".json", "")) {
+      target.location.position.direction = direction;
+      await player.setLocation(target.id, map, { x, y, direction });
+      await teleportPlayerWrapper(target, map, x, y);
+      return;
+    }
+    // Already on that map: move there like an admin teleport, without
+    // reloading the map (a reload wipes everything the client shows).
+    target.location.position = { ...target.location.position, x, y, direction };
+    globalStateRevision++;
+    if (shouldUpdateAOI(target)) {
+      await updatePlayerAOI(target, spawnBatchQueue, despawnBatchQueue);
+    }
+    broadcastToAOI(target, packetManager.moveXY({
+      i: target.id,
+      d: { x, y, dr: direction },
+      r: globalStateRevision,
+      s: target.isStealth ? 1 : 0,
+    }), true);
+    await resyncNpcChunks(target, target.wt);
+  },
+});
+
+// What the control panel (systems/controlpanel.ts) needs from the socket
+// layer: the state only this file holds.
+controlPanel.setControlPanelBridge({
+  restartScheduled: () => !!restartScheduled,
+  status: () => ({
+    eventLoopLagMs: getEventLoopLagMs(),
+    whitelistEnabled: isWhitelistEnabled,
+    whitelisted: realmWhitelist.size,
+    creatures: creatures.stats(),
+  }),
+  worlds: async () => (await getLiveWorlds()).map((world) => ({
+    name: world.name,
+    weather: world.weather || "clear",
+    // A "random" world is showing whichever weather it settled on.
+    showing: (world.weather === "random" ? resolvedWeatherCache.get(world.name)?.weather : world.weather) || world.weather || "clear",
+    players: Number(world.players) || 0,
+  })),
+});
+
+/**
+ * Runs one admin command (or one of the admin packets) for the control panel
+ * through this receiver, exactly as if the admin had sent it, so the panel
+ * and the chat command are one implementation. Resolves with what the
+ * command told the admin. The panel runs one at a time per admin.
+ */
+async function runForControlPanel(wt: any, run: controlPanel.PanelRun): Promise<string[]> {
+  const replies: string[] = [];
+  const stood = "command" in run ? { type: "COMMAND", data: { command: "" } } : { type: run.packet, data: null };
+  if ("command" in run) panelCommands.set(stood, { name: run.command, args: run.args });
+  panelReplies.set(wt, replies);
+  try {
+    await packetReceiver(null, wt, "control panel", stood as unknown as Packet);
+  } finally {
+    panelReplies.delete(wt);
+  }
+  return replies;
+}
+
 // When a stun lands on a moving player, stop their movement server-side
 // immediately - the client may never send a MOVEXY "abort".
 spellEffects.setStunMovementHandler(forceStopPlayerMovement);
@@ -11310,6 +11602,8 @@ function sendPacket(wt: any, packets: any[]) {
 
     return;
   }
+  // What a command tells the admin is also the control panel's answer.
+  if (panelReplies.size) controlPanel.collectReplies(panelReplies.get(wt), packets);
   try {
     packets.forEach((packet) => {
       wt.send(packet);

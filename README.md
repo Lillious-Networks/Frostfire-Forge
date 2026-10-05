@@ -340,6 +340,7 @@ bun setup-production
 /shutdown
 ```
 - **Permission**: `server.shutdown` | `server.*`
+- Warns everyone, disconnects them after 5 seconds, then stops the server process. A supervisor that restarts on any exit (the Docker compose files use `restart: always`) starts it again.
 </details>
 
 <details>
@@ -349,6 +350,7 @@ bun setup-production
 /restart
 ```
 - **Permission**: `server.restart`
+- Run it again to cancel the countdown. When it ends, everyone is disconnected and the server process exits: it is started again by its supervisor (the Docker compose files use `restart: always`). Started by hand with `bun production`, it stays down.
 </details>
 
 <details>
@@ -424,6 +426,8 @@ bun setup-production
 - `set` - Permission: `permission.add` | `permission.*`
 - `clear` - Permission: `permission.remove` | `permission.*`
 - `list` - Permission: `permission.list` | `permission.*`
+
+`add` and `set` only work on a player who is an admin. `remove`, `clear` and `list` work on anyone, so what a former admin still holds can be taken away. `add` and `remove` take one permission or a comma-separated list.
 </details>
 
 <details>
@@ -488,6 +492,19 @@ Creates and edits items: name, type, quality, icon, description, equipment slot,
 </details>
 
 <details>
+<summary><strong>Spell Editor</strong></summary>
+
+```bash
+/spelleditor
+```
+- **Aliases**: `se`
+- **Permission**: `tools.spell_editor` | `tools.*`
+
+Creates and edits spells: name, icon, description, damage, mana cost, range, cast time, cooldown, particles, area and ground targeting, charge and teleport, and the effects a spell applies (each effect type with only the fields it uses). A saved spell works at once, without a restart. Spells registered by plugins are shown read-only.
+
+</details>
+
+<details>
 <summary><strong>Quest Editor</strong></summary>
 
 ```bash
@@ -497,6 +514,33 @@ Creates and edits items: name, type, quality, icon, description, equipment slot,
 - **Permission**: `tools.quest_editor` | `tools.*`
 
 Creates and edits quests: offer/progress/completion text, level and prerequisites, chains, kill/collect/talk/explore objectives, guaranteed and choice-of-one rewards, repeatable and daily flags, and the NPCs that give and end each quest.
+
+</details>
+
+<details>
+<summary><strong>Player Editor</strong></summary>
+
+```bash
+/player edit [username | id]
+```
+- **Permission**: `server.admin` | `server.*`
+
+Opens the player editor on one player, online or offline; admins also get **Edit Player Attributes** when right-clicking a player. `id` is the connection id of an online player (as the other commands take) or an account id. The editor changes stats, currency, location, inventory, equipment, mounts, spells, friends, guild, party, quest log, permissions and the admin role; an online player's client is updated as each change is made. Changing permissions also needs `permission.add` / `permission.remove` (or `permission.*`), as `/permission` does.
+
+</details>
+
+<details>
+<summary><strong>Control Panel</strong></summary>
+
+```bash
+/controlpanel
+```
+- **Aliases**: `cp`
+- **Permission**: admin role
+
+Opens the server control panel in its own window: a dashboard with a page for each kind of work (Dashboard, Players, Communication, Server, World, Items & Loot). The Dashboard charts players online, server lag and memory over the last hour, 6 hours or 24 hours, breaks the online players down by map, level and role, and lists what admins last did through the panel. That history is kept in memory only (a reading every 15 seconds for the last hour, one a minute for the last 24 hours, the last 100 actions) and starts again when the server restarts. Players is a table of everyone online, with a search over every account, and a side panel for the player picked.
+
+The panel has a control for every admin command above; the editors are opened with their own commands. Each control runs the command it stands for under that command's own permission, so the panel gives nobody a power the commands would refuse; what cannot be taken back (kick, ban, kill, the admin role, permissions, restart, shutdown, deleting a loot table) asks for confirmation first.
 
 </details>
 

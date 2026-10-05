@@ -6,6 +6,7 @@ import query from "../../controllers/sqldatabase";
 import log from "../../modules/logger";
 import assetCache from "../../services/assetCache";
 import { find, getCachedQuestsSync, npcLinksForQuest, reload } from "./definitions";
+import { removeFromEveryLog } from "./log";
 
 export const EDITOR_PERMISSION = "tools.quest_editor";
 export const EDITOR_WILDCARD = "tools.*";
@@ -441,7 +442,21 @@ async function pruneDeletedNpcLinks(payload: QuestSavePayload): Promise<void> {
   }
 }
 
+/**
+ * A save whose statement fails has written the ones before it, and may have
+ * written that one too: the definitions held are read again, so they are
+ * what the database has.
+ */
 async function saveInner(payload: QuestSavePayload): Promise<SaveResult> {
+  try {
+    return await writeQuest(payload);
+  } catch (error) {
+    await reload().catch(() => {});
+    throw error;
+  }
+}
+
+async function writeQuest(payload: QuestSavePayload): Promise<SaveResult> {
   await pruneDeletedNpcLinks(payload);
   const errors = await validateQuest(payload);
   if (errors.length > 0) return { ok: false, errors };
@@ -479,6 +494,7 @@ async function saveInner(payload: QuestSavePayload): Promise<SaveResult> {
     );
     questId = selfId;
   } else {
+    const known = new Set(getCachedQuestsSync().map((q) => q.id));
     const result = (await query(
       `INSERT INTO quests (name, zone, offer_text, description, progress_text, completion_text,
        required_level, quest_level, xp_reward, copper_reward, repeatable, next_quest_id, sort_order)
@@ -491,9 +507,12 @@ async function saveInner(payload: QuestSavePayload): Promise<SaveResult> {
     )) as any;
     questId = Number(result?.insertId ?? result?.lastInsertRowid);
     if (!Number.isFinite(questId)) {
-      // Fall back to re-reading the row by name.
-      const rows = (await query("SELECT id FROM quests WHERE name = ?", [row.name])) as any[];
-      questId = Number(rows?.[0]?.id);
+      // The database did not say which id it gave the row: the definitions
+      // are read again, and the new quest is the one of that name that was
+      // not there before.
+      await reload();
+      const added = getCachedQuestsSync().filter((q) => q.name === row.name && !known.has(q.id)).map((q) => q.id);
+      questId = added.length > 0 ? Math.max(...added) : NaN;
     }
   }
   if (!Number.isFinite(questId)) return { ok: false, errors: ["Could not save the quest."] };
@@ -561,14 +580,20 @@ async function saveInner(payload: QuestSavePayload): Promise<SaveResult> {
 export async function remove(questId: number): Promise<void> {
   const qid = Number(questId);
   if (!Number.isFinite(qid)) return;
-  await query("DELETE FROM quest_rewards WHERE quest_id = ?", [qid]);
-  await query("DELETE FROM quest_objectives WHERE quest_id = ?", [qid]);
-  await query("DELETE FROM quest_prerequisites WHERE quest_id = ? OR required_quest_id = ?", [qid, qid]);
-  await query("DELETE FROM npc_quests WHERE quest_id = ?", [qid]);
-  await query("DELETE FROM quest_objective_progress WHERE quest_id = ?", [qid]);
-  await query("DELETE FROM quest_log WHERE quest_id = ?", [qid]);
-  await query("UPDATE quests SET next_quest_id = NULL WHERE next_quest_id = ?", [qid]);
-  await query("DELETE FROM quests WHERE id = ?", [qid]);
+  try {
+    await query("DELETE FROM quest_rewards WHERE quest_id = ?", [qid]);
+    await query("DELETE FROM quest_objectives WHERE quest_id = ?", [qid]);
+    await query("DELETE FROM quest_prerequisites WHERE quest_id = ? OR required_quest_id = ?", [qid, qid]);
+    await query("DELETE FROM npc_quests WHERE quest_id = ?", [qid]);
+    // Every player's rows of the quest, in quest_objective_progress and quest_log.
+    await removeFromEveryLog(qid);
+    await query("UPDATE quests SET next_quest_id = NULL WHERE next_quest_id = ?", [qid]);
+    await query("DELETE FROM quests WHERE id = ?", [qid]);
+  } catch (error) {
+    // Some of the quest is gone: the definitions held are read again, so they are what the database has.
+    await reload().catch(() => {});
+    throw error;
+  }
   await reload();
 }
 

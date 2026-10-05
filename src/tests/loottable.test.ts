@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 
 // Rows the mocked database returns for loot_table_items, and what was written.
 let tableItems: any[] = [];
@@ -6,7 +6,7 @@ let written: any[][] = [];
 
 mock.module("../controllers/sqldatabase", () => ({
   default: async (sql: string, params: any[] = []) => {
-    if (sql.startsWith("SELECT * FROM loot_tables WHERE id")) return [{ id: 1, name: "Wolf drops", created_at: null }];
+    if (sql.startsWith("SELECT * FROM loot_tables")) return [{ id: 1, name: "Wolf drops", created_at: null }];
     if (sql.startsWith("SELECT * FROM loot_table_items")) return tableItems;
     if (sql.startsWith("INSERT INTO loot_table_items") || sql.startsWith("UPDATE loot_table_items")) written.push(params);
     return [];
@@ -17,9 +17,13 @@ mock.module("../services/assetCache", () => ({
 }));
 mock.module("../modules/spriteSheetManager", () => ({ getIconUrl: () => "" }));
 
+const { clearCaches } = await import("../services/datacache");
 const { default: lootTable, normalizeDropChance } = await import("../systems/lootTable");
 
-const row = (drop_chance: unknown) => ({ id: 1, item_name: "Wolf Pelt", min_quantity: 1, max_quantity: 1, drop_chance, quality: "common" });
+const row = (drop_chance: unknown) => ({ id: 1, loot_table_id: 1, item_name: "Wolf Pelt", min_quantity: 1, max_quantity: 1, drop_chance, quality: "common" });
+
+// Each test gives the database other rows: the tables held of the last one are forgotten.
+beforeEach(clearCaches);
 
 afterEach(() => {
   tableItems = [];

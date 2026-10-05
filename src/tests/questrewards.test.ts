@@ -76,7 +76,8 @@ mock.module("../services/playermanager", () => ({
 mock.module("../systems/inventory", () => ({
   default: {
     find: async () => [],
-    get: async () => [],
+    // What the player holds, as the inventory system answers it: a row for each item, under `item`.
+    get: async () => inventoryState.map((r) => ({ ...r })),
     add: async (name: string, item: any) => {
       inventoryCalls.push({ name, quantity: item.quantity });
       return { affectedRows: 1 };

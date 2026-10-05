@@ -5,7 +5,10 @@
  */
 import query from "../controllers/sqldatabase";
 import assetCache from "../services/assetCache";
+import log from "../modules/logger";
+import { refreshAuthItems } from "../socket/authentication_pool";
 import { listIcons, type SpriteSheetOption } from "./creatures/editor";
+import itemTable from "./items";
 
 export const EDITOR_PERMISSION = "tools.item_editor";
 export const EDITOR_WILDCARD = "tools.*";
@@ -165,39 +168,75 @@ const values = (item: Item) => [
   item.damage_min, item.damage_max, item.attack_speed_ms,
 ];
 
-/** Insert or update by name, then refresh the cache every system reads from. */
+/**
+ * The cached item list changed. The login workers build a player's inventory
+ * from their own copy of the list, so hand them the new one.
+ */
+async function itemsChanged(): Promise<void> {
+  try {
+    await refreshAuthItems();
+  } catch (error) {
+    log.error(`Could not hand the changed items to the login workers: ${error}`);
+  }
+}
+
+/**
+ * A statement that changes the items table. One that throws may still have
+ * been applied (a timeout, say), so the table is read again and the login
+ * workers are handed what it holds: the items held are then the database's,
+ * not what they were before.
+ */
+async function write(sql: string, params: any[]): Promise<void> {
+  try {
+    await query(sql, params);
+  } catch (error) {
+    try {
+      await assetCache.set("items", await itemTable.list());
+      await itemsChanged();
+    } catch (again) {
+      log.error(`Could not read the items again after a write that failed: ${again}`);
+    }
+    throw error;
+  }
+}
+
+/** Insert or update by name, then put the item into the cache every system reads from. */
 export async function saveItem(input: any, originalName: string | null): Promise<Item> {
   const item = normalizeItem(input);
   const existing = originalName ?? item.name;
-  const rows = (await query("SELECT name FROM items WHERE name = ?", [existing])) as any[];
+  const isRow = (i: Item) => i.name.toLowerCase() === existing.toLowerCase();
+  // The items held are every row of the table: whether this one is there is read from them.
+  const held = ((await assetCache.get("items")) || []) as Item[];
 
-  if (rows.length > 0) {
-    await query(
+  if (held.some(isRow)) {
+    await write(
       `UPDATE items SET ${COLUMNS.map((c) => `${c} = ?`).join(", ")} WHERE name = ?`,
       [...values(item), existing]
     );
   } else {
-    await query(
+    await write(
       `INSERT INTO items (${COLUMNS.join(", ")}) VALUES (${COLUMNS.map(() => "?").join(", ")})`,
       values(item)
     );
   }
 
   const items = ((await assetCache.get("items")) || []) as Item[];
-  const index = items.findIndex((i) => i.name.toLowerCase() === existing.toLowerCase());
+  const index = items.findIndex(isRow);
   if (index === -1) items.push(item);
   else items[index] = item;
   await assetCache.set("items", items);
+  await itemsChanged();
   return item;
 }
 
 export async function deleteItem(name: string): Promise<void> {
-  await query("DELETE FROM items WHERE name = ?", [name]);
+  await write("DELETE FROM items WHERE name = ?", [name]);
   const items = ((await assetCache.get("items")) || []) as Item[];
   const index = items.findIndex((i) => i.name.toLowerCase() === name.toLowerCase());
   if (index !== -1) {
     items.splice(index, 1);
     await assetCache.set("items", items);
+    await itemsChanged();
   }
 }
 
