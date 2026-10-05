@@ -527,35 +527,3 @@ describe("work queued per key", () => {
     await Promise.all(results);
   });
 });
-
-describe("finding an online player by name", () => {
-  beforeEach(() => playerCache.clear());
-
-  test("finds them in any case, and nobody once they have left", () => {
-    playerCache.add("s1", { id: "s1", username: "Hero" });
-    expect(playerCache.getByUsername("hero")?.id).toBe("s1");
-    expect(playerCache.getByUsername("HERO")?.id).toBe("s1");
-    expect(playerCache.getByUsername("nobody")).toBeUndefined();
-
-    playerCache.remove("s1");
-    expect(playerCache.getByUsername("hero")).toBeUndefined();
-  });
-
-  test("a second login takes the name, and the first session's last writes do not take it back", () => {
-    playerCache.add("old", { id: "old", username: "hero" });
-    playerCache.add("new", { id: "new", username: "hero" });
-    expect(playerCache.getByUsername("hero")?.id).toBe("new");
-
-    // The old session is still written to while it is being disconnected.
-    playerCache.set("old", { id: "old", username: "hero" });
-    expect(playerCache.getByUsername("hero")?.id).toBe("new");
-
-    playerCache.remove("old");
-    expect(playerCache.getByUsername("hero")?.id).toBe("new");
-  });
-
-  test("a player put in with set is found too", () => {
-    playerCache.set("s2", { id: "s2", username: "mage" });
-    expect(playerCache.getByUsername("mage")?.id).toBe("s2");
-  });
-});

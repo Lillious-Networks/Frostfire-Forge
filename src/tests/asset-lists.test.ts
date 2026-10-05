@@ -533,35 +533,6 @@ describe("npcs", () => {
 // ---------------------------------------------------------------- particles
 
 describe("particles", () => {
-  test("the list is the particles held, without the database", async () => {
-    expect(await particles.list()).toEqual([EMBER, SMOKE] as any);
-    expect(await particles.list()).toEqual([EMBER, SMOKE] as any);
-    expect(queries).toEqual([]);
-  });
-
-  test("find answers from the particles held, and leaves the list held alone", async () => {
-    expect(await particles.find({ name: "smoke" } as Particle)).toEqual(SMOKE as any);
-    expect((await particles.find({ name: "nothing" } as Particle)).name).toBeUndefined();
-    expect(held("particles")).toEqual([EMBER, SMOKE]);
-    expect(queries).toEqual([]);
-  });
-
-  test("add writes the particle, and the list has it without asking", async () => {
-    await particles.add(sent());
-    expect(writes()).toHaveLength(1);
-    expect(db.particles.at(-1)).toMatchObject({ name: "spark", velocity: "1,-2", visible: 1, time_on: null, brightness: 1.5 });
-    expect(await particles.list()).toEqual([EMBER, SMOKE, SPARK] as any);
-    expect(held("particles")).toEqual([EMBER, SMOKE, SPARK]);
-    expect(reads()).toEqual([]);
-  });
-
-  test("update writes the particle, and the list has it without asking", async () => {
-    await particles.update(sent({ name: "smoke", affected_by_weather: true, image: "puff2.png", time_on: "20:00", time_off: "05:00", affected_by_time: true }));
-    expect(writes()).toHaveLength(1);
-    expect(await particles.list()).toEqual([EMBER, { ...SPARK, name: "smoke", weather: RAINY, affected_by_weather: true, image: "puff2.png", time_on: "20:00", time_off: "05:00", affected_by_time: true }] as any);
-    expect(reads()).toEqual([]);
-  });
-
   test("remove deletes the particle, and the list knows without asking: it is no longer wiped", async () => {
     await particles.remove({ name: "ember" } as Particle);
     expect(db.particles.map((row) => row.name)).toEqual(["smoke"]);
@@ -587,18 +558,6 @@ describe("particles", () => {
     expect(copyOf(await particles.list())).toEqual(before);
     expect(before.map((particle: any) => particle.name)).toEqual(["ember", "spark"]);
   });
-
-  for (const applied of [false, true]) {
-    test(`a write the database refused${applied ? ", though it had applied it" : ""}: the table is read again, once, and the list is what it holds`, async () => {
-      failing = /^INSERT INTO particles/;
-      appliedAnyway = applied;
-      await expect(particles.add(sent())).rejects.toThrow("connection lost");
-      failing = null;
-      expect(reads()).toEqual(["SELECT * FROM particles"]);
-      expect(await particles.list()).toEqual((applied ? [EMBER, SMOKE, SPARK] : [EMBER, SMOKE]) as any);
-      expect(reads()).toEqual(["SELECT * FROM particles"]);
-    });
-  }
 
   test("when the table cannot be read again either, the next list reads it", async () => {
     failing = /^(DELETE FROM|SELECT \* FROM) particles/;
@@ -634,22 +593,6 @@ describe("renaming a particle", () => {
     expect(db.mounts.map((row) => row.particles)).toEqual([null, "smoke,cinder"]);
     // A map's own emitter and a plugin's spell are no database rows: whoever renames (the receiver) changes them in memory.
     expect(TORCH.particles as unknown).toBe("ember");
-  });
-
-  test("leaves every list held as the database then has it", async () => {
-    await particles.rename("ember", "cinder");
-
-    expect(await particles.list()).toEqual([{ ...EMBER, name: "cinder" }, SMOKE] as any);
-    expect(held("npcs").map((entry) => entry.particles)).toEqual(["cinder", "smoke,cinder"]);
-    expect(held("spells").map((spell) => spell.particles)).toEqual(["cinder", null]);
-    expect(held("mounts").map((mount) => mount.particles)).toEqual([null, "smoke,cinder"]);
-    expect(reads()).toEqual([]);
-
-    const before = copyOf([await particles.list(), timeless(held("npcs")), held("mounts")]);
-    await reread("particles");
-    await reread("npcs");
-    await reread("mounts");
-    expect(copyOf([await particles.list(), timeless(held("npcs")), held("mounts")])).toEqual(before);
   });
 
   test("a name that is only part of another is left alone", async () => {

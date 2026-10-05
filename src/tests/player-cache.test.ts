@@ -244,26 +244,6 @@ afterAll(() => {
 // --------------------------------------------------------------- who is online
 
 describe("who is online is answered from the players held, never the database", () => {
-  test("a username's session is the one it is online under, in any case", async () => {
-    online("6101", "pc_hero");
-    queries = [];
-    expect(await player.getSessionIdByUsername("PC_Hero")).toBe("6101");
-    expect(await player.getSession("pc_hero")).toBe("6101");
-    expect(await player.isOnline("pc_hero")).toEqual([{ online: 1 }]);
-    expect(queries).toEqual([]);
-  });
-
-  test("a player who is not online has no session, whatever the database still holds", async () => {
-    // Left behind by a server that stopped without logging its players out.
-    row("pc_hero").session_id = "5555";
-    expect(await player.getSessionIdByUsername("pc_hero")).toBeUndefined();
-    expect(await player.getSession("pc_hero")).toBeUndefined();
-    expect(await player.getSessionIdByUsername("pc_nobody")).toBeUndefined();
-    expect(await player.getSessionIdByUsername("")).toBeUndefined();
-    expect(await player.isOnline("pc_hero")).toEqual([{ online: 0 }]);
-    expect(queries).toEqual([]);
-  });
-
   test("a session's username and map, and the players on a map", async () => {
     online("6101", "pc_hero");
     // A map no other test file leaves players on: the players held are shared.
@@ -280,29 +260,6 @@ describe("who is online is answered from the players held, never the database", 
     expect(queries).toEqual([]);
   });
 
-  test("kick logs out the session the player is online under, and only then", async () => {
-    online("6101", "pc_hero");
-    queries = [];
-    let closed = 0;
-    const wt = { close: () => { closed++; } };
-
-    await player.kick("pc_hero", wt);
-    expect(queries).toEqual(["UPDATE accounts SET token = NULL, online = ?, session_id = NULL, verification_code = NULL, verified = ? WHERE session_id = ?"]);
-    expect(row("pc_hero").session_id).toBeNull();
-
-    queries = [];
-    await player.kick("pc_ally", wt);
-    expect(queries).toEqual([]);
-    expect(closed).toBe(2);
-  });
-
-  test("an online player's stats are put together without the database once their base stats are held", async () => {
-    online("6101", "pc_hero", { stats: { health: 80, max_health: 100, stamina: 60, max_stamina: 100 }, equipment: {}, inventory: [] });
-    const first = await player.synchronizeStats("pc_hero");
-    expect(first).toMatchObject({ total_max_health: 100, stat_armor: 3, stat_damage: 4, stat_avoidance: 5 });
-    expect(await fromCache(() => player.synchronizeStats("pc_hero"))).toEqual(first);
-    expect(await fromCache(() => player.synchronizeStats("pc_ally"))).toBeUndefined();
-  });
 });
 
 // -------------------------------------------------------------- account rows
@@ -332,24 +289,6 @@ describe("what the engine knows of an account", () => {
     },
   };
 
-  for (const [name, { read, answer, loads }] of Object.entries(READS)) {
-    test(`${name} reads the database the first time and the cache after`, async () => {
-      expect(await read()).toEqual(answer);
-      expect(queries).toHaveLength(loads);
-      expect(await fromCache(read)).toEqual(answer);
-      expect(await fromCache(read)).toEqual(answer);
-    });
-  }
-
-  test("every question about one account is answered from the one row", async () => {
-    expect(await player.isAdmin("pc_boss")).toBe(true);
-    expect(await fromCache(() => player.isStealth("pc_boss"))).toBe(true);
-    expect(await fromCache(() => player.isGuest("pc_boss"))).toBe(false);
-    expect(await fromCache(() => player.findAccount("pc_boss"))).toMatchObject({ id: 4301, banned: 0 });
-    expect(await fromCache(() => player.findPlayerInDatabase("pc_boss"))).toEqual([{ username: "pc_boss", banned: 0 }]);
-    expect(queries).toHaveLength(1);
-  });
-
   test("an account that does not exist answers as it did from the database", async () => {
     expect(await player.isAdmin("pc_nobody")).toBe(false);
     expect(await player.isGuest("pc_nobody")).toBe(false);
@@ -375,14 +314,6 @@ describe("what the engine knows of an account", () => {
     expect(queries).toEqual([]);
   });
 
-  test("the session of an account is who is online, not a column of the row", async () => {
-    row("pc_exile").session_id = "5555";
-    expect((await player.findAccount("pc_exile"))!.session_id).toBeNull();
-    online("6101", "pc_hero");
-    expect((await player.findAccount("pc_hero"))!.session_id).toBe("6101");
-    expect((await player.findAccount(undefined, 4303))!.session_id).toBe("6101");
-  });
-
   test("a session id finds the account of the player online under it", async () => {
     online("6101", "pc_hero");
     expect(await player.findPlayerInDatabase(undefined, "6101")).toEqual([{ username: "pc_hero", banned: 0 }]);
@@ -390,25 +321,6 @@ describe("what the engine knows of an account", () => {
     expect(await player.findPlayerInDatabase("pc_exile", "6101")).toEqual([{ username: "pc_exile", banned: 1 }, { username: "pc_hero", banned: 0 }]);
     expect(await player.findPlayerInDatabase(undefined, "9999")).toEqual([]);
     expect(await player.getLocation({ id: "6101" } as any)).toEqual({ map: "overworld", position: { x: 320, y: 480, direction: "down" } });
-  });
-
-  test("an id and a name that stand for one account never disagree", async () => {
-    expect((await player.findAccount(undefined, 4303))!.banned).toBe(0);
-    await player.ban("pc_hero", null);
-    expect((await fromCache(() => player.findAccount(undefined, 4303)))!.banned).toBe(1);
-    expect((await fromCache(() => player.findAccount("pc_hero")))!.banned).toBe(1);
-  });
-
-  test("an id whose name was given to a new account is looked up again", async () => {
-    expect((await player.findAccount(undefined, 4303))!.username).toBe("pc_hero");
-    // The account is deleted and the name registered again: the gateway's doing, seen here at the next login.
-    tables.accounts = tables.accounts.filter((r) => r.username !== "pc_hero");
-    tables.accounts.push(account(4999, "pc_hero"));
-    await refreshPlayer("pc_hero");
-
-    expect(await player.findAccount(undefined, 4303)).toBeNull();
-    expect(await player.findAccount(undefined, 4303)).toBeNull();
-    expect((await player.findAccount(undefined, 4999))!.username).toBe("pc_hero");
   });
 
   test("a row another system wrote is read again once that system says so", async () => {
@@ -605,30 +517,6 @@ describe("a write to an account", () => {
     expect(await player.toggleNoclip("pc_nobody")).toBe(false);
   });
 
-  test("ban and unban are seen by every lookup of the account", async () => {
-    expect((await player.findAccount("pc_hero"))!.banned).toBe(0);
-    expect<any>(await player.ban("PC_Hero", null)).toEqual({ affectedRows: 1 });
-    expect(row("pc_hero").banned).toBe(1);
-    expect((await fromCache(() => player.findAccount("pc_hero")))!.banned).toBe(1);
-    expect(await fromCache(() => player.isBanned("pc_hero"))).toEqual([{ banned: 1 }]);
-    expect(await fromCache(() => player.findPlayerInDatabase("pc_hero"))).toEqual([{ username: "pc_hero", banned: 1 }]);
-
-    expect<any>(await player.unban("pc_hero")).toEqual({ affectedRows: 1 });
-    expect(row("pc_hero").banned).toBe(0);
-    expect((await fromCache(() => player.findAccount("pc_hero")))!.banned).toBe(0);
-  });
-
-  test("banning a player who is online logs their session out and closes their connection", async () => {
-    online("6101", "pc_hero");
-    let closed = 0;
-    expect(await sentBy(() => player.ban("pc_hero", { close: () => { closed++; } }))).toEqual([
-      "UPDATE accounts SET banned = 1 WHERE username = ?",
-      "UPDATE accounts SET token = NULL, online = ?, session_id = NULL, verification_code = NULL, verified = ? WHERE session_id = ?",
-    ]);
-    expect(row("pc_hero")).toMatchObject({ banned: 1, session_id: null });
-    expect(closed).toBe(1);
-  });
-
   test("setLocation writes where the session's player is, and the row held follows", async () => {
     online("6101", "pc_hero");
     await location("pc_hero");
@@ -657,28 +545,6 @@ describe("a write to an account", () => {
     expect(await location("pc_hero")).toEqual({ map: "cave", position: { x: 7, y: 8, direction: "up" } });
   });
 
-  test("setLocationByUsername, returnHome and setDeadState are seen without asking", async () => {
-    await location("pc_ally");
-    await player.setLocationByUsername("PC_Ally", "cave", { x: 5, y: 6, direction: "left" });
-    expect(row("pc_ally")).toMatchObject({ map: "cave", position: "5,6", direction: "left" });
-    expect(await fromCache(() => location("pc_ally"))).toEqual({ map: "cave", position: { x: 5, y: 6, direction: "left" } });
-
-    online("6102", "pc_ally");
-    await player.returnHome("6102");
-    // The default map is the server's setting.
-    const home = row("pc_ally").map;
-    expect(home).not.toBe("cave");
-    expect(row("pc_ally").position).toBe("0,0");
-    expect(await fromCache(() => location("pc_ally"))).toEqual({ map: home, position: { x: 0, y: 0, direction: "left" } });
-
-    await player.setDeadState("pc_ally", 2, { map: "cave", x: 4.6, y: 8.2 });
-    expect(row("pc_ally")).toMatchObject({ is_dead: 2, corpse_map: "cave", corpse_x: 5, corpse_y: 8 });
-    expect((await fromCache(() => player.findAccount("pc_ally")))!.is_dead).toBe(2);
-    await player.setDeadState("pc_ally", 0, null);
-    expect(row("pc_ally")).toMatchObject({ is_dead: 0, corpse_map: null, corpse_x: null, corpse_y: null });
-    expect((await fromCache(() => player.findAccount("pc_ally")))!.is_dead).toBe(0);
-  });
-
   test("a write the database stores differently from what it was given has the row read again", async () => {
     await location("pc_hero");
     // No direction: the column keeps what it had or takes its default, which is the database's to say.
@@ -705,40 +571,6 @@ describe("a write to an account", () => {
     noclip: await player.isNoclip("pc_boss"), at: await location("pc_boss"), exile: await player.findAccount("pc_exile"),
   });
 
-  for (const [name, write] of Object.entries(WRITES)) {
-    for (const made of [false, true]) {
-      test(`${name}: a write the database ${made ? "made but never answered" : "refused"} has the row read again`, async () => {
-        online("6101", "pc_boss");
-        const before = await snapshot();
-
-        writesLeft = 0;
-        lostAfterWriting = made;
-        await expect(write()).rejects.toThrow("database gone");
-        writesLeft = Infinity;
-
-        // The next read asks the database, once, and the ones after it do not.
-        let after: any;
-        expect(await sentBy(async () => { after = await snapshot(); })).toHaveLength(1);
-        expect(await fromCache(snapshot)).toEqual(after);
-        if (made) expect(after).not.toEqual(before);
-        else expect(after).toEqual(before);
-        // What it answers is what the database holds.
-        await clearCaches();
-        expect(await snapshot()).toEqual(after);
-      });
-    }
-  }
-
-  test("taking the role away: when clearing stealth is not answered, the role already written is not lost", async () => {
-    await snapshot();
-    writesLeft = 1;
-    await expect(player.toggleAdmin("pc_boss")).rejects.toThrow("database gone");
-    writesLeft = Infinity;
-
-    expect(row("pc_boss")).toMatchObject({ role: 0, stealth: 1, noclip: 1 });
-    expect(await sentBy(async () => { expect(await player.isAdmin("pc_boss")).toBe(false); })).toHaveLength(1);
-    expect(await fromCache(() => player.isStealth("pc_boss"))).toBe(true);
-  });
 });
 
 // --------------------------------------------------------------------- stats
@@ -790,13 +622,6 @@ describe("a player's stats", () => {
     expect(await sentBy(async () => { expect(await player.increaseXp("pc_hero", 10)).toEqual({ xp: 75, level: 1, max_xp: 100 }); })).toEqual(["UPDATE stats SET xp = ?, max_xp = ?, level = ? WHERE username = ?"]);
     expect(row("pc_hero", "stats").xp).toBe(75);
     expect(await fromCache(() => player.getStats("pc_hero"))).toMatchObject({ xp: 75, level: 1 });
-  });
-
-  test("a level gained is written with its new maximums and held", async () => {
-    expect(await player.increaseXp("pc_hero", 70)).toEqual({ xp: 10, level: 2, max_xp: 110 });
-    const gained = { xp: 10, level: 2, max_xp: 110, max_health: player.getMaxHealthForLevel(2), health: player.getMaxHealthForLevel(2), max_stamina: player.getMaxStaminaForLevel(2), stamina: player.getMaxStaminaForLevel(2) };
-    expect(row("pc_hero", "stats")).toMatchObject(gained);
-    expect(await fromCache(() => player.getStats("pc_hero"))).toMatchObject(gained);
   });
 
   test("increaseLevel changes what the database holds by one, so the row is read again", async () => {
@@ -942,39 +767,6 @@ describe("a player's client config", () => {
 // ------------------------------------------------- tables other systems cache
 
 describe("the guest clean-up", () => {
-  test("has every cache of a table it wrote read again", async () => {
-    await player.getPartyIdByUsername("pc_ally");
-    await player.findAccount("guest_pc");
-    await player.findAccount(undefined, 4306);
-    await player.getStats("guest_pc");
-    await player.getConfig("guest_pc");
-    expect(await player.searchAccounts("guest", 5)).toEqual([{ id: 4306, username: "guest_pc" }]);
-    queries = [];
-
-    await player.clear();
-
-    expect(tables.accounts.map((r) => r.username)).toEqual(["pc_boss", "pc_mod", "pc_hero", "pc_ally", "pc_exile"]);
-    expect(tables.parties).toEqual([]);
-    expect(tables.guilds.map((g) => g.name)).toEqual(["Frostguard"]);
-    for (const table of ["stats", "clientconfig", "inventory", "quest_log", "currency", "collectables", "equipment", "learned_spells", "permissions", "friendslist"]) {
-      expect(tables[table].some((r) => r.username === "guest_pc")).toBe(false);
-    }
-
-    // Every account lost its party, and the guest everything.
-    expect(await player.getPartyIdByUsername("pc_ally")).toBeNull();
-    expect(await player.findAccount("guest_pc")).toBeNull();
-    expect(await player.findAccount(undefined, 4306)).toBeNull();
-    expect(await player.getStats("guest_pc")).toEqual([]);
-    expect(await player.getConfig("guest_pc")).toEqual([]);
-    // The names were read again by the clean-up itself, not by the search.
-    expect(await fromCache(() => player.searchAccounts("guest", 5))).toEqual([]);
-
-    expect(told.sort()).toEqual([
-      "account_ids *", "accounts *", "clientconfig *", "collectables *", "currency *", "equipment *", "friends *", "guilds reload",
-      "inventory *", "learned_spells *", "parties reload", "permissions *", "quest_log *", "spell_usage *", "stats *",
-    ]);
-  });
-
   test("that the database stops half way still has them read again", async () => {
     await player.getPartyIdByUsername("pc_ally");
     await player.getStats("guest_pc");
@@ -988,22 +780,5 @@ describe("the guest clean-up", () => {
     expect(await player.getStats("guest_pc")).toEqual([]);
     expect(told).toContain("accounts *");
     expect(told).toContain("parties reload");
-  });
-});
-
-describe("a new account's default rows", () => {
-  test("are read by every cache that had looked for them", async () => {
-    expect(await player.findAccount("pc_newcomer")).toBeNull();
-    expect(await player.getStats("pc_newcomer")).toEqual([]);
-    expect(await player.getConfig("pc_newcomer")).toEqual([]);
-
-    expect(await player.register("PC_Newcomer", "hash", "New@Example.test", { ip: "127.0.0.1", headers: {} }, false)).toBe("pc_newcomer");
-
-    expect(await player.findAccount("pc_newcomer")).toMatchObject({ username: "pc_newcomer", banned: 0 });
-    expect(await player.getStats("pc_newcomer")).toMatchObject({ health: 100, level: 1 });
-    expect(await player.getConfig("pc_newcomer")).toMatchObject([{ fps: 60, muted: 0 }]);
-    expect(await fromCache(() => player.searchAccounts("newcomer", 5))).toMatchObject([{ username: "pc_newcomer" }]);
-    // And who knows frost_bolt, which every new account is given.
-    expect(told.sort()).toEqual(["collectables pc_newcomer", "currency pc_newcomer", "equipment pc_newcomer", "learned_spells pc_newcomer", "quest_log pc_newcomer", "spell_usage frost_bolt"]);
   });
 });

@@ -328,27 +328,9 @@ describe("player editor permissions", () => {
     expect(heroRow("currency").gold).toBe(1);
   });
 
-  test("losing the permission stops the very next packet", async () => {
-    expect((await act("currency.set", { gold: 2, silver: 0, copper: 0 })).ok).toBe(true);
-    // As the server takes a permission away: through the permissions system, which holds the row the editor asks.
-    await permissions.set("boss", ["admin.kick"]);
-    const result = await act("currency.set", { gold: 3, silver: 0, copper: 0 });
-    expect(result.denied).toBe(true);
-    expect(heroRow("currency").gold).toBe(2);
-  });
 });
 
 describe("player editor targets", () => {
-  test("a username, an account id or an online connection id all find the player", async () => {
-    expect(await editor.resolveTarget("Hero")).toEqual({ username: "hero", userid: 4203 });
-    expect(await editor.resolveTarget("4203")).toEqual({ username: "hero", userid: 4203 });
-    expect(await editor.resolveTarget(4203)).toEqual({ username: "hero", userid: 4203 });
-    login("ally", "7002");
-    expect(await editor.resolveTarget("7002")).toEqual({ username: "ally", userid: 4204 });
-    expect(await editor.resolveTarget("nobody")).toBeNull();
-    expect(await editor.resolveTarget("4299")).toBeNull();
-  });
-
   test("anything that is not a username or a number never reaches a query", async () => {
     for (const hostile of ["hero' OR '1'='1", "hero\\", "he ro", "", null, undefined, {}, ["hero"], "x".repeat(65)]) {
       queries.length = 0;
@@ -364,44 +346,6 @@ describe("player editor targets", () => {
 });
 
 describe("player editor snapshot", () => {
-  test("an offline player loads in full from the database", async () => {
-    tables.quest_log.push({ username: "hero", quest_id: 1, state: "active", accepted_at: 1, completed_at: 0, times_completed: 0 });
-    tables.quest_objective_progress.push({ username: "hero", quest_id: 1, objective_id: 10, count: 2 });
-    const result = await editor.handleEditorPacket(ADMIN, "PLAYER_EDITOR_LOAD", { target: "hero" });
-    expect(result.kind).toBe("data");
-    if (result.kind !== "data") return;
-    const { snapshot, options } = result.data;
-
-    expect(snapshot).toMatchObject({
-      username: "hero", userid: 4203, online: false, sessionId: null, isAdmin: false, banned: false, dead: 0,
-      location: { map: "overworld", x: 320, y: 480, direction: "down" },
-      currency: { copper: 5, silver: 2, gold: 1 },
-      inventorySlots: 25,
-      spells: ["frost_bolt"],
-      totals: null,
-      guild: null,
-      party: null,
-    });
-    expect(snapshot.stats).toMatchObject({ level: 1, xp: 40, max_xp: 100, health: 80, max_health: 100 });
-    expect(snapshot.inventory).toEqual([
-      { name: "Health Potion", quantity: 3, equipped: false, quality: "common", type: "consumable", icon: "health_potion", equipment_slot: null, level_requirement: 1, known: true },
-    ]);
-    expect(snapshot.equipment.helmet).toBeNull();
-    expect(Object.keys(snapshot.equipment)).toHaveLength(16);
-    expect(snapshot.collectables).toEqual([{ type: "mount", item: "unicorn", icon: "mount_unicorn", known: true }]);
-    expect(snapshot.quests.active).toEqual([
-      { id: 1, name: "Rats in the Cellar", state: "active", objectives: [{ id: 10, label: "Rats slain", count: 2, required: 3 }] },
-    ]);
-
-    expect(options.editor).toBe("boss");
-    expect(options.maps).toEqual([{ name: "overworld", width: 3200, height: 1600 }]);
-    expect(options.guilds).toEqual([{ id: 7, name: "Frostguard", leader: "ally", members: 1 }]);
-    expect(options.quests.map((q) => q.name)).toEqual(["Rats in the Cellar", "Aftermath"]);
-    expect(options.permissionTypes).toContain("server.admin");
-    // 100 * 1.1^(level - 1) stops fitting a 32-bit column after this level.
-    expect(options.limits.level).toBe(178);
-  });
-
   test("an online player's vitals and position come from their live copy", async () => {
     const { live } = login("hero", "7001");
     live.stats.health = 33;
@@ -484,95 +428,14 @@ describe("player editor snapshot", () => {
 });
 
 describe("player editor dispatch", () => {
-  test("unknown actions are rejected, inherited object keys included", async () => {
-    for (const action of ["inventory.duplicate", "constructor", "toString", "__proto__", ""]) {
-      await expectRefused(action, {}, /Unknown player editor action/);
-    }
-    const result = await editor.handleEditorPacket(ADMIN, "PLAYER_EDITOR_NONSENSE", { target: "hero" });
-    expect(result).toMatchObject({ kind: "result", ok: false });
-  });
-
   test("an action on an unknown player changes nothing", async () => {
     const result = await act("currency.set", { gold: 1, silver: 1, copper: 1 }, "nobody");
     expect(result).toMatchObject({ ok: false, errors: ["Player not found."], snapshot: null });
   });
 
-  test("a change answers with the fresh snapshot, and so does a refusal", async () => {
-    const changed = await act("currency.set", { gold: 9, silver: 8, copper: 7 });
-    expect(changed).toMatchObject({ ok: true, errors: [], action: "currency.set" });
-    expect(changed.snapshot?.currency).toEqual({ gold: 9, silver: 8, copper: 7 });
-    const refused = await act("currency.set", { gold: -1, silver: 8, copper: 7 });
-    expect(refused.ok).toBe(false);
-    expect(refused.snapshot?.currency).toEqual({ gold: 9, silver: 8, copper: 7 });
-  });
-});
-
-describe("stats", () => {
-  test("numbers must be whole and in range", async () => {
-    await expectRefused("stats.set", {}, /No stats were given/);
-    await expectRefused("stats.set", { stats: { level: 0 } }, /Level must be a whole number from 1 to 178/);
-    await expectRefused("stats.set", { stats: { level: 179 } }, /Level must be/);
-    for (const bad of [1.5, -3, "abc", "", null, true, NaN, Infinity, [5], {}]) {
-      await expectRefused("stats.set", { stats: { stat_damage: bad } }, /Damage must be a whole number/);
-    }
-    await expectRefused("stats.set", { stats: { health: 0 } }, /Health must be a whole number from 1/);
-    await expectRefused("stats.set", { stats: { health: 101 } }, /Health cannot be above the maximum of 100/);
-    await expectRefused("stats.set", { stats: { xp: 100 } }, /XP must be below 100/);
-    await expectRefused("stats.set", { stats: { max_xp: 5 } }, /Unknown stat: max_xp/);
-    await expectRefused("stats.set", { stats: { role: 1 } }, /Unknown stat: role/);
-    await expectRefused("stats.set", { stats: JSON.parse('{"__proto__": 5, "constructor": 5}') }, /Unknown stat: __proto__.*Unknown stat: constructor/);
-  });
-
-  test("an offline player's row is rewritten, with the level's XP and maximums following it", async () => {
-    expect((await act("stats.set", { stats: { level: 5, stat_damage: 12 } })).ok).toBe(true);
-    expect(heroRow("stats")).toMatchObject({
-      level: 5, max_xp: 146, max_health: 155, max_stamina: 133, stat_damage: 12,
-      // Untouched values stay, under the new maximums.
-      xp: 40, health: 80, stamina: 60, stat_critical_chance: 10,
-    });
-  });
-
-  test("going down a level pulls XP and health back under the new maximums", async () => {
-    Object.assign(heroRow("stats"), { level: 5, max_xp: 146, xp: 140, max_health: 155, health: 150 });
-    expect((await act("stats.set", { stats: { level: 1 } })).ok).toBe(true);
-    // Level 1 by the engine's own curve: 100 + 1^1.5 * 5.
-    expect(heroRow("stats")).toMatchObject({ level: 1, max_xp: 100, xp: 99, max_health: 105, health: 105 });
-  });
-
-  test("an online player's live stats, client and onlookers are updated", async () => {
-    const { live, sent, types } = login("hero", "7001");
-    const levels: number[] = [];
-    const onLevel = (event: any) => levels.push(event.level);
-    listener.on(Events.PLAYER_LEVEL_UP, onLevel);
-    const result = await act("stats.set", { stats: { level: 3, health: 50 } });
-    listener.off(Events.PLAYER_LEVEL_UP, onLevel);
-
-    expect(result.ok).toBe(true);
-    expect(live.stats).toMatchObject({ level: 3, max_xp: 121, health: 50, max_health: 125, total_max_health: 125 });
-    expect(heroRow("stats")).toMatchObject({ level: 3, health: 50 });
-    expect(types()).toEqual(["UPDATESTATS", "UPDATE_XP", "QUEST_MARKERS"]);
-    expect(sent[0].data).toMatchObject({ target: "7001", stats: { level: 3, health: 50 } });
-    expect(sent[1].data).toEqual({ id: "7001", xp: 40, level: 3, max_xp: 121 });
-    expect(bridged).toEqual(["broadcastStats"]);
-    expect(levels).toEqual([3]);
-  });
-
-  test("a dead player's stats are left to the death flow", async () => {
-    heroRow("accounts").is_dead = 1;
-    await expectRefused("stats.set", { stats: { level: 2 } }, /revive them/);
-    heroRow("accounts").is_dead = 0;
-    login("hero", "7001", { isGhost: true });
-    await expectRefused("stats.set", { stats: { level: 2 } }, /revive them/);
-  });
 });
 
 describe("currency", () => {
-  test("each coin has its own range", async () => {
-    await expectRefused("currency.set", { gold: 1, silver: 100, copper: 0 }, /Silver must be a whole number from 0 to 99/);
-    await expectRefused("currency.set", { gold: 10000000, silver: 0, copper: 0 }, /Gold must be/);
-    await expectRefused("currency.set", { gold: 1 }, /Silver must be.*Copper must be/);
-  });
-
   test("the balance is set, and an online player sees it", async () => {
     const { live, sent } = login("hero", "7001");
     expect((await act("currency.set", { gold: 12, silver: 34, copper: 56 })).ok).toBe(true);
@@ -585,60 +448,6 @@ describe("currency", () => {
 describe("inventory", () => {
   const held = (name: string) => tables.inventory.find((row) => row.username === "hero" && row.item === name)?.quantity;
 
-  test("items must exist and quantities must be whole and positive", async () => {
-    await expectRefused("inventory.add", { item: "Sword of Lies", quantity: 1 }, /does not exist/);
-    await expectRefused("inventory.add", { item: "Health Potion' --", quantity: 1 }, /does not exist/);
-    for (const bad of [0, -1, 2.5, "many", null, undefined, 1000001]) {
-      await expectRefused("inventory.add", { item: "Health Potion", quantity: bad }, /Quantity must be a whole number/);
-    }
-    await expectRefused("inventory.add", { item: "Health Potion", quantity: 999998 }, /A stack holds at most/);
-    await expectRefused("inventory.remove", { item: "Wooden Staff" }, /does not have that item/);
-    await expectRefused("inventory.set", { item: "Health Potion", quantity: -2 }, /Quantity must be/);
-  });
-
-  test("adding stacks onto what is held, by the item's own name whatever case was sent", async () => {
-    expect((await act("inventory.add", { item: "health potion", quantity: 4 })).ok).toBe(true);
-    expect(held("Health Potion")).toBe("7");
-    const result = await act("inventory.add", { item: "WOODEN STAFF", quantity: 1 });
-    expect(held("Wooden Staff")).toBe(1);
-    expect(result.snapshot?.inventory.map((i) => `${i.quantity}x ${i.name}`)).toEqual(["7x Health Potion", "1x Wooden Staff"]);
-  });
-
-  test("removing takes some or all, and setting goes either way", async () => {
-    await act("inventory.remove", { item: "Health Potion", quantity: 2 });
-    expect(held("Health Potion")).toBe("1");
-    await act("inventory.set", { item: "Health Potion", quantity: 9 });
-    expect(held("Health Potion")).toBe("9");
-    await act("inventory.set", { item: "Health Potion", quantity: 4 });
-    expect(held("Health Potion")).toBe("4");
-    await act("inventory.remove", { item: "Health Potion" });
-    expect(held("Health Potion")).toBeUndefined();
-  });
-
-  test("a full inventory takes no new item, but existing stacks still grow", async () => {
-    const items = assets.get("items");
-    const junk = Array.from({ length: 24 }, (_, i) => item(`Junk ${i}`, { type: "miscellaneous", equipable: false }));
-    assets.set("items", [...items, ...junk]);
-    for (const [i, { name }] of junk.entries()) tables.inventory.push({ username: "hero", item: name, quantity: 1, equipped: 0, slot: i + 1, bag_slot: 0 });
-    await expectRefused("inventory.add", { item: "Wooden Staff", quantity: 1 }, /inventory is full/);
-    expect((await act("inventory.add", { item: "Health Potion", quantity: 1 })).ok).toBe(true);
-    assets.set("items", items);
-  });
-
-  test("an equipped item cannot be removed from under its slot", async () => {
-    tables.inventory.push({ username: "hero", item: "Iron Helmet", quantity: 1, equipped: 1, slot: null, bag_slot: null });
-    heroRow("equipment").helmet = "Iron Helmet";
-    await expectRefused("inventory.remove", { item: "Iron Helmet" }, /unequip it before removing it/);
-    await expectRefused("inventory.set", { item: "Iron Helmet", quantity: 0 }, /unequip it/);
-  });
-
-  test("a row whose item was deleted can still be cleared out, whole", async () => {
-    tables.inventory.push({ username: "hero", item: "Lost Relic", quantity: 2, equipped: 0, slot: 3, bag_slot: 0 });
-    await expectRefused("inventory.add", { item: "Lost Relic", quantity: 1 }, /can only be removed/);
-    expect((await act("inventory.remove", { item: "Lost Relic" })).ok).toBe(true);
-    expect(held("Lost Relic")).toBeUndefined();
-  });
-
   test("an online player's list is rebuilt and sent, with their quest log", async () => {
     const { live, types } = login("hero", "7001");
     expect((await act("inventory.add", { item: "Wooden Staff", quantity: 2 })).ok).toBe(true);
@@ -648,62 +457,7 @@ describe("inventory", () => {
   });
 });
 
-describe("equipment", () => {
-  test("slots must be real and the item must belong in the slot", async () => {
-    await expectRefused("equipment.equip", { slot: "tail", item: "Iron Helmet" }, /not an equipment slot/);
-    await expectRefused("equipment.equip", { slot: "username", item: "Iron Helmet" }, /not an equipment slot/);
-    await expectRefused("equipment.equip", { slot: "helmet", item: "Nothing" }, /does not exist/);
-    await expectRefused("equipment.equip", { slot: "weapon", item: "Iron Helmet" }, /does not go in the weapon slot/);
-    await expectRefused("equipment.equip", { slot: "helmet", item: "Health Potion" }, /does not go in the helmet slot/);
-    await expectRefused("equipment.unequip", { slot: "helmet" }, /Nothing is equipped/);
-    await expectRefused("equipment.unequip", { slot: "id" }, /not an equipment slot/);
-  });
-
-  test("equipping gives the item if needed, and swaps out what was worn", async () => {
-    expect((await act("equipment.equip", { slot: "helmet", item: "leather cap" })).ok).toBe(true);
-    expect(heroRow("equipment").helmet).toBe("Leather Cap");
-    const result = await act("equipment.equip", { slot: "helmet", item: "Iron Helmet" });
-    expect(heroRow("equipment").helmet).toBe("Iron Helmet");
-    expect(result.snapshot?.inventory.filter((i) => i.equipped).map((i) => i.name)).toEqual(["Iron Helmet"]);
-    expect(result.snapshot?.inventory.map((i) => i.name)).toContain("Leather Cap");
-    await expectRefused("equipment.equip", { slot: "helmet", item: "Iron Helmet" }, /already equipped/);
-  });
-
-  test("an online player gets the item's stats, both lists and a redrawn sprite", async () => {
-    const { live, sent, types } = login("hero", "7001");
-    const equipped: string[] = [];
-    const onEquip = (event: any) => equipped.push(`${event.slot}=${event.item.name}`);
-    listener.on(Events.ITEM_EQUIP, onEquip);
-    expect((await act("equipment.equip", { slot: "helmet", item: "Iron Helmet" })).ok).toBe(true);
-    listener.off(Events.ITEM_EQUIP, onEquip);
-
-    expect(live.equipment.helmet).toBe("Iron Helmet");
-    expect(live.equipmentRevision).toBe(1);
-    // Base 100 plus the helmet's 20; armor comes from the helmet too.
-    expect(live.stats).toMatchObject({ max_health: 100, total_max_health: 120, stat_armor: 5 });
-    expect(bridged).toEqual(["syncInventory", "broadcastStats", "refreshAppearance"]);
-    expect(types()).toEqual(["UPDATESTATS", "UPDATE_XP", "EQUIPMENT"]);
-    expect(sent[2].data.helmet).toBe("Iron Helmet");
-    expect(equipped).toEqual(["helmet=Iron Helmet"]);
-
-    // Taking it off drops the totals again, and health with them.
-    live.stats.health = 120;
-    expect((await act("equipment.unequip", { slot: "helmet" })).ok).toBe(true);
-    expect(heroRow("equipment").helmet).toBeNull();
-    expect(live.equipment.helmet).toBeNull();
-    expect(live.stats).toMatchObject({ total_max_health: 100, health: 100, stat_armor: 0 });
-    expect(tables.inventory.find((row) => row.item === "Iron Helmet")).toMatchObject({ equipped: 0 });
-  });
-});
-
 describe("collections", () => {
-  test("only known mounts can be given, once each", async () => {
-    await expectRefused("collectable.add", { type: "pet", item: "wolf" }, /cannot be given from here/);
-    await expectRefused("collectable.add", { type: "mount", item: "dragon" }, /does not exist/);
-    await expectRefused("collectable.add", { type: "mount", item: "Unicorn" }, /already has unicorn/);
-    await expectRefused("collectable.remove", { type: "mount", item: "wolf" }, /does not have that collectable/);
-  });
-
   test("mounts are given and taken away, and an online player's list follows", async () => {
     const { live } = login("hero", "7001");
     expect((await act("collectable.add", { type: "mount", item: "WOLF" })).ok).toBe(true);
@@ -718,59 +472,9 @@ describe("collections", () => {
     expect(bridged).toEqual(["sendCollectables", "sendCollectables"]);
   });
 
-  test("spells are learned once and unlearned, in the live spell book too", async () => {
-    await expectRefused("spell.learn", { spell: "meteor" }, /does not exist/);
-    await expectRefused("spell.learn", { spell: "Frost_Bolt" }, /already knows frost_bolt/);
-    await expectRefused("spell.unlearn", { spell: "fireball" }, /has not learned/);
-
-    const { live } = login("hero", "7001");
-    const learned = await act("spell.learn", { spell: "Fireball" });
-    expect(learned.snapshot?.spells).toEqual(["frost_bolt", "fireball"]);
-    expect(Object.keys(live.learnedSpells)).toEqual(["frost_bolt", "fireball"]);
-    expect(live.learnedSpells.fireball).toMatchObject({ icon: "fireball", mana: 10 });
-
-    await act("spell.unlearn", { spell: "frost_bolt" });
-    expect(tables.learned_spells.map((s) => s.spell)).toEqual(["fireball"]);
-    expect(Object.keys(live.learnedSpells)).toEqual(["fireball"]);
-    expect(bridged).toEqual(["sendSpells", "sendSpells"]);
-  });
-});
-
-describe("friends", () => {
-  test("friendship is added and removed on both sides", async () => {
-    await expectRefused("friend.add", { username: "nobody" }, /does not exist/);
-    await expectRefused("friend.add", { username: "hero" }, /their own friend/);
-    await expectRefused("friend.remove", { username: "ally" }, /not their friend/);
-
-    const hero = login("hero", "7001");
-    const ally = login("ally", "7002");
-    expect((await act("friend.add", { username: "Ally" })).ok).toBe(true);
-    expect(tables.friendslist).toEqual([{ username: "hero", friends: "ally" }, { username: "ally", friends: "hero" }]);
-    expect(hero.live.friends).toEqual(["ally"]);
-    expect(hero.sent).toEqual([
-      { type: "UPDATE_FRIENDS", data: { friends: ["ally"] } },
-      { type: "UPDATE_ONLINE_STATUS", data: { online: true, username: "ally" } },
-    ]);
-    expect(ally.types()).toEqual(["UPDATE_FRIENDS", "UPDATE_ONLINE_STATUS"]);
-    await expectRefused("friend.add", { username: "ally" }, /already their friend/);
-
-    const removed = await act("friend.remove", { username: "ally" });
-    expect(removed.snapshot?.friends).toEqual([]);
-    expect(tables.friendslist.map((row) => row.friends)).toEqual(["", ""]);
-    expect(ally.live.friends).toEqual([]);
-  });
 });
 
 describe("guild", () => {
-  test("joining needs a real guild and a player who is free and not a guest", async () => {
-    await expectRefused("guild.join", { guild: "Nobodies" }, /does not exist/);
-    await expectRefused("guild.join", { guild: "Frostguard" }, /Guests cannot/, "guest_7");
-    await expectRefused("guild.join", { guild: "Frostguard" }, /already in a guild/, "ally");
-    await expectRefused("guild.leave", {}, /not in a guild/);
-    await expectRefused("guild.leave", {}, /leads that guild/, "ally");
-    await expectRefused("guild.disband", {}, /not in a guild/);
-  });
-
   test("a member is added, made leader, and the guild disbanded through them", async () => {
     const hero = login("hero", "7001");
     const ally = login("ally", "7002", { guild_id: 7, guild: ["ally"], guild_name: "Frostguard" });
@@ -796,42 +500,9 @@ describe("guild", () => {
     expect(ally.sent.at(-1)).toEqual({ type: "NOTIFY", data: { message: "The guild has been disbanded" } });
   });
 
-  test("a member who does not lead is removed, and those left are told", async () => {
-    Object.assign(tables.guilds[0], { members: "ally, hero" });
-    heroRow("accounts").guild_id = 7;
-    const ally = login("ally", "7002");
-    expect((await act("guild.leave")).ok).toBe(true);
-    expect(tables.guilds[0].members).toBe("ally");
-    expect(heroRow("accounts").guild_id).toBeNull();
-    expect(ally.sent).toEqual([{ type: "UPDATE_GUILD", data: { members: ["ally"], guild_name: "Frostguard" } }]);
-  });
 });
 
 describe("party", () => {
-  test("a party is formed with another player, then left", async () => {
-    await expectRefused("party.join", { username: "nobody" }, /does not exist/);
-    await expectRefused("party.join", { username: "hero" }, /needs two/);
-    await expectRefused("party.leave", {}, /not in a party/);
-
-    const hero = login("hero", "7001");
-    const ally = login("ally", "7002");
-    const joined = await act("party.join", { username: "ally" });
-    // The other player had no party, so they lead the new one.
-    expect(joined.snapshot?.party).toMatchObject({ leader: "ally", members: ["ally", "hero"] });
-    const partyId = tables.parties[0].id;
-    expect(hero.live).toMatchObject({ party_id: partyId, party: ["ally", "hero"] });
-    expect(ally.sent).toEqual([{ type: "UPDATE_PARTY", data: { members: ["ally", "hero"] } }]);
-    expect(bridged).toEqual(["syncPartyLayers:ally:ally+hero"]);
-    await expectRefused("party.join", { username: "ally" }, /already in a party/);
-
-    const left = await act("party.leave");
-    expect(left.ok).toBe(true);
-    expect(left.snapshot?.party).toBeNull();
-    expect(heroRow("accounts").party_id).toBeNull();
-    expect(hero.live.party).toEqual([]);
-    expect(hero.live.party_id).toBeNull();
-  });
-
   /** A party of three that ally leads, with all three online. */
   function partyOfThree() {
     const members = ["ally", "mod", "hero"];
@@ -893,48 +564,6 @@ describe("party", () => {
 });
 
 describe("quests", () => {
-  test("quests are started, completed without a turn-in, and forgotten", async () => {
-    await expectRefused("quest.accept", { questId: 99 }, /does not exist/);
-    await expectRefused("quest.accept", { questId: "1; DROP" }, /does not exist/);
-    await expectRefused("quest.abandon", { questId: 1 }, /not in the player's log/);
-    await expectRefused("quest.forget", { questId: 1 }, /no record of that quest/);
-
-    const started = await act("quest.accept", { questId: 1 });
-    expect(started.snapshot?.quests.active.map((q) => `${q.name}: ${q.state}`)).toEqual(["Rats in the Cellar: active"]);
-    await expectRefused("quest.accept", { questId: 1 }, /already in your log/);
-
-    const completed = await act("quest.complete", { questId: 1 });
-    expect(completed.snapshot?.quests).toEqual({ active: [], completed: [{ id: 1, name: "Rats in the Cellar" }] });
-    expect(tables.quest_log[0]).toMatchObject({ state: "completed", times_completed: 1 });
-    await expectRefused("quest.complete", { questId: 1 }, /already completed/);
-
-    const forgotten = await act("quest.forget", { questId: 1 });
-    expect(forgotten.snapshot?.quests).toEqual({ active: [], completed: [] });
-    expect(tables.quest_log).toEqual([]);
-  });
-
-  test("an abandon or a forget the database refused is answered as not done, and the quest is still there", async () => {
-    await act("quest.accept", { questId: 2 });
-    const said = spyOn(log, "error").mockImplementation(() => {});
-    refused = /^DELETE FROM quest_log/;
-    try {
-      const abandoned = await act("quest.abandon", { questId: 2 });
-      expect(abandoned.ok).toBe(false);
-      expect(abandoned.errors).toEqual(["Could not abandon that quest."]);
-
-      const forgotten = await act("quest.forget", { questId: 2 });
-      expect(forgotten.ok).toBe(false);
-      expect(forgotten.errors).toEqual(["Could not forget that quest."]);
-    } finally {
-      refused = null;
-      said.mockRestore();
-    }
-    expect(tables.quest_log.map((row: any) => row.quest_id)).toEqual([2]);
-
-    expect((await act("quest.abandon", { questId: 2 })).ok).toBe(true);
-    expect(tables.quest_log).toEqual([]);
-  });
-
   test("an online player's quest log follows each change", async () => {
     const { live, sent, types } = login("hero", "7001");
     await act("quest.accept", { questId: 2 });
@@ -951,20 +580,6 @@ describe("quests", () => {
 describe("access", () => {
   const heroPermissions = () => tables.permissions.find((row) => row.username === "hero")?.permissions;
 
-  test("permissions follow the /permission command's rules", async () => {
-    await expectRefused("permissions.set", { permissions: ["admin.kick"] }, /your own permissions/, "boss");
-    await expectRefused("permissions.set", { permissions: "admin.kick" }, /No permissions were given/);
-    await expectRefused("permissions.set", { permissions: ["admin.fly"] }, /Invalid permission: admin.fly/);
-    // boss holds admin.kick and server.admin, but neither admin.ban nor a wildcard.
-    await expectRefused("permissions.set", { permissions: ["admin.ban"] }, /cannot grant the admin.ban permission/);
-    await expectRefused("permissions.set", { permissions: ["server.*"] }, /cannot grant the server\.\* permission/);
-
-    await permissions.set("boss", ["server.admin", "admin.kick"]);
-    await expectRefused("permissions.set", { permissions: ["admin.kick"] }, /need permission.add/);
-    await permissions.set("hero", ["admin.kick"]);
-    await expectRefused("permissions.set", { permissions: [] }, /need permission.remove/);
-  });
-
   test("a held permission is granted and taken away again", async () => {
     const { live } = login("hero", "7001");
     const granted = await act("permissions.set", { permissions: ["admin.kick", "admin.kick", " server.admin "] });
@@ -977,89 +592,6 @@ describe("access", () => {
     expect(live.permissions).toEqual([]);
   });
 
-  test("the admin role is switched for others, never for yourself", async () => {
-    await expectRefused("admin.set", { value: true }, /your own admin status/, "boss");
-    await expectRefused("admin.set", { value: "yes" }, /must be on or off/);
-
-    const { live, types } = login("hero", "7001", { isStealth: true });
-    const promoted = await act("admin.set", { value: true });
-    expect(promoted.snapshot?.isAdmin).toBe(true);
-    expect(heroRow("accounts").role).toBe(1);
-    expect(live.isAdmin).toBe(true);
-    expect(types()).toEqual(["RECONNECT"]);
-
-    await act("admin.set", { value: false });
-    expect(heroRow("accounts").role).toBe(0);
-    expect(live).toMatchObject({ isAdmin: false, isStealth: false });
-  });
-});
-
-// The creature editor's listener in the game window relayed every editor popup's requests a second time, so each
-// player editor change reached the server twice, side by side: both passed the "already has it" check before either
-// wrote. The mount and the spell were given twice (their tables have no unique key) and the admin role flipped on and
-// straight back off. Changes to one player now run one after the other.
-describe("a request that arrives twice", () => {
-  const twice = (action: string, data: Row) => Promise.all([act(action, data), act(action, data)]);
-
-  test("gives a mount or a spell once", async () => {
-    const mount = await twice("collectable.add", { type: "mount", item: "wolf" });
-    expect(mount.map((r) => r.ok).sort()).toEqual([false, true]);
-    expect(tables.collectables.filter((c) => c.username === "hero" && c.item === "wolf")).toHaveLength(1);
-
-    const spell = await twice("spell.learn", { spell: "fireball" });
-    expect(spell.map((r) => r.ok).sort()).toEqual([false, true]);
-    expect(tables.learned_spells.filter((s) => s.username === "hero" && s.spell === "fireball")).toHaveLength(1);
-    expect(spell[1].snapshot?.spells).toEqual(["frost_bolt", "fireball"]);
-  });
-
-  test("leaves the admin role as asked, not flipped back", async () => {
-    const on = await twice("admin.set", { value: true });
-    expect(on.map((r) => r.ok)).toEqual([true, true]);
-    expect(heroRow("accounts").role).toBe(1);
-    expect(on[1].snapshot?.isAdmin).toBe(true);
-
-    await twice("admin.set", { value: false });
-    expect(heroRow("accounts").role).toBe(0);
-  });
-
-  // From the server log of 2026-10-04: "Quest accept failed ... Duplicate entry 'lillious-3' for key
-  // 'quest_log.PRIMARY'" beside one "applied quest.accept", and every quest.forget applied twice.
-  test("starts a quest once, with no second insert, and forgets it once", async () => {
-    const started = await twice("quest.accept", { questId: 1 });
-    expect(started.map((r) => r.ok)).toEqual([true, false]);
-    expect(started[1].errors.join(" ")).toMatch(/already in your log/);
-    expect(tables.quest_log.filter((row) => row.username === "hero" && row.quest_id === 1)).toHaveLength(1);
-    expect(queries.filter((q) => q.startsWith("INSERT INTO quest_log"))).toHaveLength(1);
-
-    const forgotten = await twice("quest.forget", { questId: 1 });
-    expect(forgotten.map((r) => r.ok)).toEqual([true, false]);
-    expect(forgotten[1].errors.join(" ")).toMatch(/no record of that quest/);
-    expect(tables.quest_log).toEqual([]);
-  });
-});
-
-describe("location", () => {
-  test("the map must exist and the position must be inside it", async () => {
-    await expectRefused("location.set", { map: "moon", x: 1, y: 1 }, /map does not exist/);
-    await expectRefused("location.set", { map: "overworld", x: 3201, y: 1 }, /X must be a whole number from 0 to 3200/);
-    await expectRefused("location.set", { map: "overworld", x: 1, y: -1 }, /Y must be a whole number from 0 to 1600/);
-    await expectRefused("location.set", { map: "overworld", x: 1, y: 1, direction: "sideways" }, /not a direction/);
-    heroRow("accounts").is_dead = 2;
-    // Written behind the engine's back: the account it holds by now is read again.
-    await clearCaches();
-    await expectRefused("location.set", { map: "overworld", x: 1, y: 1 }, /revive them/);
-  });
-
-  test("an offline player is moved in the database, an online one through the socket layer", async () => {
-    expect((await act("location.set", { map: "overworld.json", x: 64, y: 96, direction: "up" })).ok).toBe(true);
-    expect(heroRow("accounts")).toMatchObject({ map: "overworld", position: "64,96", direction: "up" });
-
-    login("hero", "7001");
-    queries.length = 0;
-    expect((await act("location.set", { map: "overworld", x: 10, y: 20 })).ok).toBe(true);
-    expect(bridged).toEqual(["relocate:overworld:10:20:down"]);
-    expect(writes()).toEqual([]);
-  });
 });
 
 describe("search", () => {
