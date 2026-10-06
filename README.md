@@ -452,7 +452,7 @@ bun setup-production
 /drop [item_name] [amount?]
 ```
 - **Permission**: `admin.items` | `admin.*`
-- Spawns a loot drop at your feet. Amount defaults to 1, capped at 9,999.
+- Spawns a loot drop at your feet with no owner, so any player can pick it up. Amount defaults to 1, capped at 9,999.
 </details>
 
 <details>

@@ -8868,7 +8868,8 @@ export default async function packetReceiver(
 
             const iconUrl = getIconUrl(dropDef.icon) || "";
             const quality = dropDef.quality || "common";
-            const spawnedLoot = loot.create(currentPlayer, dropDef.name, dropQty, iconUrl, quality);
+            // Dropped for everyone: no owner, so any player nearby may pick it up.
+            const spawnedLoot = loot.create(currentPlayer, dropDef.name, dropQty, iconUrl, quality, null);
 
             const spawnData = {
               id: spawnedLoot.id,

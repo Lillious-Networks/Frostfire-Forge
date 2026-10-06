@@ -14,9 +14,14 @@ export interface LootItem {
   map: string;
   x: number;
   y: number;
+  // The only player who may pick it up. Empty for loot anyone may take.
   ownerId: string;
   ownerName: string;
   expiresAt: number;
+}
+
+function mayTake(lootItem: LootItem, player: any): boolean {
+  return !lootItem.ownerId || String(lootItem.ownerId) === String(player.username);
 }
 
 const lootItems = new Map<string, LootItem>();
@@ -42,6 +47,8 @@ const loot = {
     quantity: number,
     iconUrl: string,
     quality: string,
+    // The player who may pick it up, the one it drops at by default. null leaves it for anyone.
+    owner: string | null = player.username,
   ): LootItem {
     const id = generateId();
     const lootItem: LootItem = {
@@ -53,8 +60,8 @@ const loot = {
       map: player.location.map,
       x: player.location.position.x,
       y: player.location.position.y,
-      ownerId: player.username,
-      ownerName: player.username || "Unknown",
+      ownerId: owner ?? "",
+      ownerName: owner === null ? "" : owner || "Unknown",
       expiresAt: Date.now() + DESPAWN_MINUTES * 60 * 1000,
     };
     lootItems.set(id, lootItem);
@@ -90,7 +97,7 @@ const loot = {
   pickup(player: any, lootId: string): { success: boolean; message?: string; item?: LootItem } {
     const lootItem = lootItems.get(lootId);
     if (!lootItem) return { success: false, message: "Loot no longer exists." };
-    if (String(lootItem.ownerId) !== String(player.username)) return { success: false, message: "This loot belongs to someone else." };
+    if (!mayTake(lootItem, player)) return { success: false, message: "This loot belongs to someone else." };
     if (lootItem.map !== player.location.map) return { success: false, message: "Loot is on a different map." };
 
     const dx = player.location.position.x - lootItem.x;
@@ -111,7 +118,7 @@ const loot = {
   pickupAllNearby(player: any): LootItem[] {
     const result: LootItem[] = [];
     for (const [id, lootItem] of lootItems) {
-      if (String(lootItem.ownerId) !== String(player.username)) continue;
+      if (!mayTake(lootItem, player)) continue;
       if (lootItem.map !== player.location.map) continue;
       const dx = player.location.position.x - lootItem.x;
       const dy = player.location.position.y - lootItem.y;
@@ -133,7 +140,8 @@ const loot = {
   cleanupPlayer(playerId: string): LootItem[] {
     const result: LootItem[] = [];
     for (const [_id, lootItem] of lootItems) {
-      if (String(lootItem.ownerId) === String(playerId)) {
+      // Loot with no owner is nobody's to clean up: it stays until it despawns.
+      if (lootItem.ownerId && String(lootItem.ownerId) === String(playerId)) {
         result.push(lootItem);
       }
     }
