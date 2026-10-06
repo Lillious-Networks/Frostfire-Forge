@@ -1,6 +1,7 @@
 import { SQL } from 'bun';
 import { getSqlCert } from "./utils";
 import { sqlWrapper } from "./sqlescape";
+import { runTransaction, GuardError, NotStartedError, type TransactionStatement } from "./sqltransaction";
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
@@ -129,8 +130,29 @@ const initializationPromise: Promise<any> = createSQLControllerWithRetry().then(
   throw error;
 });
 
+/**
+ * A list of statements, kept whole or not at all. Only a transaction that never opened is tried
+ * again: one that opened and then failed may have been kept, and a second run would write it twice.
+ */
+async function answerTransaction(id: string, statements: TransactionStatement[], maxRetries: number, retryDelay: number, timeout: number) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const result = await runTransaction(sqlController, statements, _databaseEngine, timeout);
+      self.postMessage({ id, result });
+      return;
+    } catch (error: any) {
+      if (error instanceof NotStartedError && attempt < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        continue;
+      }
+      self.postMessage({ id, error: error?.message || 'Unknown error', guard: error instanceof GuardError ? error.statement : undefined });
+      return;
+    }
+  }
+}
+
 self.onmessage = async (event: MessageEvent) => {
-  const { id, sql, values } = event.data;
+  const { id, sql, values, transaction } = event.data;
   const maxRetries = 3;
   const retryDelay = 1000;
   const queryTimeout = 15000;
@@ -144,6 +166,11 @@ self.onmessage = async (event: MessageEvent) => {
       self.postMessage({ id, error: error.message });
       return;
     }
+  }
+
+  if (transaction) {
+    await answerTransaction(id, transaction, maxRetries, retryDelay, queryTimeout);
+    return;
   }
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {

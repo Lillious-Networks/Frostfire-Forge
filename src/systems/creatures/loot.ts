@@ -119,6 +119,13 @@ export class CorpseLootStore {
     return { taken, copper, empty };
   }
 
+  /** Put back what a take took, on the corpse it was taken from: its writes were not kept. */
+  restore(loot: CorpseLoot, result: LootTakeResult): void {
+    for (const item of result.taken) loot.taken.delete(item.index);
+    for (const share of result.copper.values()) loot.copper += share;
+    this.corpses.set(loot.creatureId, loot);
+  }
+
   remove(creatureId: number): void {
     this.corpses.delete(creatureId);
   }

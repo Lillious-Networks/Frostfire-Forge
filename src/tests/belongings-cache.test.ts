@@ -1,4 +1,6 @@
 import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { databaseModule } from "./setup";
+import { GuardError } from "../controllers/sqltransaction";
 
 // What a player owns (inventory, equipment, bags, currency, collectables) is
 // read from caches, and written to the database and the cache together. These
@@ -33,6 +35,8 @@ let tables: Record<string, Row[]>;
 let nextId: number;
 /** Every statement on the five tables, in order. */
 let queries: string[];
+/** How many transactions were sent. */
+let transactions: number;
 /** Statements that fail: refused, or (lostAfterRunning) run with the answer never coming, as one that timed out can have been. */
 let failing: ((sql: string) => boolean) | null;
 let lostAfterRunning: boolean;
@@ -122,14 +126,39 @@ function execute(text: string, table: string, params: any[]): any {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-mock.module("../controllers/sqldatabase", () => ({
-  default: async (sql: string, params: any[] = []) => {
-    const wait = lag.shift();
-    if (!wait) return run(sql, params);
-    await sleep(wait.run);
-    const answer = run(sql, params);
-    await sleep(wait.answer);
-    return answer;
+async function ask(sql: string, params: any[] = []) {
+  const wait = lag.shift();
+  if (!wait) return run(sql, params);
+  await sleep(wait.run);
+  const answer = run(sql, params);
+  await sleep(wait.answer);
+  return answer;
+}
+
+mock.module("../controllers/sqldatabase", () => databaseModule({
+  default: ask,
+  // All of its statements or none: one that is refused puts the tables back as they were. One that is made
+  // with the answer never coming stands for a transaction that was kept whole and never answered.
+  transaction: async (statements: Array<{ sql: string; values?: any[]; mustChange?: boolean }>) => {
+    transactions++;
+    const before = structuredClone({ tables, nextId });
+    const results: any[] = [];
+    let lost: unknown = null;
+    for (const [index, statement] of statements.entries()) {
+      try {
+        const answer = await ask(statement.sql, statement.values);
+        if (statement.mustChange && answer.affectedRows === 0) throw new GuardError(index);
+        results.push(answer);
+      } catch (error) {
+        if (!lostAfterRunning || error instanceof GuardError) {
+          ({ tables, nextId } = before);
+          throw error;
+        }
+        lost = error;
+      }
+    }
+    if (lost) throw lost;
+    return results;
   },
 }));
 
@@ -167,12 +196,17 @@ const { default: equipment } = await import("../systems/equipment");
 const { default: bags } = await import("../systems/bags");
 const { default: currency } = await import("../systems/currency");
 const { default: collectables } = await import("../systems/collectables");
+const { atomically } = await import("../services/batch");
+const { default: lootChest } = await import("../systems/lootChest");
+const { takeCorpseLoot, corpseLoot } = await import("../systems/creatures/kill");
+const { AIState } = await import("../systems/creatures/types");
 
 // ------------------------------------------------------------------ fixtures
 
 beforeEach(async () => {
   nextId = 100;
   queries = [];
+  transactions = 0;
   failing = null;
   lostAfterRunning = false;
   answersWithId = true;
@@ -463,7 +497,7 @@ describe("inventory", () => {
     await fromCache(() => inventoryIsDatabase("hero"));
   });
 
-  test("slots saved until one fails: the rows are read again, with the ones that were written", async () => {
+  test("slots are saved together: when one is refused none is moved, and the rows are read again", async () => {
     await inventory.get("hero");
     let saved = 0;
     failing = (sql) => sql.startsWith("UPDATE inventory SET slot") && ++saved === 2;
@@ -472,7 +506,7 @@ describe("inventory", () => {
     ])).rejects.toThrow("database gone");
     failing = null;
 
-    expect(of("inventory", "hero").map((row) => row.slot)).toEqual([11, 1, 2]);
+    expect(of("inventory", "hero").map((row) => row.slot)).toEqual([0, 1, 2]);
     queries = [];
     await inventoryIsDatabase("hero");
     await fromCache(() => inventoryIsDatabase("hero"));
@@ -944,6 +978,357 @@ describe("collectables", () => {
       expect(queries).toEqual(["SELECT item, type FROM collectables WHERE username = ?"]);
     });
   }
+});
+
+describe("a change made of several systems' writes", () => {
+  const coins = (copper: number): Currency => ({ copper, silver: 0, gold: 0 });
+
+  test("a purchase: the coins paid and the item gained are one transaction, and in both", async () => {
+    await readAll("hero");
+    queries = [];
+
+    const balance = await atomically(["hero"], async (batch) => {
+      const left = await currency.remove("hero", coins(20), batch);
+      await inventory.add("hero", { name: "Rat Tail", quantity: 2 }, batch);
+      return left;
+    });
+
+    expect(balance).toEqual({ copper: 30, silver: 2, gold: 1 });
+    expect(tables.currency[0]).toEqual({ username: "hero", copper: 30, silver: 2, gold: 1 });
+    expect(stack("Rat Tail")).toEqual({ id: 100, username: "hero", item: "Rat Tail", quantity: 2, equipped: 0, slot: null, bag_slot: null });
+    expect(transactions).toBe(1);
+    expect(writes()).toHaveLength(2);
+    await fromCache(() => everythingIsDatabase("hero"));
+  });
+
+  test("nothing is held as changed until the transaction is kept", async () => {
+    await readAll("hero");
+
+    await atomically(["hero"], async (batch) => {
+      await currency.add("hero", coins(5), batch);
+      await inventory.add("hero", { name: "Rat Tail", quantity: 2 }, batch);
+
+      expect(await inventory.find("hero", { name: "Rat Tail", quantity: 0 })).toEqual([]);
+      expect(await currency.get("hero")).toEqual({ copper: 50, silver: 2, gold: 1 });
+      expect(writes()).toEqual([]);
+    });
+
+    expect(await currency.get("hero")).toEqual({ copper: 55, silver: 2, gold: 1 });
+  });
+
+  test("the same item gained twice in one batch is one stack", async () => {
+    await inventory.get("hero");
+
+    await atomically(["hero"], async (batch) => {
+      await inventory.add("hero", { name: "Rat Tail", quantity: 2 }, batch);
+      await inventory.add("hero", { name: "rat tail", quantity: 3 }, batch);
+      await inventory.add("hero", { name: "Health Potion", quantity: 1 }, batch);
+    });
+
+    expect(of("inventory", "hero").filter((row) => row.item === "Rat Tail")).toEqual([
+      { id: 100, username: "hero", item: "Rat Tail", quantity: 5, equipped: 0, slot: null, bag_slot: null },
+    ]);
+    expect(stack("Health Potion")!.quantity).toBe(4);
+    expect(transactions).toBe(1);
+    await fromCache(() => inventoryIsDatabase("hero"));
+  });
+
+  test("used in part, used up, and gained and used up again, all in one batch", async () => {
+    await inventory.get("hero");
+
+    await atomically(["hero"], async (batch) => {
+      await inventory.remove("hero", { name: "Health Potion", quantity: 1 }, batch);
+      await inventory.remove("hero", { name: "Iron Helmet", quantity: 1 }, batch);
+      await inventory.add("hero", { name: "Rat Tail", quantity: 2 }, batch);
+      await inventory.remove("hero", { name: "Rat Tail", quantity: 2 }, batch);
+    });
+
+    expect(of("inventory", "hero").map((row) => [row.item, row.quantity])).toEqual([["Health Potion", 2], ["Leather Cap", 1]]);
+    expect(transactions).toBe(1);
+    await fromCache(() => inventoryIsDatabase("hero"));
+  });
+
+  test("says whether there was anything to add or remove", async () => {
+    await inventory.get("hero");
+
+    await atomically(["hero"], async (batch) => {
+      expect(await inventory.add("hero", { name: "Rat Tail", quantity: 1 }, batch)).toBe(true);
+      expect(await inventory.add("hero", { name: "No Such Item", quantity: 1 }, batch)).toBeUndefined();
+      expect(await inventory.remove("hero", { name: "Health Potion", quantity: 1 }, batch)).toBe(true);
+      expect(await inventory.remove("hero", { name: "Old Sack", quantity: 1 }, batch)).toBeUndefined();
+    });
+
+    expect(writes()).toHaveLength(2);
+  });
+
+  test("coins received and paid several times in one batch are all counted", async () => {
+    await currency.get("hero");
+
+    const balance = await atomically(["hero"], async (batch) => {
+      await currency.add("hero", coins(60), batch);
+      await currency.add("hero", coins(60), batch);
+      return currency.remove("hero", coins(5), batch);
+    });
+
+    // 50 + 60 + 60 - 5 copper, carried into silver.
+    expect(balance).toEqual({ copper: 65, silver: 3, gold: 1 });
+    expect(tables.currency[0]).toEqual({ username: "hero", copper: 65, silver: 3, gold: 1 });
+    expect(transactions).toBe(1);
+    await fromCache(() => currencyIsDatabase("hero"));
+  });
+
+  test("a share for each of two players is one transaction, and a player with no row gets one", async () => {
+    await readAll("hero");
+    await readAll("ally");
+
+    await atomically(["hero", "ally"], async (batch) => {
+      await currency.add("hero", coins(10), batch);
+      await currency.add("ally", coins(10), batch);
+      await inventory.add("ally", { name: "Rat Tail", quantity: 1 }, batch);
+    });
+
+    expect(tables.currency).toEqual([{ username: "hero", copper: 60, silver: 2, gold: 1 }, { username: "ally", copper: 10, silver: 0, gold: 0 }]);
+    expect(transactions).toBe(1);
+    await fromCache(() => everythingIsDatabase("hero"));
+    await fromCache(() => everythingIsDatabase("ally"));
+  });
+
+  for (const [how, made] of FAILURES) {
+    test(`${how} by the database: what is held is read again, and is what the database holds`, async () => {
+      await readAll("hero");
+      const before = structuredClone(tables);
+      failing = (sql) => sql.startsWith("INSERT IGNORE INTO inventory");
+      lostAfterRunning = made;
+
+      await expect(atomically(["hero"], async (batch) => {
+        await currency.remove("hero", coins(20), batch);
+        await inventory.add("hero", { name: "Rat Tail", quantity: 2 }, batch);
+      })).rejects.toThrow("database gone");
+      failing = null;
+
+      // Refused, neither write was kept. Made, both were, and nothing here was told.
+      if (made) {
+        expect(tables.currency[0].copper).toBe(30);
+        expect(stack("Rat Tail")!.quantity).toBe(2);
+      } else {
+        expect(tables).toEqual(before);
+      }
+
+      queries = [];
+      await everythingIsDatabase("hero");
+      await fromCache(() => everythingIsDatabase("hero"));
+      expect(queries.sort()).toEqual(["SELECT * FROM inventory WHERE username = ?", "SELECT copper, silver, gold FROM currency WHERE username = ?"].sort());
+    });
+  }
+
+  test("an item the database no longer has cannot be given away: nothing is kept", async () => {
+    await readAll("hero");
+    await readAll("ally");
+    // Gone behind the cache's back.
+    tables.inventory = tables.inventory.filter((row) => !(row.username === "hero" && row.item === "Iron Helmet"));
+    const before = structuredClone(tables);
+
+    await expect(atomically(["hero", "ally"], async (batch) => {
+      await inventory.add("ally", { name: "Iron Helmet", quantity: 1 }, batch);
+      await inventory.remove("hero", { name: "Iron Helmet", quantity: 1 }, batch);
+    })).rejects.toBeInstanceOf(GuardError);
+
+    expect(tables).toEqual(before);
+    await everythingIsDatabase("hero");
+    await everythingIsDatabase("ally");
+  });
+
+  test("work that throws writes nothing and leaves what is held as it was", async () => {
+    await readAll("hero");
+    queries = [];
+
+    await expect(atomically(["hero"], async (batch) => {
+      await currency.remove("hero", coins(20), batch);
+      await inventory.add("hero", { name: "Rat Tail", quantity: 2 }, batch);
+      throw new Error("the vendor walked away");
+    })).rejects.toThrow("the vendor walked away");
+
+    expect(queries).toEqual([]);
+    await fromCache(() => everythingIsDatabase("hero"));
+  });
+
+  test("a change asked for while a batch is under way waits for it, and works from what it left", async () => {
+    await readAll("hero");
+    let plain: Promise<unknown> = Promise.resolve();
+
+    await atomically(["hero"], async (batch) => {
+      await inventory.add("hero", { name: "Rat Tail", quantity: 2 }, batch);
+      await currency.add("hero", coins(10), batch);
+      plain = Promise.all([inventory.add("hero", { name: "Rat Tail", quantity: 3 }), currency.add("hero", coins(1))]);
+      await sleep(5);
+    });
+    await plain;
+
+    expect(of("inventory", "hero").filter((row) => row.item === "Rat Tail").map((row) => row.quantity)).toEqual([5]);
+    expect(tables.currency[0].copper).toBe(61);
+    await fromCache(() => everythingIsDatabase("hero"));
+  });
+
+  test("an INSERT answered without an id: the rows are read again, once", async () => {
+    await inventory.get("hero");
+    answersWithId = false;
+    queries = [];
+
+    await atomically(["hero"], (batch) => inventory.add("hero", { name: "Rat Tail", quantity: 2 }, batch));
+
+    await inventoryIsDatabase("hero");
+    expect(reads()).toEqual([INVENTORY_READ]);
+  });
+
+  test("a number the database does not store as given is read back, not guessed", async () => {
+    await readAll("hero");
+    queries = [];
+
+    await atomically(["hero"], async (batch) => {
+      await inventory.add("hero", { name: "Health Potion", quantity: 1.5 }, batch);
+      await currency.add("hero", coins(1.5), batch);
+    });
+
+    await everythingIsDatabase("hero");
+    expect(reads().sort()).toEqual(["SELECT * FROM inventory WHERE username = ?", "SELECT copper, silver, gold FROM currency WHERE username = ?"].sort());
+  });
+});
+
+describe("loot taken from a chest", () => {
+  const always = (itemName: string, quantity: number) => ({ itemName, minQuantity: quantity, maxQuantity: quantity, dropChance: 100 });
+  /** A chest holding two rat tails, a potion and a sack, opened by the player online as "7". */
+  async function openedChest() {
+    const id = lootChest.spawn("main", 0, 0, undefined, [always("Rat Tail", 2), always("Health Potion", 1), always("Old Sack", 1)]);
+    expect((await lootChest.open(id, "7"))!.items.map((entry: Row) => entry.itemName)).toEqual(["Rat Tail", "Health Potion", "Old Sack"]);
+    return id;
+  }
+  const held = () => of("inventory", "hero").map((row) => [row.item, row.quantity]);
+  const BEFORE = [["Health Potion", 3], ["Iron Helmet", 1], ["Leather Cap", 1]];
+
+  test("everything taken is one transaction, and in both", async () => {
+    const id = await openedChest();
+    await inventory.get("hero");
+
+    const result = await lootChest.takeAllItems(id, "7", "hero");
+
+    expect(result).toMatchObject({ allTaken: true });
+    expect(result!.taken).toHaveLength(3);
+    expect(transactions).toBe(1);
+    expect(held()).toEqual([["Health Potion", 4], ["Iron Helmet", 1], ["Leather Cap", 1], ["Rat Tail", 2], ["Old Sack", 1]]);
+    await fromCache(() => inventoryIsDatabase("hero"));
+  });
+
+  test("the items picked are taken and the rest stay in the chest", async () => {
+    const id = await openedChest();
+
+    const result = await lootChest.takeItems(id, "7", "hero", [0, 2]);
+
+    expect(result!.taken.map((entry: Row) => entry.itemName)).toEqual(["Rat Tail", "Old Sack"]);
+    expect(result!.remaining.map((entry: Row) => entry.itemName)).toEqual(["Health Potion"]);
+    expect(result!.allTaken).toBe(false);
+    expect(transactions).toBe(1);
+    expect((await lootChest.open(id, "7"))!.items.map((entry: Row) => entry.itemName)).toEqual(["Health Potion"]);
+  });
+
+  test("items that could not be written are still in the chest, and none of them is in the inventory", async () => {
+    const id = await openedChest();
+    await inventory.get("hero");
+    let written = 0;
+    failing = (sql) => !sql.startsWith("SELECT") && ++written === 3;
+
+    expect(await lootChest.takeAllItems(id, "7", "hero")).toBeNull();
+    failing = null;
+
+    expect(held()).toEqual(BEFORE);
+    await inventoryIsDatabase("hero");
+    expect((await lootChest.open(id, "7"))!.items).toHaveLength(3);
+
+    expect((await lootChest.takeItems(id, "7", "hero", [0, 1, 2]))!.allTaken).toBe(true);
+    expect(held()).toEqual([["Health Potion", 4], ["Iron Helmet", 1], ["Leather Cap", 1], ["Rat Tail", 2], ["Old Sack", 1]]);
+    await fromCache(() => inventoryIsDatabase("hero"));
+  });
+
+  test("asked for twice at the same moment, an item is taken once", async () => {
+    const id = await openedChest();
+    lag = [{ run: 5, answer: 5 }];
+
+    const [first, second] = await Promise.all([
+      lootChest.takeItems(id, "7", "hero", [0, 1]),
+      lootChest.takeAllItems(id, "7", "hero"),
+    ]);
+
+    expect(first!.taken.map((entry: Row) => entry.itemName)).toEqual(["Rat Tail", "Health Potion"]);
+    expect(second!.taken.map((entry: Row) => entry.itemName)).toEqual(["Old Sack"]);
+    expect(held()).toEqual([["Health Potion", 4], ["Iron Helmet", 1], ["Leather Cap", 1], ["Rat Tail", 2], ["Old Sack", 1]]);
+    await fromCache(() => inventoryIsDatabase("hero"));
+  });
+});
+
+describe("loot taken from a corpse", () => {
+  let nextCreature = 9000;
+  const looter = { id: "7", username: "hero", location: { map: "main", position: { x: 0, y: 0 } }, wt: null };
+  const drop = (index: number, itemName: string, quantity: number) => ({ index, itemName, quantity, quality: "common", iconUrl: "" });
+  /** A dead creature at the looter's feet, with two rat tails, a sack and 21 copper that hero and ally share. */
+  function corpse() {
+    const creature: any = { id: nextCreature++, state: AIState.DEAD, map: "main", layerId: null, x: 0, y: 0, combat: { corpseUntil: Date.now() + 60_000 } };
+    corpseLoot.create(creature.id, [drop(0, "Rat Tail", 2), drop(1, "Old Sack", 1)], 21, ["hero"], ["hero", "ally"]);
+    return creature;
+  }
+  const copperOf = (username: string) => of("currency", username)[0]?.copper;
+
+  test("the items and every share of the money are one transaction, and in both", async () => {
+    const creature = corpse();
+    await readAll("hero");
+    await readAll("ally");
+
+    const result = await takeCorpseLoot(looter, creature, null);
+
+    expect(result).toMatchObject({ empty: true });
+    expect(transactions).toBe(1);
+    expect(stack("Rat Tail")!.quantity).toBe(2);
+    expect(stack("Old Sack")!.quantity).toBe(1);
+    // 21 between two: ten each, and the one left over to whoever looted.
+    expect(copperOf("hero")).toBe(61);
+    expect(copperOf("ally")).toBe(10);
+    await fromCache(() => everythingIsDatabase("hero"));
+    await fromCache(() => everythingIsDatabase("ally"));
+    expect(corpseLoot.has(creature.id)).toBe(false);
+  });
+
+  test("loot that could not be written is still on the corpse, and nobody has any of it", async () => {
+    const creature = corpse();
+    await readAll("hero");
+    await readAll("ally");
+    const before = structuredClone(tables);
+    // The second player's share is the write that fails: the items and the first share were made before it.
+    let shares = 0;
+    failing = (sql) => sql.startsWith("INSERT INTO currency") && ++shares === 2;
+
+    expect(await takeCorpseLoot(looter, creature, null)).toBe("failed");
+    failing = null;
+
+    expect(tables).toEqual(before);
+    await everythingIsDatabase("hero");
+    await everythingIsDatabase("ally");
+    expect(corpseLoot.remaining(creature.id).map((entry) => entry.itemName)).toEqual(["Rat Tail", "Old Sack"]);
+    expect(corpseLoot.get(creature.id)!.copper).toBe(21);
+
+    expect(await takeCorpseLoot(looter, creature, null)).toMatchObject({ empty: true });
+    expect(copperOf("hero")).toBe(61);
+    expect(copperOf("ally")).toBe(10);
+    expect(stack("Rat Tail")!.quantity).toBe(2);
+  });
+
+  test("one item taken leaves the rest, and the money goes with the first take", async () => {
+    const creature = corpse();
+
+    expect(await takeCorpseLoot(looter, creature, [1])).toMatchObject({ empty: false, taken: [expect.objectContaining({ itemName: "Old Sack" })] });
+    expect(copperOf("hero")).toBe(61);
+    expect(await takeCorpseLoot(looter, creature, [0])).toMatchObject({ empty: true });
+    expect(copperOf("hero")).toBe(61);
+    expect(copperOf("ally")).toBe(10);
+    expect(transactions).toBe(2);
+  });
 });
 
 describe("the caches", () => {

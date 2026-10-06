@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 // ------------------------------------------------------------ fake database
 // The statements the spell system sends about what players have learned, run
@@ -43,7 +44,7 @@ function run(sql: string, params: any[]): any {
   throw new Error(`The fake database does not understand: ${sql}`);
 }
 
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (sql: string, params: any[] = []) => {
     queries.push([sql, params]);
     if (failing?.test(sql)) {

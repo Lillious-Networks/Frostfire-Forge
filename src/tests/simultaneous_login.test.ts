@@ -1,11 +1,12 @@
 import { expect, test, mock, beforeEach } from "bun:test";
+import { databaseModule } from "./setup";
 
 // Two players logging in at the same exact time must end up mutually visible:
 // each side's `playersInAOI` contains the other, the reverse index agrees, and
 // a spawn is queued in BOTH directions. Uses the real AOI module (only the
 // database is stubbed); each test gets its own map name because LayerManager
 // has no reset and layers are keyed by map.
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (_sql: string, _params?: any[]) => [],
 }));
 

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 // ------------------------------------------------------------ fake database
 // The statements the loot tables send, run against in-memory tables. A
@@ -79,7 +80,7 @@ async function database(sql: string, params: any[] = []): Promise<any> {
   return apply(sql, params);
 }
 
-mock.module("../controllers/sqldatabase", () => ({ default: database }));
+mock.module("../controllers/sqldatabase", () => databaseModule({ default: database }));
 mock.module("../services/assetCache", () => ({
   default: {
     get: async (key: string) => (key === "items" ? [{ name: "Iron Sword", quality: "common" }, { name: "Wolf Pelt", quality: "common" }, { name: "Frostbite", quality: "epic" }] : undefined),

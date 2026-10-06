@@ -1,4 +1,5 @@
 import { expect, test, mock, beforeEach } from "bun:test";
+import { databaseModule } from "./setup";
 
 // Duplicate-login (session kick) regression tests.
 //
@@ -15,7 +16,7 @@ import { expect, test, mock, beforeEach } from "bun:test";
 //
 // Uses the real AOI / index modules (only the database is stubbed). Each test
 // gets its own map name because LayerManager has no reset.
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (_sql: string, _params?: any[]) => [],
 }));
 

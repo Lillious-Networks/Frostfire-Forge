@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 // ------------------------------------------------------------ fake database
 // The statements the permissions system sends, run against in-memory tables.
@@ -54,7 +55,7 @@ async function database(sql: string, params: any[] = []): Promise<any> {
   return run(sql, params);
 }
 
-mock.module("../controllers/sqldatabase", () => ({ default: database }));
+mock.module("../controllers/sqldatabase", () => databaseModule({ default: database }));
 
 const datacache = await import("../services/datacache");
 const { default: log } = await import("../modules/logger");

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 // ------------------------------------------------------------ fake database
 // The statements systems/weather sends, run against an in-memory table, with
@@ -59,7 +60,7 @@ function apply(text: string, params: any[]): any {
   throw new Error(`The fake database does not understand: ${text}`);
 }
 
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: (sql: string, params: any[] = []) => run(sql, params),
 }));
 

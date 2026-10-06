@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 import { readFileSync } from "fs";
 import { join } from "path";
 
@@ -20,6 +21,9 @@ const queries: string[] = [];
 function run(sql: string, params: any[] = []): any {
   const text = sql.replace(/\s+/g, " ").trim();
   queries.push(text);
+  // The two reads the report system fills itself with.
+  if (text.includes("FROM reports WHERE status = 'open'")) return (tables.reports || []).filter((row) => row.status === "open").map((row) => ({ ...row }));
+  if (text.includes("FROM reports WHERE status = 'resolved'")) return (tables.reports || []).filter((row) => row.status === "resolved").map((row) => ({ ...row }));
   // The dashboard's two counts of the accounts table, guests aside.
   if (text.startsWith("SELECT COUNT(*) AS registered")) {
     const real = tables.accounts.filter((row) => (row.guest_mode ?? 0) == params[0]);
@@ -36,7 +40,7 @@ function run(sql: string, params: any[] = []): any {
     .map((row) => ({ ...row }));
 }
 
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (sql: string, params: any[] = []) => run(sql, params),
 }));
 
@@ -54,7 +58,7 @@ mock.module("../services/assetCache", () => ({
 }));
 
 const { default: playerCache } = await import("../services/playermanager");
-const { clearCaches, dropRows } = await import("../services/datacache");
+const { clearCaches, dropRows, loadTables } = await import("../services/datacache");
 const { packetManager } = await import("../socket/packet_manager");
 const { oneAtATime } = await import("../systems/playereditor");
 const panel = await import("../systems/controlpanel");
@@ -178,6 +182,9 @@ beforeEach(async () => {
     loot_tables: [{ id: 3, name: "Bandit", created_at: null }],
     loot_table_items: [{ id: 31, loot_table_id: 3, item_name: "Iron Helmet", min_quantity: 1, max_quantity: 2, drop_chance: 50, quality: "common" }],
   };
+  // As at startup: the tables the server holds whole are read before anyone opens the panel.
+  await loadTables();
+  queries.length = 0;
   boss = online("7101", "cp_boss", { isAdmin: true, permissions: [...EVERYTHING] });
   mod = online("7102", "cp_mod", { isAdmin: true, permissions: ["admin.kick", "admin.ban"] });
   sneak = online("7103", "cp_sneak", { isAdmin: true, isStealth: true, stats: { level: 60 }, location: { map: "cave.json", position: { x: 0, y: 0 } } });
@@ -207,6 +214,9 @@ const RULES: Record<string, Needs> = {
   "player.kick": { command: "KICK", groups: [["admin.kick", "admin.*"]], confirm: true },
   "player.ban": { command: "BAN", groups: [["admin.ban", "admin.*"]], confirm: true },
   "player.unban": { command: "UNBAN", groups: [["admin.unban", "admin.*"]] },
+  "player.mute": { command: "MUTE", groups: [["admin.mute", "admin.*"]] },
+  "player.unmute": { command: "UNMUTE", groups: [["admin.unmute", "admin.*"]] },
+  "report.resolve": { command: "REPORTS", groups: [["admin.reports", "admin.*"]] },
   "player.admin": { command: "ADMIN", groups: [["server.admin", "server.*"]], confirm: true },
   "player.give": { command: "GIVE", groups: [["admin.items", "admin.*"]] },
   "permission.add": { command: "PERMISSION", groups: [COMMAND_RULE, ["permission.add", "permission.*"]], confirm: true },
@@ -239,6 +249,8 @@ const VALID: Record<string, Row> = {
   "self.stealth": { enabled: true },
   "player.admin": { target: "cp_hero", admin: true },
   "player.unban": { target: "cp_exile" },
+  "player.mute": { target: "cp_hero", duration: "30m", reason: "spam" },
+  "report.resolve": { id: 4, note: "warned" },
   "player.give": { target: "cp_hero", item: "Iron Helmet", quantity: 2 },
   "permission.add": { target: "cp_mod", permission: "admin.kick" },
   "permission.remove": { target: "cp_mod", permission: "admin.kick" },
@@ -370,7 +382,7 @@ describe("each control keeps its command's permission rule", () => {
 
   test("what the viewer may do is sent with the full panel, by action", async () => {
     const can = await panel.capabilities(mod);
-    expect(Object.keys(can).sort()).toEqual([...Object.keys(RULES), "player.summon.admins", "query.lootTables", "query.permissions"].sort());
+    expect(Object.keys(can).sort()).toEqual([...Object.keys(RULES), "player.summon.admins", "query.lootTables", "query.moderation", "query.permissions", "query.reports"].sort());
     const yes = Object.keys(can).filter((name) => can[name]).sort();
     expect(yes).toEqual(["player.ban", "player.kick", "self.noclip", "self.stealth"]);
     expect((await panel.capabilities(boss))["player.summon.admins"]).toBe(true);
@@ -597,7 +609,7 @@ describe("everything the in-game admin panel did", () => {
     const reachable = new Set(Object.values(panel.ACTIONS).map((action) => action.command));
     for (const command of [
       "SUMMON", "TELEPORT", "KICK", "BROADCAST", "BAN", "UNBAN", "ADMIN", "WHITELIST", "SHUTDOWN", "RESTART", "RESPAWN", "REVIVE", "KILL",
-      "PERMISSION", "RELOADMAP", "WARP", "WEATHER", "GIVE", "DROP", "SPAWNCHEST", "LOOTTABLE",
+      "PERMISSION", "RELOADMAP", "WARP", "WEATHER", "GIVE", "DROP", "SPAWNCHEST", "LOOTTABLE", "MUTE", "UNMUTE", "REPORTS",
     ]) {
       expect(reachable.has(command)).toBe(true);
     }
@@ -610,6 +622,95 @@ describe("everything the in-game admin panel did", () => {
       expect(reachable.has(command)).toBe(false);
       expect(commandBlock(command).length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("mutes and reports", () => {
+  const NOON = 1_800_000_000_000;
+  const filed = (id: number, over: Row = {}): Row => ({
+    id, reporter: "cp_hero", target: "cp_exile", category: "spam", details: null, chat_log: JSON.stringify([{ at: NOON, channel: "say", text: "buy gold" }]),
+    map: "overworld", x: 1, y: 2, target_map: null, target_x: null, target_y: null, created_at: NOON + id,
+    status: "open", resolved_by: null, resolved_at: null, resolution: null, ...over,
+  });
+  const ask = (actor: any, data: Row) => panel.handlePanelPacket(actor, "CONTROL_PANEL_QUERY", data, receiver(actor));
+
+  test("/mute is handed the player, how long and why, and a mute until lifted says so in a word", async () => {
+    await act(boss, "player.mute", { target: "CP_Hero", duration: "2H", reason: "  selling gold  " });
+    await act(boss, "player.mute", { target: "cp_hero", duration: "", reason: "7d of spam" });
+    await act(boss, "player.mute", { target: "cp_hero" });
+    await act(boss, "player.unmute", { target: "cp_hero" });
+
+    expect(ran.map((entry) => entry.run)).toEqual([
+      { command: "MUTE", args: ["cp_hero", "2h", "selling gold"] },
+      { command: "MUTE", args: ["cp_hero", "permanent", "7d of spam"] },
+      { command: "MUTE", args: ["cp_hero", "permanent"] },
+      { command: "UNMUTE", args: ["cp_hero"] },
+    ]);
+  });
+
+  test("a report is resolved by its number, with the note as it was typed", async () => {
+    await act(boss, "report.resolve", { id: 4, note: " warned, then muted " });
+    await act(boss, "report.resolve", { id: "7" });
+
+    expect(ran.map((entry) => entry.run)).toEqual([
+      { command: "REPORTS", args: ["resolve", "4", "warned, then muted"] },
+      { command: "REPORTS", args: ["resolve", "7"] },
+    ]);
+  });
+
+  test("what those commands would choke on is refused here, in a sentence", async () => {
+    const refusals: Array<[string, Row, string | RegExp]> = [
+      ["player.mute", { duration: "30m" }, "Pick a player first."],
+      ["player.mute", { target: "cp_nobody", duration: "30m" }, "Player not found."],
+      ["player.mute", { target: "cp_hero", duration: "soon" }, /a number and a unit/],
+      ["player.mute", { target: "cp_hero", duration: "30m", reason: "x".repeat(201) }, /200 characters/],
+      ["player.unmute", {}, "Pick a player first."],
+      ["report.resolve", { note: "done" }, "Pick a report first."],
+      ["report.resolve", { id: 0 }, "Pick a report first."],
+      ["report.resolve", { id: 4, note: "x".repeat(201) }, /200 characters/],
+    ];
+    for (const [action, data, message] of refusals) {
+      const result = await act(boss, action, data);
+      expect(result.ok).toBe(false);
+      expect(result.errors.join(" | ")).toMatch(message);
+    }
+    expect(ran).toEqual([]);
+  });
+
+  test("a player's mute and how many open reports name them are shown to whoever may act on either", async () => {
+    tables.mutes = [{ username: "cp_exile", muted_by: "cp_boss", reason: "spam", created_at: NOON, expires_at: null }];
+    tables.reports = [filed(1), filed(2, { reporter: "cp_mod" }), filed(3, { status: "resolved", resolved_by: "cp_boss", resolved_at: NOON + 9 })];
+    await loadTables();
+
+    expect(await ask(boss, { kind: "moderation", target: "CP_Exile" })).toEqual({
+      kind: "results",
+      data: { kind: "moderation", target: "cp_exile", mute: { username: "cp_exile", muted_by: "cp_boss", reason: "spam", created_at: NOON, expires_at: null }, openReports: 2 },
+    });
+    expect(await ask(boss, { kind: "moderation", target: "cp_hero" })).toMatchObject({ data: { mute: null, openReports: 0 } });
+    expect(await ask(holder(["admin.unmute"]), { kind: "moderation", target: "cp_hero" })).toMatchObject({ kind: "results" });
+    expect(await ask(mod, { kind: "moderation", target: "cp_hero" })).toMatchObject({ kind: "result", data: { ok: false, errors: ["You don't have permission to do that."] } });
+    expect(await ask(boss, { kind: "moderation", target: "cp_nobody" })).toMatchObject({ data: { errors: ["Player not found."] } });
+  });
+
+  test("the reports are listed for whoever handles them: the open ones newest first, then the latest resolved", async () => {
+    tables.reports = [filed(1), filed(2, { reporter: "cp_mod" }), filed(3, { status: "resolved", resolved_by: "cp_boss", resolved_at: NOON + 9, resolution: "muted" })];
+    await loadTables();
+
+    const listed = await ask(holder(["admin.reports"]), { kind: "reports" }) as any;
+
+    expect(listed.kind).toBe("results");
+    expect(listed.data.open.map((report: Row) => report.id)).toEqual([2, 1]);
+    expect(listed.data.open[0].chat_log).toEqual([{ at: NOON, channel: "say", text: "buy gold" }]);
+    expect(listed.data.resolved).toEqual([expect.objectContaining({ id: 3, resolved_by: "cp_boss", resolution: "muted" })]);
+    expect(await ask(mod, { kind: "reports" })).toMatchObject({ kind: "result", data: { ok: false, errors: ["You don't have permission to do that."] } });
+  });
+
+  test("how many reports are open is on every refresh, for those who handle them only", async () => {
+    tables.reports = [filed(1), filed(2, { reporter: "cp_mod" }), filed(3, { status: "resolved", resolved_at: NOON })];
+    await loadTables();
+
+    expect((await panel.buildData(boss, false)).reports).toEqual({ open: 2 });
+    expect((await panel.buildData(mod, false)).reports).toBeUndefined();
   });
 });
 

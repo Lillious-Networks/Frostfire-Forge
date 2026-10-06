@@ -1,8 +1,9 @@
 import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 // The real weather is held in memory: nothing here may ask the database.
 const queries: string[] = [];
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (sql: string) => {
     queries.push(sql);
     throw new Error(`The real weather asked the database: ${sql}`);

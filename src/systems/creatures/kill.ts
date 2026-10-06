@@ -5,6 +5,7 @@
 import log from "../../modules/logger";
 import layerManager from "../../services/layermanager";
 import playerCache from "../../services/playermanager";
+import { atomically } from "../../services/batch";
 import { broadcastToAOI } from "../../socket/aoi";
 import { packetManager } from "../../socket/packet_manager";
 import currency from "../currency";
@@ -214,7 +215,7 @@ export async function handleKill(creature: CreatureInstance, template: CreatureT
   ]);
 }
 
-export type LootError = "not_found" | "too_far" | "not_allowed" | "empty";
+export type LootError = "not_found" | "too_far" | "not_allowed" | "empty" | "failed";
 
 function checkLootAccess(player: any, creature: CreatureInstance | undefined): LootError | null {
   if (!creature || creature.state !== AIState.DEAD || !corpseLoot.has(creature.id)) return "empty";
@@ -240,14 +241,33 @@ export async function takeCorpseLoot(
 ): Promise<{ taken: CorpseItem[]; empty: boolean } | LootError> {
   const error = checkLootAccess(player, creature);
   if (error) return error;
+  const loot = corpseLoot.get(creature!.id)!;
+  // Off the corpse before anything is awaited: a second take meanwhile finds it gone.
   const result = corpseLoot.take(creature!.id, player.username, indices);
   if (!result) return "not_allowed";
 
-  for (const item of result.taken) {
-    await inventory.add(player.username, { name: item.itemName, quantity: item.quantity } as any);
+  // The items and every share of the money are kept together or not at all.
+  let balances: Map<string, Currency>;
+  try {
+    balances = await atomically([player.username, ...result.copper.keys()], async (batch) => {
+      for (const item of result.taken) {
+        await inventory.add(player.username, { name: item.itemName, quantity: item.quantity } as any, batch);
+      }
+      const after = new Map<string, Currency>();
+      for (const [name, copper] of result.copper) {
+        after.set(name, await currency.add(name, { copper, silver: 0, gold: 0 }, batch));
+      }
+      return after;
+    });
+  } catch (error) {
+    log.error(`Corpse loot could not be given to ${player.username}: ${error}`);
+    // Nobody was given anything: it is on the corpse again, while there is one.
+    if (creature!.state === AIState.DEAD) corpseLoot.restore(loot, result);
+    return "failed";
   }
+
   for (const [name, copper] of result.copper) {
-    const newBalance = await currency.add(name, { copper, silver: 0, gold: 0 });
+    const newBalance = balances.get(name)!;
     const recipient = findPlayerByUsername(name);
     if (recipient?.wt) {
       send(recipient.wt, packetManager.currency(newBalance));

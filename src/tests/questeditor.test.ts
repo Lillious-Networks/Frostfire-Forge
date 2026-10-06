@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 let questTable: Array<any>;
 let objectiveTable: Array<any>;
@@ -20,7 +21,7 @@ function resetDb() {
 }
 resetDb();
 
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (sql: string, params: any[] = []) => {
     if (sql.includes("UPDATE quests SET")) {
       const row = questTable.find((q) => q.id === params[params.length - 1]);

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 // Generated at server start (`bun create-config`) and gitignored, so CI has
 // no copy on disk. Mock the values instead of requiring the file.
@@ -60,7 +61,7 @@ async function database(sql: string, params: any[] = []): Promise<any> {
   return run(sql, params);
 }
 
-mock.module("../controllers/sqldatabase", () => ({ default: database }));
+mock.module("../controllers/sqldatabase", () => databaseModule({ default: database }));
 
 const datacache = await import("../services/datacache");
 const { default: log } = await import("../modules/logger");

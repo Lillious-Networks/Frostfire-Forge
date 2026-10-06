@@ -17,6 +17,8 @@ import log from "../modules/logger";
 import player from "./player";
 import permissions from "./permissions";
 import lootTable from "./lootTable";
+import mutes, { parseDuration } from "./mutes";
+import reports from "./reports";
 import { findOnline, oneAtATime, search as searchEditor } from "./playereditor";
 
 export const DENIED = "You don't have permission to use the control panel.";
@@ -36,6 +38,8 @@ const GIVE_MAX = 1000000;
 const CHEST_ENTRIES_MAX = 20;
 /** The permissions column is 255 characters wide. */
 const PERMISSIONS_MAX = 255;
+/** Longest reason for a mute, or note on a report. */
+const NOTE_MAX = 200;
 /** How long a request id is remembered: a repeat inside this window is not run again. */
 const REPEAT_WINDOW_MS = 60000;
 
@@ -47,6 +51,7 @@ const AUDIENCES = ["ALL", "MAP", "ADMINS"];
 /** Everything the server does at once: restart, shutdown, whitelist, broadcast, weather. */
 const SERVER_KEY = "@server";
 const LOOT_KEY = "@loot";
+const REPORTS_KEY = "@reports";
 
 const lower = (s: unknown): string => String(s ?? "").toLowerCase();
 const normMap = (map: unknown): string => String(map ?? "").replaceAll(".json", "");
@@ -119,6 +124,8 @@ const holds = (...names: string[]): ((actor: any) => boolean) => (actor) =>
   Array.isArray(actor?.permissions) && actor.permissions.some((p: string) => names.includes(p));
 /** NOCLIP and STEALTH ask only for the admin role. */
 const isAdmin = (actor: any): boolean => !!actor?.isAdmin;
+/** /reports asks for this, whatever it is asked to do. */
+const handlesReports = holds("admin.reports", "admin.*");
 /** /permission asks for the command itself, then for the permission of the mode. */
 const permissionMode = (...names: string[]): ((actor: any) => boolean) => (actor) =>
   holds("admin.permission", "admin.*")(actor) && holds(...names)(actor);
@@ -425,6 +432,12 @@ export async function buildData(viewer: any, full: boolean, since: Since | null 
     },
     world: { map, weather: here?.weather || "clear", showing: here?.showing || "clear", worlds },
   };
+  // How many reports wait, for the count beside the page that lists them.
+  if (handlesReports(viewer)) {
+    // Reports that cannot be read are left out: the rest of the panel is still shown.
+    const open = await reports.openCount().catch(() => null);
+    if (open !== null) data.reports = { open };
+  }
   if (full) {
     const [maps, weathers] = await Promise.all([cached<MapProperties>("mapProperties"), cached<WeatherData>("weather")]);
     data.can = await capabilities(viewer);
@@ -453,6 +466,10 @@ const QUERY_RULES: Record<string, (actor: any) => boolean> = {
   permissions: permissionMode("permission.list", "permission.*"),
   // /loottable list and info
   lootTables: holds("admin.loot", "admin.*"),
+  // /reports
+  reports: handlesReports,
+  // Whether a player is muted and how many reports name them: for whoever may act on either.
+  moderation: holds("admin.mute", "admin.unmute", "admin.reports", "admin.*"),
 };
 
 async function lookUp(viewer: any, data: any): Promise<ControlPanelResults | string[]> {
@@ -488,10 +505,15 @@ async function lookUp(viewer: any, data: any): Promise<ControlPanelResults | str
     return { kind, tables: tables.map((t: any) => ({ id: Number(t.id), name: String(t.name), items: t.items })) };
   }
 
+  if (kind === "reports") return { kind, open: await reports.open(), resolved: await reports.resolved() };
+
   const target = targetOf(data);
   if (!target) return [NO_TARGET];
   const account = await player.findAccount(target);
   if (!account) return [NOT_FOUND];
+
+  if (kind === "moderation") return { kind, target, mute: await mutes.get(target), openReports: await reports.openAgainst(target) };
+
   const [held, types] = await Promise.all([permissions.get(target), permissions.list()]);
   return {
     kind: "permissions",
@@ -641,6 +663,36 @@ export const ACTIONS: Record<string, PanelAction> = {
         run: { command: "UNBAN", args: [target] },
         already: async () => (Number((await player.findAccount(target))?.banned) === 1 ? null : `${shown(target)} is not banned.`),
       };
+    },
+  },
+  "player.mute": {
+    command: "MUTE",
+    allowed: holds("admin.mute", "admin.*"),
+    plan: async ({ data }) => {
+      const target = targetOf(data);
+      if (!target) return [NO_TARGET];
+      if (!(await player.findAccount(target))) return [NOT_FOUND];
+      // No duration is a mute until it is lifted. That is handed over as a word of its own, so a
+      // reason is never read as how long.
+      const asked = typeof data?.duration === "string" ? data.duration.trim().toLowerCase() : "";
+      if (asked && parseDuration(asked) === null) {
+        return ["A mute lasts a number and a unit, like 30m, 2h or 7d, or is left empty to last until lifted."];
+      }
+      const reason = data?.reason === undefined || data?.reason === "" ? "" : text(data.reason, NOTE_MAX);
+      if (reason === null) return [`A reason is at most ${NOTE_MAX} characters.`];
+      return { key: target, target, run: { command: "MUTE", args: [target, asked || "permanent", ...(reason ? [reason] : [])] } };
+    },
+  },
+  "player.unmute": onPlayer("UNMUTE", holds("admin.unmute", "admin.*")),
+  "report.resolve": {
+    command: "REPORTS",
+    allowed: handlesReports,
+    plan: ({ data }) => {
+      const id = wholeNumber(data?.id, 1, Number.MAX_SAFE_INTEGER);
+      if (id === null) return ["Pick a report first."];
+      const note = data?.note === undefined || data?.note === "" ? "" : text(data.note, NOTE_MAX);
+      if (note === null) return [`A note is at most ${NOTE_MAX} characters.`];
+      return { key: REPORTS_KEY, run: { command: "REPORTS", args: ["resolve", String(id), ...(note ? [note] : [])] } };
     },
   },
   "player.admin": {

@@ -357,6 +357,38 @@ bun setup-production
 </details>
 
 <details>
+<summary><strong>Mute Player</strong></summary>
+
+```bash
+/mute [username] [duration?] [reason?]
+```
+- **Duration**: a number and a unit, such as `30m`, `2h` or `7d`. Left out (or `permanent`), the mute lasts until it is lifted
+- **Permission**: `admin.mute` | `admin.*`
+- **Description**: The player still sees their own say, whisper, party and guild messages, and is not told. Nobody else receives them
+</details>
+
+<details>
+<summary><strong>Unmute Player</strong></summary>
+
+```bash
+/unmute [username]
+```
+- **Permission**: `admin.unmute` | `admin.*`
+</details>
+
+<details>
+<summary><strong>Player Reports</strong></summary>
+
+```bash
+/reports
+/reports view [number]
+/reports resolve [number] [note?]
+```
+- **Permission**: `admin.reports` | `admin.*`
+- **Description**: List the open reports players have sent, show one with the chat lines attached, or close one with a note. Admins online with the permission are told when a report arrives
+</details>
+
+<details>
 <summary><strong>Send Message to Players</strong></summary>
 
 ```bash
@@ -650,6 +682,28 @@ The panel has a control for every admin command above; the editors are opened wi
 ```
 - **Aliases**: `s`
 - **Description**: Send a message to local players
+</details>
+
+<details>
+<summary><strong>Ignore</strong></summary>
+
+```bash
+/ignore [username]
+/unignore [username]
+/ignorelist
+```
+- **Description**: Stop receiving a player's chat, whispers, invitations and friend requests. They are not told. Ignoring a friend ends the friendship
+- **Limits**: Up to 100 players. Admins cannot be ignored, and admins cannot ignore players
+</details>
+
+<details>
+<summary><strong>Report Player</strong></summary>
+
+```bash
+/report [username] [reason]
+```
+- **Description**: Send a report to the admins, with the player's recent chat lines that reached you. They are not told
+- **Limits**: One open report per player, five reports an hour
 </details>
 
 ---

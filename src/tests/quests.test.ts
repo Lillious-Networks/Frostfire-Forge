@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 const questRows = [
   {
@@ -34,7 +35,7 @@ const npcLinks = [
   { npc_id: 2, quest_id: 2, role: "giver" },
 ];
 
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (sql: string, _params: any[] = []) => {
     if (sql.includes("FROM quests")) return questRows;
     if (sql.includes("FROM quest_objectives")) return objectiveRows;

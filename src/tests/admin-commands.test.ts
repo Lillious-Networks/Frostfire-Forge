@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 import { readFileSync } from "fs";
 import { join } from "path";
 
@@ -11,7 +12,7 @@ let accounts: Row[];
 let held: Record<string, string>;
 const PERMISSION_TYPES = ["admin.*", "admin.kick", "admin.ban", "admin.warp", "server.*", "permission.*"];
 
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (sql: string, params: any[] = []) => {
     const text = sql.replace(/\s+/g, " ").trim();
     if (text.startsWith("SELECT permissions FROM permissions")) return params[0] in held ? [{ permissions: held[params[0]] }] : [];

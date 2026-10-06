@@ -362,7 +362,10 @@ const createPermissionTypesTable = async () => {
       ('tools.weather_editor'),
       ('tools.quest_editor'),
           ('tools.particle_editor'),
-        ('admin.loot')
+        ('admin.loot'),
+        ('admin.mute'),
+        ('admin.unmute'),
+        ('admin.reports')
     `;
     await query(insertPermissionsSql);
   } else {
@@ -374,6 +377,8 @@ const createPermissionTypesTable = async () => {
   await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.kill')`);
   // Opens the gateway monitoring dashboard (Frostfire Forge Gateway).
   await query(`INSERT IGNORE INTO permission_types (name) VALUES ('server.gateway')`);
+  // Chat mutes and the player reports.
+  await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.mute'), ('admin.unmute'), ('admin.reports')`);
 };
 
 /** Quest-giver flag added to npcs after its first release. */
@@ -645,6 +650,50 @@ const createFriendsListTable = async () => {
     )
   `;
   await query(sql);
+};
+
+/** Mutes, ignore lists and player reports. Times are milliseconds since the epoch. */
+const createModerationTables = async () => {
+  log.info("Creating mutes, ignores and reports tables...");
+  await query(`
+    CREATE TABLE IF NOT EXISTS mutes (
+      username VARCHAR(255) NOT NULL PRIMARY KEY,
+      muted_by VARCHAR(255) NOT NULL,
+      reason VARCHAR(500) DEFAULT NULL,
+      created_at BIGINT NOT NULL,
+      expires_at BIGINT DEFAULT NULL
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS ignores (
+      username VARCHAR(255) NOT NULL,
+      ignored VARCHAR(255) NOT NULL,
+      created_at BIGINT NOT NULL,
+      PRIMARY KEY (username, ignored)
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS reports (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      reporter VARCHAR(255) NOT NULL,
+      target VARCHAR(255) NOT NULL,
+      category VARCHAR(32) NOT NULL,
+      details VARCHAR(500) DEFAULT NULL,
+      chat_log TEXT NOT NULL,
+      map VARCHAR(255) DEFAULT NULL,
+      x INT DEFAULT NULL,
+      y INT DEFAULT NULL,
+      target_map VARCHAR(255) DEFAULT NULL,
+      target_x INT DEFAULT NULL,
+      target_y INT DEFAULT NULL,
+      created_at BIGINT NOT NULL,
+      status VARCHAR(16) NOT NULL DEFAULT 'open',
+      resolved_by VARCHAR(255) DEFAULT NULL,
+      resolved_at BIGINT DEFAULT NULL,
+      resolution VARCHAR(500) DEFAULT NULL,
+      INDEX idx_reports_status (status)
+    )
+  `);
 };
 
 const createPartiesTable = async () => {
@@ -1301,6 +1350,7 @@ const setupDatabase = async () => {
   await createQuestsTable();
   await createQuestLogTable();
   await createFriendsListTable();
+  await createModerationTables();
   await createPartiesTable();
   await createCurrencyTable();
   await createGuildsTable();

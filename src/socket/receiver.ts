@@ -42,6 +42,50 @@ function isQuestRateLimited(id: string): boolean {
   return fresh.length > QUEST_RATE_MAX;
 }
 
+/**
+ * Who of a party or guild receives a line from one of its members, in lower
+ * case: the sender always (a muted player sees their own line as sent), and
+ * the members the chat gate lets it through to. `muted` says the line went
+ * to nobody else.
+ */
+async function chatHearing(sender: string, channel: "party" | "guild", message: string, members: string[]): Promise<Set<string> & { muted: boolean }> {
+  const me = sender.toLowerCase();
+  const others = members.map((member) => String(member).toLowerCase()).filter((member) => member !== me);
+  const reached = await chatAudience(sender, channel, message, others);
+  return Object.assign(new Set([me, ...reached.recipients]), { muted: reached.muted });
+}
+
+/**
+ * An invitation (to a party, a guild or a friendship) reaches the one invited
+ * unless they ignore who sent it. The sender sees it as sent either way.
+ */
+async function sendInvitation(from: any, to: any, invitation: any): Promise<void> {
+  // An ignore list that cannot be read holds nothing back.
+  if (await ignores.blocks(to.username, from.username).catch(() => false)) return;
+  sendPacket(to.wt, packetManager.invitation(invitation));
+}
+
+/** What /ignore and /unignore answered, sent on: the message, the list when it changed, and both friends lists when a friendship ended. */
+function sendIgnoreAnswer(wt: any, answer: moderation.IgnoreAnswer): void {
+  sendPacket(wt, packetManager.notify({ message: answer.message }));
+  if (answer.ignored) sendPacket(wt, packetManager.updateIgnores({ ignored: answer.ignored }));
+  if (!answer.unfriended) return;
+  sendPacket(wt, packetManager.updateFriends({ friends: answer.unfriended.mine }));
+  const other = playerCache.getByUsername(answer.unfriended.target);
+  if (other?.wt) sendPacket(other.wt, packetManager.updateFriends({ friends: answer.unfriended.theirs }));
+}
+
+/** Files a report from a player and answers them. The staff online who handle reports are told of one that was filed. */
+async function sendReport(wt: any, reporter: any, name: unknown, category: unknown, details: unknown): Promise<void> {
+  const answer = await moderation.report(reporter, name, category, details);
+  sendPacket(wt, packetManager.notify({ message: answer.message }));
+  if (!answer.report) return;
+  const notice = moderation.staffNotice(answer.report);
+  for (const staff of Object.values(playerCache.list() as Record<string, any>)) {
+    if (staff?.wt && moderation.can(staff, "admin.reports")) sendPacket(staff.wt, packetManager.notify({ message: notice }));
+  }
+}
+
 async function sendQuestMarkersFor(wt: any, username: string, map: string): Promise<void> {
   try {
     const markers = await markersFor(username, String(map ?? "").replaceAll(".json", ""));
@@ -89,6 +133,9 @@ import * as questEditor from "../systems/quests/editor";
 import { registerExploreHooks } from "../systems/quests/objectives";
 import { registerLevelUpHook } from "../systems/quests/markers";
 import friends from "../systems/friends";
+import ignores from "../systems/ignores";
+import * as moderation from "../systems/moderation";
+import { audience as chatAudience } from "../systems/chatgate";
 import parties from "../systems/parties.ts";
 import guilds from "../systems/guild.ts";
 import spells from "../systems/spells";
@@ -1593,6 +1640,11 @@ authWorker.on("message", async (result: any) => {
 
     listener.emit(Events.PLAYER_AUTH_COMPLETE, { username: playerData.username, spawnLocation, playerData });
 
+    // Who the player ignores, for the menus and the list their client shows. Chat is held back here, not there.
+    ignores.list(playerData.username)
+      .then((ignored) => sendPacket(wt, packetManager.updateIgnores({ ignored })))
+      .catch((error) => log.error(`The ignore list of ${playerData.username} could not be sent: ${error}`));
+
     const savedMap = maps.find((m: MapData) => m.name === spawnLocation.map);
     const map = savedMap || maps.find((m: MapData) => m.name === `${defaultMap}.json`);
     if (!map) return;
@@ -2901,12 +2953,19 @@ export default async function packetReceiver(
             p.location.map === currentPlayer.location.map && p.id !== wt.data.id
         );
 
-        listener.emit(Events.PLAYER_CHAT, { player: currentPlayer, message: decryptedMessage || data?.toString(), mapName: currentPlayer.location.map });
-
         if (currentPlayer.isStealth) {
 
           playersInMap = playersInMap.filter((p) => p.isAdmin);
         }
+
+        // A muted player's line stops here, shown to them alone, and a player
+        // who ignores them is left out. Neither is told.
+        const said = await chatAudience(currentPlayer.username, "say", decryptedMessage as string, playersInMap.map((p) => p.username));
+        if (said.muted) return;
+        const hearing = new Set(said.recipients);
+        playersInMap = playersInMap.filter((p) => hearing.has(p.username));
+
+        listener.emit(Events.PLAYER_CHAT, { player: currentPlayer, message: decryptedMessage || data?.toString(), mapName: currentPlayer.location.map });
 
         if (playersInMap.length === 0) return;
 
@@ -3641,6 +3700,7 @@ export default async function packetReceiver(
           too_far: "You are too far away to loot that.",
           not_allowed: "You don't have permission to loot that corpse.",
           empty: "There is nothing to loot.",
+          failed: "Could not take the loot. Try again.",
         };
         if (type === "CREATURE_LOOT") {
           const opened = creatures.openCorpseFor(currentPlayer, creatureId);
@@ -6394,7 +6454,10 @@ export default async function packetReceiver(
               break;
             }
 
+            const partyHearing = await chatHearing(currentPlayer.username, "party", message, partyMembers);
+
             partyMembers.forEach(async (member: any) => {
+              if (!partyHearing.has(String(member).toLowerCase())) return;
               const session_id = await player.getSessionIdByUsername(member);
               const memberPlayer = playerCache.get(session_id);
               if (memberPlayer) {
@@ -6411,7 +6474,7 @@ export default async function packetReceiver(
               }
             });
 
-            listener.emit(Events.PARTY_CHAT, { player: currentPlayer, message, partyMembers } as any);
+            if (!partyHearing.muted) listener.emit(Events.PARTY_CHAT, { player: currentPlayer, message, partyMembers } as any);
             break;
           }
 
@@ -6439,17 +6502,22 @@ export default async function packetReceiver(
               break;
             }
 
-            sendPacket(
-              targetPlayer.wt,
-              packetManager.whisper({
-                id: wt.data.id,
-                message: args.slice(1).join(" "),
+            // The whisper is shown as sent either way: a muted player, or one
+            // the target ignores, is not told that it went nowhere.
+            const whispered = await chatAudience(currentPlayer.username, "whisper", args.slice(1).join(" "), [targetPlayer.username]);
+            if (whispered.recipients.length > 0) {
+              sendPacket(
+                targetPlayer.wt,
+                packetManager.whisper({
+                  id: wt.data.id,
+                  message: args.slice(1).join(" "),
 
-                username: `<- ${currentPlayer.username.charAt(0).toUpperCase() +
-                  currentPlayer.username.slice(1)
-                  }`,
-              })
-            );
+                  username: `<- ${currentPlayer.username.charAt(0).toUpperCase() +
+                    currentPlayer.username.slice(1)
+                    }`,
+                })
+              );
+            }
 
             sendPacket(
               wt,
@@ -6549,7 +6617,7 @@ export default async function packetReceiver(
 
             playerCache.set(currentPlayer.id, currentPlayer);
 
-            sendPacket(targetPlayer.wt, packetManager.invitation(invite_data));
+            await sendInvitation(currentPlayer, targetPlayer, invite_data);
 
             sendPacket(
               wt,
@@ -6584,7 +6652,10 @@ export default async function packetReceiver(
               break;
             }
 
+            const guildHearing = await chatHearing(currentPlayer.username, "guild", message, guildMembers);
+
             guildMembers.forEach(async (member: any) => {
+              if (!guildHearing.has(String(member).toLowerCase())) return;
               const session_id = await player.getSessionIdByUsername(member);
               const memberPlayer = playerCache.get(session_id);
               if (memberPlayer) {
@@ -6601,7 +6672,7 @@ export default async function packetReceiver(
               }
             });
 
-            listener.emit(Events.GUILD_CHAT, { player: currentPlayer, message, guildMembers, guildId } as any);
+            if (!guildHearing.muted) listener.emit(Events.GUILD_CHAT, { player: currentPlayer, message, guildMembers, guildId } as any);
             break;
           }
 
@@ -6690,7 +6761,7 @@ export default async function packetReceiver(
 
             playerCache.set(currentPlayer.id, currentPlayer);
 
-            sendPacket(targetPlayer.wt, packetManager.invitation(invite_data));
+            await sendInvitation(currentPlayer, targetPlayer, invite_data);
 
             sendPacket(
               wt,
@@ -7351,6 +7422,71 @@ export default async function packetReceiver(
                 break;
               }
             }
+            break;
+          }
+
+          case "MUTE": {
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "admin.mute" || p === "admin.*"
+              )
+            ) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(wt, packetManager.notify({ message: await moderation.muteCommand(currentPlayer, args) }));
+            break;
+          }
+
+          case "UNMUTE": {
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "admin.unmute" || p === "admin.*"
+              )
+            ) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(wt, packetManager.notify({ message: await moderation.unmuteCommand(currentPlayer, args) }));
+            break;
+          }
+
+          case "IGNORE": {
+            sendIgnoreAnswer(wt, await moderation.ignore(currentPlayer, args[0]));
+            break;
+          }
+
+          case "UNIGNORE": {
+            sendIgnoreAnswer(wt, await moderation.unignore(currentPlayer, args[0]));
+            break;
+          }
+
+          case "IGNORELIST": {
+            sendPacket(wt, packetManager.notify({ message: await moderation.ignoreList(currentPlayer) }));
+            break;
+          }
+
+          case "REPORT": {
+            // From chat a report has no category to pick: the reason typed is what it says.
+            const reason = args.slice(1).join(" ");
+            if (!args[0] || !reason) {
+              sendPacket(wt, packetManager.notify({ message: "Usage: /report <username> <reason>" }));
+              break;
+            }
+            await sendReport(wt, currentPlayer, args[0], "other", reason);
+            break;
+          }
+
+          case "REPORTS": {
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "admin.reports" || p === "admin.*"
+              )
+            ) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(wt, packetManager.notify({ message: await moderation.reportsCommand(currentPlayer, args) }));
             break;
           }
 
@@ -9520,7 +9656,7 @@ export default async function packetReceiver(
 
         playerCache.set(currentPlayer.id, currentPlayer);
 
-        sendPacket(invitedUser.wt, packetManager.invitation(invite_data));
+        await sendInvitation(currentPlayer, invitedUser, invite_data);
         sendPacket(
           wt,
           packetManager.notify({
@@ -9670,7 +9806,7 @@ export default async function packetReceiver(
 
         playerCache.set(currentPlayer.id, currentPlayer);
 
-        sendPacket(invitedUser.wt, packetManager.invitation(invite_data));
+        await sendInvitation(currentPlayer, invitedUser, invite_data);
         sendPacket(
           wt,
           packetManager.notify({
@@ -9680,6 +9816,33 @@ export default async function packetReceiver(
           })
         );
         listener.emit(Events.PARTY_INVITE, { inviterUsername: currentPlayer.username, invitedUsername: invitedUserUsername });
+        break;
+      }
+      case "IGNORE_PLAYER":
+      case "UNIGNORE_PLAYER": {
+        if (!currentPlayer) return;
+        if (currentPlayer.isGuest) {
+          sendPacket(wt, packetManager.notify({ message: "Please create an account to use that feature." }));
+          return;
+        }
+        // Each one writes a row: the same pace as the other things a player clicks.
+        if (isQuestRateLimited(String(currentPlayer.id))) return;
+        // By the id of a player in sight (the menu on a character), or by name (the list of who is ignored).
+        const named = playerCache.get((data as any)?.id)?.username ?? (data as any)?.username;
+        if (typeof named !== "string" || !named) return;
+        sendIgnoreAnswer(wt, type === "IGNORE_PLAYER" ? await moderation.ignore(currentPlayer, named) : await moderation.unignore(currentPlayer, named));
+        break;
+      }
+      case "REPORT_PLAYER": {
+        if (!currentPlayer) return;
+        if (currentPlayer.isGuest) {
+          sendPacket(wt, packetManager.notify({ message: "Please create an account to use that feature." }));
+          return;
+        }
+        if (isQuestRateLimited(String(currentPlayer.id))) return;
+        const reported = playerCache.get((data as any)?.id)?.username ?? (data as any)?.username;
+        if (typeof reported !== "string" || !reported) return;
+        await sendReport(wt, currentPlayer, reported, (data as any)?.category, (data as any)?.details);
         break;
       }
       case "ADD_FRIEND": {
@@ -9742,7 +9905,7 @@ export default async function packetReceiver(
 
         playerCache.set(currentPlayer.id, currentPlayer);
 
-        sendPacket(get_friend.wt, packetManager.invitation(invite_data));
+        await sendInvitation(currentPlayer, get_friend, invite_data);
         break;
       }
       case "INVITATION_RESPONSE": {

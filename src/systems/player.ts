@@ -7,6 +7,7 @@ import * as settings from "../config/settings.json";
 import playerCache from "../services/playermanager.ts";
 import { realmWhitelist } from "../services/whitelist";
 import { rowCache, tableCache, dropRows, dropAllRows, reloadTable, type RowCache } from "../services/datacache";
+import type { Batch } from "../services/batch";
 import { Events, listener } from "./events";
 import { isSick, applySicknessToStats } from "./resurrection";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
@@ -1022,11 +1023,25 @@ const player = {
     await wrote(statRows, username, saved, whole(...Object.values(saved)));
     return response;
   },
-  increaseXp: async (username: string, xp: number) => {
+  /**
+   * With a `batch` (see services/batch), the write is added to it instead of sent: the gain is
+   * worked from the stats the batch has so far, and is on the row held once the batch is kept.
+   */
+  increaseXp: async (username: string, xp: number, batch?: Batch) => {
     if (!username) return;
     username = username.toLowerCase();
 
-    const stats = (await player.getStats(username)) as StatsData;
+    const pending = batch && await batch.pending(statRows, username, async () => {
+      const start = { stats: (await player.getStats(username)) as StatsData, saved: {} as Partial<StatsData>, leveledUp: false };
+      batch.kept(() => wrote(statRows, username, start.saved, whole(...Object.values(start.saved))));
+      batch.after(async () => { if (start.leveledUp) await player.synchronizeStats(username); });
+      batch.undone(() => statRows.drop(username));
+      return start;
+    });
+    // A player with no stats row has nothing to add to.
+    if (pending && Array.isArray(pending.stats)) return [];
+
+    const stats = pending ? pending.stats : (await player.getStats(username)) as StatsData;
     let leveledUp = false;
 
     while (xp > 0) {
@@ -1053,12 +1068,16 @@ const player = {
     const saved: Partial<StatsData> = leveledUp
       ? { xp: stats.xp, max_xp: stats.max_xp, level: stats.level, max_health: stats.max_health, health: stats.health, max_stamina: stats.max_stamina, stamina: stats.stamina }
       : { xp: stats.xp, max_xp: stats.max_xp, level: stats.level };
-    const response = await writing(statRows, username, () => query(
-      leveledUp
-        ? "UPDATE stats SET xp = ?, max_xp = ?, level = ?, max_health = ?, health = ?, max_stamina = ?, stamina = ? WHERE username = ?"
-        : "UPDATE stats SET xp = ?, max_xp = ?, level = ? WHERE username = ?",
-      [...Object.values(saved), username]
-    ));
+    const sql = leveledUp
+      ? "UPDATE stats SET xp = ?, max_xp = ?, level = ?, max_health = ?, health = ?, max_stamina = ?, stamina = ? WHERE username = ?"
+      : "UPDATE stats SET xp = ?, max_xp = ?, level = ? WHERE username = ?";
+    if (batch && pending) {
+      Object.assign(pending.saved, saved);
+      pending.leveledUp ||= leveledUp;
+      batch.add({ sql, values: [...Object.values(saved), username] });
+      return { xp: stats.xp, level: stats.level, max_xp: stats.max_xp };
+    }
+    const response = await writing(statRows, username, () => query(sql, [...Object.values(saved), username]));
     await wrote(statRows, username, saved, whole(...Object.values(saved)));
     if (leveledUp) {
       await player.synchronizeStats(username);

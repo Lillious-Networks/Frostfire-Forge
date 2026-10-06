@@ -115,6 +115,22 @@ describe("corpse loot", () => {
     expect(store.has(1)).toBe(false);
   });
 
+  test("a take that is put back leaves the corpse as it was, even one that emptied it", () => {
+    const store = new CorpseLootStore();
+    const loot = store.create(1, items.map((i) => ({ ...i })), 25, ["owner"], ["owner", "friend"])!;
+
+    const part = store.take(1, "owner", [1])!;
+    store.restore(loot, part);
+    expect(store.remaining(1).map((i) => i.index)).toEqual([0, 1]);
+    expect(store.get(1)!.copper).toBe(25);
+
+    const all = store.take(1, "owner", null)!;
+    expect(store.has(1)).toBe(false);
+    store.restore(loot, all);
+    expect(store.remaining(1).map((i) => i.index)).toEqual([0, 1]);
+    expect([...store.take(1, "owner", null)!.copper]).toEqual([["owner", 13], ["friend", 12]]);
+  });
+
   test("money-only corpses empty on first take", () => {
     const store = new CorpseLootStore();
     store.create(2, [], 50, ["solo"], ["solo"]);

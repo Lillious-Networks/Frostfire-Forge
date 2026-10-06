@@ -1,9 +1,10 @@
 import { expect, test, mock } from "bun:test";
+import { databaseModule } from "./setup";
 
 // Only the database module is stubbed. Everything else under test is real,
 // so this also verifies the effects-payload integration. (Mocking shared
 // modules like spelleffects would leak into other test files in the run.)
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (_sql: string, _params?: any[]) => [],
 }));
 

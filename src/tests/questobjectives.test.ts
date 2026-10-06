@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 const killQuest: Quest = {
   id: 1, name: "Rats", zone: null, offer_text: "", description: "", progress_text: "", completion_text: "",
@@ -39,7 +40,7 @@ function resetDb() {
 }
 resetDb();
 
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (sql: string, params: any[] = []) => {
     if (sql.startsWith("SELECT") && sql.includes("FROM quest_objective_progress WHERE username = ? AND quest_id = ? AND objective_id = ?")) {
       return progressRows.filter((r) => r.username === params[0] && r.quest_id === params[1] && r.objective_id === params[2]);

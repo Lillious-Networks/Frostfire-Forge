@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 import { readFileSync } from "fs";
 import { join } from "path";
 
@@ -18,7 +19,7 @@ const SELECT = "SELECT username FROM whitelist WHERE realm = ?";
 const INSERT = "INSERT INTO whitelist (realm, username) VALUES (?, ?)";
 const REALM = "wl_test_realm";
 
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (sql: string, params: any[] = []) => {
     queries.push([sql, params]);
     if (failing?.test(sql)) throw new Error("Connection lost");

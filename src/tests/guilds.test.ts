@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 // ------------------------------------------------------------ fake database
 // The statements the guild system sends, run against in-memory tables. A
@@ -71,7 +72,7 @@ function run(sql: string, params: any[]): any {
   throw new Error(`The fake database does not understand: ${sql}`);
 }
 
-mock.module("../controllers/sqldatabase", () => ({ default: database }));
+mock.module("../controllers/sqldatabase", () => databaseModule({ default: database }));
 
 const datacache = await import("../services/datacache");
 const { default: log } = await import("../modules/logger");

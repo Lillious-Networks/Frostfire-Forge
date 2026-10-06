@@ -784,6 +784,8 @@ declare interface ControlPanelData {
   };
   /** The viewer's map with its weather, and every world. `showing` is the weather a "random" world has settled on. */
   world: { map: string; weather: string; showing: string; worlds: Array<{ name: string; weather: string; showing: string; players: number }> };
+  /** For a viewer who handles reports: how many are open. */
+  reports?: { open: number };
   /** Sent when asked in full: which controls the viewer's permissions allow, by action. */
   can?: Record<string, boolean>;
   /** Sent when asked in full: what the map and weather controls pick from. */
@@ -805,6 +807,8 @@ declare type ControlPanelResults =
   | { kind: "players"; query: string; players: Array<{ username: string; userid: number; online: boolean }>; truncated: number }
   | { kind: "items"; query: string; items: Array<Pick<Item, "name" | "quality" | "type" | "icon" | "equipment_slot" | "level_requirement">>; truncated: number }
   | { kind: "permissions"; target: string; held: string[]; types: string[]; isAdmin: boolean }
+  | { kind: "moderation"; target: string; mute: Nullable<import("./src/systems/mutes").Mute>; openReports: number }
+  | { kind: "reports"; open: import("./src/systems/reports").Report[]; resolved: import("./src/systems/reports").Report[] }
   | { kind: "lootTables"; tables: Array<{ id: number; name: string; items: Array<{ id: number; item_name: string; min_quantity: number; max_quantity: number; drop_chance: number; quality: string }> }> };
 
 /** The answer to one control panel request. */

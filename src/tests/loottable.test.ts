@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 // Rows the mocked database returns for loot_table_items, and what was written.
 let tableItems: any[] = [];
 let written: any[][] = [];
 
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (sql: string, params: any[] = []) => {
     if (sql.startsWith("SELECT * FROM loot_tables")) return [{ id: 1, name: "Wolf drops", created_at: null }];
     if (sql.startsWith("SELECT * FROM loot_table_items")) return tableItems;

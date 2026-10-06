@@ -1,8 +1,31 @@
-
+import { GuardError, type TransactionStatement } from "../controllers/sqltransaction";
 
 export const mockQuery = async (_sql: string, _params?: any[]) => {
   return [];
 };
+
+/**
+ * What a test puts in place of the database layer, with the layer's other exports added. A
+ * transaction is its statements handed one after another to the stand-in's own query (`default`),
+ * so a test sees them as it sees any other statement. Nothing is undone when one of them throws:
+ * that all are kept or none is the real layer's to show (sqltransaction.test.ts). A statement
+ * marked `mustChange` is refused only when the stand-in's answer says it changed no rows.
+ */
+export function databaseModule<T extends { default: (sql: string, values?: any) => any }>(standIn: T) {
+  return {
+    GuardError,
+    transaction: async (statements: TransactionStatement[]) => {
+      const results: any[] = [];
+      for (const [index, statement] of statements.entries()) {
+        const result = await standIn.default(statement.sql, statement.values || []);
+        if (statement.mustChange && (result?.affectedRows === 0 || result?.count === 0)) throw new GuardError(index);
+        results.push(result);
+      }
+      return results;
+    },
+    ...standIn,
+  };
+}
 
 export const mockAssetCache = {
   get: async (key: string) => {

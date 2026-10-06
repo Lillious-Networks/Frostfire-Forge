@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, mock, setSystemTime, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 // Generated at server start (`bun create-config`) and gitignored, so CI has
 // no copy on disk. Mock the values instead of requiring the file.
@@ -120,7 +121,7 @@ function write(text: string, args: any[]): any {
   throw new Error(`The fake database does not understand: ${text}`);
 }
 
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (sql: string, params: any[] = []) => run(sql, params),
 }));
 
@@ -148,6 +149,7 @@ const { clearCaches, dropRows, forgetPlayer, refreshPlayer } = realCache;
 const { default: playerCache } = await import("../services/playermanager");
 const { Events, listener } = await import("../systems/events");
 const { default: player } = await import("../systems/player");
+const { atomically } = await import("../services/batch");
 
 // ------------------------------------------------------------------ fixtures
 
@@ -582,6 +584,57 @@ describe("a player's stats", () => {
     expect(row("pc_hero", "stats").xp).toBe(75);
     expect(await fromCache(() => player.getStats("pc_hero"))).toMatchObject({ xp: 75, level: 1 });
   });
+
+  test("increaseXp in a batch: nothing is written or held until the batch is kept, and its gains add up", async () => {
+    await player.getStats("pc_hero");
+    const answers: unknown[] = [];
+
+    const sent = await sentBy(() => atomically(["pc_hero"], async (batch) => {
+      answers.push(await player.increaseXp("PC_Hero", 25, batch));
+      answers.push(await player.increaseXp("pc_hero", 10, batch));
+      expect(row("pc_hero", "stats").xp).toBe(40);
+      expect(await player.getStats("pc_hero")).toMatchObject({ xp: 40 });
+    }));
+
+    expect(answers).toEqual([{ xp: 65, level: 1, max_xp: 100 }, { xp: 75, level: 1, max_xp: 100 }]);
+    expect(sent).toEqual(Array(2).fill("UPDATE stats SET xp = ?, max_xp = ?, level = ? WHERE username = ?"));
+    expect(row("pc_hero", "stats")).toMatchObject({ xp: 75, level: 1, max_xp: 100, health: 80 });
+    expect(await fromCache(() => player.getStats("pc_hero"))).toMatchObject({ xp: 75, level: 1 });
+  });
+
+  test("increaseXp in a batch: a level gained is written and held with what the level brings", async () => {
+    await player.getStats("pc_hero");
+
+    expect(await atomically(["pc_hero"], (batch) => player.increaseXp("pc_hero", 60, batch))).toEqual({ xp: 0, level: 2, max_xp: 110 });
+
+    const levelled = { xp: 0, level: 2, max_xp: 110, max_health: player.getMaxHealthForLevel(2), health: player.getMaxHealthForLevel(2) };
+    expect(row("pc_hero", "stats")).toMatchObject(levelled);
+    expect(await fromCache(() => player.getStats("pc_hero"))).toMatchObject(levelled);
+  });
+
+  test("increaseXp in a batch for a player with no stats adds nothing", async () => {
+    const sent = await sentBy(async () => {
+      expect(await atomically(["pc_nobody"], (batch) => player.increaseXp("pc_nobody", 25, batch))).toEqual([]);
+    });
+
+    expect(sent.filter((sql) => !sql.startsWith("SELECT"))).toEqual([]);
+  });
+
+  for (const made of [false, true]) {
+    test(`increaseXp in a batch the database ${made ? "kept but never answered" : "refused"} has the row read again`, async () => {
+      const before = await player.getStats("pc_hero");
+
+      writesLeft = 0;
+      lostAfterWriting = made;
+      await expect(atomically(["pc_hero"], (batch) => player.increaseXp("pc_hero", 25, batch))).rejects.toThrow("database gone");
+      writesLeft = Infinity;
+
+      let after: any;
+      expect(await sentBy(async () => { after = await player.getStats("pc_hero"); })).toEqual(["SELECT * FROM stats WHERE username = ?"]);
+      if (made) expect(after).toMatchObject({ xp: 65 });
+      else expect(after).toEqual(before);
+    });
+  }
 
   test("increaseLevel changes what the database holds by one, so the row is read again", async () => {
     await player.getStats("pc_hero");

@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 const base: Quest = {
   id: 1, name: "Rats", zone: null, offer_text: "", description: "", progress_text: "", completion_text: "",
@@ -30,7 +31,7 @@ const npcLinks = [
   { npc_id: 3, quest_id: 2, role: "ender" },
 ];
 
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async () => [],
 }));
 

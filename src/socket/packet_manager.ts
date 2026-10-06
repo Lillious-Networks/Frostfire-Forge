@@ -636,6 +636,11 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "UPDATE_FRIENDS", data })),
     ] as any[];
   },
+  updateIgnores: (data: { ignored: string[] }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "UPDATE_IGNORES", data })),
+    ] as any[];
+  },
   invitation: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "INVITATION", data })),

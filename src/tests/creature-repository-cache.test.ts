@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 // The creature tables are read into the asset cache at startup and after each
 // editor change (loadIntoCache). What the editor asks for in between is
@@ -41,7 +42,7 @@ async function database(sql: string, params: any[] = []): Promise<any> {
   return apply(sql, params);
 }
 
-mock.module("../controllers/sqldatabase", () => ({ default: database }));
+mock.module("../controllers/sqldatabase", () => databaseModule({ default: database }));
 
 const cache = new Map<string, any>();
 mock.module("../services/assetCache", () => ({

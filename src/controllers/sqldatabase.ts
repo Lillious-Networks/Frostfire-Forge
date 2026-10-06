@@ -1,5 +1,8 @@
 import log from "../modules/logger";
 import path from "node:path";
+import { GuardError, type TransactionStatement } from "./sqltransaction";
+
+export { GuardError, type TransactionStatement };
 
 const MAX_DB_WORKER_POOL_SIZE = 64;
 const parsedDbWorkerPoolSize = parseInt(process.env.DB_WORKER_POOL_SIZE || "", 10);
@@ -25,7 +28,7 @@ async function initializeWorkerPool(): Promise<void> {
       const worker = new Worker(workerPath);
 
       worker.onmessage = (event: MessageEvent) => {
-        const { type, id, result, error } = event.data;
+        const { type, id, result, error, guard } = event.data;
 
         if (type === 'ready') {
           workersReady++;
@@ -46,7 +49,9 @@ async function initializeWorkerPool(): Promise<void> {
         const pending = pendingQueries.get(id);
         if (pending) {
           pendingQueries.delete(id);
-          if (error) {
+          if (typeof guard === "number") {
+            pending.reject(new GuardError(guard));
+          } else if (error) {
             pending.reject(new Error(error));
           } else {
             pending.resolve(result);
@@ -73,34 +78,45 @@ function getNextWorker(): Worker {
   return worker;
 }
 
-export default async function query<T>(sql: string, values?: any[]): Promise<T[]> {
+/** Hands `work` to the next worker and waits for its answer. */
+function ask<T>(work: { sql: string; values: any[] } | { transaction: TransactionStatement[] }): Promise<T> {
   return new Promise((resolve, reject) => {
     const queryId = `query_${++queryIdCounter}_${Date.now()}`;
     const worker = getNextWorker();
-
-    pendingQueries.set(queryId, { resolve, reject });
 
     const timeout = setTimeout(() => {
       pendingQueries.delete(queryId);
       reject(new Error('Query timeout after 30 seconds'));
     }, 30000);
 
-    const originalResolve = resolve;
-    const originalReject = reject;
-
     pendingQueries.set(queryId, {
       resolve: (value: any) => {
         clearTimeout(timeout);
-        originalResolve(value);
+        resolve(value);
       },
       reject: (error: any) => {
         clearTimeout(timeout);
-        originalReject(error);
+        reject(error);
       }
     });
 
-    worker.postMessage({ id: queryId, sql, values: values || [] });
+    worker.postMessage({ id: queryId, ...work });
   });
+}
+
+export default async function query<T>(sql: string, values?: any[]): Promise<T[]> {
+  return ask<T[]>({ sql, values: values || [] });
+}
+
+/**
+ * Runs `statements` in order as one transaction, on one connection: all of them are kept, or none.
+ * Answers with one result for each statement, as `query` would give it. Throws when nothing was
+ * kept: a GuardError when a statement marked `mustChange` changed no rows, the database's own error
+ * otherwise. See TransactionStatement for what `mustChange` asks of a statement.
+ */
+export async function transaction(statements: TransactionStatement[]): Promise<any[]> {
+  if (statements.length === 0) return [];
+  return ask<any[]>({ transaction: statements });
 }
 
 /** Resolves once every query sent so far has been answered or has timed out. */

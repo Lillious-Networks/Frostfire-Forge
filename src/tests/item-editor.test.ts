@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 const queries: Array<{ sql: string; params: any[] }> = [];
 /** The items table, for the one read the editor ever makes of it: all of it, after a write that failed. */
@@ -6,7 +7,7 @@ let itemRows: any[] = [];
 /** A statement matching this is refused, as a lost connection would refuse it. */
 let failing: RegExp | null = null;
 
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (sql: string, params: any[] = []) => {
     queries.push({ sql, params });
     if (failing?.test(sql)) throw new Error("Connection lost");

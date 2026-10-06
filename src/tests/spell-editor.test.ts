@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 // ------------------------------------------------------------ fake database
 // The spell editor uses a handful of statement shapes. The fake runs them
@@ -119,7 +120,7 @@ function apply(text: string, params: any[]): any {
   throw new Error(`The fake database does not understand: ${text}`);
 }
 
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: (sql: string, params: any[] = []) => run(sql, params),
 }));
 

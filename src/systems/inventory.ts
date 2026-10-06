@@ -1,6 +1,7 @@
-import query from "../controllers/sqldatabase";
+import query, { transaction } from "../controllers/sqldatabase";
 import assetCache from "../services/assetCache";
 import { rowCache, turns } from "../services/datacache";
+import type { Batch } from "../services/batch";
 import log from "../modules/logger";
 
 async function getItems(): Promise<Item[]> {
@@ -81,18 +82,90 @@ function update(username: string, item: string, sql: string, values: unknown[], 
   });
 }
 
+/** What a batch has pending for a player: their rows as its statements so far leave them. */
+interface Pending {
+  held: InventoryRow[];
+  /** The numbers its statements write, for `hold`. */
+  written: unknown[];
+  /** An INSERT of the batch was answered without an id: the rows cannot be worked out here. */
+  unknown: boolean;
+}
+
+/**
+ * A player's rows as `batch` has them so far, the first time with this system's turn taken until
+ * the batch ends. Once the batch is kept they are the rows held; if it is not, the rows held are
+ * forgotten (see `change`).
+ */
+async function pendingIn(batch: Batch, username: string): Promise<Pending> {
+  await batch.hold(oneAtATime, username);
+  return batch.pending(rows, username, async () => {
+    const state: Pending = { held: (await rows.get(username)) ?? [], written: [], unknown: false };
+    batch.kept(() => (state.unknown ? rows.drop(username) : hold(username, state.held, state.written)));
+    batch.undone(() => rows.drop(username));
+    return state;
+  });
+}
+
+/** Collect objectives treat the inventory as the source of truth: the total now held of `item` is theirs to count. */
+async function syncCollected(name: string, item: string) {
+  try {
+    const { sync: syncObjective } = await import("./quests/objectives");
+    const stacks = await inventory.find(name, { name: item, quantity: 0 });
+    const total = stacks?.reduce((sum, r) => sum + (Number(r.quantity) || 0), 0) ?? 0;
+    await syncObjective(name, "collect", item, total);
+  } catch {
+    // Quest sync is best-effort on the inventory path.
+  }
+}
+
 const inventory = {
   async find(name: string, item: InventoryItem) {
     if (!name || !item.name) return;
     return ((await rows.get(name)) ?? []).filter((row) => sameName(row.item, item.name));
   },
-  async add(name: string, item: InventoryItem) {
+  /**
+   * With a `batch` (see services/batch), the statement is added to it instead of sent, and the
+   * answer is true when there was one to add. Each must change a row for the batch to be kept: an
+   * item is never gained beside a write that was lost.
+   */
+  async add(name: string, item: InventoryItem, batch?: Batch) {
     if (!name || !item?.quantity || !item?.name) return;
     if (Number(item.quantity) <= 0) return;
     const items = await getItems();
     const matchedItem = items.find((i) => i.name.toLowerCase() === item.name.toLowerCase());
     if (!matchedItem) return;
     const resolvedName = matchedItem.name;
+
+    if (batch) {
+      const state = await pendingIn(batch, name);
+      const stack = state.held.filter((row) => sameName(row.item, resolvedName));
+      if (stack.length === 0) {
+        const quantity = Number(item.quantity);
+        state.held = [...state.held, { id: 0, username: name, item: resolvedName, quantity, equipped: 0, slot: null, bag_slot: null }];
+        state.written.push(quantity);
+        batch.add({
+          sql: "INSERT IGNORE INTO inventory (username, item, quantity) VALUES (?, ?, ?)",
+          values: [name, resolvedName, quantity],
+          mustChange: true,
+        }, (result) => {
+          const id = insertedId(result);
+          if (id === null) state.unknown = true;
+          else state.held = changed(state.held, resolvedName, { id });
+        });
+      } else {
+        const quantity = Number(stack[0].quantity) + Number(item.quantity);
+        state.held = changed(state.held, resolvedName, { quantity });
+        state.written.push(quantity);
+        batch.add({
+          sql: "UPDATE inventory SET quantity = ? WHERE item = ? AND username = ?",
+          values: [quantity.toString(), resolvedName, name],
+          mustChange: true,
+        });
+      }
+      // Once the batch has ended: the count is the quest system's to write, in a turn of its own.
+      batch.after(() => syncCollected(name, resolvedName));
+      return true;
+    }
 
     const result = await change(name, async () => {
       const held = (await rows.get(name)) ?? [];
@@ -124,16 +197,8 @@ const inventory = {
       await hold(name, changed(held, resolvedName, { quantity }), [quantity]);
       return result;
     });
-    // Collect objectives treat the inventory as the source of truth: sync the
-    // new total so picking up quest items credits immediately.
-    try {
-      const { sync: syncObjective } = await import("./quests/objectives");
-      const stacks = await inventory.find(name, { name: resolvedName, quantity: 0 });
-      const total = stacks?.reduce((sum, r) => sum + (Number(r.quantity) || 0), 0) ?? 0;
-      await syncObjective(name, "collect", resolvedName, total);
-    } catch {
-      // Quest sync is best-effort on the inventory path.
-    }
+    // Sync the new total so picking up quest items credits immediately.
+    await syncCollected(name, resolvedName);
     return result;
   },
   async setEquipped(name: string, item: string, equipped: boolean, targetSlot?: number, targetBagSlot?: number) {
@@ -170,24 +235,49 @@ const inventory = {
     await change(username, async () => {
       let held = (await rows.get(username)) ?? [];
       const written: unknown[] = [];
+      // Together: a save that stops part way would leave some items moved and the rest where they
+      // were, two of them in one slot.
+      await transaction(slots.map((s) => ({
+        sql: "UPDATE inventory SET slot = ?, bag_slot = ? WHERE item = ? AND username = ?",
+        values: [s.slot, s.bag_slot ?? null, s.item, username],
+      })));
       for (const s of slots) {
-        await query(
-          "UPDATE inventory SET slot = ?, bag_slot = ? WHERE item = ? AND username = ?",
-          [s.slot, s.bag_slot ?? null, s.item, username]
-        );
         held = changed(held, s.item, { slot: s.slot ?? null, bag_slot: s.bag_slot ?? null });
         written.push(s.slot, s.bag_slot);
       }
       if (written.length > 0) await hold(username, held, written);
     });
   },
-  async remove(name: string, item: InventoryItem) {
+  /** With a `batch`: as `add` is. Undefined when the player holds none of the item, and nothing is added then. */
+  async remove(name: string, item: InventoryItem, batch?: Batch) {
     if (!name || !item?.quantity || !item?.name) return;
     if (Number(item.quantity) <= 0) return;
     const items = await getItems();
     const matchedItem = items.find((i) => i.name.toLowerCase() === item.name.toLowerCase());
     if (!matchedItem) return;
     const resolvedName = matchedItem.name;
+
+    if (batch) {
+      const state = await pendingIn(batch, name);
+      const stack = state.held.filter((row) => sameName(row.item, resolvedName));
+      if (stack.length === 0) return;
+      if (Number(item.quantity) >= Number(stack[0].quantity)) {
+        state.held = without(state.held, resolvedName);
+        batch.add({ sql: "DELETE FROM inventory WHERE item = ? AND username = ?", values: [resolvedName, name], mustChange: true });
+      } else {
+        const quantity = Number(stack[0].quantity) - Number(item.quantity);
+        state.held = changed(state.held, resolvedName, { quantity });
+        state.written.push(quantity);
+        batch.add({
+          sql: "UPDATE inventory SET quantity = ? WHERE item = ? AND username = ?",
+          values: [quantity.toString(), resolvedName, name],
+          mustChange: true,
+        });
+      }
+      // Giving away or using a quest item walks progress back down.
+      batch.after(() => syncCollected(name, resolvedName));
+      return true;
+    }
 
     const removed = await change(name, async () => {
       const held = (await rows.get(name)) ?? [];
@@ -217,14 +307,7 @@ const inventory = {
     });
     if (!removed) return;
     // Dropping or using a quest item walks progress back down.
-    try {
-      const { sync: syncObjective } = await import("./quests/objectives");
-      const stacks = await inventory.find(name, { name: resolvedName, quantity: 0 });
-      const total = stacks?.reduce((sum, r) => sum + (Number(r.quantity) || 0), 0) ?? 0;
-      await syncObjective(name, "collect", resolvedName, total);
-    } catch {
-      // Quest sync is best-effort on the inventory path.
-    }
+    await syncCollected(name, resolvedName);
     return removed.result;
   },
   async delete(name: string, item: InventoryItem) {

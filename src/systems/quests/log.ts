@@ -1,6 +1,7 @@
 import query from "../../controllers/sqldatabase";
 import playerCache from "../../services/playermanager";
 import { rowCache } from "../../services/datacache";
+import { atomically, type Batch } from "../../services/batch";
 import log from "../../modules/logger";
 import { listener } from "../../modules/event_bus";
 import { Events } from "../events";
@@ -146,6 +147,33 @@ export function writeQuestRows<T>(username: string, write: (rows: QuestRows) => 
       throw error;
     }
   });
+}
+
+/**
+ * writeQuestRows, as part of a batch (see services/batch). `write` is handed
+ * the rows the batch has so far, adds its statements to the batch and replaces
+ * the lists it changed; they become the rows held once the batch is kept. If
+ * it is not, the rows are forgotten and the log an online player carries is
+ * put back in step, as there. A caller changes the log the player carries in
+ * a step of its own, for once the batch is kept.
+ */
+export async function writeQuestRowsIn(batch: Batch, username: string, write: (rows: QuestRows) => void): Promise<void> {
+  const uname = lower(username);
+  await batch.hold(oneAtATime, uname);
+  const rows = await batch.pending(logRows, uname, async () => {
+    const held = await rowsOf(uname);
+    const pending = { ...held };
+    batch.kept(async () => {
+      if (pending.log !== held.log) await logRows.set(uname, pending.log);
+      if (pending.progress !== held.progress) await progressRows.set(uname, pending.progress);
+    });
+    batch.undone(async () => {
+      await Promise.all([logRows.drop(uname), progressRows.drop(uname)]);
+      await resyncLog(uname);
+    });
+    return pending;
+  });
+  write(rows);
 }
 
 function findCachedPlayer(username: string): any | null {
@@ -587,6 +615,13 @@ export async function removeFromEveryLog(questId: number): Promise<void> {
   });
 }
 
+/** Thrown inside a hand-in's batch to leave it unsent: what the player is told instead. */
+class Refused extends Error {
+  constructor(readonly result: TurnInResult) {
+    super(result.error);
+  }
+}
+
 export async function turnIn(
   username: string,
   questId: number,
@@ -599,38 +634,50 @@ export async function turnIn(
   if (!isEnder(Number(npcId), quest.id)) {
     return { ok: false, error: "That NPC does not complete this quest.", code: "not_ender" };
   }
-  const data = await readLog(username);
-  const entry = data.active.find((e) => e.quest_id === quest.id);
-  if (!entry) return { ok: false, error: "That quest is not in your log.", code: "not_active" };
-  if (entry.state !== "ready") return { ok: false, error: "That quest is not ready to turn in.", code: "not_ready" };
-
   const { validateChoice, grant } = await import("./rewards");
-  if (!validateChoice(quest, rewardChoiceIndex)) {
-    return { ok: false, error: "Choose a reward first.", code: "bad_choice" };
-  }
-  const granted = await grant(username, quest, rewardChoiceIndex);
-  if (!granted.ok) {
-    return { ok: false, error: granted.error || "Could not grant rewards.", code: granted.code || "rewards" };
-  }
 
-  const now = Date.now();
-  const timesCompleted = (entry.times_completed || 0) + 1;
+  // One batch: what the quest pays and the quest's state are kept together or not at all, so a
+  // quest that could not be completed pays nothing. And one hand-in at a time for a player: the
+  // log is read inside, where a second hand-in of the same quest finds it handed in.
+  let granted: Awaited<ReturnType<typeof grant>>;
   try {
-    await writeQuestRows(username, async (rows) => {
-      await query(
-        "UPDATE quest_log SET state = 'completed', completed_at = ?, times_completed = ? WHERE username = ? AND quest_id = ?",
-        [now, timesCompleted, uname, quest.id]
-      );
-      rows.log = rows.log.map((row) => (ofQuest(quest.id)(row) ? { ...row, state: "completed", completed_at: now, times_completed: timesCompleted } : row));
+    granted = await atomically([uname], async (batch) => {
+      const data = await readLog(username);
+      const entry = data.active.find((e) => e.quest_id === quest.id);
+      if (!entry) throw new Refused({ ok: false, error: "That quest is not in your log.", code: "not_active" });
+      if (entry.state !== "ready") throw new Refused({ ok: false, error: "That quest is not ready to turn in.", code: "not_ready" });
+      if (!validateChoice(quest, rewardChoiceIndex)) {
+        throw new Refused({ ok: false, error: "Choose a reward first.", code: "bad_choice" });
+      }
+
+      const rewards = await grant(username, quest, rewardChoiceIndex, batch);
+      if (!rewards.ok) {
+        throw new Refused({ ok: false, error: rewards.error || "Could not grant rewards.", code: rewards.code || "rewards" });
+      }
+
+      const now = Date.now();
+      const timesCompleted = (entry.times_completed || 0) + 1;
+      await writeQuestRowsIn(batch, username, (rows) => {
+        // It must change the row: a quest that is no longer in the log pays nothing.
+        batch.add({
+          sql: "UPDATE quest_log SET state = 'completed', completed_at = ?, times_completed = ? WHERE username = ? AND quest_id = ?",
+          values: [now, timesCompleted, uname, quest.id],
+          mustChange: true,
+        });
+        rows.log = rows.log.map((row) => (ofQuest(quest.id)(row) ? { ...row, state: "completed", completed_at: now, times_completed: timesCompleted } : row));
+      });
+      batch.kept(() => {
+        data.active = data.active.filter((e) => e.quest_id !== quest.id);
+        if (!data.completed.includes(quest.id)) data.completed.push(quest.id);
+        setCachedLog(username, data);
+      });
+      return rewards;
     });
   } catch (error) {
-    log.error(`Quest turn-in state save failed for ${uname} quest ${quest.id}: ${error}`);
+    if (error instanceof Refused) return error.result;
+    log.error(`Quest turn-in save failed for ${uname} quest ${quest.id}: ${error}`);
     return { ok: false, error: "Could not complete the quest.", code: "db_error" };
   }
-
-  data.active = data.active.filter((e) => e.quest_id !== quest.id);
-  if (!data.completed.includes(quest.id)) data.completed.push(quest.id);
-  setCachedLog(username, data);
 
   try {
     const { trackRadiusPlayer } = await import("./objectives");

@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 const quest: Quest = {
   id: 1, name: "Rats", zone: null, offer_text: "", description: "", progress_text: "", completion_text: "",
@@ -28,7 +29,7 @@ function resetAll() {
 
 resetAll();
 
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (sql: string, _params: any[] = []) => {
     if (sql.includes("SELECT * FROM bags")) return [];
     if (sql.includes("SELECT item FROM inventory")) {

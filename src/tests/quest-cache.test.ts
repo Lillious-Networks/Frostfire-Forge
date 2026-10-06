@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
+import { GuardError } from "../controllers/sqltransaction";
 
 // Generated at server start (`bun create-config`) and gitignored, so CI has
 // no copy on disk. Mock the values instead of requiring the file.
@@ -19,6 +21,8 @@ let tables: Record<string, Row[]>;
 let nextId: number;
 /** Every statement sent, with its values, in order. */
 let queries: Array<[string, any[]]>;
+/** How many transactions were sent. */
+let transactions: number;
 /** A statement matching this is refused, as a lost connection would refuse it. */
 let failing: RegExp | null;
 /** The refused statement was written all the same: its answer is what was lost. */
@@ -79,6 +83,13 @@ function run(text: string, params: any[]): any {
     return rows.map((row) => Object.fromEntries(columns.split(", ").map((column) => [column, row[column]])));
   }
 
+  // The one statement here that makes a row or changes the one there is: a player's balance.
+  if (text.startsWith("INSERT INTO currency (username, copper, silver, gold) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE")) {
+    const [username, copper, silver, gold] = args;
+    tables.currency = [...(tables.currency || []).filter((row) => row.username !== username), { username, copper, silver, gold }];
+    return { affectedRows: 1 };
+  }
+
   const insert = text.match(/^INSERT (IGNORE )?INTO (\w+) \((.+?)\) VALUES \((.+?)\)$/);
   if (insert) {
     const [, , table, columns, values] = insert;
@@ -116,21 +127,46 @@ function run(text: string, params: any[]): any {
   throw new Error(`The fake database does not understand: ${text}`);
 }
 
-mock.module("../controllers/sqldatabase", () => ({
-  default: async (sql: string, params: any[] = []) => {
-    const text = sql.replace(/\s+/g, " ").trim();
-    queries.push([text, params]);
-    if (gate?.match.test(text)) {
-      const held = gate;
-      gate = null;
-      held.arrive();
-      await held.open;
+async function ask(sql: string, params: any[] = []) {
+  const text = sql.replace(/\s+/g, " ").trim();
+  queries.push([text, params]);
+  if (gate?.match.test(text)) {
+    const held = gate;
+    gate = null;
+    held.arrive();
+    await held.open;
+  }
+  if (failing?.test(text)) {
+    if (lostAfterWriting) run(text, params);
+    throw new Error("connection lost");
+  }
+  return run(text, params);
+}
+
+mock.module("../controllers/sqldatabase", () => databaseModule({
+  default: ask,
+  // All of its statements or none: one that is refused, or that had to change a row and did not, puts the
+  // tables back as they were. One written with its answer lost stands for a transaction kept whole and never answered.
+  transaction: async (statements: Array<{ sql: string; values?: any[]; mustChange?: boolean }>) => {
+    transactions++;
+    const before = structuredClone({ tables, nextId });
+    const results: any[] = [];
+    let lost: unknown = null;
+    for (const [index, statement] of statements.entries()) {
+      try {
+        const answer = await ask(statement.sql, statement.values);
+        if (statement.mustChange && answer.affectedRows === 0) throw new GuardError(index);
+        results.push(answer);
+      } catch (error) {
+        if (!lostAfterWriting || error instanceof GuardError) {
+          ({ tables, nextId } = before);
+          throw error;
+        }
+        lost = error;
+      }
     }
-    if (failing?.test(text)) {
-      if (lostAfterWriting) run(text, params);
-      throw new Error("connection lost");
-    }
-    return run(text, params);
+    if (lost) throw lost;
+    return results;
   },
 }));
 
@@ -306,6 +342,7 @@ beforeEach(async () => {
   tables = { quest_log: [], quest_objective_progress: [], inventory: [], bags: [], stats: [] };
   nextId = 500;
   queries = [];
+  transactions = 0;
   failing = null;
   lostAfterWriting = false;
   gate = null;
@@ -958,6 +995,96 @@ describe("a quest write that fails changes nothing the player carries, and says 
     failing = null;
     expect(hero.questlog).toEqual({ active: [expect.objectContaining({ quest_id: 1, state: "ready" })], completed: [] });
     expect(emitted(Events.QUEST_COMPLETED)).toEqual([]);
+    await inStep(hero);
+  });
+
+  /** A quest ready to hand in that pays in every way: an item, experience and coins. */
+  async function paydayReady() {
+    const payday = quest(31, "Payday", { rewards: [reward(31, "Torch")], xp_reward: 40, copper_reward: 30 });
+    defs.setCachedQuestsSync([...QUESTS, payday]);
+    defs.setIndexesForTests(defs.buildIndexes([...QUESTS, payday], [...LINKS, { npc_id: NPC, quest_id: 31, role: "ender" }]));
+    tables.quest_log.push(logRow("hero", 31, "ready"));
+    tables.stats.push({ username: "hero", level: 5, health: 100, max_health: 100, stamina: 100, max_stamina: 100, xp: 10, max_xp: 100 });
+    const hero = await login();
+    await inventory.get("hero");
+    return hero;
+  }
+  const inventoryHeld = async () => ((await inventory.get("hero")) as Row[]).map((row) => [row.item, row.quantity]);
+  const inventoryInTable = () => tables.inventory.filter((row) => row.username === "hero").map((row) => [row.item, row.quantity]);
+
+  test("a hand-in is one transaction: the item, the experience, the coins and the quest's state", async () => {
+    const hero = await paydayReady();
+
+    expect(await questLog.turnIn("hero", 31, NPC)).toMatchObject({ ok: true, items: [{ name: "Torch", quantity: 1 }], xpResult: { xp: 50, level: 5, max_xp: 100 } });
+
+    expect(transactions).toBe(1);
+    expect(inventoryInTable()).toEqual([["Torch", 1]]);
+    expect(tables.stats[0].xp).toBe(50);
+    expect(tables.currency).toEqual([{ username: "hero", copper: 30, silver: 0, gold: 0 }]);
+    expect(tables.quest_log[0]).toMatchObject({ state: "completed", times_completed: 1 });
+    expect(await inventoryHeld()).toEqual(inventoryInTable());
+    await inStep(hero);
+  });
+
+  test("a hand-in whose state could not be saved pays nothing, and can be handed in after", async () => {
+    const hero = await paydayReady();
+
+    failing = /^UPDATE quest_log SET state = 'completed'/;
+    expect(await questLog.turnIn("hero", 31, NPC)).toMatchObject({ ok: false, code: "db_error" });
+    failing = null;
+
+    expect(inventoryInTable()).toEqual([]);
+    expect(tables.stats[0].xp).toBe(10);
+    expect(tables.currency ?? []).toEqual([]);
+    expect(hero.questlog.active).toEqual([expect.objectContaining({ quest_id: 31, state: "ready" })]);
+    expect(emitted(Events.QUEST_COMPLETED)).toEqual([]);
+    expect(await inventoryHeld()).toEqual([]);
+    await inStep(hero);
+
+    expect((await questLog.turnIn("hero", 31, NPC)).ok).toBe(true);
+    expect(inventoryInTable()).toEqual([["Torch", 1]]);
+    expect(tables.stats[0].xp).toBe(50);
+  });
+
+  test("a hand-in whose reward could not be written leaves the quest ready", async () => {
+    const hero = await paydayReady();
+
+    failing = /^INSERT IGNORE INTO inventory/;
+    expect(await questLog.turnIn("hero", 31, NPC)).toMatchObject({ ok: false, code: "db_error" });
+    failing = null;
+
+    expect(tables.quest_log[0]).toMatchObject({ state: "ready", times_completed: 0 });
+    expect(tables.stats[0].xp).toBe(10);
+    expect(hero.questlog.active).toEqual([expect.objectContaining({ quest_id: 31, state: "ready" })]);
+    await inStep(hero);
+  });
+
+  test("a reward another quest is collecting is counted for that quest once the hand-in is done", async () => {
+    const tails = quest(32, "Tail Money", { rewards: [{ ...reward(32, "Rat Tail"), quantity: 2 }] });
+    defs.setCachedQuestsSync([...QUESTS, tails]);
+    defs.setIndexesForTests(defs.buildIndexes([...QUESTS, tails], [...LINKS, { npc_id: NPC, quest_id: 32, role: "ender" }]));
+    tables.quest_log.push(logRow("hero", 32, "ready"), logRow("hero", 4));
+    const hero = await login();
+
+    expect((await questLog.turnIn("hero", 32, NPC)).ok).toBe(true);
+
+    expect(tables.quest_objective_progress).toContainEqual(count("hero", 4, 401, 2));
+    expect(tables.quest_log.find((row) => row.quest_id === 4)!.state).toBe("ready");
+    await inStep(hero);
+  }, 2000);
+
+  test("handed in twice at the same moment, a quest pays once", async () => {
+    const hero = await paydayReady();
+
+    const results = await Promise.all([questLog.turnIn("hero", 31, NPC), questLog.turnIn("hero", 31, NPC)]);
+
+    expect(results.map((result) => result.ok).sort()).toEqual([false, true]);
+    expect(results.find((result) => !result.ok)).toMatchObject({ code: "not_active" });
+    expect(inventoryInTable()).toEqual([["Torch", 1]]);
+    expect(tables.stats[0].xp).toBe(50);
+    expect(tables.currency).toEqual([{ username: "hero", copper: 30, silver: 0, gold: 0 }]);
+    expect(tables.quest_log[0].times_completed).toBe(1);
+    expect(emitted(Events.QUEST_COMPLETED)).toHaveLength(1);
     await inStep(hero);
   });
 

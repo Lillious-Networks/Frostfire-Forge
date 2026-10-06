@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 // Generated at server start (`bun create-config`) and gitignored, so CI has
 // no copy on disk. Mock the values instead of requiring the file.
@@ -112,7 +113,7 @@ function run(sql: string, params: any[] = []): any {
   throw new Error(`The fake database does not understand: ${text}`);
 }
 
-mock.module("../controllers/sqldatabase", () => ({
+mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (sql: string, params: any[] = []) => run(sql, params),
 }));
 

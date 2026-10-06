@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { databaseModule } from "./setup";
 
 // The lists the asset cache holds of whole tables (items, mounts, weather,
 // worlds, npcs, particles): read from the database at startup, answered from
@@ -133,7 +134,7 @@ function resetDatabase() {
 }
 
 resetDatabase();
-mock.module("../controllers/sqldatabase", () => ({ default: database }));
+mock.module("../controllers/sqldatabase", () => databaseModule({ default: database }));
 
 const cache = new Map<string, any>();
 mock.module("../services/assetCache", () => ({

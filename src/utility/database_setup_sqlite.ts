@@ -308,9 +308,55 @@ const createPermissionTypesTable = async () => {
       ('tools.npc_editor'),
       ('tools.entity_editor'),
       ('tools.particle_editor'),
-      ('tools.weather_editor');
+      ('tools.weather_editor'),
+      ('admin.mute'),
+      ('admin.unmute'),
+      ('admin.reports');
   `;
   await query(sql);
+};
+
+/** Mutes, ignore lists and player reports. Times are milliseconds since the epoch. */
+const createModerationTables = async () => {
+  log.info("Creating mutes, ignores and reports tables...");
+  await query(`
+    CREATE TABLE IF NOT EXISTS mutes (
+      username TEXT NOT NULL PRIMARY KEY,
+      muted_by TEXT NOT NULL,
+      reason TEXT DEFAULT NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER DEFAULT NULL
+    );
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS ignores (
+      username TEXT NOT NULL,
+      ignored TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (username, ignored)
+    );
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      reporter TEXT NOT NULL,
+      target TEXT NOT NULL,
+      category TEXT NOT NULL,
+      details TEXT DEFAULT NULL,
+      chat_log TEXT NOT NULL,
+      map TEXT DEFAULT NULL,
+      x INTEGER DEFAULT NULL,
+      y INTEGER DEFAULT NULL,
+      target_map TEXT DEFAULT NULL,
+      target_x INTEGER DEFAULT NULL,
+      target_y INTEGER DEFAULT NULL,
+      created_at INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      resolved_by TEXT DEFAULT NULL,
+      resolved_at INTEGER DEFAULT NULL,
+      resolution TEXT DEFAULT NULL
+    );
+  `);
 };
 
 const createNpcTable = async () => {
@@ -1026,6 +1072,7 @@ const setupDatabase = async () => {
   await createQuestsTable();
   await createQuestLogTable();
   await createFriendsListTable();
+  await createModerationTables();
   await createPartiesTable();
   await createCurrencyTable();
   await createGuildsTable();
