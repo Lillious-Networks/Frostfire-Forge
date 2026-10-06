@@ -10833,20 +10833,10 @@ export default async function packetReceiver(
         const addResult = await inventory.add(currentPlayer.username, { name: lootItem.item, quantity: lootItem.quantity });
         if (!addResult) break;
 
-        const invEntry = currentPlayer.inventory.find((i: any) =>
-          i.name.toLowerCase() === lootItem.item.toLowerCase()
-        );
-        if (invEntry) {
-          invEntry.quantity = (invEntry.quantity || 0) + lootItem.quantity;
-        } else {
-          currentPlayer.inventory.push({
-            name: lootItem.item,
-            quantity: lootItem.quantity,
-            equipped: false,
-            slot: null,
-            bag_slot: null,
-          });
-        }
+        // Re-read the inventory instead of patching the cached list by hand: an
+        // item the player did not hold before needs its full details (quality,
+        // icon, type), and the client cannot draw an entry without them.
+        currentPlayer.inventory = await patchInventoryBagSlots(await inventory.get(currentPlayer.username), currentPlayer.username);
         playerCache.set(currentPlayer.id, currentPlayer);
         sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
         break;
@@ -10860,25 +10850,11 @@ export default async function packetReceiver(
         if (items.length === 0) break;
 
         for (const item of items) {
-          const addResult = await inventory.add(currentPlayer.username, { name: item.item, quantity: item.quantity });
-          if (!addResult) continue;
-
-          const invEntry = currentPlayer.inventory.find((i: any) =>
-            i.name.toLowerCase() === item.item.toLowerCase()
-          );
-          if (invEntry) {
-            invEntry.quantity = (invEntry.quantity || 0) + item.quantity;
-          } else {
-            currentPlayer.inventory.push({
-              name: item.item,
-              quantity: item.quantity,
-              equipped: false,
-              slot: null,
-              bag_slot: null,
-            });
-          }
+          await inventory.add(currentPlayer.username, { name: item.item, quantity: item.quantity });
         }
 
+        // As in PICKUP_LOOT: re-read, so new items arrive with their full details.
+        currentPlayer.inventory = await patchInventoryBagSlots(await inventory.get(currentPlayer.username), currentPlayer.username);
         playerCache.set(currentPlayer.id, currentPlayer);
         sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
         sendPacket(wt, packetManager.notify({ message: `Picked up ${items.length} item(s).` }));
