@@ -299,6 +299,7 @@ const createPermissionTypesTable = async () => {
       ('permission.remove'),
       ('server.*'),
       ('server.admin'),
+      ('server.gateway'),
       ('server.notify'),
       ('server.restart'),
       ('server.shutdown'),

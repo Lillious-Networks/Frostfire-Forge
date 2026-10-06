@@ -349,6 +349,7 @@ const createPermissionTypesTable = async () => {
         ('permission.remove'),
         ('server.*'),
         ('server.admin'),
+        ('server.gateway'),
         ('server.notify'),
         ('server.restart'),
         ('server.shutdown'),
@@ -371,6 +372,8 @@ const createPermissionTypesTable = async () => {
   // Self-healing for existing databases: later-added permissions.
   await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.revive')`);
   await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.kill')`);
+  // Opens the gateway monitoring dashboard (Frostfire Forge Gateway).
+  await query(`INSERT IGNORE INTO permission_types (name) VALUES ('server.gateway')`);
 };
 
 /** Quest-giver flag added to npcs after its first release. */
