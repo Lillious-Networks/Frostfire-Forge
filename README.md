@@ -43,21 +43,25 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
   - [Gateway (Authentication & Reverse Proxy)](#gateway-authentication--reverse-proxy)
   - [Asset Server (Media & Resources)](#asset-server-media--resources)
 - [Environment Variables](#-environment-variables)
+- [Weather](#weather)
+  - [How a Weather Is Drawn](#how-a-weather-is-drawn)
+  - [Real Weather](#real-weather)
 - [Realm Whitelist Configuration](#️-realm-whitelist-configuration)
 - [Quick Start](#-quick-start)
   - [Development Setup](#development-setup)
   - [Production Setup](#production-setup)
-  - [Docker Deployment](#docker-deployment)
 - [Commands Reference](#-commands-reference)
   - [Admin Commands](#admin-commands)
   - [Player Commands](#player-commands)
+- [Benchmarking](#-benchmarking)
+- [Spell Creation Guide](#spell-creation-guide)
+- [Quest System Guide](#quest-system-guide)
 - [API Documentation](#-api-documentation)
   - [Plugin System](#plugin-system)
   - [Listener Events](#listener-events)
   - [Packet Types](#packet-types)
   - [Caching](#caching)
   - [Events](#events)
-- [System API Reference](#-system-api-reference)
 
 ---
 
@@ -93,6 +97,7 @@ Game servers automatically register with the gateway on startup using the `GATEW
 Frostfire Forge requires the [Frostfire Forge Assets](https://github.com/Lillious-Networks/Frostfire-Forge-Assets) server for all deployments. The asset server manages and distributes critical game data including:
 
 - **Map Data** - Tile maps, collision layers, spawn points, and warps
+- **World Maps** - Large worlds (up to 10240 x 10240 tiles) kept as a `.world` directory next to the `.json` maps and served in chunks like any other map. The game server syncs only a world's manifest and its collision and no-PvP data
 - **Sprites & Animations** - Character sprites, item graphics, and animation frames
 - **Game Resources** - Particle effects, NPC data, quest data, items, spells, and mounts
 - **Dynamic Updates** - Real-time map updates from the tile editor for collaborative world building
@@ -176,7 +181,44 @@ WT_HANDSHAKE_RATE_LIMIT_DISABLED="false"     # Set to "true" to disable WebTrans
 
 # Realm Configuration
 WHITELIST="false"                             # Set to "true" to enable the username whitelist
+
+# Real weather (Optional)
+WEATHER_API_KEY=""                            # OpenWeatherMap API key; empty turns real weather off
+WEATHER_API_LOCATION=""                       # "lat,lon" (47.61,-122.33) or a city and its country (Seattle,US)
+WEATHER_API_MINUTES="10"                      # Minutes between readings (default: 10)
 ```
+
+---
+
+## Weather
+
+A world's weather is the name of a row of the `weather` table, or one of three words of `/weather`: `clear`, `random` (another weather every 30 minutes) or `weather_api` (the real weather, below). Weathers are created and edited live with the [Weather Editor](#admin-commands) and given to a world with `/weather`.
+
+### How a Weather Is Drawn
+
+The client picks what it draws by the weather's name, and the row's values shape it:
+
+| Name | Drawn |
+|------|-------|
+| `rainy` | Rain, with splashes where it lands |
+| `thunderstorm` | Rain, lightning strikes and a darkened scene (by as much as `ambience` says) |
+| `snowy` | Snow, which melts where it lands |
+| `darkness` | A near-black scene with no sun and no shadows (by as much as `ambience` says) |
+| `clear`, any other name | No rain, snow or darkening: only its wind |
+
+- **Precipitation** (0 to 100) is how much rain or snow falls. 80 is the seeded thunderstorm, and a weather named for rain or snow never falls less than a drizzle.
+- **Temperature** is in degrees Fahrenheit. Below 32, rain falls as snow.
+- **Wind speed** and **wind direction** (`none`, `left`, `right`, `up`, `down`) draw white wind streaks across the screen, more and faster as the wind rises, with gusts. Wind to the left or right also slants rain and snow and pushes particles that are affected by weather. Streaks need a direction and a speed above 0.
+
+`bun setup` seeds `clear`, `thunderstorm`, `darkness`, `rainy` and `snowy`.
+
+### Real Weather
+
+A world set to `weather_api` follows the weather of a real place. With `WEATHER_API_KEY` (a free key from [OpenWeatherMap](https://openweathermap.org/api), "Current Weather Data") and `WEATHER_API_LOCATION` set, the server reads that place's weather at startup and every `WEATHER_API_MINUTES`, and holds the temperature (Fahrenheit), humidity, wind speed (mph), wind direction, precipitation (0 to 100) and ambience in memory. `weather_api` is a word of `/weather`, like `clear` and `random`: it is not a row of the weather table and nothing is written to the database.
+
+Give it to a world with `/weather weather_api`. Every world on it shows the same reading, and players there see the change as soon as a reading differs: rain as heavy as the precipitation, snow when it snows or when the temperature is below 32, lightning in a thunderstorm, and wind from the real direction. Without a key it is a still, clear day.
+
+The time of day follows the same place: each reading carries the place's shift from UTC (daylight saving included), and every player sees that place's clock, on every world. Without a key or a place, each player's own clock is used.
 
 ---
 
@@ -190,18 +232,20 @@ The whitelist feature restricts user access to a specific realm to only approved
 
 **1. Enable the whitelist for the realm:**
 
-Set the environment variable in your `.env` file:
+Set the environment variable in your `.env` file to have the realm start with its whitelist on:
 ```bash
 WHITELIST=true
 ```
 
+Or turn it on and off while the server runs, with `/whitelist on` and `/whitelist off` or the switch on the Server page of the control panel. A switch made this way lasts until the server restarts, when `WHITELIST` decides again. Turning it on adds you to the list and checks new logins only: players already online stay.
+
 **2. Run the whitelist command**
 
-Run the whitelist command found in the [Admin Commands](#admin-commands) section to add or remove from the whitelist
+Run the whitelist command found in the [Admin Commands](#admin-commands) section to add or remove from the whitelist. Usernames can only be added or removed while the whitelist is on.
 
 **Realm Status in Gateway:**
 
-The realm will display a "whitelist" badge in the realm selection UI when `WHITELIST=true`, allowing players to see which realms have restricted access.
+The realm will display a "whitelist" badge in the realm selection UI while its whitelist is on (`WHITELIST=true`, or turned on with `/whitelist on`), allowing players to see which realms have restricted access.
 
 ---
 
@@ -279,10 +323,10 @@ bun setup-production
 <summary><strong>Change Weather</strong></summary>
 
 ```bash
-/weather [weather_name | clear | random]
+/weather [weather_name | clear | random | weather_api]
 ```
 - **Permission**: `admin.weather` | `admin.*`
-- Changes the current world's weather. Valid values are any weather name from the `weather` database table, `clear` to disable weather, or `random` to cycle through all available weather types every 30 minutes.
+- Changes the current world's weather. Valid values are any weather name from the `weather` database table, `clear` for clear weather, `random` to cycle through all available weather types every 30 minutes, or `weather_api` to follow the real weather (see [Real Weather](#real-weather)).
 </details>
 
 <details>
@@ -487,7 +531,7 @@ Edits creature templates, abilities, spawns, patrol paths, link groups and spawn
 - **Aliases**: `ie`
 - **Permission**: `tools.item_editor` | `tools.*`
 
-Creates and edits items: name, type, quality, icon, description, equipment slot, level requirement, bag slots and every stat. Weapons also carry `damage_min`, `damage_max` and `attack_speed_ms`, which drive melee auto-attack damage and swing timing — a weapon with no damage range falls back to its flat damage stat.
+Creates and edits items: name, type, quality, icon, description, equipment slot, level requirement, bag slots and every stat. Weapons also carry `damage_min`, `damage_max` and `attack_speed_ms`, which drive melee auto-attack damage and swing timing. A weapon with no damage range falls back to its flat damage stat.
 
 </details>
 
@@ -501,6 +545,19 @@ Creates and edits items: name, type, quality, icon, description, equipment slot,
 - **Permission**: `tools.spell_editor` | `tools.*`
 
 Creates and edits spells: name, icon, description, damage, mana cost, range, cast time, cooldown, particles, area and ground targeting, charge and teleport, and the effects a spell applies (each effect type with only the fields it uses). A saved spell works at once, without a restart. Spells registered by plugins are shown read-only.
+
+</details>
+
+<details>
+<summary><strong>Weather Editor</strong></summary>
+
+```bash
+/weathereditor
+```
+- **Aliases**: `we`
+- **Permission**: `tools.weather_editor` | `tools.*`
+
+Creates, edits and deletes the rows of the `weather` table: name, wind speed and direction, ambience, temperature, humidity and precipitation. A saved weather is shown at once to the players of every world that shows it, including a world on `random` that settled on it. The client picks what it draws by the weather's name (see [How a Weather Is Drawn](#how-a-weather-is-drawn)), so a name is fixed once saved; a weather of any other name only carries its wind. `clear` cannot be deleted. Deleting a weather sets every world that uses it to `clear`. `random`, `none` and `weather_api` are words of `/weather` and cannot be used as a weather's name.
 
 </details>
 
@@ -553,8 +610,12 @@ The panel has a control for every admin command above; the editors are opened wi
 - **Permission**: `admin.whitelist` | `admin.*`
 
 **Modes**:
-- `add` - Add a player to the whitelist
-- `remove` - Remove a player from the whitelist
+- `on` - Turn the whitelist on without a restart. The usernames are loaded from the database, you are added to the list, and new logins are checked; players already online stay
+- `off` - Turn the whitelist off without a restart
+- `add` - Add a player to the whitelist (while it is on)
+- `remove` - Remove a player from the whitelist (while it is on)
+
+`on` and `off` last until the server restarts: `WHITELIST` in the environment decides how it starts. The same switch is on the Server page of the control panel.
 </details>
 
 ---
@@ -880,7 +941,7 @@ Quests are authored in the quest editor (`/questeditor`, alias `qe`, permission 
 - Press **E** near an NPC (or tap them on mobile) to talk. An NPC is interactable when it has quests or gossip to share.
 - **L** opens the quest log. A tracked-quest HUD lists live objective counts; clicking a tracked quest jumps to it.
 - Quest markers float above NPC heads: gold `!` = quest available, grey `?` = in progress, gold `?` = ready to turn in.
-- NPCs with no quests show their gossip in the overhead speech bubble only — no popup.
+- NPCs with no quests show their gossip in the overhead speech bubble only, with no popup.
 
 ### Quest Flow
 

@@ -358,6 +358,7 @@ const createPermissionTypesTable = async () => {
       ('tools.creature_editor'),
       ('tools.item_editor'),
       ('tools.spell_editor'),
+      ('tools.weather_editor'),
       ('tools.quest_editor'),
           ('tools.particle_editor'),
         ('admin.loot')
@@ -506,6 +507,20 @@ const createDefaultWeather = async () => {
     await query(sql);
   } else {
     log.debug("Default weather 'darkness' already exists - skipping");
+  }
+
+  // "rainy" and "snowy" are drawn by name, as much as their precipitation says.
+  const more: Array<[string, string]> = [
+    ["rainy", "('rainy', 0, 'left', 6, 85, 58, 50)"],
+    ["snowy", "('snowy', 0, 'left', 4, 80, 25, 80)"],
+  ];
+  for (const [name, values] of more) {
+    const found = await query(`SELECT COUNT(*) as count FROM weather WHERE name = '${name}'`) as Array<{ count: number }>;
+    if (found[0]?.count === 0) {
+      await query(`INSERT INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ${values}`);
+    } else {
+      log.debug(`Default weather '${name}' already exists - skipping`);
+    }
   }
 }
 
@@ -1251,6 +1266,7 @@ const dropLegacyQuestTables = async () => {
   try {
     await query(`INSERT IGNORE INTO permission_types (name) VALUES ('tools.quest_editor')`);
     await query(`INSERT IGNORE INTO permission_types (name) VALUES ('tools.spell_editor')`);
+    await query(`INSERT IGNORE INTO permission_types (name) VALUES ('tools.weather_editor')`);
   } catch {
     // Ignore.
   }

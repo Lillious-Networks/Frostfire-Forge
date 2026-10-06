@@ -2,8 +2,10 @@ import query from "../controllers/sqldatabase";
 import { verify, randomBytes } from "../modules/hash";
 import log from "../modules/logger";
 import assetCache from "../services/assetCache";
+import { getWorldMap, type WorldBits } from "../modules/worldmaps";
 import * as settings from "../config/settings.json";
 import playerCache from "../services/playermanager.ts";
+import { realmWhitelist } from "../services/whitelist";
 import { rowCache, tableCache, dropRows, dropAllRows, reloadTable, type RowCache } from "../services/datacache";
 import { Events, listener } from "./events";
 import { isSick, applySicknessToStats } from "./resurrection";
@@ -218,11 +220,15 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000).unref();
 
+type CachedMap = typeof mapCache extends Map<string, infer V> ? V : never;
+
 const mapCache: Map<
   string,
   {
     warps: Record<string, WarpObject>;
     collisionRLE?: number[];
+    /** A world's collision (modules/worldmaps.ts): one bit per tile, in place of the run lengths. */
+    collisionBits?: WorldBits;
     grid?: Uint8Array;
     width: number;
     height: number;
@@ -230,6 +236,30 @@ const mapCache: Map<
     tileHeight: number;
   }
 > = new Map();
+
+// Fills mapCache for a world. A world has no collision run lengths in the asset cache, so the lookups below take its
+// entry from here before they go looking for them.
+function cacheWorldMap(mapKey: string): CachedMap | undefined {
+  const world = getWorldMap(mapKey);
+  if (!world) return undefined;
+
+  const warps = world.properties?.warps;
+  const entry: CachedMap = {
+    warps: Array.isArray(warps)
+      ? Object.fromEntries(
+          (warps as WarpObject[]).map((warp, idx) => [warp.name ?? String(idx), warp])
+        )
+      : ((warps || {}) as Record<string, WarpObject>),
+    collisionBits: world.collision,
+    width: world.width,
+    height: world.height,
+    tileWidth: world.tileWidth,
+    tileHeight: world.tileHeight,
+  };
+
+  mapCache.set(mapKey, entry);
+  return entry;
+}
 
 function queryRLE(rleData: number[], targetIndex: number): number {
   if (!rleData || rleData.length < 2) return 0;
@@ -263,7 +293,7 @@ export async function hasLineOfSight(
   const distance = Math.sqrt(Math.pow(endX - startX, 2) + Math.pow(endY - startY, 2));
   if (distance > maxDistance) return false;
 
-  let mapDataCached = mapCache.get(mapKey);
+  let mapDataCached = mapCache.get(mapKey) ?? cacheWorldMap(mapKey);
   if (!mapDataCached) {
     const mapProperties = (await assetCache.get("mapProperties")) as MapProperties[];
     const mapData = mapProperties?.find((m: any) => m.name.replace(".json", "") === mapKey);
@@ -288,9 +318,9 @@ export async function hasLineOfSight(
     mapCache.set(mapKey, mapDataCached);
   }
 
-  const { collisionRLE, width, height, tileWidth, tileHeight } = mapDataCached;
+  const { collisionRLE, collisionBits, width, height, tileWidth, tileHeight } = mapDataCached;
 
-  if (!collisionRLE) return false;
+  if (!collisionRLE && !collisionBits) return false;
 
   const startTileX = Math.floor(startX / tileWidth);
   const startTileY = Math.floor(startY / tileHeight);
@@ -313,7 +343,7 @@ export async function hasLineOfSight(
 
     if (currentX >= 0 && currentX < width && currentY >= 0 && currentY < height) {
       const tileIndex = currentY * width + currentX;
-      const tileValue = queryRLE(collisionRLE, tileIndex);
+      const tileValue = collisionBits ? collisionBits.isSet(currentX, currentY) : queryRLE(collisionRLE!, tileIndex);
 
       if (tileValue !== 0) {
         return false;
@@ -1111,9 +1141,11 @@ const player = {
 
     const mapKey = map.replace(".json", "");
 
-    const pvpData = await assetCache.getNested(mapKey, "nopvp");
+    // A world's no-pvp zones are a bitset (modules/worldmaps.ts), a Tiled map's are run lengths
+    const worldNoPvp = getWorldMap(mapKey)?.nopvp;
+    const pvpData = worldNoPvp ? null : await assetCache.getNested(mapKey, "nopvp");
 
-    if (!pvpData || !Array.isArray(pvpData) || pvpData.length < 3) return true;
+    if (!worldNoPvp && (!pvpData || !Array.isArray(pvpData) || pvpData.length < 3)) return true;
 
     const mapPropertiesRaw = await assetCache.get("mapProperties") as MapProperties[];
     if (!mapPropertiesRaw) return true;
@@ -1138,7 +1170,7 @@ const player = {
 
         const targetIndex = tileY * mapData.width + tileX;
 
-        const tileValue = queryRLE(pvpData, targetIndex);
+        const tileValue = worldNoPvp ? worldNoPvp.isSet(tileX, tileY) : queryRLE(pvpData, targetIndex);
 
         if (tileValue !== 0) {
           return false;
@@ -1154,12 +1186,12 @@ const player = {
     playerProperties: PlayerProperties
   ) {
     const mapKey = map.replace(".json", "");
-    const mapDataCached = mapCache.get(mapKey);
+    const mapDataCached = mapCache.get(mapKey) ?? cacheWorldMap(mapKey);
     if (!mapDataCached) return { value: true, reason: "no_map_data" as const };
 
     const playerWidth = playerProperties.width || 32;
     const playerHeight = playerProperties.height || 32;
-    const { warps, collisionRLE, width, height, tileWidth, tileHeight } = mapDataCached;
+    const { warps, collisionRLE, collisionBits, width, height, tileWidth, tileHeight } = mapDataCached;
 
     for (const key in warps) {
       const warp = warps[key];
@@ -1191,7 +1223,7 @@ const player = {
         if (tileX < 0 || tileY < 0 || tileX >= width || tileY >= height) continue;
 
         const tileIndex = tileY * width + tileX;
-        const tileValue = collisionRLE ? queryRLE(collisionRLE, tileIndex) : 0;
+        const tileValue = collisionBits ? collisionBits.isSet(tileX, tileY) : collisionRLE ? queryRLE(collisionRLE, tileIndex) : 0;
 
         if (tileValue !== 0) return { value: true, reason: "tile_collision" as const, tile: { x: tileX, y: tileY } };
       }
@@ -1202,7 +1234,7 @@ const player = {
 
   preloadMapCollision: async function (mapName: string): Promise<void> {
     const mapKey = mapName.replace(".json", "");
-    if (mapCache.has(mapKey)) return;
+    if (mapCache.has(mapKey) || cacheWorldMap(mapKey)) return;
 
     const mapProperties = await assetCache.get("mapProperties") as MapProperties[];
     const mapData = mapProperties.find((m: any) => m.name.replace(".json", "") === mapKey);
@@ -1248,7 +1280,7 @@ const player = {
     const playerHeight = playerProperties.height || 32;
     const mapKey = map.replace(".json", "");
 
-    let mapDataCached = mapCache.get(mapKey);
+    let mapDataCached = mapCache.get(mapKey) ?? cacheWorldMap(mapKey);
     if (!mapDataCached) {
 
       const mapProperties = mapPropertiesCache || (await assetCache.get("mapProperties")) as MapProperties[];
@@ -1280,7 +1312,7 @@ const player = {
       mapCache.set(mapKey, mapDataCached);
     }
 
-    const { warps, collisionRLE, width, height, tileWidth, tileHeight } = mapDataCached;
+    const { warps, collisionRLE, collisionBits, width, height, tileWidth, tileHeight } = mapDataCached;
 
     for (const key in warps) {
       const warp = warps[key];
@@ -1312,7 +1344,7 @@ const player = {
         if (tileX < 0 || tileY < 0 || tileX >= width || tileY >= height) continue;
 
         const tileIndex = tileY * width + tileX;
-        const tileValue = collisionRLE ? queryRLE(collisionRLE, tileIndex) : 0;
+        const tileValue = collisionBits ? collisionBits.isSet(tileX, tileY) : collisionRLE ? queryRLE(collisionRLE, tileIndex) : 0;
 
         if (tileValue !== 0) return { value: true, reason: "tile_collision", tile: { x: tileX, y: tileY } };
       }
@@ -1692,7 +1724,6 @@ const player = {
     username = username.toLowerCase().trim();
 
     // Add to in-memory set
-    const { realmWhitelist } = await import("../socket/server.ts");
     if (realmWhitelist.has(username)) {
       return { success: false, message: `${username} is already whitelisted` };
     }
@@ -1717,7 +1748,6 @@ const player = {
     username = username.toLowerCase().trim();
 
     // Remove from in-memory set
-    const { realmWhitelist } = await import("../socket/server.ts");
     if (!realmWhitelist.has(username)) {
       return { success: false, message: `${username} is not whitelisted` };
     }

@@ -56,14 +56,10 @@ function assignments(clause: string, args: any[]): Array<(row: Row) => void> {
   });
 }
 
-/** Statements the fake database refuses, for a test of a write that fails. */
-let refused: RegExp | null = null;
-
 function run(sql: string, params: any[] = []): any {
   const text = sql.replace(/\s+/g, " ").trim();
   const args = [...params];
   queries.push(text);
-  if (refused?.test(text)) throw new Error("database gone");
 
   const select = text.match(/^SELECT (.+?) FROM (\w+)(?: \w+)?(?: WHERE (.+?))?(?: ORDER BY .+?)?(?: LIMIT (\d+))?$/);
   if (select) {
@@ -156,9 +152,7 @@ mock.module("../services/assetCache", () => ({
 
 const { default: playerCache } = await import("../services/playermanager");
 const { clearCaches } = await import("../services/datacache");
-const { default: log } = await import("../modules/logger");
-const { listener, Events } = await import("../systems/events");
-const defs = await import("../systems/quests/definitions");
+const defs =await import("../systems/quests/definitions");
 const editor = await import("../systems/playereditor");
 const { default: permissions } = await import("../systems/permissions");
 const { default: player } = await import("../systems/player");
@@ -446,8 +440,6 @@ describe("currency", () => {
 });
 
 describe("inventory", () => {
-  const held = (name: string) => tables.inventory.find((row) => row.username === "hero" && row.item === name)?.quantity;
-
   test("an online player's list is rebuilt and sent, with their quest log", async () => {
     const { live, types } = login("hero", "7001");
     expect((await act("inventory.add", { item: "Wooden Staff", quantity: 2 })).ok).toBe(true);

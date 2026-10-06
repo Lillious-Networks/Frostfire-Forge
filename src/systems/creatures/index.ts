@@ -1,6 +1,7 @@
 import AOI_CONFIG from "../../config/aoi.json";
 import log from "../../modules/logger";
 import assetCache from "../../services/assetCache";
+import { getWorldMap } from "../../modules/worldmaps";
 import { weaponProfile, type WeaponProfile } from "./combat";
 import layerManager from "../../services/layermanager";
 import mapIndex from "../../services/mapindex";
@@ -406,6 +407,12 @@ async function refreshNavGrids(spawns: Iterable<CreatureSpawn>): Promise<void> {
   const props = ((await assetCache.get("mapProperties")) || []) as any[];
   for (const map of maps) {
     const prop = props.find((m) => normMap(m?.name) === map);
+    // A world (modules/worldmaps.ts) has a collision bitset, not run lengths: its grid searches inside a window
+    const world = getWorldMap(map);
+    if (world) {
+      if (navGrids.useBits(map, world.collision, world.width, world.height, world.tileWidth, world.tileHeight)) log.debug(`Creature nav grid built for world ${map}`);
+      continue;
+    }
     const rle = await assetCache.getNested(map, "collision");
     const built = navGrids.update(map, Array.isArray(rle) ? rle : null,Number(prop?.tileWidth) || 32, Number(prop?.tileHeight) || 32);
     if (built) log.debug(`Creature nav grid built for ${map}`);

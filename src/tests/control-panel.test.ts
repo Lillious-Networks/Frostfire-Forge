@@ -82,6 +82,7 @@ let mod: any;
 let sneak: any;
 let hero: any;
 let restartScheduled: boolean;
+let whitelistOn: boolean;
 /** What the server is measuring: the readings of the history are taken from these. */
 let lagMs: number;
 let awake: number;
@@ -117,6 +118,11 @@ const receiver = (actor: any) => async (asked: PanelRun): Promise<string[]> => {
     case "RESTART":
       restartScheduled = !restartScheduled;
       return restartScheduled ? [] : ["Server restart has been aborted"];
+    case "WHITELIST":
+      // /whitelist on and off say where the switch now stands; add and remove answer like any other command.
+      if (asked.args[0] !== "on" && asked.args[0] !== "off") return replies.WHITELIST ?? ["WHITELIST done"];
+      whitelistOn = asked.args[0] === "on";
+      return [`Whitelist is ${asked.args[0]}`];
     case "BROADCAST":
       return [asked.args[1]];
     default:
@@ -134,7 +140,7 @@ const commands = () => ran.map((entry) => ("packet" in entry.run ? entry.run.pac
 
 const bridge = {
   restartScheduled: () => restartScheduled,
-  status: () => ({ eventLoopLagMs: lagMs, whitelistEnabled: true, whitelisted: 4, creatures: { creatures: 12, awake } }),
+  status: () => ({ eventLoopLagMs: lagMs, whitelistEnabled: whitelistOn, whitelisted: 4, creatures: { creatures: 12, awake } }),
   worlds: async () => [{ name: "overworld", weather: "random", showing: "rain", players: 3 }, { name: "cave", weather: "clear", showing: "clear", players: 0 }],
 };
 panel.setControlPanelBridge(bridge);
@@ -155,6 +161,7 @@ beforeEach(async () => {
   ran = [];
   replies = {};
   restartScheduled = false;
+  whitelistOn = true;
   lagMs = 1.6;
   awake = 5;
   tables = {
@@ -207,6 +214,8 @@ const RULES: Record<string, Needs> = {
   "permission.set": { command: "PERMISSION", groups: [COMMAND_RULE, ["permission.add", "permission.*"]], confirm: true },
   "permission.clear": { command: "PERMISSION", groups: [COMMAND_RULE, ["permission.remove", "permission.*"]], confirm: true },
   "server.broadcast": { command: "BROADCAST", groups: [["server.notify", "server.*"]] },
+  "server.whitelist.on": { command: "WHITELIST", groups: [["admin.whitelist", "admin.*"]] },
+  "server.whitelist.off": { command: "WHITELIST", groups: [["admin.whitelist", "admin.*"]] },
   "server.whitelist.add": { command: "WHITELIST", groups: [["admin.whitelist", "admin.*"]] },
   "server.whitelist.remove": { command: "WHITELIST", groups: [["admin.whitelist", "admin.*"]] },
   "server.restart": { command: "RESTART", groups: [["server.restart", "server.*"]], confirm: true },
@@ -351,6 +360,7 @@ describe("each control keeps its command's permission rule", () => {
 
       // With the rule met the command is what runs.
       if (action === "server.restart.cancel") restartScheduled = true;
+      if (action === "server.whitelist.on") whitelistOn = false;
       const done = await act(holder(groups.map((group) => group[0])), action, valid(action));
       expect(done.errors).toEqual([]);
       expect(ran.length).toBe(1);
@@ -448,7 +458,7 @@ describe("the live view", () => {
   test("asked in full, it adds the viewer's rights and what the controls pick from", async () => {
     const result = await panel.handlePanelPacket(boss, "CONTROL_PANEL_LOAD", { full: true }, receiver(boss));
     if (result.kind !== "data") throw new Error("A load answers with data");
-    expect(result.data.options).toEqual({ maps: ["cave", "overworld"], weathers: ["clear", "random", "rain", "snow"] });
+    expect(result.data.options).toEqual({ maps: ["cave", "overworld"], weathers: ["clear", "random", "weather_api", "rain", "snow"] });
     expect(result.data.can?.["server.shutdown"]).toBe(true);
     expect(ran).toEqual([]);
   });
@@ -527,6 +537,23 @@ describe("a request that arrives twice", () => {
     expect(restartScheduled).toBe(false);
   });
 
+  test("the whitelist is switched once each way, and the answer carries where it now stands", async () => {
+    whitelistOn = false;
+    mod.permissions = ["admin.whitelist"];
+    const [first, second] = await Promise.all([act(boss, "server.whitelist.on"), act(mod, "server.whitelist.on")]);
+    expect(first.replies).toEqual(["Whitelist is on"]);
+    expect(second.replies).toEqual(["The whitelist is already on."]);
+    expect(first.data?.status.whitelist).toEqual({ enabled: true, size: 4 });
+    const off = await act(boss, "server.whitelist.off");
+    expect(off.replies).toEqual(["Whitelist is off"]);
+    expect(off.data?.status.whitelist.enabled).toBe(false);
+    expect((await act(boss, "server.whitelist.off")).replies).toEqual(["The whitelist is already off."]);
+    // The switch takes no username: nothing sent with it reaches the command.
+    await act(boss, "server.whitelist.on", { target: "cp_hero", enabled: false });
+    expect(commands()).toEqual(["WHITELIST on", "WHITELIST off", "WHITELIST on"]);
+    expect(whitelistOn).toBe(true);
+  });
+
   test("the panel waits its turn behind a player editor change to the same player", async () => {
     let release = () => {};
     const editing = oneAtATime("cp_hero", () => new Promise<void>((resolve) => { release = resolve; }));
@@ -579,7 +606,7 @@ describe("everything the in-game admin panel did", () => {
   test("but the editors are not launched from the panel: they open with their own commands", () => {
     expect(Object.keys(panel.ACTIONS).filter((action) => action.startsWith("editor."))).toEqual([]);
     const reachable = new Set(Object.values(panel.ACTIONS).map((action) => action.command));
-    for (const command of ["TE", "PE", "IE", "SE", "QE", "CE", "NE", "LE"]) {
+    for (const command of ["TE", "PE", "IE", "SE", "WE", "QE", "CE", "NE", "LE"]) {
       expect(reachable.has(command)).toBe(false);
       expect(commandBlock(command).length).toBeGreaterThan(0);
     }

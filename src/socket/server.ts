@@ -52,6 +52,7 @@ import spellEffects, { getStunsForPlayer, getSlowsForPlayer } from "../systems/s
 import { saveOnDisconnect as saveSicknessOnDisconnect } from "../systems/resurrection.ts";
 import effectManager from "../services/effectmanager";
 import { GatewayClient } from "../modules/gateway-client.ts";
+import { isWhitelistEnabled, loadRealmWhitelist, onWhitelistSwitch } from "../services/whitelist.ts";
 import loot from "../systems/loot";
 import creatures from "../systems/creatures";
 import cooldownManager from "../services/cooldownmanager";
@@ -158,19 +159,14 @@ const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
 // before a connection can ask for one.
 await loadTables();
 
-export const realmWhitelist = new Set<string>();
-export const isWhitelistEnabled = process.env.WHITELIST === 'true';
-
 const realmId = process.env.SERVER_ID || "default";
 
-if (isWhitelistEnabled) {
-  query("SELECT username FROM whitelist WHERE realm = ?", [realmId])
-    .then((rows: any[]) => {
-      for (const row of rows) {
-        realmWhitelist.add(row.username.toLowerCase());
-      }
-      if (realmWhitelist.size > 0) {
-        log.success(`Loaded ${realmWhitelist.size} whitelisted usernames for realm ${realmId} from database`);
+// Turned on later (/whitelist on, the control panel), the usernames are loaded then.
+if (isWhitelistEnabled()) {
+  loadRealmWhitelist()
+    .then((size) => {
+      if (size > 0) {
+        log.success(`Loaded ${size} whitelisted usernames for realm ${realmId} from database`);
       } else {
         log.warn(`Whitelist enabled but no usernames found for realm ${realmId}`);
       }
@@ -680,6 +676,11 @@ gatewayClient = new GatewayClient({
 });
 
 await gatewayClient.registerWithRetry();
+
+// The realm list shows whether this realm is whitelisted: tell the gateway as soon as that is switched.
+onWhitelistSwitch(() => {
+  void gatewayClient?.heartbeatNow();
+});
 
 listener.emit(Events.AWAKE);
 listener.emit(Events.START);

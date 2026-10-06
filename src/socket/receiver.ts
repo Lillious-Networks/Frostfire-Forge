@@ -78,6 +78,7 @@ import { refreshPlayer } from "../services/datacache";
 import cooldownManager from "../services/cooldownmanager";
 import effectManager from "../services/effectmanager";
 import { reloadMap } from "../modules/assetloader";
+import { getWorldMap, refreshWorldMap } from "../modules/worldmaps";
 import { serverFetch } from "../modules/https_servers.ts";
 import language from "../systems/language";
 import questDefinitions from "../systems/quests/definitions";
@@ -104,6 +105,8 @@ import creatures from "../systems/creatures";
 import { projectileTravelMs } from "../systems/creatures/projectile";
 import * as itemEditor from "../systems/itemeditor";
 import * as spellEditor from "../systems/spelleditor";
+import * as weatherEditor from "../systems/weathereditor";
+import * as weatherApi from "../systems/weatherapi";
 import * as lootEditor from "../systems/looteditor";
 import * as playerEditor from "../systems/playereditor";
 import * as controlPanel from "../systems/controlpanel";
@@ -133,7 +136,8 @@ import { randomBytes } from "../modules/hash";
 import { saveMapChunks, saveMapProperties, applyChunksWithRebase } from "../modules/assetloader";
 import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getSpriteUrl, getMountSpriteUrl, getNpcSpriteLayers } from "../modules/spriteSheetManager";
 import { setLayerChangeHandler, initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, broadcastToAOIBestEffort, broadcastStatsUpdateToAOI, broadcastToAOIBestEffortAtPosition, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate, sendLoadPlayersChunked, cleanupKickedSession, aoiProf } from "./aoi";
-import { realmWhitelist, isWhitelistEnabled, gracefulShutdown } from "./server.ts";
+import { gracefulShutdown } from "./server.ts";
+import { realmWhitelist, isWhitelistEnabled, setWhitelistEnabled } from "../services/whitelist";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
 const useSpriteSheets = (settings as any).animation_system?.use_sprite_sheets ?? true;
@@ -180,14 +184,61 @@ async function resolveWorldWeather(worldName: string): Promise<{ weather: string
     return { weather: "clear", weatherData: null };
   }
 
-  if (weatherName === "clear") {
-    return { weather: "clear", weatherData: null };
-  }
+  // The real weather is no row of the table: it is the last reading, the same for every world on it.
+  if (weatherName === weatherApi.WEATHER_API) return { weather: weatherName, weatherData: weatherApi.currentWeather() };
 
+  // "clear" has a row like any other weather (its wind still blows), and is clear without one.
   const allWeathers = await assetCache.get("weather") as WeatherData[];
   const weatherData = allWeathers?.find((w: WeatherData) => w.name === weatherName) || null;
   return { weather: weatherName, weatherData };
 }
+
+/** What WEATHER and CHANGE_WEATHER carry: the weather under the name the client draws it by. */
+const weatherShown = (weather: string, weatherData: WeatherData | null) => ({ weather: weatherApi.shownAs(weather), weatherData });
+
+// What the weather editor (systems/weathereditor.ts) needs from the socket
+// layer: which weather each world shows, and the players to show a change to.
+const weatherBridge: weatherEditor.WeatherEditorBridge = {
+  worlds: async () => (await getLiveWorlds()).map((world) => ({
+    name: world.name,
+    weather: world.weather || "clear",
+    // A "random" world is showing whichever weather it settled on.
+    showing: (world.weather === "random" ? resolvedWeatherCache.get(world.name)?.weather : world.weather) || world.weather || "clear",
+  })),
+  // As the WEATHER command sets it.
+  setWorldWeather: async (worldName, weatherName) => {
+    const existingWorld = worldsCache.find((w) => w.name === worldName);
+    await worlds.update({ name: worldName, weather: weatherName, players: existingWorld?.players || 0 });
+    if (existingWorld) existingWorld.weather = weatherName;
+    resolvedWeatherCache.delete(worldName);
+  },
+  show: (worldName, weatherName, weatherData) => {
+    // Only a "random" world has settled on a weather: it has settled on this one now.
+    if (resolvedWeatherCache.has(worldName)) resolvedWeatherCache.set(worldName, { weather: weatherName, weatherData });
+    for (const playerId of mapIndex.getPlayersOnMap(worldName)) {
+      const player = playerCache.get(playerId);
+      if (player?.wt && player.wt.readyState === 1) {
+        sendPacket(player.wt, packetManager.changeWeather(weatherShown(weatherName, weatherData)));
+      }
+    }
+  },
+};
+weatherEditor.setWeatherEditorBridge(weatherBridge);
+
+// A world on "weather_api" follows a real place (systems/weatherapi.ts): a
+// reading that differs from the last is shown at once on every such world.
+void weatherApi.startWeatherApi(async (row) => {
+  for (const world of await weatherBridge.worlds()) {
+    if (world.weather === weatherApi.WEATHER_API) weatherBridge.show(world.name, weatherApi.WEATHER_API, row);
+  }
+}, (utcOffset) => {
+  // The time of day is that place's too: everyone online is given the clock again when its shift from UTC is first
+  // known, and when it changes with daylight saving.
+  const time = packetManager.serverTime(utcOffset);
+  for (const player of Object.values(playerCache.list()) as any[]) {
+    if (player?.wt && player.wt.readyState === 1) sendPacket(player.wt, time);
+  }
+});
 
 async function waitForSpritesReady() {
   if (!useSpriteSheets || !(await isSpriteSheetSystemAvailable())) {
@@ -1082,6 +1133,9 @@ function constructMapMetadata(
     warps: mapProps?.warps || null,
     graveyards: mapProps?.graveyards || null,
     shadowLayerNames: mapProps?.shadowLayerNames || null,
+    // Rectangles in tiles a map is made of, when it says so (the cave systems of a world's underworld,
+    // modules/worldmaps.ts): the client's world map shows only the one the player is in
+    sections: Array.isArray(map?.data?.sections) ? map.data.sections : null,
     hasWeather: !!worldsArr.find((w) => w.name === normalizedName),
     objectLayers,
     mapVersion,
@@ -1122,7 +1176,7 @@ async function transitionPlayerToMap(
       const normalizedMap = newMapName.replace(".json", "");
       const resolved = await resolveWorldWeather(normalizedMap);
       if (resolved.weather) {
-        sendPacket(wt, packetManager.weather({ weather: resolved.weather, weatherData: resolved.weatherData }));
+        sendPacket(wt, packetManager.weather(weatherShown(resolved.weather, resolved.weatherData)));
       }
     } catch (e) {
       log.warn(`Failed to fetch weather data for ${newMapName}: ${e}`);
@@ -1423,7 +1477,7 @@ authWorker.on("message", async (result: any) => {
   const playerData = status.data as PlayerData;
   if (status.authenticated && status.completed && playerData) {
     // Check realm whitelist
-    if (isWhitelistEnabled && !realmWhitelist.has(playerData.username.toLowerCase())) {
+    if (isWhitelistEnabled() && !realmWhitelist.has(playerData.username.toLowerCase())) {
       log.warn(`[Whitelist] Access denied for ${playerData.username} - not in whitelist`);
       sendPacket(wt, packetManager.loginFailed());
       wt.close(1008, "Username not whitelisted on this realm");
@@ -1494,11 +1548,15 @@ authWorker.on("message", async (result: any) => {
     const default_map_properties = mapPropertiesCache.find((m: any) => m.name === `${defaultMap}.json`);
     const spawnX = (settings as any).spawn_x;
     const spawnY = (settings as any).spawn_y;
+    // A world names its own spawn (a town square): its centre may well be a lake
+    const worldSpawn = default_map_properties?.spawn;
     const default_map_spawnpoint_x = spawnX != null
       ? spawnX
+      : worldSpawn ? worldSpawn.x
       : default_map_properties ? (default_map_properties.width * default_map_properties.tileWidth) / 2 : 0;
     const default_map_spawnpoint_y = spawnY != null
       ? spawnY
+      : worldSpawn ? worldSpawn.y
       : default_map_properties ? (default_map_properties.height * default_map_properties.tileHeight) / 2 : 0;
     const default_map_spawnpoint = { map: `${defaultMap}.json`, x: default_map_spawnpoint_x, y: default_map_spawnpoint_y, direction: "down" };
     const dbMap = playerData.location?.map;
@@ -1510,8 +1568,8 @@ authWorker.on("message", async (result: any) => {
     if (playerData.location && position && dbMap) {
       spawnLocation = {
         map: `${dbMap}.json`,
-        x: position.x || (player_map_properties ? (player_map_properties.width * player_map_properties.tileWidth) / 2 : 0),
-        y: position.y || (player_map_properties ? (player_map_properties.height * player_map_properties.tileHeight) / 2 : 0),
+        x: position.x || (player_map_properties?.spawn ? player_map_properties.spawn.x : player_map_properties ? (player_map_properties.width * player_map_properties.tileWidth) / 2 : 0),
+        y: position.y || (player_map_properties?.spawn ? player_map_properties.spawn.y : player_map_properties ? (player_map_properties.height * player_map_properties.tileHeight) / 2 : 0),
         direction: position.direction || "down",
       };
     }
@@ -1572,7 +1630,7 @@ authWorker.on("message", async (result: any) => {
     if (world) {
       const resolved = await resolveWorldWeather(spawnLocation.map.replace(".json", ""));
       if (resolved.weather) {
-        sendPacket(wt, packetManager.weather({ weather: resolved.weather, weatherData: resolved.weatherData }));
+        sendPacket(wt, packetManager.weather(weatherShown(resolved.weather, resolved.weatherData)));
       }
     }
 
@@ -1674,7 +1732,7 @@ authWorker.on("message", async (result: any) => {
 
     // Anchor the client's clock once. It advances time locally from here, so
     // this is not re-pushed on the server tick.
-    sendPacket(wt, packetManager.serverTime());
+    sendPacket(wt, packetManager.serverTime(weatherApi.utcOffsetSeconds()));
 
     setTimeout(async () => {
 
@@ -3482,6 +3540,31 @@ export default async function packetReceiver(
           for (const other of Object.values(playerCache.list()) as any[]) {
             if (!other?.wt || other.id === currentPlayer.id) continue;
             if (spellEditor.mayHaveEditorOpen(other)) sendPacket(other.wt, updated);
+          }
+        }
+        break;
+      }
+      case "WEATHER_EDITOR_LIST":
+      case "WEATHER_EDITOR_SAVE":
+      case "WEATHER_EDITOR_DELETE": {
+        if (!currentPlayer) return;
+        // The handler checks permission first, on every one of these. A change is shown by it to the players
+        // of each world that shows that weather, and its answer carries the weathers as they then stand.
+        const result = await weatherEditor.handleEditorPacket(currentPlayer, type, data);
+        if (result.kind === "data") {
+          sendPacket(wt, packetManager.weatherEditorData(result.data));
+          break;
+        }
+        if (result.denied) sendPacket(wt, packetManager.notify({ message: weatherEditor.DENIED }));
+        sendPacket(wt, packetManager.weatherEditorResult({
+          ok: result.ok, errors: result.errors, fields: result.fields, name: result.name, notes: result.notes, action: type, data: result.data,
+        }));
+        if (result.changed) {
+          // Tell every other open editor to ask for the weathers again.
+          const updated = packetManager.weatherEditorUpdated({ by: currentPlayer.username });
+          for (const other of Object.values(playerCache.list()) as any[]) {
+            if (!other?.wt || other.id === currentPlayer.id) continue;
+            if (weatherEditor.mayHaveEditorOpen(other)) sendPacket(other.wt, updated);
           }
         }
         break;
@@ -5440,6 +5523,74 @@ export default async function packetReceiver(
         }
 
         const saveData = data as unknown as { mapName: string, chunks: any[], graveyards?: any, warps?: any };
+
+        // A world (modules/worldmaps.ts) holds no tiles here: the asset server writes the edited chunks into the
+        // world's packs, then this server fetches the new collision and no-pvp bits. Its size is fixed, and its
+        // warps and graveyards come from the map generator.
+        if (typeof saveData?.mapName === "string" && getWorldMap(saveData.mapName)) {
+          const worldName = saveData.mapName.replace(".json", "");
+          try {
+            // As for any map, a list of graveyards or warps is saved only when it holds something
+            const hasChunks = Array.isArray(saveData.chunks) && saveData.chunks.length > 0;
+            const graveyards = Array.isArray(saveData.graveyards) && saveData.graveyards.length > 0 ? saveData.graveyards : undefined;
+            const warps = Array.isArray(saveData.warps) && saveData.warps.length > 0 ? saveData.warps : undefined;
+            if (!hasChunks && !graveyards && !warps) {
+              sendPacket(wt, packetManager.notify({ message: 'Nothing to save.' }));
+              break;
+            }
+            log.info(`World save requested by ${currentPlayer.username} for ${worldName}, ${hasChunks ? saveData.chunks.length : 0} chunks modified`);
+            const assetServerUrl = process.env.ASSET_SERVER_INTERNAL_URL || process.env.ASSET_SERVER_URL || "http://localhost:8081";
+            const post = async (route: string, body: Record<string, unknown>) => {
+              const response = await serverFetch(`${assetServerUrl}${route}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ...body, mapName: worldName, serverId: process.env.SERVER_ID || "game-server", authKey: process.env.ASSET_SERVER_AUTH_KEY || process.env.GATEWAY_AUTH_KEY })
+              });
+              const result = await response.json().catch(() => ({ error: response.statusText })) as any;
+              if (!response.ok || !result?.success) throw new Error(result?.error || `the asset server answered ${response.status}`);
+              return result;
+            };
+            let changed: { chunkX: number; chunkY: number }[] = [];
+            if (hasChunks) {
+              const result = await post("/save-map-chunks", { chunks: saveData.chunks });
+              changed = Array.isArray(result.changed) ? result.changed : [];
+            }
+            if (graveyards || warps) {
+              await post("/save-map-properties", { graveyards, warps });
+              // held here as for any map; movement reads the warps from its own cache, cleared below
+              const propsList = await assetCache.get("mapProperties");
+              const props = propsList?.find((m: any) => m.name === `${worldName}.json`);
+              const world = getWorldMap(worldName);
+              for (const target of [props, world?.properties]) {
+                if (!target) continue;
+                if (graveyards) target.graveyards = graveyards;
+                if (warps) target.warps = warps;
+              }
+              if (propsList) await assetCache.add("mapProperties", propsList);
+              clearMapCache(worldName);
+            }
+            if (changed.length > 0 || graveyards || warps) await refreshWorldMap(worldName);
+
+            sendPacket(wt, packetManager.notify({
+              message: `Map saved successfully! ${changed.length} chunks updated.`
+            }));
+            // The saver already shows its edits: the others on the map fetch the changed chunks again
+            if (changed.length > 0) {
+              filterPlayersByMap(currentPlayer.location.map)
+                .filter((p) => p.id !== wt.data.id)
+                .forEach((player) => {
+                  sendPacket(player.wt, packetManager.updateChunks({ chunks: changed }));
+                });
+            }
+          } catch (error: any) {
+            log.error(`Error saving world ${worldName}: ${error.message}`);
+            sendPacket(wt, packetManager.notify({
+              message: `Error saving map changes: ${error.message}`
+            }));
+          }
+          editorEditHistory.delete(saveData.mapName);
+          break;
+        }
 
         try {
           log.info(`Map save requested by ${currentPlayer.username} for map: ${saveData.mapName}, ${saveData.chunks.length} chunks modified`);
@@ -7408,16 +7559,6 @@ export default async function packetReceiver(
           }
 
           case "WHITELIST": {
-            // Check if whitelist is enabled
-            const { isWhitelistEnabled } = await import("../socket/server.ts");
-            if (!isWhitelistEnabled) {
-              const notifyData = {
-                message: "Whitelist is not enabled on this realm",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
             if (
               !currentPlayer.permissions.some(
                 (p: string) => p === "admin.whitelist" || p === "admin.*"
@@ -7433,9 +7574,30 @@ export default async function packetReceiver(
             const whitelistMode = args[0]?.toLowerCase() || null;
             const whitelistUsername = args[1] || null;
 
+            // Switch it while the server runs. Turning it on loads the
+            // usernames and puts this admin on the list; players already
+            // online stay, only new logins are checked.
+            if (whitelistMode === "on" || whitelistMode === "off") {
+              const result = await setWhitelistEnabled(whitelistMode === "on", currentPlayer.username);
+              const notifyData = {
+                message: result.message,
+              };
+              sendPacket(wt, packetManager.notify(notifyData));
+              break;
+            }
+
+            // Check if whitelist is enabled
+            if (!isWhitelistEnabled()) {
+              const notifyData = {
+                message: "Whitelist is not enabled on this realm. Turn it on with /whitelist on",
+              };
+              sendPacket(wt, packetManager.notify(notifyData));
+              break;
+            }
+
             if (!whitelistMode || !["add", "remove"].includes(whitelistMode)) {
               const notifyData = {
-                message: "Usage: /whitelist add|remove [username]",
+                message: "Usage: /whitelist on|off, or /whitelist add|remove [username]",
               };
               sendPacket(wt, packetManager.notify(notifyData));
               break;
@@ -7594,6 +7756,16 @@ export default async function packetReceiver(
               break;
             }
             sendPacket(wt, packetManager.toggleSpellEditor());
+            break;
+          }
+
+          case "WE":
+          case "WEATHEREDITOR": {
+            if (!(await weatherEditor.canUseEditor(currentPlayer))) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(wt, packetManager.toggleWeatherEditor());
             break;
           }
 
@@ -7818,10 +7990,10 @@ export default async function packetReceiver(
             const defaultMapProps = mapPropertiesCache.find(
               (m: any) => m.name === `${defaultMap}.json`
             );
-            const centerX = defaultMapProps
+            const centerX = defaultMapProps?.spawn ? defaultMapProps.spawn.x : defaultMapProps
               ? (defaultMapProps.width * defaultMapProps.tileWidth) / 2
               : 0;
-            const centerY = defaultMapProps
+            const centerY = defaultMapProps?.spawn ? defaultMapProps.spawn.y : defaultMapProps
               ? (defaultMapProps.height * defaultMapProps.tileHeight) / 2
               : 0;
 
@@ -8436,10 +8608,11 @@ export default async function packetReceiver(
             if (!identifier) {
 
               const mapProps = mapPropertiesCache.find((m: any) => m.name === `${mapName}.json`);
-              const centerX = mapProps
+              // A world names its own spawn (a town square): its centre may well be a lake
+              const centerX = mapProps?.spawn ? mapProps.spawn.x : mapProps
                 ? (mapProps.width * mapProps.tileWidth) / 2
                 : 0;
-              const centerY = mapProps
+              const centerY = mapProps?.spawn ? mapProps.spawn.y : mapProps
                 ? (mapProps.height * mapProps.tileHeight) / 2
                 : 0;
 
@@ -8505,12 +8678,13 @@ export default async function packetReceiver(
             if (!weatherName) {
               sendPacket(
                 wt,
-                packetManager.notify({ message: "Usage: /weather <weather_name|clear|random>" })
+                packetManager.notify({ message: "Usage: /weather <weather_name|clear|random|weather_api>" })
               );
               break;
             }
 
-            if (weatherName !== "clear" && weatherName !== "random") {
+            // "clear", "random" and "weather_api" are /weather's own words: they need no row of the weather table.
+            if (weatherName !== "clear" && weatherName !== "random" && weatherName !== weatherApi.WEATHER_API) {
               const allWeathers = await assetCache.get("weather") as WeatherData[];
               if (!allWeathers?.find((w: WeatherData) => w.name === weatherName)) {
                 sendPacket(
@@ -8544,7 +8718,9 @@ export default async function packetReceiver(
               } else {
                 resolvedWeatherName = "clear";
               }
-            } else if (weatherName !== "clear") {
+            } else if (weatherName === weatherApi.WEATHER_API) {
+              weatherData = weatherApi.currentWeather();
+            } else {
               const allWeathers = await assetCache.get("weather") as WeatherData[];
               weatherData = allWeathers?.find((w: WeatherData) => w.name === weatherName) || null;
             }
@@ -8555,7 +8731,7 @@ export default async function packetReceiver(
               if (player?.wt && player.wt.readyState === 1) {
                 sendPacket(
                   player.wt,
-                  packetManager.changeWeather({ weather: resolvedWeatherName, weatherData })
+                  packetManager.changeWeather(weatherShown(resolvedWeatherName, weatherData))
                 );
               }
             }
@@ -10947,6 +11123,7 @@ function findGraveyardSpawn(mapName: string, x: number, y: number): { x: number;
     return { x: Math.round(closest.position.x), y: Math.round(closest.position.y) };
   }
   const defaultMapProps = mapPropertiesCache.find((m: any) => m.name === `${defaultMap}.json`);
+  if (defaultMapProps?.spawn) return { x: Math.round(defaultMapProps.spawn.x), y: Math.round(defaultMapProps.spawn.y) };
   return {
     x: defaultMapProps ? Math.round((defaultMapProps.width * defaultMapProps.tileWidth) / 2) : 0,
     y: defaultMapProps ? Math.round((defaultMapProps.height * defaultMapProps.tileHeight) / 2) : 0,
@@ -11422,7 +11599,7 @@ controlPanel.setControlPanelBridge({
   restartScheduled: () => !!restartScheduled,
   status: () => ({
     eventLoopLagMs: getEventLoopLagMs(),
-    whitelistEnabled: isWhitelistEnabled,
+    whitelistEnabled: isWhitelistEnabled(),
     whitelisted: realmWhitelist.size,
     creatures: creatures.stats(),
   }),
@@ -11932,7 +12109,7 @@ function scheduleLightning() {
       for (const world of await getLiveWorlds()) {
         const resolved = resolvedWeatherCache.get(world.name);
         const activeWeather = resolved ? resolved.weather : world.weather;
-        if (activeWeather !== "thunderstorm") continue;
+        if (weatherApi.shownAs(activeWeather) !== "thunderstorm") continue;
         const playersOnMap = mapIndex.getPlayersOnMap(world.name);
         if (playersOnMap.size === 0) continue;
 
@@ -11977,7 +12154,7 @@ function scheduleWeatherCycle() {
           if (player?.wt && player.wt.readyState === 1) {
             sendPacket(
               player.wt,
-              packetManager.changeWeather({ weather: randomWeather.name, weatherData: randomWeather })
+              packetManager.changeWeather(weatherShown(randomWeather.name, randomWeather))
             );
           }
         }

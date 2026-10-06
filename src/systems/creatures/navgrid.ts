@@ -115,9 +115,11 @@ export class NavGrid {
     readonly height: number,
     readonly tileW: number,
     readonly tileH: number,
-    readonly blocked: Uint8Array
+    readonly blocked: Uint8Array,
+    // WorldNavGrid keeps its own, smaller scratch and passes 0
+    scratchCells = width * height
   ) {
-    const n = width * height;
+    const n = scratchCells;
     this.gScore = new Float64Array(n);
     this.cameFrom = new Int32Array(n);
     this.stamp = new Uint32Array(n);
@@ -337,9 +339,144 @@ export class NavGrid {
   }
 }
 
+/** A world's collision (modules/worldmaps.ts WorldBits): one bit per tile, read directly. */
+export interface TileBits {
+  isSet(tileX: number, tileY: number): number;
+}
+
+/** Edge, in tiles, of the square a WorldNavGrid search may cover. */
+export const WORLD_NAV_WINDOW = 256;
+
+/**
+ * The grid of a world (a map too large to hold a byte and 20 bytes of search scratch per tile: 2.2 GB for the
+ * 10240 x 10240 continent). Collision is read from the world's bitset, and a path search works inside a window of
+ * WORLD_NAV_WINDOW tiles centred between its two ends, with scratch the size of the window (1.3 MB). Tiles outside
+ * the window count as walls for that search, and ends too far apart to share a window have no path. Inside the
+ * window the search is NavGrid's own, step for step. Everything else (footprints, line of sight, smoothing, steps)
+ * is inherited and reads the bitset through isBlockedTile.
+ */
+export class WorldNavGrid extends NavGrid {
+  private winG = new Float64Array(WORLD_NAV_WINDOW * WORLD_NAV_WINDOW);
+  private winFrom = new Int32Array(WORLD_NAV_WINDOW * WORLD_NAV_WINDOW);
+  private winStamp = new Uint32Array(WORLD_NAV_WINDOW * WORLD_NAV_WINDOW);
+  private winClosed = new Uint32Array(WORLD_NAV_WINDOW * WORLD_NAV_WINDOW);
+  private winGeneration = 0;
+  private winHeap = new IndexHeap();
+
+  constructor(width: number, height: number, tileW: number, tileH: number, readonly bits: TileBits) {
+    super(width, height, tileW, tileH, new Uint8Array(0), 0);
+  }
+
+  override isBlockedTile(tx: number, ty: number): boolean {
+    if (tx < 0 || ty < 0 || tx >= this.width || ty >= this.height) return true;
+    return this.bits.isSet(tx, ty) === 1;
+  }
+
+  override findPath(from: Point, to: Point, maxNodes = 4000): Point[] | null {
+    const start = this.tileOf(from);
+    let goal = this.tileOf(to);
+    if (this.isBlockedTile(goal.tx, goal.ty)) {
+      const near = this.nearestOpenTile(goal.tx, goal.ty, 2);
+      if (!near) return null;
+      goal = near;
+    }
+    if (start.tx === goal.tx && start.ty === goal.ty) {
+      return this.isWalkable(to.x, to.y) ? [{ x: to.x, y: to.y }] : [this.anchorOfTile(goal.tx, goal.ty)];
+    }
+
+    // the window: centred between the two ends, which must both lie inside it
+    const w = WORLD_NAV_WINDOW;
+    const ox = Math.floor((start.tx + goal.tx) / 2) - (w >> 1);
+    const oy = Math.floor((start.ty + goal.ty) / 2) - (w >> 1);
+    const inside = (tx: number, ty: number) => tx >= ox && ty >= oy && tx < ox + w && ty < oy + w;
+    if (!inside(start.tx, start.ty) || !inside(goal.tx, goal.ty)) return null;
+
+    const startIdx = (start.ty - oy) * w + (start.tx - ox);
+    const goalIdx = (goal.ty - oy) * w + (goal.tx - ox);
+    ++this.winGeneration;
+    if (this.winGeneration === 0xffffffff) {
+      this.winStamp.fill(0);
+      this.winClosed.fill(0);
+      this.winGeneration = 1;
+    }
+    const gen = this.winGeneration;
+    const g = this.winG;
+    const came = this.winFrom;
+    const stamp = this.winStamp;
+    const closed = this.winClosed;
+    const heap = this.winHeap;
+    heap.clear();
+
+    const h = (tx: number, ty: number) => {
+      const ax = Math.abs(tx - goal.tx);
+      const ay = Math.abs(ty - goal.ty);
+      return Math.max(ax, ay) + (SQRT2 - 1) * Math.min(ax, ay);
+    };
+
+    stamp[startIdx] = gen;
+    g[startIdx] = 0;
+    came[startIdx] = -1;
+    heap.push(startIdx, h(start.tx, start.ty));
+
+    let expanded = 0;
+    let found = false;
+    while (heap.size > 0) {
+      const current = heap.pop();
+      if (closed[current] === gen) continue;
+      closed[current] = gen;
+      if (current === goalIdx) {
+        found = true;
+        break;
+      }
+      if (++expanded > maxNodes) break;
+
+      const lx = current % w;
+      const cx = lx + ox;
+      const cy = (current - lx) / w + oy;
+      for (const [dx, dy, cost] of NEIGHBORS) {
+        const nx = cx + dx;
+        const ny = cy + dy;
+        if (!inside(nx, ny) || this.isBlockedTile(nx, ny)) continue;
+        if (dx !== 0 && dy !== 0 && (this.isBlockedTile(cx + dx, cy) || this.isBlockedTile(cx, cy + dy))) continue;
+        const ni = (ny - oy) * w + (nx - ox);
+        if (closed[ni] === gen) continue;
+        const tentative = g[current] + cost;
+        if (stamp[ni] === gen && tentative >= g[ni]) continue;
+        stamp[ni] = gen;
+        g[ni] = tentative;
+        came[ni] = current;
+        heap.push(ni, tentative + h(nx, ny));
+      }
+    }
+    if (!found) return null;
+
+    const tiles: Point[] = [];
+    for (let i = goalIdx; i !== -1 && i !== startIdx; i = came[i]) {
+      const lx = i % w;
+      tiles.push(this.anchorOfTile(lx + ox, (i - lx) / w + oy));
+    }
+    tiles.reverse();
+    if (this.isWalkable(to.x, to.y) && this.tileOf(to).tx === goal.tx && this.tileOf(to).ty === goal.ty) {
+      tiles[tiles.length - 1] = { x: to.x, y: to.y };
+    }
+    return this.smooth(from, tiles);
+  }
+}
+
 /** Per-map grid cache, rebuilt when the collision data changes. */
 export class NavGridCache {
   private grids = new Map<string, { grid: NavGrid; checksum: number }>();
+
+  /**
+   * The grid of a world, over its collision bitset. Returns true if the grid was (re)built: the first time, and when
+   * the world's bitset is another one (the world was loaded again).
+   */
+  useBits(map: string, bits: TileBits, width: number, height: number, tileW: number, tileH: number): boolean {
+    const existing = this.grids.get(map)?.grid;
+    if (existing instanceof WorldNavGrid && existing.bits === bits && existing.tileW === tileW && existing.tileH === tileH) return false;
+    this.grids.set(map, { grid: new WorldNavGrid(width, height, tileW, tileH, bits), checksum: -1 });
+    return true;
+  }
 
   get(map: string): NavGrid | undefined {
     return this.grids.get(map)?.grid;

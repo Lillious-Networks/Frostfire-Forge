@@ -4,6 +4,7 @@ import log from "./logger.ts";
 import os from "os";
 import fs from "node:fs";
 import { serverFetch } from "./https_servers.ts";
+import { isWhitelistEnabled } from "../services/whitelist.ts";
 
 // Evaluate the TLS state at registration time rather than at import time:
 // the local certificate provisioning (ensureLocalCertificate) runs after
@@ -59,7 +60,7 @@ class GatewayClient {
           useSSL: resolveUseSSL(),
           maxConnections: this.config.maxConnections,
           authKey: process.env.GATEWAY_AUTH_KEY,
-          whitelisted: process.env.WHITELIST === 'true'
+          whitelisted: isWhitelistEnabled()
         })
       });
 
@@ -211,7 +212,9 @@ class GatewayClient {
           ramUsage: ramUsage,
           authKey: process.env.GATEWAY_AUTH_KEY,
           timestamp: sendTime,
-          rtt: this.previousRtt ?? Date.now() - sendTime
+          rtt: this.previousRtt ?? Date.now() - sendTime,
+          // Sent every time: the whitelist can be switched while the server runs.
+          whitelisted: isWhitelistEnabled()
         })
       });
 
@@ -240,6 +243,13 @@ class GatewayClient {
 
   private startHeartbeat() {
     this.heartbeatTimer = setInterval(() => this.sendHeartbeat(), this.config.heartbeatInterval);
+  }
+
+  // A heartbeat ahead of the timer, for a change the gateway should not wait to hear of.
+  async heartbeatNow(): Promise<void> {
+    if (this.registered) {
+      await this.sendHeartbeat();
+    }
   }
 
   setActiveConnections(count: number) {

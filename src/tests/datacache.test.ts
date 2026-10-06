@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 import log from "../modules/logger";
 import { clearCaches, dropAllRows, forgetPlayer, loadTables, refreshPlayer, rowCache, tableCache, turns } from "../services/datacache";
-import playerCache from "../services/playermanager";
 
 // The database, as the caches' loaders read it, and how often each was read.
 let database: Record<string, any>;

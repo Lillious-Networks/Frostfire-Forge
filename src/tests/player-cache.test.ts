@@ -265,30 +265,6 @@ describe("who is online is answered from the players held, never the database", 
 // -------------------------------------------------------------- account rows
 
 describe("what the engine knows of an account", () => {
-  const READS: Record<string, { read: () => Promise<any>; answer: any; loads: number }> = {
-    isAdmin: { read: () => player.isAdmin("PC_Boss"), answer: true, loads: 1 },
-    isGuest: { read: () => player.isGuest("guest_pc"), answer: true, loads: 1 },
-    isStealth: { read: () => player.isStealth("pc_boss"), answer: true, loads: 1 },
-    isNoclip: { read: () => player.isNoclip("pc_boss"), answer: true, loads: 1 },
-    isBanned: { read: () => player.isBanned("pc_exile"), answer: [{ banned: 1 }], loads: 1 },
-    getPartyIdByUsername: { read: () => player.getPartyIdByUsername("pc_ally"), answer: 9, loads: 1 },
-    findByUsername: { read: () => player.findByUsername("PC_Hero"), answer: [{ username: "pc_hero" }], loads: 1 },
-    findPlayerInDatabase: { read: () => player.findPlayerInDatabase("pc_exile"), answer: [{ username: "pc_exile", banned: 1 }], loads: 1 },
-    "findAccount by username": { read: () => player.findAccount("pc_exile"), answer: { id: 4305, username: "pc_exile", session_id: null, banned: 1, is_dead: 1 }, loads: 1 },
-    // The id finds the name, the name finds the row.
-    "findAccount by id": { read: () => player.findAccount(undefined, 4305), answer: { id: 4305, username: "pc_exile", session_id: null, banned: 1, is_dead: 1 }, loads: 2 },
-    getLocation: { read: () => location("pc_hero"), answer: { map: "overworld", position: { x: 320, y: 480, direction: "down" } }, loads: 1 },
-    // Everything held of the account, and nothing the gateway writes.
-    getAccount: {
-      read: () => player.getAccount("PC_Ally"),
-      answer: {
-        id: 4304, username: "pc_ally", role: 0, banned: 0, guest_mode: 0, stealth: 0, noclip: 0, is_dead: 0, corpse_map: null, corpse_x: null, corpse_y: null,
-        map: "overworld", position: "320,480", direction: "down", party_id: 9, guild_id: 7,
-      },
-      loads: 1,
-    },
-  };
-
   test("an account that does not exist answers as it did from the database", async () => {
     expect(await player.isAdmin("pc_nobody")).toBe(false);
     expect(await player.isGuest("pc_nobody")).toBe(false);
@@ -552,23 +528,6 @@ describe("a write to an account", () => {
     row("pc_hero").direction = "down";
     expect(await sentBy(() => location("pc_hero"))).toHaveLength(1);
     expect(await fromCache(() => location("pc_hero"))).toEqual({ map: "cave", position: { x: 1, y: 2, direction: "down" } });
-  });
-
-  const WRITES: Record<string, () => Promise<any>> = {
-    toggleAdmin: () => player.toggleAdmin("pc_boss"),
-    toggleStealth: () => player.toggleStealth("pc_boss"),
-    toggleNoclip: () => player.toggleNoclip("pc_boss"),
-    ban: () => player.ban("pc_boss", null),
-    unban: () => player.unban("pc_exile"),
-    setLocation: () => player.setLocation("6101", "cave", { x: 1, y: 2, direction: "up" }),
-    setLocationByUsername: () => player.setLocationByUsername("pc_boss", "cave", { x: 1, y: 2, direction: "up" }),
-    returnHome: () => player.returnHome("6101"),
-    setDeadState: () => player.setDeadState("pc_boss", 1, { map: "cave", x: 1, y: 2 }),
-  };
-
-  const snapshot = async () => ({
-    boss: await player.findAccount("pc_boss"), admin: await player.isAdmin("pc_boss"), stealth: await player.isStealth("pc_boss"),
-    noclip: await player.isNoclip("pc_boss"), at: await location("pc_boss"), exile: await player.findAccount("pc_exile"),
   });
 
 });

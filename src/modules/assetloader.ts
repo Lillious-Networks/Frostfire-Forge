@@ -12,6 +12,7 @@ import questDefinitions from "../systems/quests/definitions";
 import assetCache from "../services/assetCache";
 import zlib from "zlib";
 import { serverFetch } from "./https_servers.ts";
+import { loadWorldMaps, syncWorldMaps } from "./worldmaps";
 import * as settings from "../config/settings.json";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 const mapDir = path.join('.', 'src', 'assets', 'maps');
@@ -181,6 +182,39 @@ function loadAllMaps() {
         maps.pop();
         mapProperties.pop();
       }
+    }
+  }
+
+  // Worlds: maps too large for one file, kept as <id>.world directories (modules/worldmaps.ts). They join the same
+  // two lists without tile data; their warps, graveyards and particle objects are read like any map's.
+  for (const world of loadWorldMaps(mapDir, new Set(mapFiles))) {
+    try {
+      maps.push(world.map);
+      const properties: MapProperties = {
+        name: world.name,
+        width: world.width,
+        height: world.height,
+        tileWidth: world.tileWidth,
+        tileHeight: world.tileHeight,
+        warps: null,
+        graveyards: null,
+        shadowLayerNames: null,
+        version: String(fs.statSync(path.join(mapDir, `${world.id}.world`, "manifest.json")).mtimeMs),
+        spawn: world.spawn,
+      };
+      mapProperties.push(properties);
+      world.properties = properties;
+      extractAndCompressLayers(world.map);
+      // The particle objects are NPCs now: the map entry does not keep a second copy (a large world has tens of
+      // thousands of them, and the whole maps list is handed to every auth worker)
+      for (const layer of world.map.data.layers) {
+        if (layer.type === "objectgroup" && String(layer.name).toLowerCase() === "particles") layer.objects = [];
+      }
+      log.success(`Loaded world ${world.id} (${world.width} x ${world.height} tiles)`);
+    } catch (error) {
+      log.error(`Failed to load world ${world.id}: ${error}`);
+      maps.pop();
+      mapProperties.pop();
     }
   }
 
@@ -523,6 +557,9 @@ function extractAndCompressLayers(map: MapData) {
       _map.warps = merged;
     }
   }
+
+  // A world has no tile data here: its collision and no-pvp zones are bitsets (modules/worldmaps.ts)
+  if ((map as any).world) return;
 
   let width: number | null = null;
   let height: number | null = null;
@@ -1008,6 +1045,7 @@ export function refreshMapVersion(mapName: string): void {
 }
 
 await syncMapsBeforeLoading();
+await syncWorldMaps(mapDir);
 loadAllMaps();
 
 // The maps' particle-only NPCs join the NPC cache (and every later npc.list() reload of it)

@@ -57,9 +57,41 @@ function windowAround(g: { chunkPx: number; chunksX: number; chunksY: number }, 
 
 const chunkOf = (g: { chunkPx: number }, x: number, y: number) => `${Math.floor(x / g.chunkPx)},${Math.floor(y / g.chunkPx)}`;
 
+// The NPCs of each map by chunk, as places in the NPC list. A large world carries a particle NPC on every lantern and
+// crystal (some 190,000 on the 10240 x 10240 underworld), and going through the whole list each time a player
+// crosses a chunk border took milliseconds per player. Built per NPC list: the list is replaced whenever an NPC is
+// added, changed or removed (every write ends in assetCache.set("npcs", a new list)), never changed in place.
+const npcChunks = new WeakMap<Npc[], Map<string, Map<string, number[]>>>();
+
 async function npcsIn(map: string, g: { chunkPx: number }, keys: Set<string>): Promise<Npc[]> {
   const all = ((await assetCache.get("npcs")) || []) as Npc[];
-  return all.filter((n) => norm(n.map) === norm(map) && n.id != null && keys.has(chunkOf(g, n.position.x, n.position.y)));
+  let byMap = npcChunks.get(all);
+  if (!byMap) {
+    byMap = new Map();
+    npcChunks.set(all, byMap);
+  }
+  const name = norm(map), id = `${name}|${g.chunkPx}`;
+  let chunks = byMap.get(id);
+  if (!chunks) {
+    chunks = new Map();
+    for (let i = 0; i < all.length; i++) {
+      const n = all[i];
+      if (n.id == null || norm(n.map) !== name) continue;
+      const key = chunkOf(g, n.position.x, n.position.y);
+      const list = chunks.get(key);
+      if (list) list.push(i);
+      else chunks.set(key, [i]);
+    }
+    byMap.set(id, chunks);
+  }
+  // in the order of the NPC list, as going through the whole list gave them
+  const places: number[] = [];
+  for (const key of keys) {
+    const list = chunks.get(key);
+    if (list) for (const i of list) places.push(i);
+  }
+  places.sort((a, b) => a - b);
+  return places.map((i) => all[i]);
 }
 
 /** The client's NPC data (particle names resolved to their definitions), as the map-entry packets always sent it. */

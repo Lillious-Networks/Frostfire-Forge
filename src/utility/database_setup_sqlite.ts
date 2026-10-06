@@ -306,7 +306,8 @@ const createPermissionTypesTable = async () => {
       ('tools.tile_editor'),
       ('tools.npc_editor'),
       ('tools.entity_editor'),
-      ('tools.particle_editor');
+      ('tools.particle_editor'),
+      ('tools.weather_editor');
   `;
   await query(sql);
 };
@@ -396,7 +397,10 @@ const createDefaultWeather = async () => {
   await query(sql);
   // "darkness": no shadows and a near-black scene (the client's ambience keys off the name)
   await query(`INSERT OR IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('darkness', 0.9, 'none', 0, 40, 50, 0);`);
-}
+  // "thunderstorm", "rainy" and "snowy" are drawn by name, as much as their precipitation says.
+  await query(`INSERT OR IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('thunderstorm', 0.8, 'right', 25, 90, 55, 80);`);
+  await query(`INSERT OR IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('rainy', 0, 'left', 6, 85, 58, 50);`);
+  await query(`INSERT OR IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('snowy', 0, 'left', 4, 80, 25, 80);`);}
 
 const createWorldTable = async () => {
   log.info("Creating world table...");

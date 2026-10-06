@@ -671,9 +671,12 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "CONSOLE_MESSAGE", data })),
     ] as any[];
   },
-  serverTime: () => {
+  // `utcOffset`: the shift from UTC, in seconds, of the place whose time of day
+  // the game keeps (systems/weatherapi.ts). Left out when there is none, and
+  // the client reads the time on its own clock.
+  serverTime: (utcOffset?: number | null) => {
     return [
-      packet.encode(JSON.stringify({ type: "SERVER_TIME", data: Date.now() })),
+      packet.encode(JSON.stringify({ type: "SERVER_TIME", data: Date.now(), ...(utcOffset != null ? { utcOffset } : {}) })),
     ] as any[];
   },
   weather: (data: any) => {
@@ -1072,6 +1075,26 @@ export const packetManager = {
   spellEditorUpdated: (data: { by: string }) => {
     return [
       packet.encode(JSON.stringify({ type: "SPELL_EDITOR_UPDATED", data })),
+    ] as any[];
+  },
+  toggleWeatherEditor: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "TOGGLE_WEATHER_EDITOR", data: null })),
+    ] as any[];
+  },
+  weatherEditorData: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "WEATHER_EDITOR_DATA", data })),
+    ] as any[];
+  },
+  weatherEditorResult: (data: { ok: boolean; errors: string[]; fields?: Record<string, string>; name?: string; notes: string[]; action?: string; data: any }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "WEATHER_EDITOR_RESULT", data })),
+    ] as any[];
+  },
+  weatherEditorUpdated: (data: { by: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "WEATHER_EDITOR_UPDATED", data })),
     ] as any[];
   },
   playerEditorOpen: (data: { target: string }) => {

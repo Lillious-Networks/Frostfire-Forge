@@ -38,6 +38,10 @@ GATEWAY_GAME_SERVER_SECRET=""
 SERVER_ID="server-1"
 SERVER_HOST="localhost"
 PUBLIC_HOST="localhost"
+# Real weather: a world set to "weather_api" follows WEATHER_API_LOCATION ("lat,lon" or "City,CC"), read from OpenWeatherMap
+WEATHER_API_KEY=""
+WEATHER_API_LOCATION=""
+WEATHER_API_MINUTES=10
 `;
 
 const production_environment_variables = `DATABASE_ENGINE=""
@@ -75,6 +79,10 @@ GATEWAY_GAME_SERVER_SECRET=""
 
 CACHE=""
 REDIS_URL=""
+
+WEATHER_API_KEY=""
+WEATHER_API_LOCATION=""
+WEATHER_API_MINUTES=""
 `;
 
 const settings = {

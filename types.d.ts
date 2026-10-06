@@ -457,6 +457,8 @@ declare interface MapProperties {
   graveyards: Nullable<GraveyardObject[]>;
   shadowLayerNames?: Nullable<string[]>;
   version: string;
+  /** Worlds only: where new players start, in pixels. */
+  spawn?: Nullable<{ x: number; y: number }>;
 }
 
 declare interface PlayerProperties {

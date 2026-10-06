@@ -430,8 +430,8 @@ export async function buildData(viewer: any, full: boolean, since: Since | null 
     data.can = await capabilities(viewer);
     data.options = {
       maps: maps.map((m) => normMap(m.name)).sort((a, b) => a.localeCompare(b)),
-      // "clear" and "random" are /weather's own words, not rows of the weather table.
-      weathers: [...new Set(["clear", "random", ...weathers.map((w) => w.name)])],
+      // "clear", "random" and "weather_api" are /weather's own words, not rows of the weather table.
+      weathers: [...new Set(["clear", "random", "weather_api", ...weathers.map((w) => w.name)])],
     };
     data.accounts = await accountTotals();
   }
@@ -719,6 +719,8 @@ export const ACTIONS: Record<string, PanelAction> = {
       };
     },
   },
+  "server.whitelist.on": whitelistSwitch(true),
+  "server.whitelist.off": whitelistSwitch(false),
   "server.whitelist.add": whitelist("add"),
   "server.whitelist.remove": whitelist("remove"),
   "server.restart": {
@@ -849,6 +851,21 @@ function whitelist(mode: "add" | "remove"): PanelAction {
       const target = targetOf(data);
       return target ? { key: SERVER_KEY, target, run: { command: "WHITELIST", args: [mode, target] } } : ["Type a username."];
     },
+  };
+}
+
+/** /whitelist on and off: the switch itself, which lasts until the server restarts. */
+function whitelistSwitch(wanted: boolean): PanelAction {
+  const state = wanted ? "on" : "off";
+  return {
+    command: "WHITELIST",
+    allowed: holds("admin.whitelist", "admin.*"),
+    plan: () => ({
+      key: SERVER_KEY,
+      run: { command: "WHITELIST", args: [state] },
+      // Two admins, or a click on a page that is behind: it is only run when it changes something.
+      already: () => (!!bridge?.status().whitelistEnabled === wanted ? `The whitelist is already ${state}.` : null),
+    }),
   };
 }
 

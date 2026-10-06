@@ -161,15 +161,7 @@ const held = <T = any>(key: string): T[] => {
 };
 const copyOf = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 
-const RAINY = { name: "rainy", ambience: 0.5, wind_direction: "left", wind_speed: 4, humidity: 90, temperature: 55, precipitation: 0.8 };
-
 /** The particles of the fixture, as the server holds them. */
-const EMBER = {
-  name: "ember", size: 3, color: "orange", lifetime: 900, opacity: 0.8, visible: true, gravity: { x: 0, y: 0.5 }, localposition: { x: 4, y: 8 },
-  velocity: { x: 0, y: -1 }, interval: 100, amount: 6, staggertime: 0, spread: { x: 2, y: 2 }, currentLife: null, initialVelocity: null,
-  weather: RAINY, affected_by_weather: true, zIndex: 2, glow_intensity: 1.5, glow_radius: 12, static_light: false, brightness: 1,
-  affected_by_time: false, time_on: null, time_off: null, image: null,
-};
 const SMOKE = {
   name: "smoke", size: 5, color: "grey", lifetime: 2000, opacity: 0.4, visible: true, gravity: { x: 0, y: 0 }, localposition: { x: 0, y: 0 },
   velocity: { x: 0, y: -0.5 }, interval: 300, amount: 2, staggertime: 0.5, spread: { x: 6, y: 1 }, currentLife: null, initialVelocity: null,
@@ -182,12 +174,6 @@ const sent = (over: Row = {}) => ({
   amount: 12, staggertime: 0.25, spread: "3,3", affected_by_weather: false, zIndex: 1, glow_intensity: 2, glow_radius: 0, static_light: false, brightness: 1.5,
   affected_by_time: false, time_on: "", time_off: "", image: null, ...over,
 } as unknown as Particle);
-const SPARK = {
-  name: "spark", size: 2, color: "yellow", lifetime: 400, opacity: 1, visible: true, gravity: { x: 0, y: 1 }, localposition: { x: 0, y: 0 },
-  velocity: { x: 1, y: -2 }, interval: 50, amount: 12, staggertime: 0.25, spread: { x: 3, y: 3 }, currentLife: null, initialVelocity: null,
-  weather: "none", affected_by_weather: false, zIndex: 1, glow_intensity: 2, glow_radius: 0, static_light: false, brightness: 1.5,
-  affected_by_time: false, time_on: null, time_off: null, image: null,
-};
 
 const GUARD = {
   id: 5, last_updated: "2026-01-01 09:00:00", map: "overworld", name: "Guard", position: { x: 120, y: 80, direction: "left" }, hidden: false, script: null,
