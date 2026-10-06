@@ -1593,11 +1593,18 @@ authWorker.on("message", async (result: any) => {
 
     listener.emit(Events.PLAYER_AUTH_COMPLETE, { username: playerData.username, spawnLocation, playerData });
 
-    const map =
-      maps.find((m: MapData) => m.name === spawnLocation.map) ||
-      maps.find((m: MapData) => m.name === `${defaultMap}.json`);
+    const savedMap = maps.find((m: MapData) => m.name === spawnLocation.map);
+    const map = savedMap || maps.find((m: MapData) => m.name === `${defaultMap}.json`);
     if (!map) return;
 
+    // A saved map that no longer exists (removed from the asset server) falls
+    // back to the default map. Its coordinates mean nothing there, so the
+    // player starts at the default map's spawn point instead.
+    if (!savedMap) {
+      spawnLocation.x = default_map_spawnpoint.x;
+      spawnLocation.y = default_map_spawnpoint.y;
+      spawnLocation.direction = default_map_spawnpoint.direction;
+    }
     spawnLocation.map = map.name;
 
     const questActive: QuestLogEntry[] = Array.isArray(playerData.questlog?.active) ? playerData.questlog.active : [];

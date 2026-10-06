@@ -2,6 +2,7 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import log from "./logger";
+import { removeUnlistedWorlds } from "./mapmirror";
 
 // World maps: a map too large to hold as one Tiled file (the 10240 x 10240 continent) is a directory <id>.world/ in
 // the maps folder, written by the map generator and served by the asset server. The game server never needs its
@@ -302,6 +303,11 @@ export async function syncWorldMaps(mapDir: string): Promise<void> {
         fs.renameSync(`${target}.tmp`, target);
       }
       if (complete) log.success(`Synced world: ${id}`);
+    }
+
+    // A local world the asset server no longer lists is removed (modules/mapmirror.ts).
+    for (const id of removeUnlistedWorlds(mapDir, result.worlds.map((world: any) => String(world?.id ?? "")))) {
+      log.warn(`Removed world ${id}.world: the asset server no longer has it`);
     }
   } catch (error) {
     log.warn(`Failed to sync worlds from asset server: ${error}`);

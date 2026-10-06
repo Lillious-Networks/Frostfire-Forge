@@ -13,6 +13,7 @@ import assetCache from "../services/assetCache";
 import zlib from "zlib";
 import { serverFetch } from "./https_servers.ts";
 import { loadWorldMaps, syncWorldMaps } from "./worldmaps";
+import { removeUnlistedMaps } from "./mapmirror";
 import * as settings from "../config/settings.json";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 const mapDir = path.join('.', 'src', 'assets', 'maps');
@@ -143,6 +144,15 @@ async function syncMapsBeforeLoading(): Promise<void> {
       }
     } else {
       log.info("All maps are up to date");
+    }
+
+    // The asset server names every map it has (`maps`). A local map it no
+    // longer has is removed, so the folder stays a copy of the asset server's.
+    // An older asset server sends no list: nothing is removed then.
+    if (Array.isArray(result.maps)) {
+      for (const name of removeUnlistedMaps(mapDir, result.maps.map(String))) {
+        log.warn(`Removed map ${name}: the asset server no longer has it`);
+      }
     }
   } catch (error) {
     log.warn(`Failed to sync maps from asset server: ${error}`);
