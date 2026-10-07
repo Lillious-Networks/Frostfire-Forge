@@ -1,10 +1,29 @@
 import { describe, expect, test } from "bun:test";
-import { areaCastRefusal, areaSpellHarms } from "../systems/pvpzone";
+import { areaCastRefusal, areaSpellHarms, targetedCastRefused } from "../systems/pvpzone";
 
 // A map whose southern half (y >= 500) is a no-PvP zone.
 const allowed = async (position: { x: number; y: number }) => position.y < 500;
 const field = { x: 100, y: 100 };
 const town = { x: 100, y: 800 };
+
+describe("casting a spell at a target", () => {
+  test("a harmful one is allowed where PvP is", async () => {
+    expect(await targetedCastRefused(true, field, { x: 140, y: 120 }, allowed)).toBe(false);
+  });
+
+  test("a harmful one is refused when the caster or the target stands in a no-PvP zone", async () => {
+    expect(await targetedCastRefused(true, town, field, allowed)).toBe(true);
+    expect(await targetedCastRefused(true, field, town, allowed)).toBe(true);
+    expect(await targetedCastRefused(true, town, town, allowed)).toBe(true);
+  });
+
+  test("a beneficial one (a heal, a buff) is allowed in a no-PvP zone, on yourself or on another", async () => {
+    expect(await targetedCastRefused(false, town, town, allowed)).toBe(false);
+    expect(await targetedCastRefused(false, town, { x: 140, y: 820 }, allowed)).toBe(false);
+    expect(await targetedCastRefused(false, field, town, allowed)).toBe(false);
+    expect(await targetedCastRefused(false, town, field, allowed)).toBe(false);
+  });
+});
 
 describe("casting a harmful spell that has no target", () => {
   test("is allowed where PvP is", async () => {

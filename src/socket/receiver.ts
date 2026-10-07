@@ -4810,7 +4810,8 @@ export default async function packetReceiver(
             width: 24,
             height: 40,
           },
-          spell_range
+          spell_range,
+          spell_damage > 0 || spellIsHostileEffect
         );
         log.debug(`[ATTACK] canAttack result: ${JSON.stringify(canAttack)}`);
 
@@ -5110,7 +5111,8 @@ export default async function packetReceiver(
               width: 24,
               height: 40,
             },
-            spell_range
+            spell_range,
+            spell_damage > 0 || spellIsHostileEffect
           );
         }
 

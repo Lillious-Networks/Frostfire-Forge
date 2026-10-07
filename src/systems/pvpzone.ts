@@ -12,6 +12,16 @@ export type PvpAllowed = (position: Point) => Promise<boolean>;
 export const PVP_BODY = { width: 24, height: 40 };
 
 /**
+ * Whether a spell cast at a target is refused for a no-PvP zone: a harmful one
+ * when its caster or its target stands in one. A beneficial spell (a heal, a
+ * buff) harms nobody and is cast anywhere.
+ */
+export async function targetedCastRefused(harmful: boolean, caster: Point, target: Point, allowed: PvpAllowed): Promise<boolean> {
+  if (!harmful) return false;
+  return !(await allowed(target)) || !(await allowed(caster));
+}
+
+/**
  * Why a harmful area spell may not be cast, or null when it may: not by a
  * caster standing in a no-PvP zone, and not placed inside one (`aim` is the
  * ground point of a ground-targeted spell, null for one around the caster).

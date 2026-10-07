@@ -3,6 +3,7 @@ import { verify, randomBytes } from "../modules/hash";
 import log from "../modules/logger";
 import assetCache from "../services/assetCache";
 import { getWorldMap, type WorldBits } from "../modules/worldmaps";
+import { targetedCastRefused } from "./pvpzone";
 import * as settings from "../config/settings.json";
 import playerCache from "../services/playermanager.ts";
 import { realmWhitelist } from "../services/whitelist";
@@ -1429,7 +1430,8 @@ const player = {
     self: Player,
     target: Player,
     playerProperties: PlayerProperties,
-    maxPathfindingDistance: number = 300
+    maxPathfindingDistance: number = 300,
+    harmful: boolean = true
   ): Promise<{ value: boolean; reason?: string }> => {
 
     const isSelf = self.id === target.id || self.username === target.username;
@@ -1494,18 +1496,10 @@ const player = {
       }
     }
 
-    const isPvpAllowedTarget = await player.isInPvPZone(
-      self.location.map,
-      targetPosition,
-      playerProperties
-    );
-    if (!isPvpAllowedTarget) return { value: false, reason: "nopvp" };
-    const isPvpAllowedSelf = await player.isInPvPZone(
-      self.location.map,
-      selfPosition,
-      playerProperties
-    );
-    if (!isPvpAllowedSelf) return { value: false, reason: "nopvp" };
+    // Only a harmful spell answers to the no-PvP zones: a heal or a buff is cast anywhere.
+    const map = self.location.map;
+    const pvpAllowed = (position: { x: number; y: number }) => player.isInPvPZone(map, position as PositionData, playerProperties);
+    if (await targetedCastRefused(harmful, selfPosition, targetPosition, pvpAllowed)) return { value: false, reason: "nopvp" };
 
     const hasPath = await hasLineOfSight(
       selfPosition.x,
