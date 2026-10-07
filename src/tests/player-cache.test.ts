@@ -90,8 +90,15 @@ function write(text: string, args: any[]): any {
     });
     const wanted = args.shift();
     const rows = tables[table].filter((row) => !column || same(row[column], wanted));
-    for (const row of rows) for (const assign of apply) assign(row);
-    return { affectedRows: rows.length };
+    // As MySQL answers: the rows the statement changed, not the rows it found. A row written with the values it
+    // already had is not counted.
+    let changed = 0;
+    for (const row of rows) {
+      const before = JSON.stringify(row);
+      for (const assign of apply) assign(row);
+      if (JSON.stringify(row) !== before) changed++;
+    }
+    return { affectedRows: changed };
   }
 
   const insert = text.match(/^INSERT INTO (\w+) \((.+?)\) VALUES \((.+?)\)$/);
@@ -512,6 +519,29 @@ describe("a write to an account", () => {
     expect(await fromCache(() => location("pc_hero"))).toEqual({ map: "overworld", position: { x: 320, y: 480, direction: "down" } });
   });
 
+  test("arriveAt says the account is saved as standing there, when the row was changed and when it already said so", async () => {
+    online("6101", "pc_hero");
+    await location("pc_hero");
+    expect(await player.arriveAt("6101", "cave", { x: 12.4, y: 99.6, direction: "up" })).toBe(true);
+    expect(row("pc_hero")).toMatchObject({ map: "cave", position: "12,100", direction: "up" });
+    // The same place again: the database changes no row, and that is not a refusal. A door leads to one spot, and a
+    // player brought back inside some other way (a home item, an admin) walks out to where they were last saved.
+    expect<any>(await player.setLocation("6101", "cave", { x: 12, y: 100, direction: "up" })).toEqual({ affectedRows: 0 });
+    expect(await player.arriveAt("6101", "cave.json", { x: 12, y: 100, direction: "up" })).toBe(true);
+    expect(await player.arriveAt("6101", "cave", { x: 12, y: 100, direction: "left" })).toBe(true);
+    expect(row("pc_hero")).toMatchObject({ map: "cave", position: "12,100", direction: "left" });
+  });
+
+  test("arriveAt refuses a session the database gives to nobody, wherever it was going", async () => {
+    online("6101", "pc_hero");
+    await location("pc_hero");
+    // Logged in somewhere else since: the gateway gave the account another session.
+    row("pc_hero").session_id = "7777";
+    expect(await player.arriveAt("6101", "cave", { x: 1, y: 2, direction: "up" })).toBe(false);
+    expect(row("pc_hero")).toMatchObject({ map: "overworld", position: "320,480" });
+    expect(await player.arriveAt("", "cave", { x: 1, y: 2, direction: "up" })).toBe(false);
+  });
+
   test("a save made for a session that has already left the players held is read once the player is let go", async () => {
     // A disconnect: the player leaves the players held, is saved by session id, and is then forgotten.
     online("6101", "pc_hero");
@@ -792,5 +822,27 @@ describe("the guest clean-up", () => {
     expect(await player.getStats("guest_pc")).toEqual([]);
     expect(told).toContain("accounts *");
     expect(told).toContain("parties reload");
+  });
+});
+
+// ------------------------------------------------------------- a new account
+
+describe("a new account", () => {
+  const signUp = () => player.register("PC_Newcomer", "hash", "Newcomer@Example.test", { ip: "203.0.113.9", headers: {} }, false);
+
+  test("is given the rows it starts with: its stats, settings, purse, equipment, mount and first spell", async () => {
+    expect(await signUp()).toBe("pc_newcomer");
+    for (const table of ["accounts", "stats", "clientconfig", "currency", "equipment", "collectables", "learned_spells"]) {
+      expect(tables[table].filter((row) => row.username === "pc_newcomer")).toHaveLength(1);
+    }
+  });
+
+  // The quest log holds a row for each quest a player has taken, and a row needs its quest. A new account has
+  // taken none: the row once written for it here, with a name and no quest, is refused by the database ("Field
+  // 'quest_id' doesn't have a default value"), and everything after it was then never written.
+  test("is given no row in the quest log", async () => {
+    await signUp();
+    expect(queries.filter((sql) => sql.startsWith("INSERT INTO quest_log"))).toEqual([]);
+    expect(tables.quest_log.some((row) => row.username === "pc_newcomer")).toBe(false);
   });
 });

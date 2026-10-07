@@ -9,6 +9,7 @@ import ignores, { IGNORE_LIMIT } from "./ignores";
 import mutes, { parseDuration } from "./mutes";
 import player from "./player";
 import reports, { REPORT_CATEGORIES, type Place, type RefusedReport, type Report, type ReportCategory } from "./reports";
+import tradeLog, { type TradeGave, type TradeRecord } from "./tradelog";
 
 const NO_PERMISSION = "You don't have permission to use this command";
 const NOT_FOUND = "Player not found";
@@ -203,5 +204,39 @@ export async function reportsCommand(actor: any, args: string[], now = Date.now(
     where,
     ...filed.chat_log.map((line) => `[${line.channel}] ${line.text}`),
     `Open reports naming ${shown(filed.target)}: ${others}`,
+  ].join("\n");
+}
+
+// ----------------------------------------------------------------- trades
+
+/** What one side of a trade handed over, in a line: "4 Iron Ore, 1s 60c", or "nothing". */
+export function gaveText(gave: TradeGave): string {
+  const { gold, silver, copper } = gave.coins;
+  const coins = [gold ? `${gold}g` : "", silver ? `${silver}s` : "", copper ? `${copper}c` : ""].filter(Boolean).join(" ");
+  return [...gave.items.map((item) => `${item.quantity} ${item.name}`), ...(coins ? [coins] : [])].join(", ") || "nothing";
+}
+
+/** A trade as one of its players' sides of it: who it was with, what they gave and what they got. */
+export function tradeSides(record: TradeRecord, username: string): { partner: string; gave: TradeGave; got: TradeGave } {
+  return record.player_a === lower(username)
+    ? { partner: record.player_b, gave: record.a_gave, got: record.b_gave }
+    : { partner: record.player_a, gave: record.b_gave, got: record.a_gave };
+}
+
+/** /trades <username>: the latest trades a player completed. */
+export async function tradesCommand(actor: any, args: string[], now = Date.now()): Promise<string> {
+  if (!can(actor, "admin.trades")) return NO_PERMISSION;
+  if (!args[0]) return "Usage: /trades <username>";
+  const target = await accountName(args[0]);
+  if (!target) return NOT_FOUND;
+
+  const latest = await tradeLog.of(target, LISTED);
+  if (latest.length === 0) return `${shown(target)} has no trades on record`;
+  return [
+    `${shown(target)}'s latest trades: ${latest.length}`,
+    ...latest.map((record) => {
+      const { partner, gave, got } = tradeSides(record, target);
+      return `#${record.id} with ${shown(partner)}, ${ago(record.created_at, now)}: gave ${gaveText(gave)}, got ${gaveText(got)}`;
+    }),
   ].join("\n");
 }

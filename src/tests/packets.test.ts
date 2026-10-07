@@ -129,3 +129,42 @@ test("packetManager.equipment encodes correctly", () => {
     expect(json.type).toBe("EQUIPMENT");
     expect(json.data.weapon).toBe("iron_sword");
 });
+
+// ── createNpc builder ──
+
+test("packetManager.createNpc says whether the NPC is a vendor", () => {
+    const npc = { id: 7, name: "Smith", position: { x: 1, y: 2, direction: "down" }, hidden: false, dialog: null, particles: [], map: "overworld", sprite_type: "none" };
+    const sent = (data: any) => decode(packetManager.createNpc(data)[0]).data;
+    expect(sent({ ...npc, vendor: true }).vendor).toBe(true);
+    expect(sent({ ...npc, vendor_items: [{ item: "Bread", price: 5 }] }).vendor).toBe(true);
+    expect(sent({ ...npc, vendor_items: [] }).vendor).toBe(false);
+    expect(sent(npc).vendor).toBe(false);
+});
+
+test("packetManager.itemCooldown says which cooldown, how long is left of it and how long it is in all", () => {
+    expect(decode(packetManager.itemCooldown({ kind: "consumable", remaining: 12_000, total: 30_000 })[0]))
+        .toEqual({ type: "ITEM_COOLDOWN", data: { kind: "consumable", remaining: 12_000, total: 30_000 } });
+    expect(decode(packetManager.itemCooldown({ kind: "home", remaining: 3_600_000, total: 3_600_000 })[0]).data.kind).toBe("home");
+});
+
+test("packetManager.cooldownsReset tells a player every cooldown of theirs is over", () => {
+    expect(decode(packetManager.cooldownsReset()[0])).toEqual({ type: "COOLDOWNS_RESET", data: null });
+});
+
+test("packetManager.mapMarkers says where a map's inns and caves are", () => {
+    const markers = [{ kind: "inn" as const, x: 1008, y: 2000, name: "The Rusty Anchor" }, { kind: "cave" as const, x: 8032, y: 2500, name: null }];
+    expect(decode(packetManager.mapMarkers({ map: "overworld", markers })[0])).toEqual({ type: "MAP_MARKERS", data: { map: "overworld", markers } });
+});
+
+test("packetManager.npcGossip says whether the NPC keeps an inn", () => {
+    const sent = decode(packetManager.npcGossip({ npcId: 7, name: "Host", gossipText: null, quests: [], vendor: false, innkeeper: true })[0]);
+    expect(sent).toEqual({ type: "NPC_GOSSIP", data: { npcId: 7, name: "Host", gossipText: null, quests: [], vendor: false, innkeeper: true } });
+});
+
+test("packetManager.createNpc says whether the NPC is an innkeeper", () => {
+    const npc = { id: 7, name: "Host", position: { x: 1, y: 2, direction: "down" }, hidden: false, dialog: null, particles: [], map: "overworld", sprite_type: "none" };
+    const sent = (data: any) => decode(packetManager.createNpc(data)[0]).data;
+    expect(sent({ ...npc, innkeeper: true }).innkeeper).toBe(true);
+    expect(sent({ ...npc, innkeeper: false }).innkeeper).toBe(false);
+    expect(sent(npc).innkeeper).toBe(false);
+});

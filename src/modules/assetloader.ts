@@ -14,6 +14,7 @@ import zlib from "zlib";
 import { serverFetch } from "./https_servers.ts";
 import { loadWorldMaps, syncWorldMaps } from "./worldmaps";
 import { removeUnlistedMaps } from "./mapmirror";
+import { placedNpc } from "./mapnpc";
 import * as settings from "../config/settings.json";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 const mapDir = path.join('.', 'src', 'assets', 'maps');
@@ -90,8 +91,10 @@ const quests = await questDefinitions.list();
 log.success(`Loaded ${quests.length} quest(s) from the database in ${(performance.now() - questNow).toFixed(2)}ms`);
 
 const mapProperties: MapProperties[] = [];
-/** Particle-only NPCs read from the maps' "Particles" object layers (extractAndCompressLayers). */
+/** The NPCs the maps place themselves (extractAndCompressLayers): particle emitters from their "Particles" layers, and whole NPCs from "npc" objects. */
 const mapNpcList: Npc[] = [];
+/** The ids of the whole NPCs among them: no two may share one. */
+const placedNpcIds = new Set<number>();
 /** Where the client draws an NPC's particles relative to its position (client npc.ts: position + 16, + 24). */
 const MAP_NPC_PARTICLE_OFFSET = { x: 16, y: 24 } as const;
 
@@ -468,6 +471,23 @@ function extractAndCompressLayers(map: MapData) {
               sprite_legs: null,
               sprite_weapon: null,
             });
+            break;
+          }
+          // A point of type "npc" (or on an "NPCs" layer) is an NPC the map places itself (mapnpc.ts): drawn and
+          // talked to as a row of the npcs table is, under an id that is the same at every start
+          case "npc":
+          case "npcs": {
+            const placed = placedNpc(map.name, obj);
+            if (!placed) {
+              log.warn(`NPC object without a name or a place in map ${map.name}: ${JSON.stringify(obj)}`);
+              break;
+            }
+            if (placedNpcIds.has(placed.id as number)) {
+              log.warn(`NPC object "${placed.name}" in map ${map.name} has the id of another placed NPC: give it a name of its own`);
+              break;
+            }
+            placedNpcIds.add(placed.id as number);
+            mapNpcList.push(placed);
             break;
           }
           default:
@@ -1058,10 +1078,10 @@ await syncMapsBeforeLoading();
 await syncWorldMaps(mapDir);
 loadAllMaps();
 
-// The maps' particle-only NPCs join the NPC cache (and every later npc.list() reload of it)
+// The maps' own NPCs join the NPC cache (and every later npc.list() reload of it)
 npc.setMapNpcs(mapNpcList);
 await assetCache.set("npcs", [...npcs.filter((n) => !npc.isMapNpc(n)), ...mapNpcList]);
-if (mapNpcList.length) log.success(`Loaded ${mapNpcList.length} particle npc(s) from the maps`);
+if (mapNpcList.length) log.success(`Loaded ${mapNpcList.length - placedNpcIds.size} particle npc(s) and ${placedNpcIds.size} placed npc(s) from the maps`);
 
 function tryParse(data: string): any {
   try {

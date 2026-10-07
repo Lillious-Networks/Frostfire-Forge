@@ -260,6 +260,21 @@ declare interface Item {
   damage_min: Nullable<number>;
   damage_max: Nullable<number>;
   attack_speed_ms: Nullable<number>;
+  /** What a vendor pays for one, in copper. Nothing set is 1; 0 is an item vendors do not buy. */
+  sell_price?: Nullable<number>;
+  /** Consumables: the health and stamina using one gives back, at once. */
+  restore_health?: Nullable<number>;
+  restore_stamina?: Nullable<number>;
+  /** Consumables: one that cannot be used in combat. */
+  no_combat?: boolean;
+  /** The home item: a consumable that is never used up and takes its player to their home inn. One item is it. */
+  teleports_home?: boolean;
+}
+
+/** One thing a vendor stocks: the item's name, and what one costs to buy there, in copper. */
+declare interface VendorItem {
+  item: string;
+  price: number;
 }
 
 declare interface Equipment {
@@ -306,6 +321,10 @@ declare interface Npc {
   particles: Nullable<Particle[]>;
   /** Whether quests can be assigned to this NPC in the editors. */
   quest_giver: boolean;
+  /** What this NPC sells. An NPC with something in stock is a vendor, and buys what players sell. */
+  vendor_items?: Nullable<VendorItem[]>;
+  /** Whether players can make this NPC's inn their home. */
+  innkeeper?: boolean;
   sprite_type: 'none' | 'static' | 'animated';
   sprite_body: Nullable<string>;
   sprite_head: Nullable<string>;
@@ -429,6 +448,15 @@ declare interface WeatherData {
   wind_direction: string;
   precipitation: number;
   ambience: number;
+}
+
+/** What a weather reads, as the control panel shows it: degrees Fahrenheit, percent, miles an hour, where the wind blows to on screen, and how much falls (0 to 100). */
+declare interface WeatherConditions {
+  temperature: number;
+  humidity: number;
+  wind_speed: number;
+  wind_direction: string;
+  precipitation: number;
 }
 
 declare interface WorldData {
@@ -783,7 +811,12 @@ declare interface ControlPanelData {
     creatures: Nullable<Record<string, unknown>>;
   };
   /** The viewer's map with its weather, and every world. `showing` is the weather a "random" world has settled on. */
-  world: { map: string; weather: string; showing: string; worlds: Array<{ name: string; weather: string; showing: string; players: number }> };
+  world: {
+    map: string; weather: string; showing: string;
+    /** The readings of the weather the viewer's map has now. Null under a clear sky, or when there is nothing to read. */
+    conditions: WeatherConditions | null;
+    worlds: Array<{ name: string; weather: string; showing: string; conditions: WeatherConditions | null; players: number }>;
+  };
   /** For a viewer who handles reports: how many are open. */
   reports?: { open: number };
   /** Sent when asked in full: which controls the viewer's permissions allow, by action. */
@@ -809,6 +842,7 @@ declare type ControlPanelResults =
   | { kind: "permissions"; target: string; held: string[]; types: string[]; isAdmin: boolean }
   | { kind: "moderation"; target: string; mute: Nullable<import("./src/systems/mutes").Mute>; openReports: number }
   | { kind: "reports"; open: import("./src/systems/reports").Report[]; resolved: import("./src/systems/reports").Report[] }
+  | { kind: "trades"; target: string; trades: import("./src/systems/tradelog").TradeRecord[] }
   | { kind: "lootTables"; tables: Array<{ id: number; name: string; items: Array<{ id: number; item_name: string; min_quantity: number; max_quantity: number; drop_chance: number; quality: string }> }> };
 
 /** The answer to one control panel request. */

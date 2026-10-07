@@ -145,7 +145,10 @@ const commands = () => ran.map((entry) => ("packet" in entry.run ? entry.run.pac
 const bridge = {
   restartScheduled: () => restartScheduled,
   status: () => ({ eventLoopLagMs: lagMs, whitelistEnabled: whitelistOn, whitelisted: 4, creatures: { creatures: 12, awake } }),
-  worlds: async () => [{ name: "overworld", weather: "random", showing: "rain", players: 3 }, { name: "cave", weather: "clear", showing: "clear", players: 0 }],
+  worlds: async () => [
+    { name: "overworld", weather: "random", showing: "rain", conditions: { temperature: 55, humidity: 70, wind_speed: 8, wind_direction: "left", precipitation: 60 }, players: 3 },
+    { name: "cave", weather: "clear", showing: "clear", conditions: null, players: 0 },
+  ],
 };
 panel.setControlPanelBridge(bridge);
 
@@ -382,7 +385,7 @@ describe("each control keeps its command's permission rule", () => {
 
   test("what the viewer may do is sent with the full panel, by action", async () => {
     const can = await panel.capabilities(mod);
-    expect(Object.keys(can).sort()).toEqual([...Object.keys(RULES), "player.summon.admins", "query.lootTables", "query.moderation", "query.permissions", "query.reports"].sort());
+    expect(Object.keys(can).sort()).toEqual([...Object.keys(RULES), "player.summon.admins", "query.lootTables", "query.moderation", "query.permissions", "query.reports", "query.trades"].sort());
     const yes = Object.keys(can).filter((name) => can[name]).sort();
     expect(yes).toEqual(["player.ban", "player.kick", "self.noclip", "self.stealth"]);
     expect((await panel.capabilities(boss))["player.summon.admins"]).toBe(true);
@@ -456,7 +459,11 @@ describe("the live view", () => {
     expect(data.status).toMatchObject({
       eventLoopLagMs: 2, restartScheduled: false, whitelist: { enabled: true, size: 4 }, creatures: { creatures: 12, awake: 5 },
     });
-    expect(data.world).toMatchObject({ map: "overworld", weather: "random", showing: "rain" });
+    expect(data.world).toMatchObject({
+      map: "overworld", weather: "random", showing: "rain",
+      // What the viewer's own map reads now, for the weather card.
+      conditions: { temperature: 55, humidity: 70, wind_speed: 8, wind_direction: "left", precipitation: 60 },
+    });
     expect(data.world.worlds.length).toBe(2);
     // Asked for every few seconds: nothing is read from the database, and the fixed lists are left out.
     expect(queries).toEqual([]);
@@ -703,6 +710,34 @@ describe("mutes and reports", () => {
     expect(listed.data.open[0].chat_log).toEqual([{ at: NOON, channel: "say", text: "buy gold" }]);
     expect(listed.data.resolved).toEqual([expect.objectContaining({ id: 3, resolved_by: "cp_boss", resolution: "muted" })]);
     expect(await ask(mod, { kind: "reports" })).toMatchObject({ kind: "result", data: { ok: false, errors: ["You don't have permission to do that."] } });
+  });
+
+  test("a player's latest trades are listed, newest first, for whoever may read the trade log", async () => {
+    const gave = (items: Array<[string, number]> = [], gold = 0) => ({ items: items.map(([name, quantity]) => ({ name, quantity })), coins: { gold, silver: 0, copper: 0 } });
+    const traded = (id: number, player_a: string, player_b: string, a: ReturnType<typeof gave>, b: ReturnType<typeof gave>) =>
+      ({ id, player_a, player_b, a_gave: JSON.stringify(a), b_gave: JSON.stringify(b), created_at: NOON + id });
+    tables.trade_log = [
+      traded(1, "cp_hero", "cp_exile", gave([["Iron Helmet", 1]]), gave([], 5)),
+      traded(2, "cp_exile", "cp_mod", gave(), gave([], 1)),
+      traded(3, "cp_mod", "cp_hero", gave([], 2), gave()),
+    ];
+    await loadTables();
+
+    expect(await ask(holder(["admin.trades"]), { kind: "trades", target: "CP_Hero" })).toEqual({
+      kind: "results",
+      data: {
+        kind: "trades",
+        target: "cp_hero",
+        trades: [
+          { id: 3, player_a: "cp_mod", player_b: "cp_hero", a_gave: gave([], 2), b_gave: gave(), created_at: NOON + 3 },
+          { id: 1, player_a: "cp_hero", player_b: "cp_exile", a_gave: gave([["Iron Helmet", 1]]), b_gave: gave([], 5), created_at: NOON + 1 },
+        ],
+      },
+    });
+    expect(await ask(boss, { kind: "trades", target: "cp_boss" })).toMatchObject({ data: { trades: [] } });
+    expect(await ask(mod, { kind: "trades", target: "cp_hero" })).toMatchObject({ kind: "result", data: { ok: false, errors: ["You don't have permission to do that."] } });
+    expect(await ask(boss, { kind: "trades", target: "cp_nobody" })).toMatchObject({ data: { errors: ["Player not found."] } });
+    expect(await ask(boss, { kind: "trades" })).toMatchObject({ data: { errors: ["Pick a player first."] } });
   });
 
   test("how many reports are open is on every refresh, for those who handle them only", async () => {
@@ -965,5 +1000,43 @@ describe("the list of what admins did through the panel", () => {
     expect(refresh.data.history).toBeUndefined();
     // The answer to an action carries the live view only: the panel asks for the list.
     expect((await act(boss, "player.respawn", { target: "cp_hero" })).data?.activity).toBeUndefined();
+  });
+});
+
+describe("the weather a world has now", () => {
+  const row = (name: string, over: Partial<WeatherData> = {}): WeatherData => ({ name, temperature: 60, humidity: 50, wind_speed: 5, wind_direction: "left", precipitation: 40, ambience: 0.3, ...over });
+  const rows = [row("rainy"), row("Blizzard", { temperature: 10, wind_speed: 40, wind_direction: "right", precipitation: 90 })];
+  const live = { look: "snowy", row: row("weather_api", { temperature: 28, humidity: 81, wind_speed: 12, wind_direction: "down", precipitation: 20 }) };
+  const now = (set: string, settled?: { weather: string; weatherData: WeatherData | null }) => panel.worldWeather(set, settled, live, rows);
+
+  test("a clear world shows clear, and has no readings", () => {
+    expect(now("clear")).toEqual({ weather: "clear", showing: "clear", conditions: null });
+    expect(now("")).toEqual({ weather: "clear", showing: "clear", conditions: null });
+  });
+
+  test("a world set to a weather of the table has that weather's readings, whatever the case of its name", () => {
+    expect(now("rainy")).toEqual({
+      weather: "rainy", showing: "rainy",
+      conditions: { temperature: 60, humidity: 50, wind_speed: 5, wind_direction: "left", precipitation: 40 },
+    });
+    expect(now("blizzard").conditions).toEqual({ temperature: 10, humidity: 50, wind_speed: 40, wind_direction: "right", precipitation: 90 });
+    // A weather that has since been deleted is still named, with nothing to read.
+    expect(now("fog")).toEqual({ weather: "fog", showing: "fog", conditions: null });
+  });
+
+  test("a random world shows the weather it settled on, and nothing before it has", () => {
+    expect(now("random", { weather: "Blizzard", weatherData: rows[1] })).toEqual({
+      weather: "random", showing: "Blizzard",
+      conditions: { temperature: 10, humidity: 50, wind_speed: 40, wind_direction: "right", precipitation: 90 },
+    });
+    expect(now("random", { weather: "clear", weatherData: null })).toEqual({ weather: "random", showing: "clear", conditions: null });
+    expect(now("random")).toEqual({ weather: "random", showing: "random", conditions: null });
+  });
+
+  test("a world that follows a real place shows what it looks like there now, with the reading", () => {
+    expect(now("weather_api")).toEqual({
+      weather: "weather_api", showing: "snowy",
+      conditions: { temperature: 28, humidity: 81, wind_speed: 12, wind_direction: "down", precipitation: 20 },
+    });
   });
 });

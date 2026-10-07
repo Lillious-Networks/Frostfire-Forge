@@ -1,4 +1,5 @@
 import packet from "../modules/packet";
+import type { TradeView } from "../systems/trades";
 
 export const packetManager = {
   disconnect: (id: string) => {
@@ -229,9 +230,46 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "QUEST_MARKERS", data })),
     ] as any[];
   },
-  npcGossip: (data: { npcId: number; name: string | null; gossipText: string | null; quests: QuestOffer[] }) => {
+  /**
+   * `vendor`: the NPC also sells things, which the player can ask to see (VENDOR_OPEN).
+   * `innkeeper`: it keeps an inn, which the player can make their home (SET_HOME).
+   */
+  npcGossip: (data: { npcId: number; name: string | null; gossipText: string | null; quests: QuestOffer[]; vendor?: boolean; innkeeper?: boolean }) => {
     return [
       packet.encode(JSON.stringify({ type: "NPC_GOSSIP", data })),
+    ] as any[];
+  },
+  /**
+   * A cooldown on the player's items, in milliseconds: the one every consumable shares, or the
+   * home item's own. Sent when it starts, and what is left of it when they log in.
+   */
+  itemCooldown: (data: { kind: "consumable" | "home"; remaining: number; total: number }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "ITEM_COOLDOWN", data })),
+    ] as any[];
+  },
+  /** Where the inns, merchants, caves and houses of the map the player is on are (map px), for their minimap and world map. Sent on entering a map, and again when an NPC changes. */
+  mapMarkers: (data: { map: string; markers: Array<{ kind: "inn" | "merchant" | "cave" | "house"; x: number; y: number; name: string | null }> }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "MAP_MARKERS", data })),
+    ] as any[];
+  },
+  /** Every cooldown of the player is over (an admin reset them): spells, the spell lockout and items. */
+  cooldownsReset: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "COOLDOWNS_RESET", data: null })),
+    ] as any[];
+  },
+  /** What a vendor stocks (each item with what it is, and its price there in copper) and what the player can buy back from it. */
+  vendorStock: (data: { npcId: number; name: string | null; items: Array<Item & { price: number }>; buyback: Array<Record<string, unknown>> }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "VENDOR_STOCK", data })),
+    ] as any[];
+  },
+  /** The player may no longer deal with the vendor (they walked off, say): their vendor window closes. */
+  vendorClosed: (data: { message: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "VENDOR_CLOSED", data })),
     ] as any[];
   },
   questEditorData: (data: any) => {
@@ -297,6 +335,10 @@ export const packetManager = {
             position: data.position,
             sprite_type: data.sprite_type || 'animated',
             spriteLayers: data.spriteLayers || null,
+            // Whether it sells things, so it can be talked to (see systems/npcStreaming.ts).
+            vendor: data.vendor === true || (Array.isArray(data.vendor_items) && data.vendor_items.length > 0),
+            // Whether it keeps an inn, which is a reason to talk to it too.
+            innkeeper: data.innkeeper === true,
           },
         })
       )
@@ -641,6 +683,18 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "UPDATE_IGNORES", data })),
     ] as any[];
   },
+  /** A player's trade as it stands: both sides, and who has accepted. */
+  tradeState: (data: TradeView) => {
+    return [
+      packet.encode(JSON.stringify({ type: "TRADE_STATE", data })),
+    ] as any[];
+  },
+  /** A player's trade ended: whether the offers changed hands, and what they are told. */
+  tradeClosed: (data: { completed: boolean; message: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "TRADE_CLOSED", data })),
+    ] as any[];
+  },
   invitation: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "INVITATION", data })),
@@ -719,9 +773,9 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "TOGGLE_NPC_EDITOR", data: null })),
     ] as any[];
   },
-  npcList: (npcs: any[], quests?: Array<{ id: number; name: string }>, assets?: { spriteSheets: Record<string, Array<{ name: string; image: string | null }>>; icons: Array<{ name: string; image: string | null }> }) => {
+  npcList: (npcs: any[], quests?: Array<{ id: number; name: string }>, assets?: { spriteSheets: Record<string, Array<{ name: string; image: string | null }>>; icons: Array<{ name: string; image: string | null }>; items?: Array<{ name: string; icon: string | null; quality: string; sell_price: number }> }) => {
     return [
-      packet.encode(JSON.stringify({ type: "NPC_LIST", data: npcs, quests: quests || [], spriteSheets: assets?.spriteSheets || {}, icons: assets?.icons || [] })),
+      packet.encode(JSON.stringify({ type: "NPC_LIST", data: npcs, quests: quests || [], spriteSheets: assets?.spriteSheets || {}, icons: assets?.icons || [], items: assets?.items || [] })),
     ] as any[];
   },
   npcUpdated: (npc: any) => {

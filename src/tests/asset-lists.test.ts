@@ -107,11 +107,14 @@ function resetDatabase() {
         id: 5, last_updated: "2026-01-01 09:00:00", name: "Guard", map: "overworld", position: "120,80", direction: "left", dialog: "Halt.", gossip: null,
         hidden: 0, script: null, particles: "ember", quest_giver: 1, sprite_type: "animated", sprite_body: "guard", sprite_head: null, sprite_helmet: null,
         sprite_shoulderguards: null, sprite_neck: null, sprite_hands: null, sprite_chest: null, sprite_feet: null, sprite_legs: null, sprite_weapon: null,
+        // What a vendor stocks is kept as text.
+        vendor_items: '[{"item":"Bread","price":25},{"item":"Rope","price":0}]', innkeeper: 1,
       },
       {
         id: 9, last_updated: "2026-01-02 09:00:00", name: null, map: "cave", position: "10,20", direction: "down", dialog: null, gossip: null,
         hidden: 1, script: null, particles: "smoke,ember", quest_giver: 0, sprite_type: "none", sprite_body: null, sprite_head: null, sprite_helmet: null,
         sprite_shoulderguards: null, sprite_neck: null, sprite_hands: null, sprite_chest: null, sprite_feet: null, sprite_legs: null, sprite_weapon: null,
+        vendor_items: null, innkeeper: 0,
       },
     ],
     particles: [
@@ -180,18 +183,21 @@ const GUARD = {
   id: 5, last_updated: "2026-01-01 09:00:00", map: "overworld", name: "Guard", position: { x: 120, y: 80, direction: "left" }, hidden: false, script: null,
   dialog: "Halt.", gossip: null, particles: "ember", quest_giver: true, sprite_type: "animated", sprite_body: "guard", sprite_head: null, sprite_helmet: null,
   sprite_shoulderguards: null, sprite_neck: null, sprite_hands: null, sprite_chest: null, sprite_feet: null, sprite_legs: null, sprite_weapon: null,
+  vendor_items: [{ item: "Bread", price: 25 }, { item: "Rope", price: 0 }], innkeeper: true,
 };
 const LURKER = {
   id: 9, last_updated: "2026-01-02 09:00:00", map: "cave", name: null, position: { x: 10, y: 20, direction: "down" }, hidden: true, script: null,
   dialog: null, gossip: null, particles: "smoke,ember", quest_giver: false, sprite_type: "none", sprite_body: null, sprite_head: null, sprite_helmet: null,
   sprite_shoulderguards: null, sprite_neck: null, sprite_hands: null, sprite_chest: null, sprite_feet: null, sprite_legs: null, sprite_weapon: null,
+  vendor_items: [], innkeeper: false,
 };
 /** A particle emitter a map places: never a database row. */
 const TORCH = { ...LURKER, id: -1, map: "overworld", particles: "ember", hidden: false } as unknown as Npc;
 const npc = (over: Row = {}) => ({
   id: null, last_updated: null, map: "overworld", name: "Smith", position: { x: 300, y: 40, direction: "right" }, hidden: false, script: null, dialog: "Hot.",
   gossip: null, particles: "ember,smoke", quest_giver: false, sprite_type: "animated", sprite_body: "smith", sprite_head: null, sprite_helmet: null,
-  sprite_shoulderguards: null, sprite_neck: null, sprite_hands: null, sprite_chest: null, sprite_feet: null, sprite_legs: null, sprite_weapon: null, ...over,
+  sprite_shoulderguards: null, sprite_neck: null, sprite_hands: null, sprite_chest: null, sprite_feet: null, sprite_legs: null, sprite_weapon: null,
+  vendor_items: [], innkeeper: false, ...over,
 } as unknown as Npc);
 /** An NPC as held, but for when it was written. */
 const timeless = (list: any[]) => list.map((entry) => ({ ...entry, last_updated: null }));
@@ -472,6 +478,69 @@ describe("npcs", () => {
     expect(db.npcs[0].position).toBe("7,8");
     expect(timeless(await npcs.list())).toEqual(timeless([{ ...GUARD, position: { x: 7, y: 8, direction: "left" } }, LURKER]));
     expect(reads()).toEqual([]);
+  });
+
+  test("what a vendor stocks is written as text and held as a list, and an NPC that stocks nothing has none written", async () => {
+    await npcs.add(npc({ vendor_items: [{ item: "Bread", price: 30 }, { item: "Nails", price: 2 }] }));
+    expect(db.npcs.at(-1)!.vendor_items).toBe('[{"item":"Bread","price":30},{"item":"Nails","price":2}]');
+    expect((await npcs.list()).at(-1)!.vendor_items).toEqual([{ item: "Bread", price: 30 }, { item: "Nails", price: 2 }]);
+
+    await npcs.update({ ...GUARD, vendor_items: [] } as unknown as Npc);
+    expect(db.npcs[0].vendor_items).toBeNull();
+    expect((await npcs.list())[0]!.vendor_items).toEqual([]);
+
+    await npcs.update({ ...LURKER, vendor_items: [{ item: "Rope", price: 7 }] } as unknown as Npc);
+    expect(db.npcs[1].vendor_items).toBe('[{"item":"Rope","price":7}]');
+    expect((await npcs.list())[1]!.vendor_items).toEqual([{ item: "Rope", price: 7 }]);
+    expect(reads()).toEqual([]);
+  });
+
+  test("whether an NPC is an innkeeper is written as a flag and held as one", async () => {
+    await npcs.add(npc({ innkeeper: true }));
+    expect(db.npcs.at(-1)!.innkeeper).toBe(1);
+    expect((await npcs.list()).at(-1)!.innkeeper).toBe(true);
+
+    await npcs.update({ ...GUARD, innkeeper: false } as unknown as Npc);
+    expect(db.npcs[0].innkeeper).toBe(0);
+    expect((await npcs.list())[0]!.innkeeper).toBe(false);
+
+    await npcs.update({ ...LURKER, innkeeper: true } as unknown as Npc);
+    expect(db.npcs[1].innkeeper).toBe(1);
+    expect((await npcs.list())[1]!.innkeeper).toBe(true);
+    expect(reads()).toEqual([]);
+  });
+
+  test("a player's game is told which NPCs keep an inn, so they can be talked to", async () => {
+    const { npcForClient } = await import("../systems/npcStreaming");
+    const [guard, lurker] = await npcs.list();
+    expect((await npcForClient(guard!)).innkeeper).toBe(true);
+    expect((await npcForClient(lurker!)).innkeeper).toBe(false);
+  });
+
+  test("a player's game is told which NPCs sell things, so they can be talked to, and not what they sell", async () => {
+    const { npcForClient } = await import("../systems/npcStreaming");
+    const [guard, lurker] = await npcs.list();
+    expect((await npcForClient(guard!)).vendor).toBe(true);
+    expect((await npcForClient(lurker!)).vendor).toBe(false);
+    // The stock itself is sent when the vendor is opened.
+    expect(await npcForClient(guard!)).not.toHaveProperty("vendor_items");
+  });
+
+  test("a move keeps what the NPC stocks", async () => {
+    await npcs.move({ id: 5, position: { x: 7, y: 8, direction: null } } as unknown as Npc);
+    expect(db.npcs[0].vendor_items).toBe('[{"item":"Bread","price":25},{"item":"Rope","price":0}]');
+    expect((await npcs.list())[0].vendor_items).toEqual(GUARD.vendor_items);
+  });
+
+  test("stock is read the same from text and from a column that gives it already read, and anything unreadable is no stock", async () => {
+    db.npcs[0].vendor_items = [{ item: "Bread", price: 25 }];
+    db.npcs[1].vendor_items = "not a list";
+    db.npcs.push({ ...db.npcs[1], id: 12, vendor_items: '[{"item":"Bread","price":-1},{"item":7,"price":3},{"price":3},{"item":"Rope","price":2.5},{"item":"Nails","price":4}]' });
+    const list = await npcs.reload();
+    expect(list[0].vendor_items).toEqual([{ item: "Bread", price: 25 }]);
+    expect(list[1].vendor_items).toEqual([]);
+    // Entries that are not an item's name and a whole price are left out.
+    expect(list[2].vendor_items).toEqual([{ item: "Nails", price: 4 }]);
   });
 
   test("remove deletes the NPC, and the list knows without asking", async () => {

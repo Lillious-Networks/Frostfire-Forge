@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
-import { databaseModule } from "./setup";
+import { databaseModule, standInFor } from "./setup";
 
 const repeatable: Quest = {
   id: 10, name: "Daily Grind", zone: null, offer_text: "", description: "", progress_text: "", completion_text: "",
@@ -116,7 +116,7 @@ mock.module("../services/assetCache", () => ({
 }));
 
 const players = new Map<string, any>();
-mock.module("../services/playermanager", () => ({
+await standInFor("../services/playermanager", () => ({
   default: {
     list: () => Object.fromEntries(players),
     get: (id: string) => players.get(id),

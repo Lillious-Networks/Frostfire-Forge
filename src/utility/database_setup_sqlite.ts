@@ -109,10 +109,13 @@ const createInventoryTable = async () => {
   log.info("Creating inventory table...");
   const sql = `
     CREATE TABLE IF NOT EXISTS inventory (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT NOT NULL,
         item TEXT NOT NULL,
         quantity INTEGER NOT NULL,
-        equipped INTEGER NOT NULL DEFAULT 0
+        equipped INTEGER NOT NULL DEFAULT 0,
+        slot INTEGER DEFAULT NULL,
+        bag_slot INTEGER DEFAULT NULL
     );
   `;
   await query(sql);
@@ -139,9 +142,15 @@ const createItemsTable = async () => {
         level_requirement INTEGER DEFAULT NULL,
         equipment_slot TEXT DEFAULT NULL,
         equipable INTEGER NOT NULL DEFAULT 0,
+        bag_slots INTEGER DEFAULT 0,
         damage_min INTEGER DEFAULT NULL,
         damage_max INTEGER DEFAULT NULL,
-        attack_speed_ms INTEGER DEFAULT NULL
+        attack_speed_ms INTEGER DEFAULT NULL,
+        sell_price INTEGER NOT NULL DEFAULT 1,
+        restore_health INTEGER NOT NULL DEFAULT 0,
+        restore_stamina INTEGER NOT NULL DEFAULT 0,
+        no_combat INTEGER NOT NULL DEFAULT 0,
+        teleports_home INTEGER NOT NULL DEFAULT 0
     );
   `;
   await query(sql);
@@ -311,7 +320,9 @@ const createPermissionTypesTable = async () => {
       ('tools.weather_editor'),
       ('admin.mute'),
       ('admin.unmute'),
-      ('admin.reports');
+      ('admin.reports'),
+      ('admin.trades'),
+      ('admin.cooldowns');
   `;
   await query(sql);
 };
@@ -359,12 +370,56 @@ const createModerationTables = async () => {
   `);
 };
 
+/** Every trade two players completed: what each gave (JSON: items and coins). Times are milliseconds since the epoch. */
+const createTradeLogTable = async () => {
+  log.info("Creating trade_log table...");
+  await query(`
+    CREATE TABLE IF NOT EXISTS trade_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      player_a TEXT NOT NULL,
+      player_b TEXT NOT NULL,
+      a_gave TEXT NOT NULL,
+      b_gave TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+  `);
+};
+
+/**
+ * Each player's home: the innkeeper it was set at, where they stood from that NPC, and when their
+ * home item was last used (milliseconds since the epoch; 0: never). A player with no row has no home.
+ */
+const createPlayerHomeTable = async () => {
+  log.info("Creating player_home table...");
+  await query(`
+    CREATE TABLE IF NOT EXISTS player_home (
+      username TEXT NOT NULL PRIMARY KEY,
+      npc_id INTEGER DEFAULT NULL,
+      offset_x INTEGER NOT NULL DEFAULT 0,
+      offset_y INTEGER NOT NULL DEFAULT 0,
+      used_at INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+};
+
+/** The home item every player is given, made when no item is it yet. Its name and look are the item editor's to change. */
+const insertHomeItem = async () => {
+  const held = (await query("SELECT COUNT(*) as count FROM items WHERE teleports_home = 1")) as any[];
+  if (held[0] && Number(held[0].count) > 0) return;
+  log.info("Creating the home item...");
+  await query(
+    `INSERT OR IGNORE INTO items (name, type, quality, description, sell_price, teleports_home)
+     VALUES ('Home Stone', 'consumable', 'uncommon', 'Returns you to your home inn.', 0, 1)`
+  );
+};
+
 const createNpcTable = async () => {
   log.info("Creating npcs table...");
   const sql = `
     CREATE TABLE IF NOT EXISTS npcs (
         id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
         last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        name TEXT DEFAULT NULL,
         map TEXT NOT NULL,
         position TEXT NOT NULL,
         direction TEXT NOT NULL,
@@ -373,10 +428,34 @@ const createNpcTable = async () => {
         hidden INTEGER NOT NULL DEFAULT 0,
         script TEXT DEFAULT NULL,
         particles TEXT DEFAULT NULL,
-        quest_giver INTEGER NOT NULL DEFAULT 0
+        quest_giver INTEGER NOT NULL DEFAULT 0,
+        sprite_type TEXT NOT NULL DEFAULT 'animated',
+        sprite_body TEXT DEFAULT NULL,
+        sprite_head TEXT DEFAULT NULL,
+        sprite_helmet TEXT DEFAULT NULL,
+        sprite_shoulderguards TEXT DEFAULT NULL,
+        sprite_neck TEXT DEFAULT NULL,
+        sprite_hands TEXT DEFAULT NULL,
+        sprite_chest TEXT DEFAULT NULL,
+        sprite_feet TEXT DEFAULT NULL,
+        sprite_legs TEXT DEFAULT NULL,
+        sprite_weapon TEXT DEFAULT NULL,
+        vendor_items TEXT DEFAULT NULL,
+        innkeeper INTEGER NOT NULL DEFAULT 0
     );
   `;
   await query(sql);
+  // What a vendor stocks (JSON: a list of item names and their prices there), added after the first release.
+  await addMissingColumns("npcs", [{ name: "vendor_items", type: "TEXT DEFAULT NULL" }]);
+  // Whether players can make the NPC's inn their home. Added with inns.
+  await addMissingColumns("npcs", [{ name: "innkeeper", type: "INTEGER NOT NULL DEFAULT 0" }]);
+  // An NPC's name and what it looks like: columns the table was first made without here.
+  await addMissingColumns("npcs", [
+    { name: "name", type: "TEXT DEFAULT NULL" },
+    { name: "sprite_type", type: "TEXT NOT NULL DEFAULT 'animated'" },
+    ...["body", "head", "helmet", "shoulderguards", "neck", "hands", "chest", "feet", "legs", "weapon"]
+      .map((part) => ({ name: `sprite_${part}`, type: "TEXT DEFAULT NULL" })),
+  ]);
   const npcRows = (await query(
     `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'npcs'`
   )) as any[];
@@ -666,7 +745,7 @@ const createEquipmentTable = async () => {
   const sql = `
     CREATE TABLE IF NOT EXISTS equipment (
         id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
-        username TEXT NOT NULL,
+        username TEXT NOT NULL UNIQUE,
         head TEXT DEFAULT 'player_head_default',
         body TEXT DEFAULT 'player_body_default',
         helmet TEXT DEFAULT NULL,
@@ -860,7 +939,64 @@ const addSpellColumns = async () => {
 };
 
 /** Weapon damage columns added to items after their first release. */
+/** Where an item sits in the bags: columns the inventory table was first made without here. */
+const addInventorySlotColumns = async () => {
+  await addMissingColumns("inventory", [
+    { name: "slot", type: "INTEGER DEFAULT NULL" },
+    { name: "bag_slot", type: "INTEGER DEFAULT NULL" },
+  ]);
+};
+
+/** The bags a player has in their four bag slots, by item name. */
+const createBagsTable = async () => {
+  log.info("Creating bags table...");
+  await query(`
+    CREATE TABLE IF NOT EXISTS bags (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE,
+      slot_1 TEXT DEFAULT NULL,
+      slot_2 TEXT DEFAULT NULL,
+      slot_3 TEXT DEFAULT NULL,
+      slot_4 TEXT DEFAULT NULL
+    );
+  `);
+};
+
+/** What chests and creatures drop: the tables, and the items each can roll. */
+const createLootTables = async () => {
+  log.info("Creating loot_tables and loot_table_items tables...");
+  await query(`
+    CREATE TABLE IF NOT EXISTS loot_tables (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS loot_table_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      loot_table_id INTEGER NOT NULL,
+      item_name TEXT NOT NULL,
+      min_quantity INTEGER DEFAULT 1,
+      max_quantity INTEGER DEFAULT 1,
+      drop_chance REAL DEFAULT 100.00,
+      quality TEXT DEFAULT 'common'
+    );
+  `);
+};
+
 const addItemWeaponColumns = async () => {
+  // How many slots an item adds when it is used as a bag: a column the table was first made without here.
+  await addMissingColumns("items", [{ name: "bag_slots", type: "INTEGER DEFAULT 0" }]);
+  // What a vendor pays for one, in copper: one unless set otherwise. Added with vendors.
+  await addMissingColumns("items", [{ name: "sell_price", type: "INTEGER NOT NULL DEFAULT 1" }]);
+  // What using a consumable restores, whether it can be used in combat, and which item takes its player home. Added with consumables.
+  await addMissingColumns("items", [
+    { name: "restore_health", type: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "restore_stamina", type: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "no_combat", type: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "teleports_home", type: "INTEGER NOT NULL DEFAULT 0" },
+  ]);
   await addMissingColumns("items", [
     { name: "damage_min", type: "INTEGER DEFAULT NULL" },
     { name: "damage_max", type: "INTEGER DEFAULT NULL" },
@@ -1073,6 +1209,7 @@ const setupDatabase = async () => {
   await createQuestLogTable();
   await createFriendsListTable();
   await createModerationTables();
+  await createTradeLogTable();
   await createPartiesTable();
   await createCurrencyTable();
   await createGuildsTable();
@@ -1081,9 +1218,14 @@ const setupDatabase = async () => {
   await createCollectablesTable();
   await createLearnedSpellsTable();
   await createEquipmentTable();
+  await createBagsTable();
+  await createLootTables();
   await createCreatureTables();
   await addCreatureTemplateColumns();
+  await addInventorySlotColumns();
   await addItemWeaponColumns();
+  await createPlayerHomeTable();
+  await insertHomeItem();
   await addSpellColumns();
   await insertDemoAccount();
   await insertDemoStats();

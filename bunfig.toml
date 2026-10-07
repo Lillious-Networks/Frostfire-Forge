@@ -1,0 +1,3 @@
+[test]
+# Stand-ins for the generated config files, so the tests load on a fresh checkout (see the file).
+preload = ["./src/tests/preload.ts"]

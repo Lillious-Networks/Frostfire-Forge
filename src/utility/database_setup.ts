@@ -108,7 +108,12 @@ const createItemsTable = async () => {
         bag_slots INT NULL DEFAULT 0,
         damage_min INT DEFAULT NULL,
         damage_max INT DEFAULT NULL,
-        attack_speed_ms INT DEFAULT NULL
+        attack_speed_ms INT DEFAULT NULL,
+        sell_price INT NOT NULL DEFAULT 1,
+        restore_health INT NOT NULL DEFAULT 0,
+        restore_stamina INT NOT NULL DEFAULT 0,
+        no_combat INT NOT NULL DEFAULT 0,
+        teleports_home INT NOT NULL DEFAULT 0
     )
   `;
   await query(sql);
@@ -365,7 +370,9 @@ const createPermissionTypesTable = async () => {
         ('admin.loot'),
         ('admin.mute'),
         ('admin.unmute'),
-        ('admin.reports')
+        ('admin.reports'),
+        ('admin.trades'),
+        ('admin.cooldowns')
     `;
     await query(insertPermissionsSql);
   } else {
@@ -379,6 +386,10 @@ const createPermissionTypesTable = async () => {
   await query(`INSERT IGNORE INTO permission_types (name) VALUES ('server.gateway')`);
   // Chat mutes and the player reports.
   await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.mute'), ('admin.unmute'), ('admin.reports')`);
+  // The log of trades between players.
+  await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.trades')`);
+  // Resetting a player's cooldowns.
+  await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.cooldowns')`);
 };
 
 /** Quest-giver flag added to npcs after its first release. */
@@ -429,7 +440,9 @@ const createNpcTable = async () => {
       sprite_chest VARCHAR(255) DEFAULT NULL,
       sprite_feet VARCHAR(255) DEFAULT NULL,
       sprite_legs VARCHAR(255) DEFAULT NULL,
-      sprite_weapon VARCHAR(255) DEFAULT NULL
+      sprite_weapon VARCHAR(255) DEFAULT NULL,
+      vendor_items TEXT,
+      innkeeper INT NOT NULL DEFAULT 0
     )
   `;
   await query(sql);
@@ -696,6 +709,41 @@ const createModerationTables = async () => {
   `);
 };
 
+/** Every trade two players completed: what each gave (JSON: items and coins). Times are milliseconds since the epoch. */
+const createTradeLogTable = async () => {
+  log.info("Creating trade_log table...");
+  await query(`
+    CREATE TABLE IF NOT EXISTS trade_log (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      player_a VARCHAR(255) NOT NULL,
+      player_b VARCHAR(255) NOT NULL,
+      a_gave TEXT NOT NULL,
+      b_gave TEXT NOT NULL,
+      created_at BIGINT NOT NULL,
+      INDEX idx_trade_log_player_a (player_a),
+      INDEX idx_trade_log_player_b (player_b)
+    )
+  `);
+};
+
+/**
+ * Each player's home: the innkeeper it was set at, where they stood from that NPC, and when their
+ * home item was last used (milliseconds since the epoch; 0: never). A player with no row has no home.
+ */
+const createPlayerHomeTable = async () => {
+  log.info("Creating player_home table...");
+  await query(`
+    CREATE TABLE IF NOT EXISTS player_home (
+      username VARCHAR(255) NOT NULL PRIMARY KEY,
+      npc_id INT DEFAULT NULL,
+      offset_x INT NOT NULL DEFAULT 0,
+      offset_y INT NOT NULL DEFAULT 0,
+      used_at BIGINT NOT NULL DEFAULT 0,
+      INDEX idx_player_home_npc (npc_id)
+    )
+  `);
+};
+
 const createPartiesTable = async () => {
   log.info("Creating parties table...");
   const sql = `
@@ -854,6 +902,60 @@ const createLootTableItemsTable = async () => {
     drop_chance DECIMAL(5,2) DEFAULT 100.00,
     quality VARCHAR(50) DEFAULT 'common'
   )`);
+};
+
+/**
+ * Vendors, added after the first release: what a vendor pays for an item (copper, one unless set
+ * otherwise), and what an NPC stocks (JSON: a list of item names and their prices there).
+ */
+const addVendorColumns = async () => {
+  const columns = [
+    { table: "items", name: "sell_price", type: "INT NOT NULL DEFAULT 1" },
+    { table: "npcs", name: "vendor_items", type: "TEXT" },
+  ];
+  for (const col of columns) {
+    const exists = (await query(
+      `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+      [database, col.table, col.name]
+    )) as any[];
+    if (!exists[0] || Number(exists[0].count) === 0) {
+      await query(`ALTER TABLE ${col.table} ADD COLUMN ${col.name} ${col.type}`);
+    }
+  }
+};
+
+/**
+ * Consumables and inns, added after the first release: what using an item restores, whether it can
+ * be used in combat, which item takes its player home, and which NPCs keep an inn.
+ */
+const addConsumableColumns = async () => {
+  const columns = [
+    { table: "items", name: "restore_health", type: "INT NOT NULL DEFAULT 0" },
+    { table: "items", name: "restore_stamina", type: "INT NOT NULL DEFAULT 0" },
+    { table: "items", name: "no_combat", type: "INT NOT NULL DEFAULT 0" },
+    { table: "items", name: "teleports_home", type: "INT NOT NULL DEFAULT 0" },
+    { table: "npcs", name: "innkeeper", type: "INT NOT NULL DEFAULT 0" },
+  ];
+  for (const col of columns) {
+    const exists = (await query(
+      `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+      [database, col.table, col.name]
+    )) as any[];
+    if (!exists[0] || Number(exists[0].count) === 0) {
+      await query(`ALTER TABLE ${col.table} ADD COLUMN ${col.name} ${col.type}`);
+    }
+  }
+};
+
+/** The home item every player is given, made when no item is it yet. Its name and look are the item editor's to change. */
+const insertHomeItem = async () => {
+  const held = (await query("SELECT COUNT(*) as count FROM items WHERE teleports_home = 1")) as any[];
+  if (held[0] && Number(held[0].count) > 0) return;
+  log.info("Creating the home item...");
+  await query(
+    `INSERT IGNORE INTO items (name, type, quality, description, sell_price, teleports_home)
+     VALUES ('Home Stone', 'consumable', 'uncommon', 'Returns you to your home inn.', 0, 1)`
+  );
 };
 
 /** Weapon damage columns added to items after their first release. */
@@ -1351,6 +1453,7 @@ const setupDatabase = async () => {
   await createQuestLogTable();
   await createFriendsListTable();
   await createModerationTables();
+  await createTradeLogTable();
   await createPartiesTable();
   await createCurrencyTable();
   await createGuildsTable();
@@ -1366,6 +1469,10 @@ const setupDatabase = async () => {
   await createCreatureTables();
   await addCreatureTemplateColumns();
   await addItemWeaponColumns();
+  await addVendorColumns();
+  await addConsumableColumns();
+  await createPlayerHomeTable();
+  await insertHomeItem();
   await insertDemoAccount();
   await insertDemoStats();
   await insertDemoClientConfig();

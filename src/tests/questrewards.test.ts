@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { databaseModule } from "./setup";
+import { databaseModule, standInFor } from "./setup";
 
 const quest: Quest = {
   id: 1, name: "Rats", zone: null, offer_text: "", description: "", progress_text: "", completion_text: "",
@@ -58,7 +58,7 @@ mock.module("../services/assetCache", () => ({
 }));
 
 const players = new Map<string, any>();
-mock.module("../services/playermanager", () => ({
+await standInFor("../services/playermanager", () => ({
   default: {
     list: () => Object.fromEntries(players),
     get: (id: string) => players.get(id),
@@ -74,7 +74,7 @@ mock.module("../services/playermanager", () => ({
 // Observe grants through the real inventory/currency/player modules by spying
 // on the query layer is awkward, so spy one level up via module mocks that
 // still exercise rewards.ts validation and precheck logic.
-mock.module("../systems/inventory", () => ({
+await standInFor("../systems/inventory", () => ({
   default: {
     find: async () => [],
     // What the player holds, as the inventory system answers it: a row for each item, under `item`.
@@ -87,7 +87,7 @@ mock.module("../systems/inventory", () => ({
   },
 }));
 
-mock.module("../systems/currency", () => ({
+await standInFor("../systems/currency", () => ({
   default: {
     get: async () => ({ copper: 0, silver: 0, gold: 0 }),
     add: async (username: string, amount: any) => {
@@ -97,7 +97,7 @@ mock.module("../systems/currency", () => ({
   },
 }));
 
-mock.module("../systems/player", () => ({
+await standInFor("../systems/player", () => ({
   default: {
     increaseXp: async (username: string, xp: number) => {
       xpCalls.push({ username, xp });
@@ -108,6 +108,10 @@ mock.module("../systems/player", () => ({
 }));
 
 const rewards = await import("../systems/quests/rewards");
+
+// The bags a player has are read through a cache that outlives a test file: a file run before this
+// one may have left "hero" a bag there, and with it room this file's full bags do not have.
+await (await import("../services/datacache")).clearCaches();
 
 describe("quest rewards", () => {
   test("choice validation requires an index only when choices exist", () => {

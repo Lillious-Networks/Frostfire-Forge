@@ -19,6 +19,7 @@ import permissions from "./permissions";
 import lootTable from "./lootTable";
 import mutes, { parseDuration } from "./mutes";
 import reports from "./reports";
+import tradeLog from "./tradelog";
 import { findOnline, oneAtATime, search as searchEditor } from "./playereditor";
 
 export const DENIED = "You don't have permission to use the control panel.";
@@ -72,8 +73,30 @@ export interface ControlPanelBridge {
   restartScheduled(): boolean;
   /** Counters the server already keeps: the event loop delay, the whitelist, what /creature-stats reports. */
   status(): { eventLoopLagMs: number; whitelistEnabled: boolean; whitelisted: number; creatures: Record<string, unknown> };
-  /** Every world with the weather it is set to and, where that is "random", the one being shown. */
-  worlds(): Promise<Array<{ name: string; weather: string; showing: string; players: number }>>;
+  /** Every world with the weather it is set to, the one it has now, and what that one reads (worldWeather, below). */
+  worlds(): Promise<Array<{ name: string; weather: string; showing: string; conditions: WeatherConditions | null; players: number }>>;
+}
+
+/**
+ * The weather a world has now. What a world is set to is not always what is over it: "random" is whichever weather
+ * the server settled on (`settled`, none until it has), and "weather_api" is the last reading of a real place
+ * (`live`: what it looks like, and its values). `conditions` are the readings of the weather shown: of the table's
+ * row (`rows`) for a weather set by name, and none for a clear sky or a name the table no longer has.
+ */
+export function worldWeather(
+  set: string,
+  settled: { weather: string; weatherData: WeatherData | null } | undefined,
+  live: { look: string; row: WeatherData },
+  rows: WeatherData[],
+): { weather: string; showing: string; conditions: WeatherConditions | null } {
+  const weather = set || "clear";
+  const read = (row: WeatherData | null | undefined): WeatherConditions | null => row
+    ? { temperature: Number(row.temperature) || 0, humidity: Number(row.humidity) || 0, wind_speed: Number(row.wind_speed) || 0, wind_direction: String(row.wind_direction || "none"), precipitation: Number(row.precipitation) || 0 }
+    : null;
+  if (weather === "weather_api") return { weather, showing: live.look, conditions: read(live.row) };
+  if (weather === "random") return { weather, showing: settled?.weather || weather, conditions: read(settled?.weatherData) };
+  if (weather === "clear") return { weather, showing: weather, conditions: null };
+  return { weather, showing: weather, conditions: read(rows.find((row) => String(row.name).toLowerCase() === weather.toLowerCase())) };
 }
 
 let bridge: ControlPanelBridge | null = null;
@@ -430,7 +453,7 @@ export async function buildData(viewer: any, full: boolean, since: Since | null 
       whitelist: { enabled: !!extra?.whitelistEnabled, size: extra?.whitelisted ?? 0 },
       creatures: extra?.creatures ?? null,
     },
-    world: { map, weather: here?.weather || "clear", showing: here?.showing || "clear", worlds },
+    world: { map, weather: here?.weather || "clear", showing: here?.showing || "clear", conditions: here?.conditions ?? null, worlds },
   };
   // How many reports wait, for the count beside the page that lists them.
   if (handlesReports(viewer)) {
@@ -470,6 +493,8 @@ const QUERY_RULES: Record<string, (actor: any) => boolean> = {
   reports: handlesReports,
   // Whether a player is muted and how many reports name them: for whoever may act on either.
   moderation: holds("admin.mute", "admin.unmute", "admin.reports", "admin.*"),
+  // /trades
+  trades: holds("admin.trades", "admin.*"),
 };
 
 async function lookUp(viewer: any, data: any): Promise<ControlPanelResults | string[]> {
@@ -513,6 +538,7 @@ async function lookUp(viewer: any, data: any): Promise<ControlPanelResults | str
   if (!account) return [NOT_FOUND];
 
   if (kind === "moderation") return { kind, target, mute: await mutes.get(target), openReports: await reports.openAgainst(target) };
+  if (kind === "trades") return { kind, target, trades: await tradeLog.of(target) };
 
   const [held, types] = await Promise.all([permissions.get(target), permissions.list()]);
   return {

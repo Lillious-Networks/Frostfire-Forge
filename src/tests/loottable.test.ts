@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
-import { databaseModule } from "./setup";
+import { databaseModule, standInFor } from "./setup";
 
 // Rows the mocked database returns for loot_table_items, and what was written.
 let tableItems: any[] = [];
@@ -16,7 +16,7 @@ mock.module("../controllers/sqldatabase", () => databaseModule({
 mock.module("../services/assetCache", () => ({
   default: { get: async () => [{ name: "Wolf Pelt", quality: "common" }] },
 }));
-mock.module("../modules/spriteSheetManager", () => ({ getIconUrl: () => "" }));
+await standInFor("../modules/spriteSheetManager", () => ({ getIconUrl: () => "" }));
 
 const { clearCaches } = await import("../services/datacache");
 const { default: lootTable, normalizeDropChance } = await import("../systems/lootTable");

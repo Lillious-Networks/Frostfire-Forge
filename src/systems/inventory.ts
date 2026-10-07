@@ -124,6 +124,14 @@ const inventory = {
     return ((await rows.get(name)) ?? []).filter((row) => sameName(row.item, item.name));
   },
   /**
+   * In a `batch`: how many of an item the player has as the batch stands, and whether it is in use (worn, or a bag
+   * in a bag slot). Null when they have none. Nothing outside the batch changes it before the batch ends.
+   */
+  async heldIn(batch: Batch, name: string, item: string): Promise<{ quantity: number; equipped: boolean } | null> {
+    const row = (await pendingIn(batch, name)).held.find((held) => sameName(held.item, item));
+    return row ? { quantity: Number(row.quantity), equipped: Number(row.equipped) === 1 } : null;
+  },
+  /**
    * With a `batch` (see services/batch), the statement is added to it instead of sent, and the
    * answer is true when there was one to add. Each must change a row for the batch to be kept: an
    * item is never gained beside a write that was lost.

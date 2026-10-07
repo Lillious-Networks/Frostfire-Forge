@@ -9,6 +9,13 @@ const max_gold = 9999999;
 /** The most of each coin a balance holds. */
 export const CURRENCY_LIMITS: Currency = { copper: max_copper, silver: max_silver, gold: max_gold };
 
+/** An amount counted in copper, as the coins it is paid in. */
+export const coinsOf = (worth: number): Currency => ({
+    gold: Math.floor(worth / ((max_silver + 1) * (max_copper + 1))),
+    silver: Math.floor(worth / (max_copper + 1)) % (max_silver + 1),
+    copper: worth % (max_copper + 1),
+});
+
 /** What coins come to, counted in copper. */
 export const coinsWorth = ({ copper, silver, gold }: Currency) => (gold * (max_silver + 1) + silver) * (max_copper + 1) + copper;
 
@@ -112,6 +119,7 @@ async function pendingIn(batch: Batch, username: string): Promise<{ balance: Cur
 async function changeIn(batch: Batch, username: string, next: (balance: Currency) => Currency): Promise<Currency> {
     const state = await pendingIn(batch, username);
     state.balance = next(state.balance);
+    state.written = true;
     batch.add(saving(username, state.balance));
     return { ...state.balance };
 }
@@ -120,6 +128,10 @@ const currency = {
     async get(username: string): Promise<Currency> {
         if (!username) return { copper: 0, silver: 0, gold: 0 };
         return (await rows.get(username)) ?? { copper: 0, silver: 0, gold: 0 };
+    },
+    /** In a `batch`: the balance as the batch stands, which nothing outside it changes before it ends. */
+    async heldIn(batch: Batch, username: string): Promise<Currency> {
+        return { ...(await pendingIn(batch, username)).balance };
     },
     async set(username: string, currencyData: Currency) {
         if (!username || !currencyData) return;

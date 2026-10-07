@@ -86,6 +86,265 @@ async function sendReport(wt: any, reporter: any, name: unknown, category: unkno
   }
 }
 
+/** The player online under a name: who the trade rules ask about. */
+const traderNamed = (username: string) => playerCache.getByUsername(username);
+const shownName = (username: string) => username.charAt(0).toUpperCase() + username.slice(1);
+
+/**
+ * Why `asker` cannot start a trade with `asked` now, in words for `asker`: the two may not trade,
+ * or one of them already is. Null when they can.
+ */
+function tradeRefusal(asker: any, asked: any): string | null {
+  const reason = cannotTrade(asker, asked);
+  if (reason) return reason;
+  if (trades.of(asker.username)) return "You are already trading.";
+  if (trades.of(asked.username)) return `${shownName(asked.username)} is already trading.`;
+  return null;
+}
+
+/** Sends each of a trade's players the trade as it stands for them. */
+async function sendTradeState(trade: Trade): Promise<void> {
+  const now = Date.now();
+  for (const name of trade.players) {
+    const online = playerCache.getByUsername(name);
+    if (online?.wt) sendPacket(online.wt, packetManager.tradeState(await trades.view(trade, name, now)));
+  }
+}
+
+/** Tells each of a trade's players that it ended, in the words meant for them. */
+function sendTradeClosed(trade: Trade, completed: boolean, messages: Record<string, string>): void {
+  for (const name of trade.players) {
+    const online = playerCache.getByUsername(name);
+    if (online?.wt) sendPacket(online.wt, packetManager.tradeClosed({ completed, message: messages[name] ?? "" }));
+  }
+}
+
+/** After a player's items and coins changed together (a trade, a deal with a vendor): their bags and coins as they now are. */
+async function sendBelongingsOf(online: any): Promise<void> {
+  if (!online) return;
+  online.inventory = await patchInventoryBagSlots(await inventory.get(online.username), online.username);
+  online.currency = await currencySystem.get(online.username);
+  playerCache.set(online.id, online);
+  if (!online.wt) return;
+  sendPacket(online.wt, packetManager.inventory(online.inventory, await getInventorySlots(online)));
+  sendPacket(online.wt, packetManager.currency(online.currency));
+}
+
+/** After a trade's offers changed hands: each player's bags and coins as they now are. */
+async function sendBelongingsAfterTrade(trade: Trade): Promise<void> {
+  for (const name of trade.players) await sendBelongingsOf(playerCache.getByUsername(name));
+}
+
+/**
+ * The NPC a vendor packet names, when the player may deal with it now. When they may not (it is no
+ * vendor, they walked off, they died, they are trading with a player), they are told why and their
+ * vendor window is closed.
+ */
+async function vendorFor(wt: any, shopper: any, npcId: unknown): Promise<Npc | null> {
+  const npc = (((await assetCache.get("npcs")) || []) as Npc[]).find((held) => Number(held.id) === Number(npcId));
+  const reason = trades.of(shopper.username) ? "You cannot use a vendor while trading." : cannotShop(shopper, npc);
+  if (reason) {
+    sendPacket(wt, packetManager.vendorClosed({ message: reason }));
+    return null;
+  }
+  return npc!;
+}
+
+/**
+ * What an NPC stocks, as the NPC editor sent it: the entries that name an item and a price. The
+ * editor is told what was wrong with any that were left out.
+ */
+async function vendorStockFrom(wt: any, sent: unknown): Promise<VendorItem[]> {
+  const names = (((await assetCache.get("items")) || []) as Item[]).map((item) => item.name);
+  const read = readVendorItems(sent, names);
+  if (read.errors.length > 0) sendPacket(wt, packetManager.notify({ message: `Vendor stock: ${read.errors.join(" ")}` }));
+  return read.items;
+}
+
+/** Sends a player what a vendor stocks and what they can buy back: this opens their vendor window, or brings it up to date. */
+async function sendVendorStock(wt: any, shopper: any, npc: Npc): Promise<void> {
+  sendPacket(wt, packetManager.vendorStock({
+    npcId: Number(npc.id),
+    name: npc.name || null,
+    items: await vendors.stock(npc),
+    buyback: await vendors.buybackList(shopper.username),
+  }));
+}
+
+/** What a deal with a vendor answered, sent on: the player's bags, coins and vendor window when it was made, and why not when it was not. */
+async function sendVendorAnswer(wt: any, shopper: any, npc: Npc, answer: VendorAnswer, event: string): Promise<void> {
+  if (!answer.ok) {
+    sendPacket(wt, packetManager.notify({ message: answer.message }));
+    return;
+  }
+  await sendBelongingsOf(shopper);
+  await sendVendorStock(wt, shopper, npc);
+  listener.emit(event, { player: shopper, npcId: Number(npc.id), item: answer.item, quantity: answer.quantity, coins: answer.coins });
+}
+
+// A trade ends when its players may no longer trade: one walked away, entered combat, died, changed
+// map or left. Looked at once a second, and only while there is a trade.
+listener.on(Events.SERVER_TICK, () => {
+  if (trades.count === 0) return;
+  for (const { trade, reasons } of trades.sweep(traderNamed)) sendTradeClosed(trade, false, reasons);
+});
+
+// A player who logs out or loses their connection ends their trade at once. The look above would
+// find them gone too, but only once they are out of the players held, which waits on their saves:
+// until then the other player could still accept.
+function endTradeOfLeaver(event: { player?: any }): void {
+  const username = event?.player?.username;
+  if (!username) return;
+  // What they sold to vendors can no longer be bought back.
+  vendors.forget(String(username));
+  const ended = trades.cancel(username);
+  if (!ended) return;
+  const gone = `${shownName(String(username))} is no longer online.`;
+  sendTradeClosed(ended, false, Object.fromEntries(ended.players.map((name) => [name, gone])));
+}
+listener.on(Events.PLAYER_DISCONNECT, endTradeOfLeaver);
+listener.on(Events.PLAYER_LOGOUT, endTradeOfLeaver);
+
+/** Where the world's players start: the spawn the settings name, else the default map's own, else its middle. */
+function worldSpawn(): { map: string; x: number; y: number } {
+  const properties: any = mapPropertiesCache.find((m: any) => m.name === `${defaultMap}.json`);
+  const middle = (tiles: unknown, size: unknown) => (properties ? (Number(tiles) * Number(size)) / 2 : 0);
+  return {
+    map: defaultMap,
+    x: Number((settings as any).spawn_x ?? properties?.spawn?.x ?? middle(properties?.width, properties?.tileWidth)),
+    y: Number((settings as any).spawn_y ?? properties?.spawn?.y ?? middle(properties?.height, properties?.tileHeight)),
+  };
+}
+
+/** Whether a player is casting their home item now: its cast is the one they are in. */
+const castingHome = (player: any) => !!player?.casting && player.homeCastId !== undefined && player.homeCastId === player.castId;
+
+/**
+ * A player casts their home item: HOME_CAST_MS standing still, and then they are at home (see
+ * systems/homes), or at the world's spawn when they have none. A step, any damage, a stun, dying
+ * or cancelling breaks the cast, and a broken cast starts no cooldown.
+ */
+// (the one who casts is `caster`, not `player`: that name is the player system's in this file, which the cast saves through)
+async function castHome(caster: any, itemName: string): Promise<void> {
+  const wt = caster.wt;
+  if (!wt) return;
+  if (caster.casting || playerCache.get(caster.id)?.casting) {
+    sendPacket(wt, packetManager.notify({ message: "You are already casting." }));
+    return;
+  }
+  // A step breaks the cast, but a player already walking takes none.
+  if (caster.moving) {
+    sendPacket(wt, packetManager.notify({ message: "You must stand still to use that." }));
+    return;
+  }
+
+  const from = { map: String(caster.location?.map), x: Number(caster.location?.position?.x), y: Number(caster.location?.position?.y) };
+  caster.casting = true;
+  caster.castOnSelf = true;
+  // Broken by a step, as a spell that cannot be cast on the move is.
+  caster.interruptableSpell = true;
+  caster.castingSpellId = undefined;
+  caster.castId = (caster.castId || 0) + 1;
+  caster.homeCastId = caster.castId;
+  caster.mounted = false;
+  playerCache.set(caster.id, caster);
+  const thisCast = caster.castId;
+
+  globalStateRevision++;
+  await sendPositionAnimation(wt, caster.location.position?.direction || "down", false, false, caster.mount_type || "unicorn", undefined, globalStateRevision, true);
+  broadcastCastToMap(filterPlayersByMap(caster.location.map), caster.id, packetManager.castSpell({ id: caster.id, spell: itemName, time: HOME_CAST_MS / 1000 }));
+  await new Promise((resolve) => setTimeout(resolve, HOME_CAST_MS));
+
+  // Broken (they are no longer in this cast), or they left.
+  const after = playerCache.get(caster.id);
+  if (!after || after.castId !== thisCast || !after.casting) return;
+
+  const here = after.location?.position;
+  const moved = String(after.location?.map) !== from.map || Number(here?.x) !== from.x || Number(here?.y) !== from.y;
+  if (moved || after.isDead || after.isGhost || spellEffects.isStunned(after)) {
+    await interruptPlayerCast(after);
+    return;
+  }
+  for (const held of new Set([caster, after])) {
+    held.casting = false;
+    held.interruptableSpell = false;
+    held.homeCastId = undefined;
+  }
+  playerCache.set(after.id, after);
+  const live = after.wt;
+  if (!live) return;
+  globalStateRevision++;
+  await sendPositionAnimation(live, here?.direction || "down", false, false, after.mount_type || "unicorn", undefined, globalStateRevision, false);
+
+  let to;
+  try {
+    to = (await homes.where(after.username)) ?? worldSpawn();
+    // Saved as standing there before the move, as every other way of moving a player between maps does: until the
+    // next save, the account would otherwise still be where the stone was used.
+    await player.setLocation(after.id, to.map, { x: to.x, y: to.y, direction: here?.direction || "down" });
+    await teleportPlayerWrapper(after, to.map, to.x, to.y);
+  } catch (error) {
+    log.error(`${after.username} could not be taken home: ${error}`);
+    sendPacket(live, packetManager.notify({ message: "You could not be taken home. Try again." }));
+    return;
+  }
+  // The hour starts once they are home, not before: a move that failed must not cost them the hour.
+  try {
+    await homes.arrive(after.username);
+    sendPacket(live, packetManager.itemCooldown({ kind: "home", remaining: HOME_COOLDOWN_MS, total: HOME_COOLDOWN_MS }));
+  } catch (error) {
+    log.error(`The home cooldown of ${after.username} could not be started: ${error}`);
+  }
+  listener.emit(Events.ITEM_USED, { player: after, item: itemName, health: 0, stamina: 0, home: to });
+}
+
+/** Breaks a player's cast home, when they are in one. */
+function breakCastHome(target: any): void {
+  const player = (target?.id && playerCache.get(target.id)) || target;
+  if (!castingHome(player)) return;
+  interruptPlayerCast(player).catch((error) => log.error(`A cast home could not be broken: ${error}`));
+}
+// Any damage breaks it, and so does a stun. A step does too, where steps are read (MOVEXY), and dying where a death is handled.
+listener.on(Events.PLAYER_DAMAGED, (event: { target?: any; damage?: number }) => {
+  if (Number(event?.damage) > 0) breakCastHome(event.target);
+});
+listener.on(Events.PLAYER_DEBUFF_ADDED, (event: { target?: any; effectType?: string }) => {
+  if (event?.effectType === "stun") breakCastHome(event.target);
+});
+
+/**
+ * Sends a player what a map marks, for their minimap and world map: its inns and merchants (the
+ * doors that lead to a house an innkeeper or a vendor is in), its caves (the ways into another
+ * world) and its houses. See systems/mapmarkers. A world is open country; any other map is indoors.
+ */
+async function sendMapMarkers(wt: any, map: unknown): Promise<void> {
+  try {
+    const name = String(map ?? "").replaceAll(".json", "");
+    if (!wt || !name) return;
+    const properties: any = getWorldMap(name)?.properties
+      ?? (((await assetCache.get("mapProperties")) || []) as any[]).find((held) => String(held?.name ?? "").replaceAll(".json", "") === name);
+    const npcs = ((await assetCache.get("npcs")) || []) as Npc[];
+    sendPacket(wt, packetManager.mapMarkers({ map: name, markers: mapMarkers(name, npcs, properties?.warps, (other) => !!getWorldMap(other)) }));
+  } catch (error) {
+    log.warn(`The minimap markers of ${map} could not be sent: ${error}`);
+  }
+}
+
+/** An innkeeper or a vendor was added, changed or removed: everyone online is sent what the map they are on marks again. */
+async function resendMapMarkers(): Promise<void> {
+  for (const online of Object.values(playerCache.list()) as any[]) {
+    if (online?.wt && online.location?.map) await sendMapMarkers(online.wt, online.location.map);
+  }
+}
+
+/** What is left of a player's item cooldowns, sent when they log in so their bags and hotbar show them. */
+async function sendItemCooldowns(wt: any, username: string): Promise<void> {
+  const shared = consumables.cooldownLeft(username);
+  if (shared > 0) sendPacket(wt, packetManager.itemCooldown({ kind: "consumable", remaining: shared, total: CONSUMABLE_COOLDOWN_MS }));
+  const home = await homes.cooldownLeft(username);
+  if (home > 0) sendPacket(wt, packetManager.itemCooldown({ kind: "home", remaining: home, total: HOME_COOLDOWN_MS }));
+}
+
 async function sendQuestMarkersFor(wt: any, username: string, map: string): Promise<void> {
   try {
     const markers = await markersFor(username, String(map ?? "").replaceAll(".json", ""));
@@ -135,6 +394,12 @@ import { registerLevelUpHook } from "../systems/quests/markers";
 import friends from "../systems/friends";
 import ignores from "../systems/ignores";
 import * as moderation from "../systems/moderation";
+import trades, { cannotTrade, type Trade } from "../systems/trades";
+import vendors, { cannotShop, readVendorItems, type VendorAnswer } from "../systems/vendors";
+import consumables, { CONSUMABLE_COOLDOWN_MS, isKept } from "../systems/consumables";
+import { resetCooldowns } from "../systems/cooldowns";
+import { mapMarkers } from "../systems/mapmarkers";
+import homes, { cannotSetHome, isInnkeeper, HOME_CAST_MS, HOME_COOLDOWN_MS } from "../systems/homes";
 import { audience as chatAudience } from "../systems/chatgate";
 import parties from "../systems/parties.ts";
 import guilds from "../systems/guild.ts";
@@ -1183,6 +1448,9 @@ function constructMapMetadata(
     // Rectangles in tiles a map is made of, when it says so (the cave systems of a world's underworld,
     // modules/worldmaps.ts): the client's world map shows only the one the player is in
     sections: Array.isArray(map?.data?.sections) ? map.data.sections : null,
+    // The inside of a building (isInteriorMap): the client shows no world map there and keeps its minimap zoomed
+    // all the way in
+    interior: isInteriorMap(normalizedName),
     hasWeather: !!worldsArr.find((w) => w.name === normalizedName),
     objectLayers,
     mapVersion,
@@ -1190,6 +1458,17 @@ function constructMapMetadata(
 
   listener.emit(Events.WARP, { mapName, metadata });
   return metadata;
+}
+
+/**
+ * Whether a map is the inside of a building: it says so with the Tiled map property "interior" (the houses' rooms
+ * have it). No mount is ridden there.
+ */
+function isInteriorMap(mapName: string): boolean {
+  const name = String(mapName ?? "").replace(".json", "");
+  const map = (maps as MapData[]).find((m: MapData) => m.name === `${name}.json` || m.name === name);
+  const properties = (map?.data as any)?.properties;
+  return Array.isArray(properties) && properties.some((p: any) => p?.name === "interior" && p.value === true);
 }
 
 async function transitionPlayerToMap(
@@ -1201,6 +1480,15 @@ async function transitionPlayerToMap(
   despawnBatchQueue: Map<string, Set<string>>
 ): Promise<void> {
   loot.cancelCleanup(player.username);
+
+  // Mounts stay outside: whoever rides into a building gets off at the door. Done before the move, so the players
+  // inside are shown someone on foot.
+  const dismounted = player.mounted === true && isInteriorMap(newMapName);
+  if (dismounted) {
+    player.mounted = false;
+    player.mount_type = null;
+    playerCache.set(player.id, player);
+  }
 
   await handleMapChangeAOI(player, newMapName, { x: newPosition.x, y: newPosition.y }, spawnBatchQueue, despawnBatchQueue);
 
@@ -1218,12 +1506,26 @@ async function transitionPlayerToMap(
   // again: resend every creature around the player.
   creatures.resyncPlayer(player.id);
 
+  if (dismounted) {
+    updatedPlayer.mounted = false;
+    updatedPlayer.mount_type = null;
+    playerCache.set(updatedPlayer.id, updatedPlayer);
+    globalStateRevision++;
+    await sendPositionAnimation(wt, direction, false, false, "", updatedPlayer.id, globalStateRevision, updatedPlayer.casting || false);
+    listener.emit(Events.PLAYER_MOUNT, { player: updatedPlayer, mounted: false, mountType: null });
+  }
+
   setImmediate(async () => {
     try {
       const normalizedMap = newMapName.replace(".json", "");
-      const resolved = await resolveWorldWeather(normalizedMap);
-      if (resolved.weather) {
-        sendPacket(wt, packetManager.weather(weatherShown(resolved.weather, resolved.weatherData)));
+      // A map with no entry in the worlds table (the inside of a house) is clear and has no day and night: the
+      // client drops both when it loads a map, and is sent nothing here that would turn them on again. Sending
+      // it "clear" did: any WEATHER packet starts the day and night cycle. (The login path below does the same.)
+      if ((await getLiveWorlds()).some((w) => w.name === normalizedMap)) {
+        const resolved = await resolveWorldWeather(normalizedMap);
+        if (resolved.weather) {
+          sendPacket(wt, packetManager.weather(weatherShown(resolved.weather, resolved.weatherData)));
+        }
       }
     } catch (e) {
       log.warn(`Failed to fetch weather data for ${newMapName}: ${e}`);
@@ -1242,6 +1544,8 @@ async function transitionPlayerToMap(
     // Quest markers for the new map. Map-wide explore objectives credit via
     // the MAP_ENTER listener in the quest objectives module.
     await sendQuestMarkersFor(wt, player.username, newMapName);
+    // And where the new map's inns are, for the minimap.
+    await sendMapMarkers(wt, newMapName);
 
     try {
       const lootOnMap = loot.getOnMap(newMapName);
@@ -2177,6 +2481,14 @@ authWorker.on("message", async (result: any) => {
     sendPacket(wt, packetManager.inventory(inventoryWithIconUrls, inventorySlots));
     sendPacket(wt, packetManager.equipment(playerData.equipment || {}));
 
+    // Every player has the home item: one who holds none (a new account, or one from before there
+    // was such an item) is given it now, and sent their bags again with it in them.
+    void consumables.giveHomeItem(playerData.username)
+      .then((given) => (given ? sendBelongingsOf(playerCache.get(wt.data.id)) : undefined))
+      .catch((error) => log.error(`${playerData.username} could not be given the home item: ${error}`));
+    void sendItemCooldowns(wt, playerData.username)
+      .catch((error) => log.error(`The item cooldowns of ${playerData.username} could not be sent: ${error}`));
+
     const playerBags = await bags.ensure(playerData.username);
     sendPacket(wt, packetManager.bags(playerBags));
     sendPacket(wt, packetManager.collectables(collectablesWithIconUrls));
@@ -2192,6 +2504,7 @@ authWorker.on("message", async (result: any) => {
       packetManager.questLog({ active: questActive, completed: questCompleted, definitions: questDefsForEntries(questActive, questCompleted) })
     );
     await sendQuestMarkersFor(wt, playerData.username, spawnLocation.map);
+    await sendMapMarkers(wt, spawnLocation.map);
   }
 });
 
@@ -2362,6 +2675,8 @@ export default async function packetReceiver(
         const direction = data.toString().toLowerCase();
 
         if (direction === "abort") {
+          // The key was let go: the next warp walked into is meant (see _warpHold below).
+          currentPlayer._warpHold = undefined;
           await forceStopPlayerMovement(currentPlayer);
           return;
         }
@@ -2384,6 +2699,9 @@ export default async function packetReceiver(
         }
 
         if (!VALID_DIRECTIONS.has(direction)) return;
+
+        // Turning is new input too: a warp may take the player again.
+        if (currentPlayer._warpHold && currentPlayer._warpHold !== direction) currentPlayer._warpHold = undefined;
 
         // Stunned players cannot move. stunnedUntil is an epoch timestamp
         // (Date.now()-based), so it must be compared against Date.now().
@@ -2585,15 +2903,28 @@ export default async function packetReceiver(
                 y: number;
               };
 
+              // A warp sets its traveller down in front of the way back (a house's door, its room's door; a
+              // cave's shaft, its mine door). Someone still holding the key they came in on would walk straight
+              // back through. So the way they were walking does not take them through a warp again until they
+              // let go of the key or turn (cleared at the top of this handler): until then a warp is a wall.
+              if (currentPlayer._warpHold === direction) {
+                return;
+              }
+
               for (const interceptor of warpInterceptors) {
                 if (await interceptor(warp, wt, currentPlayer, sendPacket)) {
                   return;
                 }
               }
 
+              currentPlayer._warpHold = direction;
+
               const currentMap = currentPlayer.location.map;
 
-              const result = await player.setLocation(
+              // Saved as standing where the warp leads, or the warp is not taken. A row the database did not
+              // change is not a refusal by itself: the account may already be saved there (see arriveAt). Read as
+              // one, it left a player who came back inside by their home item unable to walk out the door.
+              const arrived = await player.arriveAt(
                 currentPlayer.id,
                 warp.map.replace(".json", ""),
                 {
@@ -2603,12 +2934,7 @@ export default async function packetReceiver(
                 }
               );
 
-              if (
-                result &&
-                typeof result === "object" &&
-                "affectedRows" in result &&
-                (result as { affectedRows: number }).affectedRows !== 0
-              ) {
+              if (arrived) {
                 const newMap = warp.map.replace(".json", "");
                 const newPosition = {
                   x: warp.x || 0,
@@ -3047,8 +3373,14 @@ export default async function packetReceiver(
         break;
       }
       case "EDITOR_OPEN": {
-        if (!currentPlayer || !currentPlayer.isAdmin) return;
+        if (!currentPlayer) return;
         const mapName = currentPlayer.location.map;
+        // Live sync between editors is for admins. Anyone else who may open the editor (tools.tile_editor) still
+        // has to be answered: their editor waits for this before it opens, and waited for good without it.
+        if (!currentPlayer.isAdmin) {
+          sendPacket(wt, packetManager.editorSyncReady({ mapName }));
+          break;
+        }
         if (!activeEditorsByMap.has(mapName)) {
           activeEditorsByMap.set(mapName, new Set());
         }
@@ -3074,10 +3406,11 @@ export default async function packetReceiver(
       }
       case "EDITOR_CLOSE": {
         if (!currentPlayer || !currentPlayer.isAdmin) return;
-        const mapName = currentPlayer.location.map;
-        const editors = activeEditorsByMap.get(mapName);
-        if (editors) {
-          editors.delete(wt.data.id);
+        // Every map this connection edits, not only the one the player is on: an editor that closes because its
+        // player walked through a warp says so once the player is already on the next map, and the map it was
+        // editing would keep them as an editor, and its unsaved edits, until they left the game.
+        for (const [mapName, editors] of activeEditorsByMap.entries()) {
+          if (!editors.delete(wt.data.id)) continue;
           if (editors.size === 0) {
             activeEditorsByMap.delete(mapName);
             // No editors left on this map - clear unsaved edit history
@@ -3869,7 +4202,9 @@ export default async function packetReceiver(
           const aim = isGroundAoe ? { x: Number((data as any).groundX), y: Number((data as any).groundY) } : null;
           const refused = await areaCastRefusal(currentPlayer.location.position, aim, pvpAllowed);
           if (refused) {
-            sendPacket(wt, packetManager.notify({ message: refused === "aim" ? "You cannot cast that into a no-PvP area" : "You are not in a PvP area" }));
+            // Told only when it is where they aimed that is wrong. A cast refused because the caster stands in a
+            // no-PvP area says nothing (USER REQUEST 2026-10-06: "Remove the 'you are not in a pvp area' notification").
+            if (refused === "aim") sendPacket(wt, packetManager.notify({ message: "You cannot cast that into a no-PvP area" }));
             listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "nopvp" } as any);
             return;
           }
@@ -4493,12 +4828,7 @@ export default async function packetReceiver(
         if (isSelf && (spell_damage > 0 || spellIsHostileEffect) && !isAoeSpell) return;
 
         if (!canAttack?.value) {
-          if (canAttack?.reason == "nopvp") {
-            sendPacket(
-              wt,
-              packetManager.notify({ message: "You are not in a PvP area" })
-            );
-          }
+          // (a cast refused for a no-PvP area says nothing: see the area casts above)
           if (canAttack?.reason == "path_blocked") {
             sendPacket(
               wt,
@@ -5267,14 +5597,24 @@ export default async function packetReceiver(
         const visibleOffers = offers.filter(
           (o) => !(o.marker === "available_future" && (o.reason === "level_too_low" || o.reason === "missing_prerequisite"))
         );
+        // An NPC with something in stock is a vendor. With no quest to talk about, talking to it opens
+        // its goods; with quests, they are listed and the goods are one more line under them.
+        const sells = vendors.isVendor(npc);
+        // An innkeeper's inn can be made the player's home: a line of its own, so talking to one always lists what it offers.
+        const keepsInn = isInnkeeper(npc);
         if (visibleOffers.length === 0) {
+          if (sells && !keepsInn) {
+            const vendor = await vendorFor(wt, currentPlayer, npcId);
+            if (vendor) await sendVendorStock(wt, currentPlayer, vendor);
+            break;
+          }
           sendPacket(
             wt,
-            packetManager.npcGossip({ npcId, name: npc.name || null, gossipText: npc.dialog || null, quests: [] })
+            packetManager.npcGossip({ npcId, name: npc.name || null, gossipText: npc.dialog || null, quests: [], vendor: sells, innkeeper: keepsInn })
           );
           break;
         }
-        if (visibleOffers.length === 1) {
+        if (visibleOffers.length === 1 && !sells && !keepsInn) {
           const offer = visibleOffers[0]!;
           const quest = questDefinitions.find(offer.questId);
           if (!quest) break;
@@ -5304,8 +5644,86 @@ export default async function packetReceiver(
         }
         sendPacket(
           wt,
-          packetManager.npcGossip({ npcId, name: npc.name || null, gossipText: npc.dialog || null, quests: offers })
+          packetManager.npcGossip({ npcId, name: npc.name || null, gossipText: npc.dialog || null, quests: offers, vendor: sells, innkeeper: keepsInn })
         );
+        break;
+      }
+      case "VENDOR_OPEN": {
+        if (!currentPlayer) return;
+        if (isQuestRateLimited(`npc:${wt.data.id}`)) return;
+        const vendor = await vendorFor(wt, currentPlayer, (data as any)?.npcId);
+        if (vendor) await sendVendorStock(wt, currentPlayer, vendor);
+        break;
+      }
+      case "VENDOR_BUY": {
+        if (!currentPlayer) return;
+        const vendor = await vendorFor(wt, currentPlayer, (data as any)?.npcId);
+        if (!vendor) break;
+        const bought = await vendors.buy(currentPlayer.username, vendor, String((data as any)?.item ?? ""), (data as any)?.quantity ?? 1);
+        await sendVendorAnswer(wt, currentPlayer, vendor, bought, Events.VENDOR_BUY);
+        break;
+      }
+      case "VENDOR_SELL": {
+        if (!currentPlayer) return;
+        const vendor = await vendorFor(wt, currentPlayer, (data as any)?.npcId);
+        if (!vendor) break;
+        // No amount is all of it that is spare.
+        const sold = await vendors.sell(currentPlayer.username, String((data as any)?.item ?? ""), (data as any)?.quantity ?? undefined);
+        await sendVendorAnswer(wt, currentPlayer, vendor, sold, Events.VENDOR_SELL);
+        break;
+      }
+      case "VENDOR_BUYBACK": {
+        if (!currentPlayer) return;
+        const vendor = await vendorFor(wt, currentPlayer, (data as any)?.npcId);
+        if (!vendor) break;
+        const returned = await vendors.buyback(currentPlayer.username, (data as any)?.index);
+        await sendVendorAnswer(wt, currentPlayer, vendor, returned, Events.VENDOR_BUY);
+        break;
+      }
+      case "USE_ITEM": {
+        if (!currentPlayer) return;
+        // The stats the server holds are the ones a use restores.
+        const user = playerCache.get(currentPlayer.id) || currentPlayer;
+        const used = await consumables.use(user, (data as any)?.item, { trading: !!trades.of(currentPlayer.username) });
+        if (!used.ok) {
+          sendPacket(wt, packetManager.notify({ message: used.message }));
+          break;
+        }
+        if (used.kind === "home") {
+          await castHome(currentPlayer, used.item);
+          break;
+        }
+        currentPlayer.stats = user.stats;
+        playerCache.set(user.id, user);
+        await sendBelongingsOf(user);
+        // Shown to everyone near as a heal is, when it healed.
+        const healed = used.health > 0 ? { isCrit: false, damage: -used.health } : {};
+        broadcastToAOIBestEffort(user, packetManager.updateStats({ id: user.id, target: user.id, stats: user.stats, ...healed }));
+        sendStatsToPartyMembers(user.username, user.id, user.stats);
+        sendPacket(wt, packetManager.itemCooldown({ kind: "consumable", remaining: used.cooldown, total: CONSUMABLE_COOLDOWN_MS }));
+        if (used.health > 0) listener.emit(Events.PLAYER_HEALED, { caster: user, target: user, amount: used.health, source: used.item } as any);
+        listener.emit(Events.ITEM_USED, { player: user, item: used.item, health: used.health, stamina: used.stamina, home: null });
+        break;
+      }
+      case "SET_HOME": {
+        if (!currentPlayer) return;
+        if (isQuestRateLimited(`npc:${wt.data.id}`)) return;
+        const npcId = Number((data as any)?.npcId);
+        const innkeeper = (((await assetCache.get("npcs")) || []) as Npc[]).find((held) => Number(held.id) === npcId);
+        const reason = cannotSetHome(currentPlayer, innkeeper);
+        if (reason) {
+          sendPacket(wt, packetManager.notify({ message: reason }));
+          break;
+        }
+        try {
+          await homes.set(currentPlayer, innkeeper!);
+        } catch (error) {
+          log.error(`The home of ${currentPlayer.username} could not be set: ${error}`);
+          sendPacket(wt, packetManager.notify({ message: "Your home could not be set. Nothing changed." }));
+          break;
+        }
+        sendPacket(wt, packetManager.notify({ message: "You have updated your home location" }));
+        listener.emit(Events.HOME_SET, { player: currentPlayer, npcId, inn: innkeeper!.name || null });
         break;
       }
       case "QUEST_SELECT": {
@@ -6054,8 +6472,11 @@ export default async function packetReceiver(
           const questCatalog = questDefinitions.getCachedQuestsSync().map((q) => ({ id: q.id, name: q.name }));
           // Sprite data for the appearance tab, same feed as the creature editor.
           const [spriteSheets, icons] = await Promise.all([listSpriteSheets(), listIcons()]);
+          // The items there are, for picking what a vendor stocks.
+          const items = (((await assetCache.get("items")) || []) as Item[])
+            .map((item) => ({ name: item.name, icon: item.icon ?? null, quality: item.quality, sell_price: item.sell_price ?? 1 }));
 
-          sendPacket(wt, packetManager.npcList(resolvedNpcs, questCatalog, { spriteSheets, icons }));
+          sendPacket(wt, packetManager.npcList(resolvedNpcs, questCatalog, { spriteSheets, icons, items }));
         } catch (error: any) {
           log.error(`Error listing NPCs: ${error.message}`);
           sendPacket(wt, packetManager.notify({ message: "Error loading NPCs." }));
@@ -6104,11 +6525,14 @@ export default async function packetReceiver(
             sprite_feet: clientData?.sprite_feet ?? null,
             sprite_legs: clientData?.sprite_legs ?? null,
             sprite_weapon: clientData?.sprite_weapon ?? null,
+            vendor_items: await vendorStockFrom(wt, clientData?.vendor_items),
+            innkeeper: clientData?.innkeeper === true || clientData?.innkeeper === 1,
           };
 
           await npcSystem.add(newNpc);
           const updatedNpcs = await npcSystem.list();
           await assetCache.set("npcs", updatedNpcs);
+          if (newNpc.innkeeper || vendors.isVendor(newNpc)) void resendMapMarkers();
 
           const createdNpc = updatedNpcs
             .filter((n: Npc) => n.map === mapName)
@@ -6175,6 +6599,16 @@ export default async function packetReceiver(
             return;
           }
 
+          // What the NPC stocks is checked against the items there are. An editor that sends no
+          // stock at all (one from before vendors) leaves what the NPC has.
+          npcData.vendor_items = npcData.vendor_items === undefined
+            ? (((await assetCache.get("npcs")) || []) as Npc[]).find((held) => Number(held.id) === Number(npcData.id))?.vendor_items ?? []
+            : await vendorStockFrom(wt, npcData.vendor_items);
+          // Whether it keeps an inn, the same way: an editor that does not say leaves it as it is.
+          npcData.innkeeper = npcData.innkeeper === undefined
+            ? (((await assetCache.get("npcs")) || []) as Npc[]).find((held) => Number(held.id) === Number(npcData.id))?.innkeeper === true
+            : npcData.innkeeper === true || (npcData.innkeeper as unknown) === 1;
+
           await npcSystem.update(npcData);
           const updatedNpcs = await npcSystem.list();
           await assetCache.set("npcs", updatedNpcs);
@@ -6215,6 +6649,8 @@ export default async function packetReceiver(
             }
           }
 
+          // It may have become an innkeeper or a vendor, or stopped being one.
+          void resendMapMarkers();
           sendPacket(wt, packetManager.notify({ message: "NPC saved successfully." }));
           log.info(`NPC ${npcData.id} saved by ${currentPlayer.username}`);
         } catch (error: any) {
@@ -6311,6 +6747,10 @@ export default async function packetReceiver(
           await npcSystem.remove({ id } as Npc);
           const updatedNpcs = await npcSystem.list();
           await assetCache.set("npcs", updatedNpcs);
+          // Nobody's home is at an innkeeper that is gone.
+          if (existingNpc.innkeeper) await homes.innGone(id).catch((error) => log.error(`The homes at NPC ${id} could not be cleared: ${error}`));
+          // Its inn or its shop is no longer marked on anyone's map.
+          if (existingNpc.innkeeper || vendors.isVendor(existingNpc)) void resendMapMarkers();
 
           const removePacket = packetManager.npcRemoved(id);
           const playersInMap = filterPlayersByMap(mapName);
@@ -7490,6 +7930,19 @@ export default async function packetReceiver(
             break;
           }
 
+          case "TRADES": {
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "admin.trades" || p === "admin.*"
+              )
+            ) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(wt, packetManager.notify({ message: await moderation.tradesCommand(currentPlayer, args) }));
+            break;
+          }
+
           case "BAN": {
 
             if (
@@ -8298,6 +8751,50 @@ export default async function packetReceiver(
               message: `Revived ${onlineTarget.username.charAt(0).toUpperCase() + onlineTarget.username.slice(1)}`,
             }));
             listener.emit(Events.PLAYER_REVIVED, { player: onlineTarget });
+            break;
+          }
+
+          // Ends every cooldown an online player is waiting on: spells, the lockout after an
+          // interrupt, the one consumables share and the home item's hour. Themselves, when no
+          // player is named.
+          case "COOLDOWNS":
+          case "RESETCOOLDOWNS": {
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "admin.cooldowns" || p === "admin.*"
+              )
+            ) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+
+            const named = args[0]?.toLowerCase() || null;
+            const found = !named
+              ? currentPlayer
+              : isNaN(Number(named))
+                ? Object.values(playerCache.list()).find((p: any) => p.username.toLowerCase() === named)
+                : playerCache.get(named);
+            const waiting = found ? playerCache.get((found as any).id) : null;
+            if (!waiting) {
+              sendPacket(wt, packetManager.notify({ message: "Player must be online to reset their cooldowns" }));
+              break;
+            }
+
+            const waitingName = waiting.username.charAt(0).toUpperCase() + waiting.username.slice(1);
+            try {
+              await resetCooldowns(waiting);
+            } catch (error) {
+              log.error(`The cooldowns of ${waiting.username} could not all be reset: ${error}`);
+              sendPacket(wt, packetManager.notify({ message: `The home cooldown of ${waitingName} could not be reset. The others were.` }));
+            }
+            // The admin's own, as their connection carries them.
+            if (waiting.id === currentPlayer.id) {
+              currentPlayer.spellCooldowns = waiting.spellCooldowns;
+              currentPlayer.spellLockoutUntil = 0;
+            }
+            playerCache.set(waiting.id, waiting);
+            if (waiting.wt) sendPacket(waiting.wt, packetManager.cooldownsReset());
+            sendPacket(wt, packetManager.notify({ message: `Reset the cooldowns of ${waitingName}` }));
             break;
           }
 
@@ -9845,6 +10342,78 @@ export default async function packetReceiver(
         await sendReport(wt, currentPlayer, reported, (data as any)?.category, (data as any)?.details);
         break;
       }
+      case "TRADE_REQUEST": {
+        if (!currentPlayer) return;
+        if (isQuestRateLimited(String(currentPlayer.id))) return;
+        const asked = playerCache.get((data as any)?.id);
+        const refusal = tradeRefusal(currentPlayer, asked);
+        if (refusal) {
+          sendPacket(wt, packetManager.notify({ message: refusal }));
+          break;
+        }
+
+        const invite_data = {
+          action: "TRADE_REQUEST",
+          message: `${shownName(currentPlayer.username)} wants to trade with you`,
+          originator: currentPlayer.id.toString(),
+          authorization: randomBytes(16).toString(),
+        };
+        // One request at a time: asking again, or someone else, takes back the one before.
+        currentPlayer.invitations = currentPlayer.invitations.filter((inv: any) => inv.action !== "TRADE_REQUEST");
+        currentPlayer.invitations.push({
+          action: invite_data.action,
+          originator: invite_data.originator,
+          authorization: invite_data.authorization,
+          // Who it was sent to: nobody else can answer it.
+          target: asked.id.toString(),
+        });
+        playerCache.set(currentPlayer.id, currentPlayer);
+
+        await sendInvitation(currentPlayer, asked, invite_data);
+        sendPacket(wt, packetManager.notify({ message: `Trade request sent to ${shownName(asked.username)}` }));
+        break;
+      }
+      case "TRADE_OFFER": {
+        if (!currentPlayer) return;
+        const offered = await trades.offer(currentPlayer.username, data);
+        if (offered.ok && offered.changed) {
+          await sendTradeState(offered.trade);
+          break;
+        }
+        if (!offered.ok) sendPacket(wt, packetManager.notify({ message: offered.message }));
+        // Nothing changed: the player is sent the trade as it stands, which puts back what their window showed.
+        const standing = trades.of(currentPlayer.username);
+        if (standing) sendPacket(wt, packetManager.tradeState(await trades.view(standing, currentPlayer.username)));
+        break;
+      }
+      case "TRADE_ACCEPT": {
+        if (!currentPlayer) return;
+        const accepted = await trades.accept(currentPlayer.username, traderNamed);
+        if (accepted.state === "wait") {
+          sendPacket(wt, packetManager.notify({ message: accepted.message }));
+        } else if (accepted.state === "accepted") {
+          await sendTradeState(accepted.trade);
+        } else if (accepted.state === "failed") {
+          sendTradeClosed(accepted.trade, false, accepted.reasons);
+        } else if (accepted.state === "completed") {
+          const { trade, record } = accepted;
+          if (record) await sendBelongingsAfterTrade(trade);
+          const said = record ? "Trade complete." : "Nothing was traded.";
+          sendTradeClosed(trade, record !== null, Object.fromEntries(trade.players.map((name) => [name, said])));
+          if (record) listener.emit(Events.TRADE_COMPLETED, { trade: record });
+        }
+        break;
+      }
+      case "TRADE_CANCEL": {
+        if (!currentPlayer) return;
+        const cancelled = trades.cancel(currentPlayer.username);
+        if (!cancelled) break;
+        const me = currentPlayer.username.toLowerCase();
+        sendTradeClosed(cancelled, false, Object.fromEntries(cancelled.players.map((name) =>
+          [name, name === me ? "You cancelled the trade." : `${shownName(currentPlayer.username)} cancelled the trade.`]
+        )));
+        break;
+      }
       case "ADD_FRIEND": {
         const id = (data as any).id;
         if (!id) return;
@@ -9946,6 +10515,24 @@ export default async function packetReceiver(
         playerCache.set(inviter.id, inviter);
 
         switch (action.toUpperCase()) {
+
+          case "TRADE_REQUEST": {
+            // Answered by someone it was not sent to: it is spent, and nothing comes of it.
+            if (invite.target !== currentPlayer.id.toString()) break;
+            if (response.toUpperCase() !== "ACCEPT") {
+              sendPacket(inviter.wt, packetManager.notify({ message: `${shownName(currentPlayer.username)} declined your trade request` }));
+              break;
+            }
+            // Things may have changed since it was asked: one walked off, or began another trade.
+            const refusal = tradeRefusal(currentPlayer, inviter);
+            const trade = refusal ?? trades.open(inviter, currentPlayer);
+            if (typeof trade === "string") {
+              sendPacket(wt, packetManager.notify({ message: trade }));
+              break;
+            }
+            await sendTradeState(trade);
+            break;
+          }
 
           case "FRIEND_REQUEST": {
             if (response.toUpperCase() === "ACCEPT") {
@@ -10304,6 +10891,15 @@ export default async function packetReceiver(
           return;
         }
 
+        // No mount is ridden inside a building.
+        if (!dismounting && isInteriorMap(currentPlayer.location?.map)) {
+          sendPacket(
+            wt,
+            packetManager.notify({ message: "Cannot mount indoors." })
+          );
+          return;
+        }
+
         const canMount = player.canMount(currentPlayer);
         const mount = (data as any).mount;
         if (!mount) {
@@ -10556,6 +11152,11 @@ export default async function packetReceiver(
       }
       case "EQUIP_ITEM": {
         if (!currentPlayer) return;
+        // As for a bag (see BAG_EQUIP): an item on offer in a trade is not put on while the trade is open.
+        if (trades.of(currentPlayer.username)) {
+          sendPacket(wt, packetManager.notify({ message: "You can't change equipment while trading." }));
+          break;
+        }
         const item = (data as any).item;
         const slotIndex = (data as any).slotIndex;
         if (!item) return;
@@ -10815,6 +11416,11 @@ export default async function packetReceiver(
       }
       case "BAG_EQUIP": {
         if (!currentPlayer) return;
+        // What is spare of an item can be on offer in a trade: nothing more of it is put to use until the trade is over.
+        if (trades.of(currentPlayer.username)) {
+          sendPacket(wt, packetManager.notify({ message: "You can't change equipment while trading." }));
+          break;
+        }
         const item = (data as any).item;
         const bagSlot = (data as any).slot;
         if (!item || !bagSlot) return;
@@ -10945,6 +11551,12 @@ export default async function packetReceiver(
             i.name.toLowerCase() === String(itemName).toLowerCase()
           );
           if (!invItem) return;
+          // The home item stays with its player.
+          const definition = (((await assetCache.get("items")) || []) as Item[]).find((held) => held.name.toLowerCase() === String(invItem.name).toLowerCase());
+          if (isKept(definition)) {
+            sendPacket(wt, packetManager.notify({ message: `${invItem.name} cannot be destroyed.` }));
+            break;
+          }
 
           await inventory.delete(currentPlayer.username, { name: invItem.name, quantity: 0 });
           currentPlayer.inventory = currentPlayer.inventory.filter((i: any) => i !== invItem);
@@ -11750,13 +12362,17 @@ controlPanel.setControlPanelBridge({
     whitelisted: realmWhitelist.size,
     creatures: creatures.stats(),
   }),
-  worlds: async () => (await getLiveWorlds()).map((world) => ({
-    name: world.name,
-    weather: world.weather || "clear",
-    // A "random" world is showing whichever weather it settled on.
-    showing: (world.weather === "random" ? resolvedWeatherCache.get(world.name)?.weather : world.weather) || world.weather || "clear",
-    players: Number(world.players) || 0,
-  })),
+  worlds: async () => {
+    // What each world has over it now, and what that reads: a "random" world the weather it settled on, a world on
+    // "weather_api" the last reading of the place it follows.
+    const rows = (await assetCache.get("weather") as WeatherData[]) || [];
+    const live = { look: weatherApi.shownAs(weatherApi.WEATHER_API), row: weatherApi.currentWeather() };
+    return (await getLiveWorlds()).map((world) => ({
+      name: world.name,
+      ...controlPanel.worldWeather(world.weather, resolvedWeatherCache.get(world.name), live, rows),
+      players: Number(world.players) || 0,
+    }));
+  },
 });
 
 /**

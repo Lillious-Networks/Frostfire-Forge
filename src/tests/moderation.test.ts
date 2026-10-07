@@ -19,6 +19,7 @@ let mutesTable: Row[];
 let ignoresTable: Row[];
 let reportsTable: Row[];
 let friendsTable: Row[];
+let tradesTable: Row[];
 let nextId: number;
 
 function run(sql: string, params: any[]): any {
@@ -57,6 +58,8 @@ function run(sql: string, params: any[]): any {
     if (row) row.friends = params[0];
     return { affectedRows: row ? 1 : 0 };
   }
+
+  if (sql.includes("FROM trade_log ORDER BY id DESC")) return [...tradesTable].sort((a, b) => b.id - a.id).slice(0, params[0]).map((row) => ({ ...row }));
 
   // A login has every system's player cache fill itself: tables that are not this file's hold nothing.
   if (sql.startsWith("SELECT ")) return [];
@@ -110,6 +113,7 @@ beforeEach(async () => {
   ignoresTable = [];
   reportsTable = [];
   friendsTable = [];
+  tradesTable = [];
   nextId = 1;
   for (const id of ["9301", "9302", "9303", "9304"]) playerCache.remove(id);
   boss = online("9301", "boss", ["admin.*"]);
@@ -308,6 +312,46 @@ describe("/reports", () => {
     expect(await moderation.reportsCommand(mod, ["view"], NOON)).toBe(usage);
     expect(await moderation.reportsCommand(mod, ["resolve", "abc"], NOON)).toBe(usage);
     expect(await moderation.reportsCommand(mod, ["close", "1"], NOON)).toBe(usage);
+  });
+});
+
+describe("/trades", () => {
+  const gave = (items: Array<[string, number]> = [], gold = 0, silver = 0, copper = 0) =>
+    JSON.stringify({ items: items.map(([name, quantity]) => ({ name, quantity })), coins: { gold, silver, copper } });
+
+  test("needs its permission", async () => {
+    expect(await moderation.tradesCommand(hero, ["troll"], NOON)).toBe("You don't have permission to use this command");
+    expect(await moderation.tradesCommand(mod, ["troll"], NOON)).toBe("You don't have permission to use this command");
+  });
+
+  test("lists a player's latest trades, newest first, from their side", async () => {
+    tradesTable = [
+      { id: 1, player_a: "hero", player_b: "troll", a_gave: gave([["Iron Ore", 4], ["Rat Tail", 1]], 0, 1, 60), b_gave: gave([["Health Potion", 5]]), created_at: NOON - 65 * MINUTE },
+      { id: 2, player_a: "ally", player_b: "hero", a_gave: gave([], 12), b_gave: gave(), created_at: NOON - 5 * MINUTE },
+      { id: 3, player_a: "ally", player_b: "troll", a_gave: gave(), b_gave: gave([["Rat Tail", 2]]), created_at: NOON - MINUTE },
+    ];
+    await datacache.clearCaches();
+
+    expect(await moderation.tradesCommand(boss, ["HERO"], NOON)).toBe([
+      "Hero's latest trades: 2",
+      "#2 with Ally, 5m ago: gave nothing, got 12g",
+      "#1 with Troll, 1h ago: gave 4 Iron Ore, 1 Rat Tail, 1s 60c, got 5 Health Potion",
+    ].join("\n"));
+  });
+
+  test("says so when a player has made none, or is nobody", async () => {
+    expect(await moderation.tradesCommand(boss, ["sleeper"], NOON)).toBe("Sleeper has no trades on record");
+    expect(await moderation.tradesCommand(boss, ["nobody"], NOON)).toBe("Player not found");
+    expect(await moderation.tradesCommand(boss, [], NOON)).toBe("Usage: /trades <username>");
+  });
+
+  test("lists ten at most", async () => {
+    tradesTable = Array.from({ length: 14 }, (_, index) => ({ id: index + 1, player_a: "hero", player_b: "troll", a_gave: gave([], 1), b_gave: gave(), created_at: NOON - MINUTE }));
+    await datacache.clearCaches();
+    const lines = (await moderation.tradesCommand(boss, ["hero"], NOON)).split("\n");
+    expect(lines).toHaveLength(11);
+    expect(lines[1]).toStartWith("#14 ");
+    expect(lines[10]).toStartWith("#5 ");
   });
 });
 

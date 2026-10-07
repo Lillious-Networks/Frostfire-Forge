@@ -52,3 +52,24 @@ describe("transaction through the worker pool", () => {
     expect(out.final).toEqual([{ username: "a", copper: 0 }, { username: "b", copper: 30 }]);
   });
 });
+
+// The systems' statements are MySQL's. SQLite has other words for two of them, and the layer
+// writes those: without that, a new item or a change of coins is a syntax error there.
+describe("MySQL's insert forms on SQLite", () => {
+  test("INSERT IGNORE adds a row, answers with its id, and adds nothing when one is in the way", () => {
+    expect(out.ignore).toEqual({ id: 1, again: "ran" });
+    expect(out.bag).toEqual([{ username: "a", item: "Ore", quantity: 1 }, { username: "a", item: "Rat's \"Tail\"", quantity: 2 }]);
+  });
+
+  test("in a transaction, an insert that was ignored changed no rows and one that was made changed one", () => {
+    expect(out.ignoreGuard).toBe("guard 0");
+    expect(out.ignoreKept).toBe("kept");
+  });
+
+  test("ON DUPLICATE KEY UPDATE makes the row, then changes it, alone or in a transaction", () => {
+    expect(out.upsertFirst).toBe("ran");
+    expect(out.upsertAgain).toBe("ran");
+    expect(out.upsertTogether).toBe("kept");
+    expect(out.purse).toEqual([{ username: "a", copper: 7, silver: 8 }, { username: "b", copper: 5, silver: 6 }]);
+  });
+});

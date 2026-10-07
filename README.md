@@ -13,7 +13,7 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
 </p>
 <p align="center">
   <img src="https://img.shields.io/github/actions/workflow/status/Lillious-Networks/Frostfire-Forge/release.yml?branch=main&label=Docker&style=flat-square" alt="Docker">
-  <img src="https://img.shields.io/badge/status-Alpha-yellow?style=flat-square&label=Status" alt="Work in Progress">
+  <img src="https://img.shields.io/badge/status-Beta-yellow?style=flat-square&label=Status" alt="Work in Progress">
   <img src="https://img.shields.io/github/license/Lillious-Networks/Frostfire-Forge?style=flat-square&label=License" alt="License">
   <img src="https://img.shields.io/github/stars/Lillious-Networks/Frostfire-Forge?style=flat-square&label=Stars&color=yellow" alt="GitHub Stars">
 </p>
@@ -193,6 +193,8 @@ WEATHER_API_MINUTES="10"                      # Minutes between readings (defaul
 ## Weather
 
 A world's weather is the name of a row of the `weather` table, or one of three words of `/weather`: `clear`, `random` (another weather every 30 minutes) or `weather_api` (the real weather, below). Weathers are created and edited live with the [Weather Editor](#admin-commands) and given to a world with `/weather`.
+
+A map with no entry in the `worlds` table (the inside of a house, for one) is clear and has no day and night cycle: it is never darkened, and its shadows and time-driven particles see a standing midday.
 
 ### How a Weather Is Drawn
 
@@ -389,6 +391,16 @@ bun setup-production
 </details>
 
 <details>
+<summary><strong>Player Trades</strong></summary>
+
+```bash
+/trades [username]
+```
+- **Permission**: `admin.trades` | `admin.*`
+- **Description**: List the latest trades a player completed: who each was with, when, what they gave and what they got. Players trade from the right-click menu on another player; every completed trade is written to the `trade_log` table
+</details>
+
+<details>
 <summary><strong>Send Message to Players</strong></summary>
 
 ```bash
@@ -446,6 +458,17 @@ bun setup-production
 ```
 - **Permission**: `admin.revive` | `admin.*`
 - Revives a dead or ghost player in place at full health. Omitting the username revives yourself. Only works on online targets that are actually dead.
+</details>
+
+<details>
+<summary><strong>Reset Cooldowns</strong></summary>
+
+```bash
+/cooldowns [username | id]
+```
+- **Alias**: `/resetcooldowns`
+- **Permission**: `admin.cooldowns` | `admin.*`
+- Ends every cooldown an online player is waiting on: spells, the spell lockout after an interrupt, the cooldown consumables share and the home item's hour. Omitting the username resets your own.
 </details>
 
 <details>
@@ -1218,6 +1241,11 @@ import { listener } from "@engine/systems/events";
 | `onGuildChat` | `{ player, message, guildMembers, guildId }` | After a guild chat message is sent. `guildMembers` is the list of usernames in the guild. |
 | `onPartyChanged` | `{ type, members, username?, kickedUsername? }` | After party join/kick/leave/disband. `type` = `"join"` \| `"kick"` \| `"leave"` \| `"disband"`. `members` = affected usernames. |
 | `onPartyInvite` | `{ inviterUsername, invitedUsername }` | After party invitation sent |
+| `onVendorBuy` | `{ player, npcId, item, quantity, coins }` | After a player buys from a vendor, or buys back something they sold. `coins` = copper paid |
+| `onVendorSell` | `{ player, npcId, item, quantity, coins }` | After a player sells an item to a vendor. `coins` = copper received |
+| `onItemUsed` | `{ player, item, health, stamina, home }` | After a player uses a consumable. `health` / `stamina` = what it restored. For the home item both are 0 and `home` = `{ map, x, y }` where they arrived (fired once the cast has finished); otherwise `home` = `null` |
+| `onHomeSet` | `{ player, npcId, inn }` | After a player makes an innkeeper's inn their home. `inn` = the NPC's name |
+| `onTradeCompleted` | `{ trade }` | After two players complete a trade. `trade` = `{ id, player_a, player_b, a_gave, b_gave, created_at }`; each `gave` is `{ items: [{ name, quantity }], coins }` |
 | `onGuildChanged` | `{ type, guildId, guildName, playerUsername, kickedUsername? }` | After guild create/join/leave/kick/disband. `type` = `"create"` \| `"join"` \| `"leave"` \| `"kick"` \| `"disband"` |
 | `onFriendAdded` | `{ type, playerUsername, friendUsername }` | After friend request accepted and lists updated |
 | `onFriendRemoved` | `{ type, playerUsername, friendUsername }` | After friend removed and list synced |

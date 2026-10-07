@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
-import { databaseModule } from "./setup";
+import { databaseModule, standInFor } from "./setup";
 
 // ------------------------------------------------------------ fake database
 // The statements the loot tables send, run against in-memory tables. A
@@ -86,7 +86,7 @@ mock.module("../services/assetCache", () => ({
     get: async (key: string) => (key === "items" ? [{ name: "Iron Sword", quality: "common" }, { name: "Wolf Pelt", quality: "common" }, { name: "Frostbite", quality: "epic" }] : undefined),
   },
 }));
-mock.module("../modules/spriteSheetManager", () => ({ getIconUrl: (name: string) => `icon:${name}` }));
+await standInFor("../modules/spriteSheetManager", () => ({ getIconUrl: (name: string) => `icon:${name}` }));
 
 const datacache = await import("../services/datacache");
 const { default: log } = await import("../modules/logger");

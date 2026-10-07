@@ -468,8 +468,9 @@ const player = {
         [username, 60, 50, 50, 0]
       );
 
-      await query("INSERT INTO quest_log (username) VALUES (?)", [username]);
-
+      // (Nothing for the quest log: it holds a row for each quest a player has taken, and a new one has taken
+      // none. The row once written for it here, a name and no quest, is refused by the table as it is now, and
+      // nothing after it was then written.)
       await query(
         "INSERT INTO currency (username, copper, silver, gold) VALUES (?, ?, ?, ?)",
         [username, 0, 0, 0]
@@ -489,7 +490,7 @@ const player = {
         accountRows.drop(username),
         statRows.drop(username),
         configRows.drop(username),
-        ...["quest_log", "currency", "equipment", "collectables", "learned_spells"].map((name) => dropRows(name, username)),
+        ...["currency", "equipment", "collectables", "learned_spells"].map((name) => dropRows(name, username)),
         // Who knows the spell every new account is given.
         dropRows("spell_usage", "frost_bolt"),
       ]);
@@ -602,6 +603,23 @@ const player = {
       await wrote(accountRows, username, { map, position: at, direction: position.direction as string }, text(map, position.direction));
     }
     return response;
+  },
+  /**
+   * setLocation for a player who has just been moved somewhere (through a warp, say), answering
+   * whether the account is saved as standing there: its row was changed, or it already said so.
+   * The database answers a write with the rows it changed, so a move to where the account was last
+   * saved changes none, exactly as a write for a session that is no longer the account's does. The
+   * two are told apart by the row held: a door leads to one spot, and a player brought back inside
+   * some other way walks out to the very place they were saved at.
+   */
+  arriveAt: async (session_id: string, map: string, position: PositionData): Promise<boolean> => {
+    if (!session_id || !map || !position) return false;
+    const response = await player.setLocation(session_id, map, position);
+    if (changedRows(response)) return true;
+    const username = usernameOfSession(session_id);
+    const held = username ? await accountByNameOrSession(username) : null;
+    const mapName = (name: unknown) => String(name ?? "").replaceAll(".json", "");
+    return !!held && mapName(held.map) === mapName(map) && held.position === `${Math.round(position.x)},${Math.round(position.y)}`;
   },
   /** setLocation for a player who is offline, and so has no session id to be found by. */
   setLocationByUsername: async (
@@ -1215,8 +1233,10 @@ const player = {
     for (const key in warps) {
       const warp = warps[key];
       if (
-        position.x + playerWidth > warp.position.x &&
-        position.x < warp.position.x + warp.size.width &&
+        // across, the position is the middle of the sprite (as the tile test below has it): a warp is met by
+        // the player's own width centred on it, so a rectangle is entered as readily from its left as its right
+        position.x + playerWidth / 2 > warp.position.x &&
+        position.x - playerWidth / 2 < warp.position.x + warp.size.width &&
         position.y + playerHeight > warp.position.y &&
         position.y < warp.position.y + warp.size.height
       ) {
@@ -1336,8 +1356,10 @@ const player = {
     for (const key in warps) {
       const warp = warps[key];
       if (
-        position.x + playerWidth > warp.position.x &&
-        position.x < warp.position.x + warp.size.width &&
+        // across, the position is the middle of the sprite (as the tile test below has it): a warp is met by
+        // the player's own width centred on it, so a rectangle is entered as readily from its left as its right
+        position.x + playerWidth / 2 > warp.position.x &&
+        position.x - playerWidth / 2 < warp.position.x + warp.size.width &&
         position.y + playerHeight > warp.position.y &&
         position.y < warp.position.y + warp.size.height
       ) {

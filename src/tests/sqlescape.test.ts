@@ -199,6 +199,63 @@ describe("sqlWrapper", () => {
     expect(() => sqlWrapper("SELECT 1 WHERE id IN (?)", [[]], "mysql")).toThrow("Cannot use empty array as SQL parameter");
   });
 
+  describe("MySQL's insert forms, as SQLite writes them", () => {
+    const IGNORE = "INSERT IGNORE INTO inventory (username, item, quantity) VALUES (?, ?, ?)";
+    const UPSERT = "INSERT INTO currency (username, copper, silver, gold) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE copper = ?, silver = ?, gold = ?";
+
+    test("INSERT IGNORE becomes INSERT OR IGNORE", () => {
+      expect(sqlWrapper(IGNORE, ["hero", "Iron Ore", 2], "sqlite"))
+        .toBe("INSERT OR IGNORE INTO inventory (username, item, quantity) VALUES ('hero', 'Iron Ore', 2)");
+    });
+
+    test("ON DUPLICATE KEY UPDATE becomes an upsert on whichever key the row broke", () => {
+      expect(sqlWrapper(UPSERT, ["hero", 1, 2, 3, 1, 2, 3], "sqlite"))
+        .toBe("INSERT INTO currency (username, copper, silver, gold) VALUES ('hero', 1, 2, 3) ON CONFLICT DO UPDATE SET copper = 1, silver = 2, gold = 3");
+    });
+
+    test("VALUES(column) in the update is the row that was not inserted", () => {
+      expect(sqlWrapper("INSERT INTO friendslist (username, friends) VALUES (?, ?) ON DUPLICATE KEY UPDATE friends = VALUES(friends), seen = VALUES( seen )", ["hero", "ally"], "sqlite"))
+        .toBe("INSERT INTO friendslist (username, friends) VALUES ('hero', 'ally') ON CONFLICT DO UPDATE SET friends = excluded.friends, seen = excluded.seen");
+    });
+
+    test("they are found in any case, and across line breaks", () => {
+      expect(sqlWrapper("  insert  ignore\n  into mounts (name) values (?)", ["horse"], "sqlite"))
+        .toBe("  INSERT OR IGNORE INTO mounts (name) values ('horse')");
+      expect(sqlWrapper("INSERT INTO permissions (username, permissions) VALUES (?, ?)\n  on duplicate   key update permissions = ?", ["hero", "a", "a"], "sqlite"))
+        .toBe("INSERT INTO permissions (username, permissions) VALUES ('hero', 'a')\n  ON CONFLICT DO UPDATE SET permissions = 'a'");
+    });
+
+    test("the same words in a value are text, and stay as they are", () => {
+      const said = "INSERT IGNORE INTO x ON DUPLICATE KEY UPDATE y = VALUES(y)";
+      expect(sqlWrapper("INSERT INTO chat (line) VALUES (?)", [said], "sqlite")).toBe(`INSERT INTO chat (line) VALUES ('${said}')`);
+      expect(sqlWrapper(IGNORE, ["hero", said, 1], "sqlite"))
+        .toBe(`INSERT OR IGNORE INTO inventory (username, item, quantity) VALUES ('hero', '${said}', 1)`);
+    });
+
+    test("the same words in a quoted part of the statement stay as they are", () => {
+      const sql = "INSERT INTO notes (kind, line) VALUES ('ON DUPLICATE KEY UPDATE it''s VALUES(x)', ?)";
+      expect(sqlWrapper(sql, ["a"], "sqlite")).toBe("INSERT INTO notes (kind, line) VALUES ('ON DUPLICATE KEY UPDATE it''s VALUES(x)', 'a')");
+    });
+
+    test("a VALUES list is not mistaken for the function", () => {
+      expect(sqlWrapper("INSERT INTO currency (username) VALUES (?) ON DUPLICATE KEY UPDATE copper = ?", ["hero", 1], "sqlite"))
+        .toBe("INSERT INTO currency (username) VALUES ('hero') ON CONFLICT DO UPDATE SET copper = 1");
+    });
+
+    test("a statement that only mentions ignoring is left alone", () => {
+      const sql = "SELECT ignored FROM ignores WHERE username = ?";
+      expect(sqlWrapper(sql, ["hero"], "sqlite")).toBe("SELECT ignored FROM ignores WHERE username = 'hero'");
+      expect(sqlWrapper("UPDATE t SET note = ? WHERE id = ?", ["x", 1], "sqlite")).toBe("UPDATE t SET note = 'x' WHERE id = 1");
+    });
+
+    test.each(["mysql", "postgres"] as DatabaseEngine[])("on %s both are sent as written", (engine) => {
+      expect(sqlWrapper(IGNORE, ["hero", "Iron Ore", 2], engine))
+        .toBe("INSERT IGNORE INTO inventory (username, item, quantity) VALUES ('hero', 'Iron Ore', 2)");
+      expect(sqlWrapper(UPSERT, ["hero", 1, 2, 3, 1, 2, 3], engine))
+        .toBe("INSERT INTO currency (username, copper, silver, gold) VALUES ('hero', 1, 2, 3) ON DUPLICATE KEY UPDATE copper = 1, silver = 2, gold = 3");
+    });
+  });
+
   test("a MySQL value ending in a backslash cannot swallow the next parameter", () => {
     const name = "abc\\";
     const description = ", description = (SELECT password_hash FROM accounts LIMIT 1) -- ";

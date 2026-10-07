@@ -115,6 +115,10 @@ export async function npcForClient(npc: Npc): Promise<any> {
     position: npc.position,
     sprite_type: npc.sprite_type,
     spriteLayers: getNpcSpriteLayers(npc),
+    // Whether it sells things: an NPC that does can be talked to, though it has nothing to say. What it sells is sent when it is opened.
+    vendor: Array.isArray(npc.vendor_items) && npc.vendor_items.length > 0,
+    // Whether it keeps an inn: a reason to talk to it too.
+    innkeeper: npc.innkeeper === true,
   };
 }
 

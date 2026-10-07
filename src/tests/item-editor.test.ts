@@ -109,6 +109,80 @@ describe("item validation", () => {
     expect(editor.validateItem(weapon({ equipment_slot: "helmet" }), names(), null))
       .toContain("Weapon damage and speed only apply to items in the weapon slot.");
   });
+
+  test("what a vendor pays for it is a whole number of copper a purse can hold, 0 or more", () => {
+    expect(editor.validateItem(weapon({ sell_price: 0 }), names(), null)).toEqual([]);
+    expect(editor.validateItem(weapon({ sell_price: 12_345 }), names(), null)).toEqual([]);
+    expect(editor.validateItem(weapon({ sell_price: -1 }), names(), null)).toContain("Vendor sell price cannot be negative.");
+    expect(editor.validateItem(weapon({ sell_price: editor.SELL_PRICE_MAX }), names(), null)).toEqual([]);
+    expect(editor.validateItem(weapon({ sell_price: editor.SELL_PRICE_MAX + 1 }), names(), null)).toContain("Vendor sell price is too high.");
+  });
+});
+
+describe("a consumable", () => {
+  const potion = (over: Record<string, any> = {}) => ({ name: "Health Potion", quality: "common", type: "consumable", description: "", restore_health: 50, ...over });
+
+  test("keeps what it restores, whether it can be used in combat and whether it is the home item", () => {
+    expect(editor.normalizeItem(potion({ restore_health: "50", restore_stamina: 12.9, no_combat: 1 }))).toMatchObject({ restore_health: 50, restore_stamina: 12, no_combat: true, teleports_home: false });
+    expect(editor.normalizeItem(potion({ restore_health: "", restore_stamina: null }))).toMatchObject({ restore_health: 0, restore_stamina: 0, no_combat: false });
+    // The home item only takes its player home.
+    expect(editor.normalizeItem(potion({ teleports_home: true, restore_stamina: 5 }))).toMatchObject({ teleports_home: true, restore_health: 0, restore_stamina: 0 });
+  });
+
+  test("is the only kind of item with a use", () => {
+    expect(editor.normalizeItem(weapon({ restore_health: 50, restore_stamina: 5, no_combat: true, teleports_home: true })))
+      .toMatchObject({ restore_health: 0, restore_stamina: 0, no_combat: false, teleports_home: false });
+  });
+
+  test("has to restore something, or be the home item", () => {
+    expect(editor.validateItem(potion(), names(), null)).toEqual([]);
+    expect(editor.validateItem(potion({ restore_health: 0, restore_stamina: 30 }), names(), null)).toEqual([]);
+    expect(editor.validateItem(potion({ restore_health: 0, teleports_home: true }), names(), null)).toEqual([]);
+    expect(editor.validateItem(potion({ restore_health: 0 }), names(), null)).toContain("A consumable must restore health or stamina, or be the home item.");
+    expect(editor.validateItem(potion({ restore_health: -5 }), names(), null)).toContain("What a consumable restores cannot be negative.");
+    expect(editor.validateItem(potion({ restore_stamina: -1 }), names(), null)).toContain("What a consumable restores cannot be negative.");
+    expect(editor.validateItem(potion({ restore_health: editor.RESTORE_MAX + 1 }), names(), null)).toContain("What a consumable restores is too high.");
+  });
+
+  test("cannot be the home item while another item is", () => {
+    const stone = potion({ name: "Home Stone", restore_health: 0, teleports_home: true });
+    expect(editor.validateItem(stone, names("home stone"), "Home Stone", "Home Stone")).toEqual([]);
+    // Renamed, it is still the item it was.
+    expect(editor.validateItem({ ...stone, name: "Hearth Rune" }, names("home stone"), "home stone", "Home Stone")).toEqual([]);
+    expect(editor.validateItem({ ...stone, name: "Second Stone" }, names("home stone"), null, "Home Stone")).toContain("Home Stone is already the home item. Only one item can be.");
+    expect(editor.validateItem(potion({ teleports_home: true }), names("home stone", "health potion"), "Health Potion", "Home Stone"))
+      .toContain("Home Stone is already the home item. Only one item can be.");
+    // Any other item saves as before.
+    expect(editor.validateItem(potion(), names("home stone"), null, "Home Stone")).toEqual([]);
+  });
+
+  test("is written with its use, new or changed", async () => {
+    cache.set("items", []);
+    queries.length = 0;
+    await editor.saveItem(potion({ restore_stamina: 5, no_combat: true }), null);
+    await editor.saveItem(potion({ name: "Home Stone", restore_health: 0, teleports_home: true }), null);
+    const [first, second] = queries.filter((q) => q.sql.startsWith("INSERT INTO items"));
+    const columns = first!.sql.slice(first!.sql.indexOf("(") + 1, first!.sql.indexOf(")")).split(", ");
+    const written = (q: { params: any[] }, column: string) => q.params[columns.indexOf(column)];
+    expect(["restore_health", "restore_stamina", "no_combat", "teleports_home"].map((column) => written(first!, column))).toEqual([50, 5, 1, 0]);
+    expect(["restore_health", "restore_stamina", "no_combat", "teleports_home"].map((column) => written(second!, column))).toEqual([0, 0, 0, 1]);
+
+    await editor.saveItem(potion({ restore_health: 75 }), "Health Potion");
+    const update = queries.find((q) => q.sql.startsWith("UPDATE items SET"));
+    expect(update!.sql).toMatch(/\brestore_health = \?.*\brestore_stamina = \?.*\bno_combat = \?.*\bteleports_home = \?/);
+    expect((cache.get("items") as Item[]).find((i) => i.name === "Health Potion")).toMatchObject({ restore_health: 75, restore_stamina: 0, no_combat: false });
+  });
+
+  test("a save through the editor is refused a second home item", async () => {
+    cache.set("items", [editor.normalizeItem(potion({ name: "Home Stone", restore_health: 0, teleports_home: true }))]);
+    queries.length = 0;
+    const answer = await editor.handleEditorPacket("ITEM_EDITOR_SAVE", potion({ name: "Other Stone", restore_health: 0, teleports_home: true }));
+    expect(answer).toEqual({ kind: "result", ok: false, errors: ["Home Stone is already the home item. Only one item can be."] });
+    expect(queries).toHaveLength(0);
+    // The home item itself saves.
+    expect(await editor.handleEditorPacket("ITEM_EDITOR_SAVE", { ...potion({ name: "Home Stone", restore_health: 0, teleports_home: true }), originalName: "Home Stone" }))
+      .toMatchObject({ ok: true });
+  });
 });
 
 describe("item normalization", () => {
@@ -130,6 +204,16 @@ describe("item normalization", () => {
     expect(item.type).toBe("miscellaneous");
     expect(item.quality).toBe("common");
   });
+
+  test("an item sells for one copper unless it says otherwise", () => {
+    expect(editor.normalizeItem({ name: "x" }).sell_price).toBe(1);
+    expect(editor.normalizeItem({ name: "x", sell_price: "" }).sell_price).toBe(1);
+    expect(editor.normalizeItem({ name: "x", sell_price: null }).sell_price).toBe(1);
+    expect(editor.normalizeItem({ name: "x", sell_price: "250" }).sell_price).toBe(250);
+    expect(editor.normalizeItem({ name: "x", sell_price: 12.9 }).sell_price).toBe(12);
+    // Nothing is a price too: an item vendors do not buy.
+    expect(editor.normalizeItem({ name: "x", sell_price: 0 }).sell_price).toBe(0);
+  });
 });
 
 describe("saving", () => {
@@ -144,6 +228,22 @@ describe("saving", () => {
     const items = cache.get("items") as Item[];
     expect(items).toHaveLength(1);
     expect(items[0]?.damage_max).toBe(14);
+  });
+
+  test("what a vendor pays is written with the rest of the item, new or changed", async () => {
+    queries.length = 0;
+    itemRows = [];
+    cache.set("items", []);
+
+    await editor.saveItem(weapon({ sell_price: 340 }), null);
+    await editor.saveItem(weapon({ sell_price: 0 }), "wooden staff");
+
+    const [insert, update] = queries;
+    expect(insert!.sql).toMatch(/^INSERT INTO items \(.*\bsell_price\b.*\)/);
+    expect(insert!.params).toContain(340);
+    expect(update!.sql).toMatch(/^UPDATE items SET .*\bsell_price = \?/);
+    expect(update!.params.at(-2)).toBe(0);
+    expect((cache.get("items") as Item[])[0]?.sell_price).toBe(0);
   });
 
   test("a rename updates the existing row in place and replaces it in the cache", async () => {

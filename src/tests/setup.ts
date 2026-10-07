@@ -1,4 +1,24 @@
+import { afterAll, mock } from "bun:test";
 import { GuardError, type TransactionStatement } from "../controllers/sqltransaction";
+
+/**
+ * Puts `standIn` in place of one of the engine's own modules while the calling test file runs, and
+ * the module itself back once that file is done. `path` is as the test file would import it.
+ *
+ * A stand-in is not undone when a file ends: left in place, it is what every file run after this
+ * one is given instead of the module. Which files those are is not the same everywhere (they run
+ * by name on Windows, and in the filesystem's own order on a Linux runner), so a file that leaves
+ * one behind breaks other files on some machines and not on others.
+ *
+ * Await it before importing what is under test.
+ */
+export async function standInFor(path: string, standIn: () => Record<string, any>): Promise<void> {
+  const real = { ...(await import(path)) };
+  mock.module(path, standIn);
+  afterAll(() => {
+    mock.module(path, () => real);
+  });
+}
 
 export const mockQuery = async (_sql: string, _params?: any[]) => {
   return [];

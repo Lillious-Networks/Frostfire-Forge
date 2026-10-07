@@ -22,9 +22,36 @@ let loaded = false;
 const COLUMNS = [
   "last_updated", "map", "name", "position", "direction", "hidden", "script", "dialog", "gossip", "particles", "quest_giver",
   "sprite_type", "sprite_body", "sprite_head", "sprite_helmet", "sprite_shoulderguards", "sprite_neck",
-  "sprite_hands", "sprite_chest", "sprite_feet", "sprite_legs", "sprite_weapon",
+  "sprite_hands", "sprite_chest", "sprite_feet", "sprite_legs", "sprite_weapon", "vendor_items", "innkeeper",
 ] as const;
 type Written = Record<(typeof COLUMNS)[number], unknown>;
+
+/**
+ * What an NPC stocks, from its column (text, or already read by a JSON column) or from an NPC as
+ * held: the entries that are an item's name and a whole price of 0 or more. Anything else is no
+ * stock. Whether the items exist is not asked here (see vendors.readVendorItems for what an editor
+ * sends).
+ */
+function stockOf(stored: unknown): VendorItem[] {
+  let list = stored;
+  if (typeof stored === "string") {
+    try {
+      list = JSON.parse(stored);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((entry) => entry && typeof entry.item === "string" && entry.item && Number.isInteger(entry.price) && entry.price >= 0)
+    .map((entry) => ({ item: entry.item as string, price: entry.price as number }));
+}
+
+/** The stock as its column keeps it: text, and nothing for an NPC that stocks nothing. */
+function stockText(stock: unknown): string | null {
+  const list = stockOf(stock);
+  return list.length > 0 ? JSON.stringify(list) : null;
+}
 
 /** An npcs row as the server holds it. `row` is what the table gives, or what was just written to it. */
 function fromRow(npc: any): Npc {
@@ -57,21 +84,26 @@ function fromRow(npc: any): Npc {
     sprite_feet: npc?.sprite_feet || null,
     sprite_legs: npc?.sprite_legs || null,
     sprite_weapon: npc?.sprite_weapon || null,
+    vendor_items: stockOf(npc?.vendor_items),
+    innkeeper: npc?.innkeeper === 1 || npc?.innkeeper === true,
   };
 }
+
+/** The columns that keep a flag, 0 or 1, where every other keeps text. */
+const FLAGS = new Set<string>(["hidden", "quest_giver", "innkeeper"]);
 
 /** When a row was written, as its DATETIME column keeps it: to the second. */
 const writtenAt = (last_updated: string) => new Date(`${last_updated.replace(" ", "T")}Z`) as unknown as number;
 
 /**
- * The NPC a row holds once `written` has been written to it: every column but the two flags keeps text (a statement
+ * The NPC a row holds once `written` has been written to it: every column but the flags keeps text (a statement
  * sends anything else as its text), and nothing where it was given nothing.
  */
 function asWritten(id: Nullable<number>, written: Written): Npc {
   const row: Record<string, unknown> = { id };
   for (const column of COLUMNS) {
     const value = written[column];
-    row[column] = column === "hidden" || column === "quest_giver" || value === null || value === undefined ? value ?? null : String(value);
+    row[column] = FLAGS.has(column) || value === null || value === undefined ? value ?? null : String(value);
   }
   return { ...fromRow(row), last_updated: writtenAt(String(written.last_updated)) };
 }
@@ -173,13 +205,15 @@ const npcs = {
       sprite_feet: npc.sprite_feet || null,
       sprite_legs: npc.sprite_legs || null,
       sprite_weapon: npc.sprite_weapon || null,
+      vendor_items: stockText(npc.vendor_items),
+      innkeeper: npc.innkeeper ? 1 : 0,
     };
 
     return await write(
       `INSERT INTO npcs (last_updated, map, name, position, direction, hidden, script, dialog, gossip, particles, quest_giver,
         sprite_type, sprite_body, sprite_head, sprite_helmet, sprite_shoulderguards, sprite_neck,
-        sprite_hands, sprite_chest, sprite_feet, sprite_legs, sprite_weapon)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        sprite_hands, sprite_chest, sprite_feet, sprite_legs, sprite_weapon, vendor_items, innkeeper)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       COLUMNS.map((column) => written[column]),
       // The new NPC is what was written, under the id the database answered with. An NPC is addressed by its id:
       // an answer without one leaves it unknown, and the table is read instead.
@@ -239,13 +273,15 @@ const npcs = {
       sprite_feet: npc.sprite_feet || null,
       sprite_legs: npc.sprite_legs || null,
       sprite_weapon: npc.sprite_weapon || null,
+      vendor_items: stockText(npc.vendor_items),
+      innkeeper: npc.innkeeper ? 1 : 0,
     };
 
     return await write(
       `UPDATE npcs SET last_updated = ?, map = ?, name = ?, position = ?, direction = ?, hidden = ?, script = ?,
         dialog = ?, gossip = ?, particles = ?, quest_giver = ?, sprite_type = ?, sprite_body = ?, sprite_head = ?,
         sprite_helmet = ?, sprite_shoulderguards = ?, sprite_neck = ?, sprite_hands = ?,
-        sprite_chest = ?, sprite_feet = ?, sprite_legs = ?, sprite_weapon = ? WHERE id = ?`,
+        sprite_chest = ?, sprite_feet = ?, sprite_legs = ?, sprite_weapon = ?, vendor_items = ?, innkeeper = ? WHERE id = ?`,
       [...COLUMNS.map((column) => written[column]), npc.id],
       (rows) => rows.map((held) => (sameId(npc.id)(held) ? asWritten(held.id, written) : held))
     );

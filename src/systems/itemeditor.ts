@@ -10,6 +10,11 @@ import { refreshAuthItems } from "../socket/authentication_pool";
 import { listIcons, type SpriteSheetOption } from "./creatures/editor";
 import itemTable from "./items";
 
+/** The most copper a vendor pays for one item. */
+export const SELL_PRICE_MAX = 2147483647;
+/** The most health or stamina one consumable restores. */
+export const RESTORE_MAX = 1_000_000;
+
 export const EDITOR_PERMISSION = "tools.item_editor";
 export const EDITOR_WILDCARD = "tools.*";
 
@@ -100,6 +105,10 @@ export function normalizeItem(input: any): Item {
   const type = ITEM_TYPES.includes(input?.type) ? input.type : "miscellaneous";
   const equipable = !!input?.equipable && type === "equipment";
   const slot = ITEM_SLOTS.includes(input?.equipment_slot) ? (input.equipment_slot as ItemSlot) : null;
+  // Only a consumable has a use, and the home item's only use is the way home.
+  const consumable = type === "consumable";
+  const teleports_home = consumable && !!input?.teleports_home;
+  const restores = consumable && !teleports_home;
   return {
     name: String(input?.name ?? "").trim(),
     quality: ITEM_QUALITIES.includes(input?.quality) ? input.quality : "common",
@@ -120,10 +129,20 @@ export function normalizeItem(input: any): Item {
     damage_min: num(input?.damage_min),
     damage_max: num(input?.damage_max),
     attack_speed_ms: num(input?.attack_speed_ms),
+    // What a vendor pays for one, in copper: one unless the item says otherwise. Nothing (0) is an item vendors do not buy.
+    sell_price: num(input?.sell_price) ?? 1,
+    restore_health: restores ? num(input?.restore_health) ?? 0 : 0,
+    restore_stamina: restores ? num(input?.restore_stamina) ?? 0 : 0,
+    no_combat: consumable && !!input?.no_combat,
+    teleports_home,
   };
 }
 
-export function validateItem(input: any, existingNames: Set<string>, originalName: string | null): string[] {
+/**
+ * What is wrong with an item an editor sent. `homeItem` is the name of the item that is the home
+ * item now, when there is one: no other item can become it.
+ */
+export function validateItem(input: any, existingNames: Set<string>, originalName: string | null, homeItem: string | null = null): string[] {
   const errors: string[] = [];
   const item = normalizeItem(input);
 
@@ -141,6 +160,20 @@ export function validateItem(input: any, existingNames: Set<string>, originalNam
   if (!!input?.equipable && item.type !== "equipment") errors.push("Only equipment can be equipable.");
   if (item.level_requirement !== null && item.level_requirement < 1) errors.push("Level requirement must be at least 1.");
   if (item.bag_slots !== null && item.bag_slots < 0) errors.push("Bag slots cannot be negative.");
+  const price = item.sell_price ?? 1;
+  if (price < 0) errors.push("Vendor sell price cannot be negative.");
+  // The most its column holds: a little under 214,749 gold.
+  if (price > SELL_PRICE_MAX) errors.push("Vendor sell price is too high.");
+
+  if (item.type === "consumable") {
+    const restores = [item.restore_health ?? 0, item.restore_stamina ?? 0];
+    if (restores.some((amount) => amount < 0)) errors.push("What a consumable restores cannot be negative.");
+    if (restores.some((amount) => amount > RESTORE_MAX)) errors.push("What a consumable restores is too high.");
+    if (!item.teleports_home && restores.every((amount) => amount === 0)) errors.push("A consumable must restore health or stamina, or be the home item.");
+    // The item being saved is the home item under the name it had before this save.
+    const isHomeItem = homeItem !== null && originalName !== null && originalName.toLowerCase() === homeItem.toLowerCase();
+    if (item.teleports_home && homeItem !== null && !isHomeItem) errors.push(`${homeItem} is already the home item. Only one item can be.`);
+  }
 
   const min = item.damage_min;
   const max = item.damage_max;
@@ -158,14 +191,16 @@ const COLUMNS = [
   "name", "quality", "type", "description", "icon", "stat_armor", "stat_damage",
   "stat_critical_chance", "stat_critical_damage", "stat_health", "stat_stamina",
   "stat_avoidance", "level_requirement", "equipable", "equipment_slot",
-  "damage_min", "damage_max", "attack_speed_ms",
+  "damage_min", "damage_max", "attack_speed_ms", "sell_price",
+  "restore_health", "restore_stamina", "no_combat", "teleports_home",
 ];
 
 const values = (item: Item) => [
   item.name, item.quality, item.type, item.description, item.icon, item.stat_armor, item.stat_damage,
   item.stat_critical_chance, item.stat_critical_damage, item.stat_health, item.stat_stamina,
   item.stat_avoidance, item.level_requirement, item.equipable ? 1 : 0, item.equipment_slot,
-  item.damage_min, item.damage_max, item.attack_speed_ms,
+  item.damage_min, item.damage_max, item.attack_speed_ms, item.sell_price ?? 1,
+  item.restore_health ?? 0, item.restore_stamina ?? 0, item.no_combat ? 1 : 0, item.teleports_home ? 1 : 0,
 ];
 
 /**
@@ -258,7 +293,8 @@ export async function handleEditorPacket(type: string, data: any): Promise<Edito
       const items = ((await assetCache.get("items")) || []) as Item[];
       const originalName = data?.originalName ? String(data.originalName) : null;
       const names = new Set(items.map((i) => i.name.toLowerCase()));
-      const errors = validateItem(data, names, originalName);
+      const homeItem = items.find((i) => i.type === "consumable" && !!i.teleports_home)?.name ?? null;
+      const errors = validateItem(data, names, originalName, homeItem);
       if (errors.length) return { kind: "result", ok: false, errors };
       const saved = await saveItem(data, originalName);
       return { kind: "result", ok: true, errors: [], name: saved.name };
