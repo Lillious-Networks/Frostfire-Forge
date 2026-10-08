@@ -267,10 +267,11 @@ bun development
 
 **Optional: Update `.env.development` before running**
 
-Default admin login credentials:
-```
-Username: demo_user
-Password: Changeme123!
+**Create your admin account**
+
+Setup creates no accounts. Make the first admin from the [Gateway](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) repository, then open the link it prints to set the password:
+```bash
+bun create-admin-development <username> <email>
 ```
 
 > [!NOTE]

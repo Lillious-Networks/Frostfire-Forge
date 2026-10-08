@@ -769,79 +769,6 @@ const createEquipmentTable = async () => {
   await query(sql);
 };
 
-// Insert demo account if doesn't exist
-const insertDemoAccount = async () => {
-  log.info("Inserting demo account...");
-  const sql = `
-    INSERT OR IGNORE INTO accounts (
-      email,
-      username,
-      password_hash,
-      online,
-      role,
-      banned,
-      map,
-      position
-    ) VALUES (
-      'demo@example.com',
-      'demo_user',
-      '$argon2id$v=19$m=65536,t=2,p=1$t10G4CvyWPSnL53oJjhAeUwxVn3npXudy6CN41Z8JZE$/Rz8vPge3ECpIeYqJ2XbmBsrXipWuVPLmEGFyQfliWM',
-      0,
-      1,
-      0,
-      'overworld',
-      '0,0'
-    );
-    `;
-  await query(sql);
-};
-
-const insertDemoStats = async () => {
-  log.info("Inserting demo stats...");
-  const sql = `
-    INSERT OR IGNORE INTO stats (
-      username,
-      health,
-      max_health,
-      stamina,
-      max_stamina,
-      xp,
-      max_xp,
-      level
-    ) VALUES (
-      'demo_user',
-      100,
-      100,
-      100,
-      100,
-      0,
-      0,
-      1
-    );
-    `;
-  await query(sql);
-}
-
-const insertDemoClientConfig = async () => {
-  log.info("Inserting demo client config...");
-  const sql = `
-    INSERT OR IGNORE INTO clientconfig (
-      username,
-      fps,
-      music_volume,
-      effects_volume,
-      muted
-    ) VALUES (
-      'demo_user',
-      60,
-      100,
-      100,
-      0
-    );
-    `;
-  await query(sql);
-}
-
 const insertDemoQuests = async () => {
   log.info("Inserting demo quests...");
   const existing = (await query(`SELECT COUNT(*) as count FROM quests`)) as Array<{ count: number }>;
@@ -877,35 +804,6 @@ const insertDemoQuests = async () => {
     await query(`INSERT INTO quest_rewards (quest_id, item_name, quantity, is_choice, sort_order) VALUES (?, 'Bread', 1, 1, 0)`, [quest2Id]);
     await query(`INSERT INTO quest_rewards (quest_id, item_name, quantity, is_choice, sort_order) VALUES (?, 'Apple', 1, 1, 1)`, [quest2Id]);
   }
-}
-
-const insertDefaultLearnedSpell = async () => {
-  log.info("Inserting default learned spells for demo user...");
-  const sql = `
-    INSERT OR IGNORE INTO learned_spells (spell, username) VALUES
-    ('frost_bolt', 'demo_user'),
-    ('poison_bolt', 'demo_user'),
-    ('mind_freeze', 'demo_user'),
-    ('stun_strike', 'demo_user'),
-    ('frost_bolt_slow', 'demo_user');
-  `;
-  await query(sql);
-};
-
-const addPermissionsToDemoAccount = async () => {
-  log.info("Adding permissions to demo account...");
-  const sql = `
-    INSERT OR IGNORE INTO permissions (username, permissions) VALUES ('demo_user', 'admin.*,server.*,permission.*');
-  `;
-  await query(sql);
-}
-
-const insertDemoMount = async () => {
-  log.info("Inserting demo mount collectable...");
-  const sql = `
-    INSERT OR IGNORE INTO collectables (type, item, username) VALUES ('mount', 'unicorn', 'demo_user');
-  `;
-  await query(sql);
 }
 
 /** Add any listed column the table's DDL does not mention yet. */
@@ -1227,13 +1125,7 @@ const setupDatabase = async () => {
   await createPlayerHomeTable();
   await insertHomeItem();
   await addSpellColumns();
-  await insertDemoAccount();
-  await insertDemoStats();
-  await insertDemoClientConfig();
   await insertDemoQuests();
-  await insertDefaultLearnedSpell();
-  await addPermissionsToDemoAccount();
-  await insertDemoMount();
   await createIndexes();
 };
 

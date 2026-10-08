@@ -1093,99 +1093,6 @@ const createCreatureTables = async () => {
   )`);
 };
 
-const insertDemoAccount = async () => {
-  log.info("Inserting demo account...");
-  const checkSql = `SELECT COUNT(*) as count FROM accounts WHERE username = 'demo_user'`;
-  const result = await query(checkSql) as Array<{ count: number }>;
-
-  if (result[0]?.count === 0) {
-    const sql = `
-      INSERT INTO accounts (
-        email,
-        username,
-        password_hash,
-        online,
-        role,
-        banned,
-        map,
-        position
-      ) VALUES (
-        'demo@example.com',
-        'demo_user',
-        '$argon2id$v=19$m=65536,t=2,p=1$t10G4CvyWPSnL53oJjhAeUwxVn3npXudy6CN41Z8JZE$/Rz8vPge3ECpIeYqJ2XbmBsrXipWuVPLmEGFyQfliWM',
-        0,
-        1,
-        0,
-        'overworld',
-        '0,0'
-      )
-    `;
-    await query(sql);
-  } else {
-    log.debug("Demo account 'demo_user' already exists - skipping");
-  }
-};
-
-const insertDemoStats = async () => {
-  log.info("Inserting demo stats...");
-  const checkSql = `SELECT COUNT(*) as count FROM stats WHERE username = 'demo_user'`;
-  const result = await query(checkSql) as Array<{ count: number }>;
-
-  if (result[0]?.count === 0) {
-    const sql = `
-      INSERT INTO stats (
-        username,
-        health,
-        max_health,
-        stamina,
-        max_stamina,
-        xp,
-        max_xp,
-        level
-      ) VALUES (
-        'demo_user',
-        100,
-        100,
-        100,
-        100,
-        0,
-        0,
-        1
-      )
-    `;
-    await query(sql);
-  } else {
-    log.debug("Demo stats for 'demo_user' already exist - skipping");
-  }
-}
-
-const insertDemoClientConfig = async () => {
-  log.info("Inserting demo client config...");
-  const checkSql = `SELECT COUNT(*) as count FROM clientconfig WHERE username = 'demo_user'`;
-  const result = await query(checkSql) as Array<{ count: number }>;
-
-  if (result[0]?.count === 0) {
-    const sql = `
-      INSERT INTO clientconfig (
-        username,
-        fps,
-        music_volume,
-        effects_volume,
-        muted
-      ) VALUES (
-        'demo_user',
-        60,
-        100,
-        100,
-        0
-      )
-    `;
-    await query(sql);
-  } else {
-    log.debug("Demo client config for 'demo_user' already exists - skipping");
-  }
-}
-
 const insertDemoQuests = async () => {
   log.info("Inserting demo quests...");
   const existing = (await query(`SELECT COUNT(*) as count FROM quests`)) as Array<{ count: number }>;
@@ -1232,47 +1139,6 @@ const insertDemoQuests = async () => {
     await query(`INSERT INTO quest_rewards (quest_id, item_name, quantity, is_choice, sort_order) VALUES (?, ?, 1, 1, 1)`, [quest2Id, "Apple"]);
   }
 };
-
-const insertDefaultLearnedSpell = async () => {
-  log.info("Inserting default learned spells for demo user...");
-  const defaultSpells = ["frost_bolt", "poison_bolt", "mind_freeze", "stun_strike", "frost_bolt_slow", "fire_storm", "healing_circle", "fire_flask", "shadow_step", "shadow_strike"];
-  for (const spellName of defaultSpells) {
-    const checkSql = `SELECT COUNT(*) as count FROM learned_spells WHERE spell = ? AND username = 'demo_user'`;
-    const result = await query(checkSql, [spellName]) as Array<{ count: number }>;
-
-    if (result[0]?.count === 0) {
-      await query(`INSERT INTO learned_spells (spell, username) VALUES (?, 'demo_user')`, [spellName]);
-    } else {
-      log.debug(`Demo user 'demo_user' already has spell '${spellName}' - skipping`);
-    }
-  }
-};
-
-const addPermissionsToDemoAccount = async () => {
-  log.info("Adding permissions to demo account...");
-  const checkSql = `SELECT COUNT(*) as count FROM permissions WHERE username = 'demo_user'`;
-  const result = await query(checkSql) as Array<{ count: number }>;
-
-  if (result[0]?.count === 0) {
-    const sql = `INSERT INTO permissions (username, permissions) VALUES ('demo_user', 'admin.*,server.*,permission.*')`;
-    await query(sql);
-  } else {
-    log.debug("Permissions for 'demo_user' already exist - skipping");
-  }
-}
-
-const insertDemoMount = async () => {
-  log.info("Inserting demo mount collectable...");
-  const checkSql = `SELECT COUNT(*) as count FROM collectables WHERE type = 'mount' AND item = 'unicorn' AND username = 'demo_user'`;
-  const result = await query(checkSql) as Array<{ count: number }>;
-
-  if (result[0]?.count === 0) {
-    const sql = `INSERT INTO collectables (type, item, username) VALUES ('mount', 'unicorn', 'demo_user')`;
-    await query(sql);
-  } else {
-    log.debug("Demo user 'demo_user' already has mount 'unicorn' collectable - skipping");
-  }
-}
 
 const createWhitelistTable = async () => {
   log.info("Creating whitelist table...");
@@ -1473,13 +1339,7 @@ const setupDatabase = async () => {
   await addConsumableColumns();
   await createPlayerHomeTable();
   await insertHomeItem();
-  await insertDemoAccount();
-  await insertDemoStats();
-  await insertDemoClientConfig();
   await insertDemoQuests();
-  await insertDefaultLearnedSpell();
-  await addPermissionsToDemoAccount();
-  await insertDemoMount();
   await createIndexes();
 };
 
