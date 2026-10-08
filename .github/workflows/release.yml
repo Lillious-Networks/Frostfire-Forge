@@ -28,6 +28,8 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
+  # Single source for the release number: Octopus release, production image tag and GitHub Release
+  RELEASE_VERSION: 1.0.${{ github.run_number }}
 
 jobs:
   validate:
@@ -249,6 +251,96 @@ jobs:
           echo "Image: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:latest"
           echo "Image: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge-dev:${{ github.sha }}"
 
+  publish-production:
+    name: Build and Publish Production Docker Image
+    runs-on: ubuntu-latest
+    needs: [test-integration]
+    if: success() && inputs.dry_run != 'true'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set lowercase image name
+        id: image
+        run: |
+          IMAGE_NAME=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Verify Release Version Is Unused
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge:${{ env.RELEASE_VERSION }}"
+          if docker buildx imagetools inspect "$IMAGE" > /dev/null 2>&1; then
+            echo "❌ $IMAGE is already published. Version tags never move: start a new run instead of re-running this one."
+            exit 1
+          fi
+          echo "✅ $IMAGE is not published yet"
+
+      - name: Build Production Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./src/docker/Dockerfile.prod
+          push: false
+          load: true
+          cache-from: type=gha,scope=production
+          cache-to: type=gha,mode=max,scope=production
+          build-args: |
+            VERSION=${{ env.RELEASE_VERSION }}
+            REVISION=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge:${{ env.RELEASE_VERSION }}
+            ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge:latest
+
+      - name: Verify Production Image Contains No Secrets
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge:${{ env.RELEASE_VERSION }}"
+          FOUND=$(docker run --rm --entrypoint sh "$IMAGE" -c "find /app -path /app/node_modules -prune -o \( -name '.env*' -o -name '*.pem' -o -name '*.key' -o -name '*.pfx' -o -name '*.p12' -o -type f -path '/app/src/certs/*' ! -name '.gitkeep' \) -print")
+          if [ -n "$FOUND" ]; then
+            echo "❌ Production image contains env files, keys or certificates. Not publishing."
+            echo "$FOUND"
+            exit 1
+          fi
+          echo "✅ No env files, keys or certificates in the production image"
+
+      - name: Push Production Image
+        run: |
+          docker push "${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge:${{ env.RELEASE_VERSION }}"
+          docker push "${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge:latest"
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [publish-production]
+    if: success() && inputs.dry_run != 'true'
+    steps:
+      - name: Set lowercase image name
+        id: image
+        run: |
+          IMAGE_NAME=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ env.RELEASE_VERSION }}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "v${{ env.RELEASE_VERSION }}" \
+            --notes "Docker image: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge:${{ env.RELEASE_VERSION }}" \
+            --generate-notes
+
   deploy:
     name: Octopus Deployment
     runs-on: ubuntu-latest
@@ -265,14 +357,14 @@ jobs:
       uses: OctopusDeploy/create-release-action@v3
       with:
         project: 'Frostfire Forge Engine'
-        release_number: '1.0.${{ github.run_number }}'
+        release_number: ${{ env.RELEASE_VERSION }}
 
     - name: Deploy a release in Octopus Deploy 🐙
       id: deploy_release
       uses: OctopusDeploy/deploy-release-action@v3
       with:
         project: 'Frostfire Forge Engine'
-        release_number: '1.0.${{ github.run_number }}'
+        release_number: ${{ env.RELEASE_VERSION }}
         environments: |
             Production
     - name: Await task in Octopus Deploy 🐙
