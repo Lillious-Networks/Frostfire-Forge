@@ -1,5 +1,6 @@
 {
   "name": "frostfire-forge",
+  "license": "SEE LICENSE IN LICENSING.md",
   "module": "./src/socket/server.ts",
   "dependencies": {
     "@lillious-networks/webtransport-bun": "^0.1.6",

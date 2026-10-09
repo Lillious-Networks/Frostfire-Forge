@@ -1327,6 +1327,12 @@ import { listener } from "@engine/systems/events";
 | `listener.emit(event, payload)` | Emit an event |
 | `listener.off(event, handler)` | Remove an event handler |
 
+## License
+
+Free for noncommercial use under the [PolyForm Noncommercial License 1.0.0](LICENSE). Every commercial use needs a paid [commercial license](COMMERCIAL-LICENSE.md) from Lillious Networks. See [LICENSING.md](LICENSING.md) for which one applies to you.
+
+Contributions are welcome and need a signed [Contributor License Agreement](CLA.md); see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ---
 <p align="center">
   <sub>Built with ❤️ by the Frostfire Forge Team</sub>
