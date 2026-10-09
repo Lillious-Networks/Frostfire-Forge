@@ -97,9 +97,19 @@ const shownName = (username: string) => username.charAt(0).toUpperCase() + usern
 function tradeRefusal(asker: any, asked: any): string | null {
   const reason = cannotTrade(asker, asked);
   if (reason) return reason;
+  const unsubscribed = subscriptionRefusal(asker, "trade");
+  if (unsubscribed) return unsubscribed;
   if (trades.of(asker.username)) return "You are already trading.";
   if (trades.of(asked.username)) return `${shownName(asked.username)} is already trading.`;
   return null;
+}
+
+/** True, once the player has been told, when a subscription lock keeps them from `id` (systems/subscriptions.ts). */
+function subscriptionLocked(wt: any, who: any, id: string): boolean {
+  const message = subscriptionRefusal(who, id);
+  if (!message) return false;
+  sendPacket(wt, packetManager.notify({ message }));
+  return true;
 }
 
 /** Sends each of a trade's players the trade as it stands for them. */
@@ -450,6 +460,7 @@ import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, get
 import { setLayerChangeHandler, initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, broadcastToAOIBestEffort, broadcastStatsUpdateToAOI, broadcastToAOIBestEffortAtPosition, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate, sendLoadPlayersChunked, cleanupKickedSession, aoiProf } from "./aoi";
 import { gracefulShutdown } from "./server.ts";
 import { realmWhitelist, isWhitelistEnabled, setWhitelistEnabled } from "../services/whitelist";
+import { refusal as subscriptionRefusal, setLock as setSubscriptionLock, isLockId as isSubscriptionLock, subscriptionState } from "../systems/subscriptions";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 
 const useSpriteSheets = (settings as any).animation_system?.use_sprite_sheets ?? true;
@@ -1835,6 +1846,14 @@ authWorker.on("message", async (result: any) => {
       return;
     }
 
+    // Subscription lock on logging in (admins pass; subscriptions off means no lock)
+    if (subscriptionRefusal(playerData, "login")) {
+      log.warn(`[Subscriptions] Login refused for ${playerData.username} - not subscribed`);
+      sendPacket(wt, packetManager.loginFailed());
+      wt.close(1008, "A subscription is needed to play on this realm");
+      return;
+    }
+
     const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
 
     if (!playerData.isAdmin && playerData.isNoclip) {
@@ -2041,6 +2060,7 @@ authWorker.on("message", async (result: any) => {
       guild_name: playerData.guild_name || null,
       currency: playerData.currency || { copper: 0, silver: 0, gold: 0 },
       isGuest: playerData.isGuest,
+      isSubscribed: playerData.isSubscribed,
       created: performance.now(),
       lastUpdated: performance.now(),
       mounted: false,
@@ -3211,6 +3231,7 @@ export default async function packetReceiver(
           );
           return;
         }
+        if (subscriptionLocked(wt, currentPlayer, "chat")) return;
         const messageData = data as any;
         const message = messageData?.message;
 
@@ -3803,6 +3824,10 @@ export default async function packetReceiver(
           break;
         }
         if (currentPlayer.isDead || currentPlayer.isGhost || currentPlayer.isGuest) return;
+        if (subscriptionLocked(wt, currentPlayer, "combat")) {
+          creatures.stopAutoAttack(currentPlayer);
+          return;
+        }
         const creature = creatures.getCreature(Number(creatureId));
         if (!creature || !creatures.isTargetableBy(currentPlayer, creature)) {
           sendPacket(wt, packetManager.creatureAttackStopped(Number(creatureId)));
@@ -4026,6 +4051,7 @@ export default async function packetReceiver(
       case "CREATURE_LOOT_TAKE": {
         if (!currentPlayer) return;
         if (currentPlayer.isDead || currentPlayer.isGhost || currentPlayer.isGuest) return;
+        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
         const creatureId = Number((data as any)?.id);
         if (!Number.isFinite(creatureId)) return;
         const lootErrors: Record<string, string> = {
@@ -4075,6 +4101,7 @@ export default async function packetReceiver(
           );
           return;
         }
+        if (subscriptionLocked(wt, currentPlayer, "combat")) return;
 
 
         const casting = playerCache.get(currentPlayer.id)?.casting;
@@ -5652,6 +5679,7 @@ export default async function packetReceiver(
       }
       case "VENDOR_OPEN": {
         if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "vendor")) return;
         if (isQuestRateLimited(`npc:${wt.data.id}`)) return;
         const vendor = await vendorFor(wt, currentPlayer, (data as any)?.npcId);
         if (vendor) await sendVendorStock(wt, currentPlayer, vendor);
@@ -5659,6 +5687,7 @@ export default async function packetReceiver(
       }
       case "VENDOR_BUY": {
         if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "vendor")) return;
         const vendor = await vendorFor(wt, currentPlayer, (data as any)?.npcId);
         if (!vendor) break;
         const bought = await vendors.buy(currentPlayer.username, vendor, String((data as any)?.item ?? ""), (data as any)?.quantity ?? 1);
@@ -5667,6 +5696,7 @@ export default async function packetReceiver(
       }
       case "VENDOR_SELL": {
         if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "vendor")) return;
         const vendor = await vendorFor(wt, currentPlayer, (data as any)?.npcId);
         if (!vendor) break;
         // No amount is all of it that is spare.
@@ -5676,6 +5706,7 @@ export default async function packetReceiver(
       }
       case "VENDOR_BUYBACK": {
         if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "vendor")) return;
         const vendor = await vendorFor(wt, currentPlayer, (data as any)?.npcId);
         if (!vendor) break;
         const returned = await vendors.buyback(currentPlayer.username, (data as any)?.index);
@@ -5684,6 +5715,7 @@ export default async function packetReceiver(
       }
       case "USE_ITEM": {
         if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "use_item")) return;
         // The stats the server holds are the ones a use restores.
         const user = playerCache.get(currentPlayer.id) || currentPlayer;
         const used = await consumables.use(user, (data as any)?.item, { trading: !!trades.of(currentPlayer.username) });
@@ -5730,6 +5762,7 @@ export default async function packetReceiver(
       }
       case "QUEST_SELECT": {
         if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "quests")) return;
         if (isQuestRateLimited(`qs:${wt.data.id}`)) return;
         const npcId = Number((data as any)?.npcId);
         const questId = Number((data as any)?.questId);
@@ -5776,6 +5809,7 @@ export default async function packetReceiver(
       }
       case "QUEST_ACCEPT": {
         if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "quests")) return;
         if (isQuestRateLimited(`qa:${wt.data.id}`)) return;
         const npcId = Number((data as any)?.npcId);
         const questId = Number((data as any)?.questId);
@@ -5847,6 +5881,7 @@ export default async function packetReceiver(
       }
       case "QUEST_TURN_IN": {
         if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "quests")) return;
         if (isQuestRateLimited(`qt:${wt.data.id}`)) return;
         const npcId = Number((data as any)?.npcId);
         const questId = Number((data as any)?.questId);
@@ -6867,6 +6902,7 @@ export default async function packetReceiver(
           case "P":
           case "PARTY": {
             if (!currentPlayer) return;
+            if (subscriptionLocked(wt, currentPlayer, "party_chat")) break;
             const message = args.join(" ");
             if (!message) {
               sendPacket(
@@ -6922,6 +6958,7 @@ export default async function packetReceiver(
 
           case "W":
           case "WHISPER": {
+            if (subscriptionLocked(wt, currentPlayer, "whisper")) break;
             const username = args[0]?.toLowerCase() || null;
             if (!username) {
               const notifyData = {
@@ -7076,6 +7113,7 @@ export default async function packetReceiver(
           case "G":
           case "GUILD": {
             if (!currentPlayer) return;
+            if (subscriptionLocked(wt, currentPlayer, "guild_chat")) break;
             const message = args.join(" ");
             if (!message) {
               sendPacket(wt, packetManager.notify({ message: "Please provide a message" }));
@@ -7124,6 +7162,7 @@ export default async function packetReceiver(
               sendPacket(wt, packetManager.notify({ message: "Please create an account to use that feature." }));
               break;
             }
+            if (subscriptionLocked(wt, currentPlayer, "guild")) break;
 
             const guildId = currentPlayer.guild_id;
             if (!guildId) {
@@ -8243,6 +8282,52 @@ export default async function packetReceiver(
                 message: "An error occurred while processing the whitelist command",
               };
               sendPacket(wt, packetManager.notify(notifyData));
+            }
+            break;
+          }
+
+          case "SUBSCRIPTION": {
+            if (
+              !currentPlayer.permissions.some(
+                (p: string) => p === "admin.subscription" || p === "admin.*"
+              )
+            ) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+
+            const subscriptionMode = args[0]?.toLowerCase() || null;
+            const subscriptionId = args[1]?.toLowerCase() || null;
+
+            if (subscriptionMode === "list") {
+              const state = subscriptionState();
+              sendPacket(wt, packetManager.notify({
+                message: `Subscriptions are ${state.enabled ? "on" : "off (the Gateway has no Stripe settings, so nothing is locked)"}. Locked for players who are not subscribed: ${state.locks.length ? state.locks.join(", ") : "nothing"}`,
+              }));
+              sendPacket(wt, packetManager.notify({
+                message: `Locks: ${state.options.map((option) => option.id).join(", ")}`,
+              }));
+              break;
+            }
+
+            if (subscriptionMode !== "lock" && subscriptionMode !== "unlock") {
+              sendPacket(wt, packetManager.notify({ message: "Usage: /subscription list, or /subscription lock|unlock [id]" }));
+              break;
+            }
+
+            if (!subscriptionId || !isSubscriptionLock(subscriptionId)) {
+              sendPacket(wt, packetManager.notify({
+                message: `Usage: /subscription ${subscriptionMode} [id]. Use /subscription list to see the ids`,
+              }));
+              break;
+            }
+
+            try {
+              const result = await setSubscriptionLock(subscriptionId, subscriptionMode === "lock");
+              sendPacket(wt, packetManager.notify({ message: result.message }));
+            } catch (error) {
+              log.error(`Subscription command error: ${error}`);
+              sendPacket(wt, packetManager.notify({ message: "An error occurred while processing the subscription command" }));
             }
             break;
           }
@@ -10059,6 +10144,7 @@ export default async function packetReceiver(
           sendPacket(wt, packetManager.notify({ message: "Please create an account to use that feature." }));
           return;
         }
+        if (subscriptionLocked(wt, currentPlayer, "guild")) return;
 
         const guildName = (data as any)?.name;
         if (!guildName || !guildName.trim()) {
@@ -10106,6 +10192,7 @@ export default async function packetReceiver(
           sendPacket(wt, packetManager.notify({ message: "Please create an account to use that feature." }));
           return;
         }
+        if (subscriptionLocked(wt, currentPlayer, "guild")) return;
 
         if (invitedUser.isGuest) {
           sendPacket(wt, packetManager.notify({
@@ -10166,6 +10253,7 @@ export default async function packetReceiver(
       }
       case "GUILD_CHAT": {
         if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "guild_chat")) return;
 
         const { message } = data as any;
         if (!message) return;
@@ -10217,6 +10305,7 @@ export default async function packetReceiver(
           );
           return;
         }
+        if (subscriptionLocked(wt, currentPlayer, "party")) return;
 
         if (invitedUser.isGuest) {
           sendPacket(
@@ -10431,6 +10520,7 @@ export default async function packetReceiver(
           );
           return;
         }
+        if (subscriptionLocked(wt, currentPlayer, "friends")) return;
 
         const get_friend = playerCache.get(id);
         if (!get_friend) return;
@@ -10511,6 +10601,12 @@ export default async function packetReceiver(
           };
           sendPacket(wt, packetManager.notify(notifyData));
           return;
+        }
+
+        // Subscription locks on accepting an invitation (a trade is checked with the trade itself). The invitation stays open.
+        if (response.toUpperCase() === "ACCEPT") {
+          const lockOfInvitation = ({ INVITE_PARTY: "party", INVITE_GUILD: "guild", FRIEND_REQUEST: "friends" } as Record<string, string>)[action.toUpperCase()];
+          if (lockOfInvitation && subscriptionLocked(wt, currentPlayer, lockOfInvitation)) return;
         }
 
         inviter.invitations = inviter.invitations.filter((inv: any) => inv.authorization !== authorization);
@@ -10868,6 +10964,8 @@ export default async function packetReceiver(
 
         // Dismounting if mounted is already true
         const dismounting = currentPlayer.mounted === true;
+        // Getting off stays allowed: only mounting is locked.
+        if (!dismounting && subscriptionLocked(wt, currentPlayer, "mount")) return;
 
 
         // Prevent mounting while casting
@@ -11154,6 +11252,7 @@ export default async function packetReceiver(
       }
       case "EQUIP_ITEM": {
         if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "equip")) break;
         // As for a bag (see BAG_EQUIP): an item on offer in a trade is not put on while the trade is open.
         if (trades.of(currentPlayer.username)) {
           sendPacket(wt, packetManager.notify({ message: "You can't change equipment while trading." }));
@@ -11418,6 +11517,7 @@ export default async function packetReceiver(
       }
       case "BAG_EQUIP": {
         if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "equip")) break;
         // What is spare of an item can be on offer in a trade: nothing more of it is put to use until the trade is over.
         if (trades.of(currentPlayer.username)) {
           sendPacket(wt, packetManager.notify({ message: "You can't change equipment while trading." }));
@@ -11597,6 +11697,7 @@ export default async function packetReceiver(
         if (!currentPlayer) return;
         // Corpses and ghosts cannot pick up loot.
         if (currentPlayer.isDead || currentPlayer.isGhost) return;
+        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
         const lootId = (data as any)?.id;
         if (!lootId) return;
 
@@ -11622,6 +11723,7 @@ export default async function packetReceiver(
         if (!currentPlayer) return;
         // Corpses and ghosts cannot pick up loot.
         if (currentPlayer.isDead || currentPlayer.isGhost) return;
+        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
 
         const items = loot.pickupAllNearby(currentPlayer);
         if (items.length === 0) break;
@@ -11641,6 +11743,7 @@ export default async function packetReceiver(
         if (!currentPlayer) return;
         // Corpses and ghosts cannot open chests.
         if (currentPlayer.isDead || currentPlayer.isGhost) return;
+        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
         const chestId = (data as any)?.chestId;
         if (!chestId) return;
         const chest = lootChest.getChest(chestId);
@@ -11660,6 +11763,7 @@ export default async function packetReceiver(
         if (!currentPlayer) return;
         // Corpses and ghosts cannot take chest items.
         if (currentPlayer.isDead || currentPlayer.isGhost) return;
+        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
         const chestId = (data as any)?.chestId;
         const indices = (data as any)?.indices;
         if (!chestId || !Array.isArray(indices) || indices.length === 0) return;
@@ -11681,6 +11785,7 @@ export default async function packetReceiver(
         if (!currentPlayer) return;
         // Corpses and ghosts cannot take chest items.
         if (currentPlayer.isDead || currentPlayer.isGhost) return;
+        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
         const chestId = (data as any)?.chestId;
         if (!chestId) return;
         const result = await lootChest.takeAllItems(chestId, String(currentPlayer.id), currentPlayer.username);

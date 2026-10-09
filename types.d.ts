@@ -68,6 +68,8 @@ declare interface Player {
   isStealth: boolean;
   isAdmin: Nullable<boolean>;
   isGuest: Nullable<boolean>;
+  /** Paid for the game (accounts.subscribed). Only read by the subscription locks; true for all when subscriptions are off. */
+  isSubscribed: Nullable<boolean>;
   isNoclip: Nullable<boolean>;
   pvp: Nullable<boolean>;
   last_attack: Nullable<number>;
@@ -572,6 +574,7 @@ declare interface PlayerData {
   questlog: QuestLogData;
   isAdmin: boolean;
   isGuest: boolean;
+  isSubscribed: boolean;
   isStealth: boolean;
   isNoclip: boolean;
   isDead: number;
@@ -833,6 +836,11 @@ declare interface ControlPanelData {
   history?: { recent: ControlPanelReading[]; day: ControlPanelReading[] };
   /** What admins did through the panel, oldest first: sent as the history is. */
   activity?: ControlPanelActivity[];
+  /**
+   * Player subscriptions, on every load and after every action. `enabled`: the locks bite (the Gateway has
+   * its Stripe settings); `locks`: the ids ticked, in `options` order; `options`: every id with its label.
+   */
+  subscription: { enabled: boolean; locks: string[]; options: Array<{ id: string; label: string }> };
 }
 
 /** A list the control panel asked for. */

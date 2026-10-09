@@ -53,6 +53,7 @@ import { saveOnDisconnect as saveSicknessOnDisconnect } from "../systems/resurre
 import effectManager from "../services/effectmanager";
 import { GatewayClient } from "../modules/gateway-client.ts";
 import { isWhitelistEnabled, loadRealmWhitelist, onWhitelistSwitch } from "../services/whitelist.ts";
+import { ensureSubscriptionSchema, refreshSubscriptions, subscriptionsReady, refusal as subscriptionRefusal } from "../systems/subscriptions.ts";
 import loot from "../systems/loot";
 import creatures from "../systems/creatures";
 import cooldownManager from "../services/cooldownmanager";
@@ -157,7 +158,11 @@ const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
 // Load realm whitelist from database if WHITELIST=true
 // Every system is imported by now, so each cached table is known: read them
 // before a connection can ask for one.
+// The subscription columns and tables first, before the first login and before the table caches
+// read them. A failure is said once and leaves subscriptions off: it never stops the start.
+await ensureSubscriptionSchema();
 await loadTables();
+await refreshSubscriptions();
 
 const realmId = process.env.SERVER_ID || "default";
 
@@ -1141,14 +1146,20 @@ listener.on(Events.SAVE, async () => {
   if (nonGuestPlayers.length > 0) {
     try {
       const userIds = nonGuestPlayers.map(([, row]: [string, any]) => Number(row.userid));
+      // accounts.subscribed is only asked for once the start-time step has made sure it exists.
+      const withSubscribed = subscriptionsReady();
       const dbResults = await query(
-        "SELECT id, session_id FROM accounts WHERE id IN (?)",
+        withSubscribed
+          ? "SELECT id, session_id, subscribed FROM accounts WHERE id IN (?)"
+          : "SELECT id, session_id FROM accounts WHERE id IN (?)",
         [userIds]
       ) as any[];
 
       const dbSessionMap = new Map<string, string>();
+      const dbSubscribedMap = new Map<string, boolean>();
       for (const r of dbResults) {
         dbSessionMap.set(String(r.id ?? ""), String(r.session_id ?? ""));
+        if (withSubscribed) dbSubscribedMap.set(String(r.id ?? ""), Number(r.subscribed) === 1);
       }
 
       for (const [playerId, row] of nonGuestPlayers) {
@@ -1158,6 +1169,20 @@ listener.on(Events.SAVE, async () => {
           log.info(
             `[Save] Skipping save for ${row.username} - session stolen (local: ${playerId}, db: ${dbSid || "cleared"})`
           );
+          continue;
+        }
+        // A subscription paid for (or ended) while the player is online: the Gateway wrote the account, so take it from there.
+        const subscribed = dbSubscribedMap.get(String(row.userid));
+        if (subscribed !== undefined) row.isSubscribed = subscribed;
+        // Ended while online, and logging in is locked: the same as being refused at the login.
+        if (subscribed === false && subscriptionRefusal(row, "login")) {
+          log.info(`[Subscriptions] Disconnecting ${row.username} - not subscribed, and logging in is locked`);
+          try {
+            if (row.wt?.readyState === 1) row.wt.send(packetManager.notify({ message: subscriptionRefusal(row, "login") ?? "" }));
+          } catch {
+            // The connection is going anyway.
+          }
+          void player.kick(row.username, row.wt);
         }
       }
     } catch (e) {

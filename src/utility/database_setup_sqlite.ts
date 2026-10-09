@@ -33,7 +33,10 @@ const createAccountsTable = async () => {
         is_dead INTEGER DEFAULT 0 NOT NULL,
         corpse_map TEXT DEFAULT NULL,
         corpse_x INTEGER DEFAULT NULL,
-        corpse_y INTEGER DEFAULT NULL
+        corpse_y INTEGER DEFAULT NULL,
+        subscribed INTEGER NOT NULL DEFAULT 0,
+        stripe_customer_id TEXT DEFAULT NULL,
+        subscription_ends INTEGER DEFAULT NULL
       );
   `;
   await query(sql);
@@ -56,6 +59,43 @@ const addDeathColumns = async () => {
       await query(`ALTER TABLE accounts ADD COLUMN ${col.name} ${col.type}`);
     }
   }
+};
+
+// Player subscriptions: the account columns the Gateway writes when a payment comes in, the ticked locks, and the
+// one status row the Gateway keeps. The engine adds the same at start (systems/subscriptions.ts).
+const addSubscriptionColumns = async () => {
+  log.info("Adding subscription columns to accounts table...");
+  const rows = (await query(
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'`
+  )) as any[];
+  const ddl = String(rows[0]?.sql || "");
+  const columns = [
+    { name: "subscribed", type: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "stripe_customer_id", type: "TEXT DEFAULT NULL" },
+    { name: "subscription_ends", type: "INTEGER DEFAULT NULL" },
+  ];
+  for (const col of columns) {
+    if (!ddl.includes(col.name)) {
+      await query(`ALTER TABLE accounts ADD COLUMN ${col.name} ${col.type}`);
+    }
+  }
+};
+
+const createSubscriptionTables = async () => {
+  log.info("Creating subscription tables...");
+  await query(`
+    CREATE TABLE IF NOT EXISTS subscription_locks (
+        name TEXT NOT NULL PRIMARY KEY
+    );
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS subscription_status (
+        id INTEGER NOT NULL PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  await query(`INSERT OR IGNORE INTO subscription_status (id, enabled, updated_at) VALUES (1, 0, 0)`);
 };
 
 // Create allowed_ips table if it doesn't exist
@@ -328,7 +368,8 @@ const createPermissionTypesTable = async () => {
       ('admin.unmute'),
       ('admin.reports'),
       ('admin.trades'),
-      ('admin.cooldowns');
+      ('admin.cooldowns'),
+      ('admin.subscription');
   `;
   await query(sql);
 };
@@ -1118,6 +1159,8 @@ const setupDatabase = async () => {
   // await useDatabase();
   await createAccountsTable();
   await addDeathColumns();
+  await addSubscriptionColumns();
+  await createSubscriptionTables();
   await createAllowedIpsTable();
   await createBlockedIpsTable();
   await createWhitelistTable();

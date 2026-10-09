@@ -21,6 +21,7 @@ import mutes, { parseDuration } from "./mutes";
 import reports from "./reports";
 import tradeLog from "./tradelog";
 import { findOnline, oneAtATime, search as searchEditor } from "./playereditor";
+import { subscriptionState, isLockId } from "./subscriptions";
 
 export const DENIED = "You don't have permission to use the control panel.";
 const NOT_ALLOWED = "You don't have permission to do that.";
@@ -454,6 +455,7 @@ export async function buildData(viewer: any, full: boolean, since: Since | null 
       creatures: extra?.creatures ?? null,
     },
     world: { map, weather: here?.weather || "clear", showing: here?.showing || "clear", conditions: here?.conditions ?? null, worlds },
+    subscription: subscriptionState(),
   };
   // How many reports wait, for the count beside the page that lists them.
   if (handlesReports(viewer)) {
@@ -801,6 +803,8 @@ export const ACTIONS: Record<string, PanelAction> = {
   "server.whitelist.off": whitelistSwitch(false),
   "server.whitelist.add": whitelist("add"),
   "server.whitelist.remove": whitelist("remove"),
+  "server.subscription.lock": subscriptionLock(true),
+  "server.subscription.unlock": subscriptionLock(false),
   "server.restart": {
     command: "RESTART",
     allowed: holds("server.restart", "server.*"),
@@ -944,6 +948,21 @@ function whitelistSwitch(wanted: boolean): PanelAction {
       // Two admins, or a click on a page that is behind: it is only run when it changes something.
       already: () => (!!bridge?.status().whitelistEnabled === wanted ? `The whitelist is already ${state}.` : null),
     }),
+  };
+}
+
+/** /subscription lock and unlock: one box of the subscriptions card. The lock is named by `data.id`. */
+function subscriptionLock(wanted: boolean): PanelAction {
+  const word = wanted ? "lock" : "unlock";
+  return {
+    command: "SUBSCRIPTION",
+    allowed: holds("admin.subscription", "admin.*"),
+    plan: ({ data }) => {
+      const id = typeof data?.id === "string" ? data.id.trim() : "";
+      if (!isLockId(id)) return ["Pick what to change."];
+      // A box clicked on a page that is behind changes nothing: the command answers that it already stands so.
+      return { key: SERVER_KEY, run: { command: "SUBSCRIPTION", args: [word, id] } };
+    },
   };
 }
 

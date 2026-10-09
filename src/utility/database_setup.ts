@@ -44,7 +44,10 @@ const createAccountsTable = async () => {
         is_dead TINYINT DEFAULT 0 NOT NULL,
         corpse_map VARCHAR(64) DEFAULT NULL,
         corpse_x INT DEFAULT NULL,
-        corpse_y INT DEFAULT NULL
+        corpse_y INT DEFAULT NULL,
+        subscribed INT NOT NULL DEFAULT 0,
+        stripe_customer_id VARCHAR(64) DEFAULT NULL,
+        subscription_ends BIGINT DEFAULT NULL
       );
   `;
   await query(sql);
@@ -67,6 +70,47 @@ const addDeathColumns = async () => {
       await query(`ALTER TABLE accounts ADD COLUMN ${col.name} ${col.type}`);
     }
   }
+};
+
+/**
+ * Player subscriptions: the account columns the Gateway writes when a payment
+ * comes in, the ticked locks, and the one status row the Gateway keeps. The
+ * engine adds the same at start (systems/subscriptions.ts), so a database whose
+ * setup was not run before an update is still safe.
+ */
+const addSubscriptionColumns = async () => {
+  log.info("Adding subscription columns to accounts table...");
+  const columns = [
+    { name: "subscribed", type: "INT NOT NULL DEFAULT 0" },
+    { name: "stripe_customer_id", type: "VARCHAR(64) DEFAULT NULL" },
+    { name: "subscription_ends", type: "BIGINT DEFAULT NULL" },
+  ];
+  for (const col of columns) {
+    const exists = (await query(
+      `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'accounts' AND COLUMN_NAME = ?`,
+      [database, col.name]
+    )) as any[];
+    if (!exists[0] || Number(exists[0].count) === 0) {
+      await query(`ALTER TABLE accounts ADD COLUMN ${col.name} ${col.type}`);
+    }
+  }
+};
+
+const createSubscriptionTables = async () => {
+  log.info("Creating subscription tables...");
+  await query(`
+    CREATE TABLE IF NOT EXISTS subscription_locks (
+      name VARCHAR(64) NOT NULL PRIMARY KEY
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS subscription_status (
+      id INT NOT NULL PRIMARY KEY,
+      enabled INT NOT NULL DEFAULT 0,
+      updated_at BIGINT NOT NULL DEFAULT 0
+    )
+  `);
+  await query(`INSERT IGNORE INTO subscription_status (id, enabled, updated_at) VALUES (1, 0, 0)`);
 };
 
 const createInventoryTable = async () => {
@@ -372,7 +416,8 @@ const createPermissionTypesTable = async () => {
         ('admin.unmute'),
         ('admin.reports'),
         ('admin.trades'),
-        ('admin.cooldowns')
+        ('admin.cooldowns'),
+        ('admin.subscription')
     `;
     await query(insertPermissionsSql);
   } else {
@@ -390,6 +435,8 @@ const createPermissionTypesTable = async () => {
   await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.trades')`);
   // Resetting a player's cooldowns.
   await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.cooldowns')`);
+  // Choosing what a player who has not subscribed may not do.
+  await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.subscription')`);
 };
 
 /** Quest-giver flag added to npcs after its first release. */
@@ -1297,6 +1344,8 @@ const setupDatabase = async () => {
   await useDatabase();
   await createAccountsTable();
   await addDeathColumns();
+  await addSubscriptionColumns();
+  await createSubscriptionTables();
   await createInventoryTable();
   await createItemsTable();
   await createStatsTable();

@@ -119,6 +119,28 @@ const configRows = rowCache<Record<string, any>>("clientconfig", async (username
   return parseConfigJson(username, rows?.[0]);
 }, { perPlayer: true });
 
+/** When a failed read of accounts.subscribed was last said, so a database without it is warned of once a minute, not at every login. */
+let subscribedWarnedAt = 0;
+
+/**
+ * accounts.subscribed of a login. Read apart from the rest of the account, and
+ * never allowed to fail the login: the column is added by the setup scripts and
+ * at server start, and if it is not there (or cannot be read) the account counts
+ * as subscribed, so subscriptions stay off instead of refusing every login.
+ */
+async function readSubscribed(username: string): Promise<boolean> {
+  try {
+    const rows = (await query("SELECT subscribed FROM accounts WHERE username = ?", [username])) as { subscribed: unknown }[];
+    return Number(rows?.[0]?.subscribed) === 1;
+  } catch (error) {
+    if (Date.now() - subscribedWarnedAt > 60_000) {
+      subscribedWarnedAt = Date.now();
+      log.warn(`accounts.subscribed could not be read, so logins count as subscribed: ${error}`);
+    }
+    return true;
+  }
+}
+
 /** The account with this id. */
 async function accountById(id: number): Promise<AccountRow | null> {
   const username = await accountNames.get(id);
@@ -1843,6 +1865,7 @@ const player = {
       questProgressResult,
       equipResult,
       guildResult,
+      isSubscribed,
     ] = await Promise.all([
       query("SELECT max_health, health, max_stamina, stamina, xp, max_xp, level, stat_critical_damage, stat_critical_chance, stat_armor, stat_damage, stat_health, stat_stamina, stat_avoidance FROM stats WHERE username = ?", [username]) as Promise<any[]>,
       query("SELECT permissions FROM permissions WHERE username = ?", [username]) as Promise<any[]>,
@@ -1853,6 +1876,7 @@ const player = {
       query("SELECT quest_id, objective_id, count FROM quest_objective_progress WHERE username = ?", [username]) as Promise<any[]>,
       query("SELECT head, body, helmet, necklace, shoulderguards, chestplate, wristguards, gloves, belt, pants, boots, ring_1, ring_2, trinket_1, trinket_2, weapon FROM equipment WHERE username = ?", [username]) as Promise<any[]>,
       data.guild_id ? query("SELECT name AS guild_name FROM guilds WHERE id = ?", [data.guild_id]) as Promise<any[]> : Promise.resolve([]),
+      readSubscribed(username),
     ]);
 
     const stats = statsResult?.[0] || {};
@@ -1944,6 +1968,7 @@ const player = {
       },
       isAdmin: data.role === 1,
       isGuest: data.guest_mode === 1,
+      isSubscribed,
       isStealth: data.stealth === 1,
       isNoclip: data.noclip === 1,
       isDead: Number(data.is_dead) || 0,
