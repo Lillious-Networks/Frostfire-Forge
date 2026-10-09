@@ -12,32 +12,35 @@ export default (async () => {
     );
   }
 
-  if (!process.env.DATABASE_HOST) {
+  // SQLite is a file: it has no host, port, user or password, and DATABASE_PATH names the file in place of DATABASE_NAME.
+  const sqlite = process.env.DATABASE_ENGINE === "sqlite";
+
+  if (!sqlite && !process.env.DATABASE_HOST) {
     startUpErrors.push(
       "No database host is set, aborting... Please set the DATABASE_HOST environment variable to suppress this message."
     );
   }
 
-  if (!process.env.DATABASE_PORT) {
+  if (!sqlite && !process.env.DATABASE_PORT) {
     startUpWarnings.push(
       "No database port is set, defaulting to 3306. Please set the DATABASE_PORT environment variable to suppress this message."
     );
     process.env.DATABASE_PORT = "3306";
   }
 
-  if (!process.env.DATABASE_USER) {
+  if (!sqlite && !process.env.DATABASE_USER) {
     startUpErrors.push(
       "No database username is set, aborting... Please set the DATABASE_USER environment variable to suppress this message."
     );
   }
 
-  if (!process.env.DATABASE_PASSWORD) {
+  if (!sqlite && !process.env.DATABASE_PASSWORD) {
     startUpErrors.push(
       "No database password is set, aborting... Please set the DATABASE_PASSWORD environment variable to suppress this message."
     );
   }
 
-  if (!process.env.DATABASE_NAME) {
+  if (!process.env.DATABASE_NAME && !(sqlite && process.env.DATABASE_PATH)) {
     startUpErrors.push(
       "No database name is set, aborting... Please set the DATABASE_NAME environment variable to suppress this message."
     );

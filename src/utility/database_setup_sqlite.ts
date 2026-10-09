@@ -20,7 +20,7 @@ const createAccountsTable = async () => {
         geo_location TEXT DEFAULT NULL,
         verification_code TEXT DEFAULT NULL,
         reset_password_code TEXT DEFAULT NULL,
-        map TEXT DEFAULT 'main' NOT NULL,
+        map TEXT DEFAULT 'overworld' NOT NULL,
         position TEXT DEFAULT '0,0' NOT NULL,
         session_id TEXT UNIQUE DEFAULT NULL,
         stealth INTEGER DEFAULT 0 NOT NULL,
@@ -167,7 +167,7 @@ const createStatsTable = async () => {
         stamina INTEGER NOT NULL DEFAULT 100,
         max_stamina INTEGER NOT NULL DEFAULT 100,
         xp INTEGER NOT NULL DEFAULT 0,
-        max_xp INTEGER NOT NULL DEFAULT 0,
+        max_xp INTEGER NOT NULL DEFAULT 100,
         level INTEGER NOT NULL DEFAULT 1,
         stat_critical_damage INTEGER NOT NULL DEFAULT 0,
         stat_critical_chance INTEGER NOT NULL DEFAULT 0,
@@ -187,7 +187,7 @@ const createClientConfig = async () => {
     CREATE TABLE IF NOT EXISTS clientconfig (
         id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
         username TEXT NOT NULL UNIQUE,
-        fps INTEGER NOT NULL DEFAULT 240,
+        fps INTEGER NOT NULL DEFAULT 60,
         music_volume INTEGER NOT NULL DEFAULT 100,
         effects_volume INTEGER NOT NULL DEFAULT 100,
         muted INTEGER NOT NULL DEFAULT 0,
@@ -204,13 +204,13 @@ const createSpellsTable = async () => {
     CREATE TABLE IF NOT EXISTS spells (
         id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
         name TEXT NOT NULL UNIQUE,
-        damage INTEGER NOT NULL,
-        mana INTEGER NOT NULL,
-        \`range\` INTEGER NOT NULL,
-        type TEXT NOT NULL,
-        cast_time REAL NOT NULL,
-        cooldown INTEGER NOT NULL,
-        can_move INTEGER NOT NULL DEFAULT 0,
+        damage INTEGER DEFAULT 0,
+        mana INTEGER DEFAULT 0,
+        \`range\` INTEGER DEFAULT 0,
+        type TEXT DEFAULT 'cast',
+        cast_time REAL DEFAULT 0,
+        cooldown INTEGER DEFAULT 0,
+        can_move INTEGER DEFAULT 0,
         description TEXT DEFAULT NULL,
         icon TEXT DEFAULT NULL,
         effects TEXT DEFAULT NULL,
@@ -318,6 +318,12 @@ const createPermissionTypesTable = async () => {
       ('tools.entity_editor'),
       ('tools.particle_editor'),
       ('tools.weather_editor'),
+      ('tools.creature_editor'),
+      ('tools.item_editor'),
+      ('tools.spell_editor'),
+      ('tools.quest_editor'),
+      ('admin.items'),
+      ('admin.loot'),
       ('admin.mute'),
       ('admin.unmute'),
       ('admin.reports'),
@@ -699,7 +705,7 @@ const createMountsTable = async () => {
     CREATE TABLE IF NOT EXISTS mounts (
       id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
       name TEXT NOT NULL UNIQUE,
-      description TEXT DEFAULT NULL,
+      description TEXT NOT NULL,
       particles TEXT DEFAULT NULL,
       icon TEXT DEFAULT NULL
     );
@@ -834,6 +840,30 @@ const addSpellColumns = async () => {
     { name: "charge_distance", type: "INTEGER DEFAULT 0" },
     { name: "teleport_behind", type: "INTEGER DEFAULT 0" },
   ]);
+};
+
+/** The default spells the MySQL setup seeds that need the spell columns above: ground effects, thrown, charge, teleport. */
+const insertAreaSpells = async () => {
+  const columns = "name, damage, mana, `range`, type, cast_time, cooldown, description, icon, can_move";
+  await query(
+    `INSERT OR IGNORE INTO spells (${columns}, aoe_radius, ground_aoe, ground_duration) VALUES
+    ('fire_storm', 8, 15, 800, 'spell', 2, 12, 'Summons a fiery storm at a target location, dealing damage to all enemies in the area for 6 seconds.', 'fire_storm', 0, 150, 1, 6),
+    ('healing_circle', -5, 20, 800, 'spell', 2, 15, 'Creates a healing circle at a target location, restoring health to allies in the area for 8 seconds.', 'healing_circle', 0, 120, 1, 8);`
+  );
+  await query(
+    `INSERT OR IGNORE INTO spells (${columns}, aoe_radius, ground_aoe, ground_duration, is_thrown) VALUES
+    ('fire_flask', 6, 12, 600, 'spell', 1, 10, 'Throw a flaming flask that arcs through the air and explodes on impact, dealing damage and leaving a burning patch for 4 seconds.', 'fire_flask', 1, 100, 1, 4, 1);`
+  );
+  await query(
+    `INSERT OR IGNORE INTO spells (${columns}, charge_distance, effects) VALUES
+    ('shadow_step', 0, 10, 400, 'spell', 0, 8, 'Dash through the shadows to close the distance to your target, briefly stunning them on arrival.', 'shadow_step', 1, 300, ?);`,
+    [JSON.stringify([{ type: "stun", value: 0, duration: 1.5 }])]
+  );
+  await query(
+    `INSERT OR IGNORE INTO spells (${columns}, teleport_behind, effects) VALUES
+    ('shadow_strike', 0, 12, 350, 'spell', 0, 12, 'Vanish into darkness and reappear behind your target, stunning them for 2 seconds.', 'shadow_strike', 1, 1, ?);`,
+    [JSON.stringify([{ type: "stun", value: 0, duration: 2 }])]
+  );
 };
 
 /** Weapon damage columns added to items after their first release. */
@@ -1049,6 +1079,10 @@ const createIndexes = async () => {
     ,{ name: "idx_equipment_username", sql: "CREATE INDEX idx_equipment_username ON equipment(username)" }
     ,{ name: "idx_creature_spawns_map", sql: "CREATE INDEX idx_creature_spawns_map ON creature_spawns(map)" }
     ,{ name: "idx_creature_abilities_template", sql: "CREATE INDEX idx_creature_abilities_template ON creature_abilities(template_id)" }
+    ,{ name: "idx_reports_status", sql: "CREATE INDEX idx_reports_status ON reports(status)" }
+    ,{ name: "idx_trade_log_player_a", sql: "CREATE INDEX idx_trade_log_player_a ON trade_log(player_a)" }
+    ,{ name: "idx_trade_log_player_b", sql: "CREATE INDEX idx_trade_log_player_b ON trade_log(player_b)" }
+    ,{ name: "idx_player_home_npc", sql: "CREATE INDEX idx_player_home_npc ON player_home(npc_id)" }
   ];
 
   for (const index of indexes) {
@@ -1125,6 +1159,7 @@ const setupDatabase = async () => {
   await createPlayerHomeTable();
   await insertHomeItem();
   await addSpellColumns();
+  await insertAreaSpells();
   await insertDemoQuests();
   await createIndexes();
 };

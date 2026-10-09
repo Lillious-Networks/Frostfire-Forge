@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, mock, setSystemTime, spyOn, test } from "bun:test";
 import { databaseModule } from "./setup";
+import log from "../modules/logger";
 
 // Generated at server start (`bun create-config`) and gitignored, so CI has
 // no copy on disk. Mock the values instead of requiring the file.
@@ -740,14 +741,25 @@ describe("a player's client config", () => {
     expect(await sentBy(async () => { expect((await player.getConfig("pc_hero") as any)[0].music_volume).toBe(13); })).toHaveLength(1);
   });
 
-  test("a saved layout is held as text where the database holds it as text", async () => {
+  test("a saved layout is stored as text and held parsed where the database gives text (SQLite)", async () => {
     row("pc_hero", "clientconfig").inventory_config = '{"0":"sword"}';
-    await player.getConfig("pc_hero");
+    expect(((await player.getConfig("pc_hero")) as any)[0].inventory_config).toEqual({ 0: "sword" });
 
     await player.saveHotBarConfig("PC_Hero", { 1: "frost_bolt" });
     await player.saveInventoryConfig("pc_hero", { 0: "shield", 3: "potion" });
     expect(row("pc_hero", "clientconfig")).toMatchObject({ hotbar_config: '{"1":"frost_bolt"}', inventory_config: '{"0":"shield","3":"potion"}' });
-    expect(await fromCache(() => player.getConfig("pc_hero"))).toEqual([config("pc_hero", { hotbar_config: '{"1":"frost_bolt"}', inventory_config: '{"0":"shield","3":"potion"}' })]);
+    expect(await fromCache(() => player.getConfig("pc_hero"))).toEqual([config("pc_hero", { hotbar_config: { 1: "frost_bolt" }, inventory_config: { 0: "shield", 3: "potion" } })]);
+  });
+
+  test("a layout text that does not parse is held as null, with one warning", async () => {
+    const warn = spyOn(log, "warn").mockImplementation(() => {});
+    row("pc_hero", "clientconfig").hotbar_config = "{not json";
+    const held = (await player.getConfig("pc_hero")) as any;
+    expect(held[0].hotbar_config).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    await fromCache(() => player.getConfig("pc_hero"));
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 
   test("a saved layout is held parsed where the database gives it back parsed, as a copy of its own", async () => {
@@ -770,10 +782,10 @@ describe("a player's client config", () => {
   test("a first saved layout does not show which of the two the database gives: the row is read again", async () => {
     await player.getConfig("pc_hero");
     await player.saveHotBarConfig("pc_hero", { 1: "frost_bolt" });
-    expect(await sentBy(async () => { expect((await player.getConfig("pc_hero") as any)[0].hotbar_config).toBe('{"1":"frost_bolt"}'); })).toHaveLength(1);
+    expect(await sentBy(async () => { expect((await player.getConfig("pc_hero") as any)[0].hotbar_config).toEqual({ 1: "frost_bolt" }); })).toHaveLength(1);
     // Now it shows.
     await player.saveInventoryConfig("pc_hero", { 0: "shield" });
-    expect((await fromCache(() => player.getConfig("pc_hero")) as any)[0].inventory_config).toBe('{"0":"shield"}');
+    expect((await fromCache(() => player.getConfig("pc_hero")) as any)[0].inventory_config).toEqual({ 0: "shield" });
   });
 
   const WRITES: Record<string, () => Promise<any>> = {

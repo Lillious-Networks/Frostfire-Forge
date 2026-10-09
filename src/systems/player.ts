@@ -99,9 +99,24 @@ const statRows = rowCache<StatsData>("stats", async (username) => {
   return rows?.[0];
 }, { perPlayer: true });
 
+// SQLite gives the two JSON columns back as text, MySQL as objects: the row is held as MySQL gives it.
+function parseConfigJson(username: string, row: Record<string, any> | undefined): Record<string, any> | undefined {
+  if (!row) return row;
+  for (const column of ["hotbar_config", "inventory_config"]) {
+    if (typeof row[column] !== "string") continue;
+    try {
+      row[column] = JSON.parse(row[column]);
+    } catch {
+      log.warn(`clientconfig.${column} of ${username} is not valid JSON, treating it as empty`);
+      row[column] = null;
+    }
+  }
+  return row;
+}
+
 const configRows = rowCache<Record<string, any>>("clientconfig", async (username) => {
   const rows = (await query("SELECT * FROM clientconfig WHERE username = ?", [username])) as Record<string, any>[];
-  return rows?.[0];
+  return parseConfigJson(username, rows?.[0]);
 }, { perPlayer: true });
 
 /** The account with this id. */
@@ -176,8 +191,11 @@ async function wrote<T>(rows: RowCache<T>, username: string, columns: Partial<T>
  */
 const usernameOfSession = (session_id: string): string | undefined => playerCache.get(session_id)?.username;
 
-/** False when the database says a write changed no row: the session was not that account's any more. */
-const changedRows = (response: any) => !(response && typeof response === "object" && "affectedRows" in response && Number(response.affectedRows) === 0);
+/**
+ * False when the database says a write changed no row: the session was not that account's any more.
+ * SQLite reports `affectedRows` as null and the number of rows in `count`.
+ */
+const changedRows = (response: any) => !(response && typeof response === "object" && "affectedRows" in response && Number(response.affectedRows ?? response.count) === 0);
 
 /**
  * After a layout is saved to a config column: the same on the row held, in
@@ -1841,7 +1859,7 @@ const player = {
     const perms = permsResult?.[0]?.permissions || [];
     const currency = currencyResult?.[0] || {};
     const friends = friendsResult?.[0]?.friends || "";
-    const config = configResult?.[0] || {};
+    const config = parseConfigJson(username, configResult?.[0]) || {};
     const questRows = questResult || [];
     const questProgressRows = questProgressResult || [];
     const equip = equipResult?.[0] || {};

@@ -7290,7 +7290,7 @@ export default async function packetReceiver(
                 result &&
                 typeof result === "object" &&
                 "affectedRows" in result &&
-                (result as { affectedRows: number }).affectedRows != 0
+                ((result as { affectedRows: number | null; count?: number }).affectedRows ?? (result as { count?: number }).count) != 0
               ) {
                 if (!currentPlayer.forceVisibleTo) currentPlayer.forceVisibleTo = new Set();
                 currentPlayer.forceVisibleTo.add(targetPlayer.id);
@@ -7549,7 +7549,7 @@ export default async function packetReceiver(
                 result &&
                 typeof result === "object" &&
                 "affectedRows" in result &&
-                (result as { affectedRows: number }).affectedRows != 0
+                ((result as { affectedRows: number | null; count?: number }).affectedRows ?? (result as { count?: number }).count) != 0
               ) {
                 if (!currentPlayer.forceVisibleTo) currentPlayer.forceVisibleTo = new Set();
                 currentPlayer.forceVisibleTo.add(targetPlayer.id);
@@ -9272,7 +9272,7 @@ export default async function packetReceiver(
                 result &&
                 typeof result === "object" &&
                 "affectedRows" in result &&
-                (result as { affectedRows: number }).affectedRows != 0
+                ((result as { affectedRows: number | null; count?: number }).affectedRows ?? (result as { count?: number }).count) != 0
               ) {
                 await transitionPlayerToMap(
                   currentPlayer,

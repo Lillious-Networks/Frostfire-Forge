@@ -2,9 +2,7 @@ import { SQL } from 'bun';
 import { getSqlCert } from "./utils";
 import { sqlWrapper } from "./sqlescape";
 import { runTransaction, GuardError, NotStartedError, type TransactionStatement } from "./sqltransaction";
-import os from 'os';
-import path from 'path';
-import fs from 'fs';
+import { resolveSqlitePath } from "./sqlitepath";
 
 let sqlController: any = null;
 
@@ -55,15 +53,9 @@ async function createSQLController(): Promise<any> {
     return db;
   }
   else if (_databaseEngine === "sqlite") {
-    const dbDir = path.join(os.tmpdir(), "frostfire_forge");
-    const dbPath = path.join(dbDir, `${process.env.DATABASE_NAME}.sqlite`);
-    if (!fs.existsSync(dbDir)) {
-        fs.mkdirSync(dbDir, { recursive: true });
-    }
-
     const db = new SQL({
       adapter: "sqlite",
-      filename: process.env.DATABASE_NAME ? dbPath : "./database.sqlite",
+      filename: resolveSqlitePath(),
 
       // SQLite-specific options
       readonly: false, // Open in read-only mode
@@ -75,8 +67,9 @@ async function createSQLController(): Promise<any> {
       safeIntegers: false, // Use JavaScript numbers for integers
     });
 
-    await db`PRAGMA journal_mode = WAL`;  // Write-Ahead Logging (WAL)
+    // The Gateway opens the same file from another process: wait for its lock, also while switching to WAL.
     await db`PRAGMA busy_timeout = 5000`; // Tells SQLite to wait up to 5000ms if it hits a lock
+    await db`PRAGMA journal_mode = WAL`;  // Write-Ahead Logging (WAL)
     await db`PRAGMA synchronous = NORMAL`;
     await db`PRAGMA foreign_keys = ON`;
     await db`PRAGMA cache_size = 32000`;

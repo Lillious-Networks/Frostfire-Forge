@@ -831,7 +831,8 @@ async function saveSpell(admin: any, data: any): Promise<ActionResult> {
       [...values(spell), spell.name]
     );
     const answered = Number(result?.lastInsertRowid);
-    const addedNone = result?.affectedRows !== null && result?.affectedRows !== undefined && Number(result.affectedRows) === 0;
+    const rowsAdded = result?.affectedRows ?? result?.count;
+    const addedNone = rowsAdded !== null && rowsAdded !== undefined && Number(rowsAdded) === 0;
     if (Number.isInteger(answered) && answered > 0 && !addedNone && !(await storedSpells.find((row) => row.id === answered))) {
       id = answered;
       await storedSpells.put({ id, name: spell.name }, (row) => row.id === answered);

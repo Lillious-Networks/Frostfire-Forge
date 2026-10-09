@@ -78,7 +78,7 @@ const friends = {
         () => [{ friends: friendsString }]
       );
 
-      if (result.affectedRows > 0) {
+      if ((result.affectedRows ?? result.count) > 0) {
         return currentFriends;
       } else {
         log.error(`Failed to add friend for ${username}`);
@@ -115,7 +115,7 @@ const friends = {
         (held) => held.map((row) => ({ ...row, friends: friendsString }))
       );
 
-      if (result.affectedRows > 0) {
+      if ((result.affectedRows ?? result.count) > 0) {
         return currentFriends;
       } else {
         log.error(`Failed to remove friend for ${username}`);

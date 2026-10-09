@@ -85,7 +85,7 @@ const spells = {
         "INSERT IGNORE INTO learned_spells (username, spell) VALUES (?, ?)",
         [username, spellName],
         // The table has no key a second row of the same spell would break: a row is added unless the database says none was.
-        (held, result) => (Number(result?.affectedRows) === 0 ? held : [...held, { spell: spellName }])
+        (held, result) => (Number(result?.affectedRows ?? result?.count) === 0 ? held : [...held, { spell: spellName }])
       );
     } finally {
       // Who knows this spell changed, or may have if the statement failed: the spell editor's list of them is read again.
