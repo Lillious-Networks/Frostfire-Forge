@@ -341,6 +341,23 @@ jobs:
             --notes "Docker image: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge:${{ env.RELEASE_VERSION }}" \
             --generate-notes
 
+  hosting-bundle:
+    name: Start the Hosting Bundle
+    runs-on: ubuntu-latest
+    needs: [create-release]
+    if: success()
+    steps:
+      - name: Start Release Bundle in Frostfire-Forge-Hosting
+        env:
+          GH_TOKEN: ${{ secrets.FFH_HOSTING_DISPATCH_TOKEN }}
+        run: |
+          # The hosting panel's update bundle is made now, instead of at its next scheduled run.
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::FFH_HOSTING_DISPATCH_TOKEN is not set, so the bundle is made at the Hosting repository's next scheduled run"
+            exit 0
+          fi
+          gh workflow run "Release Bundle" --repo Frostfire-Interactive/Frostfire-Forge-Hosting
+
   deploy:
     name: Octopus Deployment
     runs-on: ubuntu-latest
