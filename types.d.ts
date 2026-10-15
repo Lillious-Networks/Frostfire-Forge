@@ -544,6 +544,8 @@ declare interface Authentication {
 declare interface PlayerData {
   id: string;
   username: string;
+  /** The character's class id (systems/classes.ts); null while the account has made no character. */
+  characterClass?: number | null;
   location: {
     map: string;
     position: {
@@ -568,6 +570,7 @@ declare interface PlayerData {
     fps: number;
     music_volume: number;
     effects_volume: number;
+    ambience_volume: number;
     muted: boolean;
     hotbar_config: any[];
   }>;

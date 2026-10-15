@@ -1,6 +1,7 @@
 // This file is used to create the database and tables if they don't exist
 import query from "../controllers/sqldatabase";
 import log from "../modules/logger";
+import { CLASSES_TABLE } from "../systems/classtable";
 
 // Create accounts table if it doesn't exist
 const createAccountsTable = async () => {
@@ -36,7 +37,8 @@ const createAccountsTable = async () => {
         corpse_y INTEGER DEFAULT NULL,
         subscribed INTEGER NOT NULL DEFAULT 0,
         stripe_customer_id TEXT DEFAULT NULL,
-        subscription_ends INTEGER DEFAULT NULL
+        subscription_ends INTEGER DEFAULT NULL,
+        class_id INTEGER DEFAULT NULL
       );
   `;
   await query(sql);
@@ -230,6 +232,7 @@ const createClientConfig = async () => {
         fps INTEGER NOT NULL DEFAULT 60,
         music_volume INTEGER NOT NULL DEFAULT 100,
         effects_volume INTEGER NOT NULL DEFAULT 100,
+        ambience_volume INTEGER NOT NULL DEFAULT 100,
         muted INTEGER NOT NULL DEFAULT 0,
         hotbar_config TEXT DEFAULT NULL,
         inventory_config TEXT DEFAULT NULL
@@ -358,6 +361,7 @@ const createPermissionTypesTable = async () => {
       ('tools.entity_editor'),
       ('tools.particle_editor'),
       ('tools.weather_editor'),
+      ('tools.class_editor'),
       ('tools.creature_editor'),
       ('tools.item_editor'),
       ('tools.spell_editor'),
@@ -1177,6 +1181,12 @@ const setupDatabase = async () => {
   await createParticleTable();
   await createWeatherTable();
   await createDefaultWeather();
+  // Character classes (systems/classes.ts), and accounts.class_id on a database made before it
+  await query(CLASSES_TABLE.sqlite);
+  {
+    const rows = (await query(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'`)) as any[];
+    if (!/\bclass_id\b/.test(String(rows?.[0]?.sql || ""))) await query(`ALTER TABLE accounts ADD COLUMN class_id INTEGER DEFAULT NULL`);
+  }
   await createWorldTable();
   await createWorld('default', 'clear');
   await createWorld('overworld', 'rainy');

@@ -1156,6 +1156,32 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "WEATHER_EDITOR_UPDATED", data })),
     ] as any[];
   },
+  // The account has no character yet: the client goes to the gateway's character page (systems/classes.ts).
+  characterRequired: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "CHARACTER_REQUIRED", data: null })),
+    ] as any[];
+  },
+  toggleClassEditor: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "TOGGLE_CLASS_EDITOR", data: null })),
+    ] as any[];
+  },
+  classEditorData: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CLASS_EDITOR_DATA", data })),
+    ] as any[];
+  },
+  classEditorResult: (data: { ok: boolean; errors: string[]; fields?: Record<string, string>; name?: string; notes: string[]; action?: string; data: any }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CLASS_EDITOR_RESULT", data })),
+    ] as any[];
+  },
+  classEditorUpdated: (data: { by: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CLASS_EDITOR_UPDATED", data })),
+    ] as any[];
+  },
   playerEditorOpen: (data: { target: string }) => {
     return [
       packet.encode(JSON.stringify({ type: "PLAYER_EDITOR_OPEN", data })),

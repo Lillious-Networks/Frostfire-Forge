@@ -226,6 +226,31 @@ function worldSpawn(): { map: string; x: number; y: number } {
   };
 }
 
+/**
+ * The world's start area, for the backdrop of the gateway's character page (socket/server.ts: GET /start-area): the
+ * default map's size and tilesets and where players start. The page reads the tiles from the asset server; nothing
+ * about who is in the world is here. USER REQUEST 2026-10-14 ("I want the character creator to pan over the starting
+ * area of the world (don't show players or creatures)"). Null while the default map is not loaded.
+ */
+export function startArea(): Record<string, unknown> | null {
+  const spawn = worldSpawn();
+  const map = (maps as MapData[] | null)?.find((m: MapData) => m.name === `${spawn.map}.json`);
+  if (!map?.data) return null;
+  return {
+    name: spawn.map,
+    assetServerUrl: process.env.ASSET_SERVER_URL || "http://localhost:8081",
+    width: map.data.width || 0,
+    height: map.data.height || 0,
+    tilewidth: map.data.tilewidth || 32,
+    tileheight: map.data.tileheight || 32,
+    tilesets: map.data.tilesets || [],
+    spawnX: spawn.x,
+    spawnY: spawn.y,
+    // changes when the map is saved: the page's picture of the area is made again
+    version: String((mapPropertiesCache as any[])?.find((m: any) => m.name === `${spawn.map}.json`)?.version ?? ""),
+  };
+}
+
 /** Whether a player is casting their home item now: its cast is the one they are in. */
 const castingHome = (player: any) => !!player?.casting && player.homeCastId !== undefined && player.homeCastId === player.castId;
 
@@ -428,6 +453,8 @@ import { projectileTravelMs } from "../systems/creatures/projectile";
 import * as itemEditor from "../systems/itemeditor";
 import * as spellEditor from "../systems/spelleditor";
 import * as weatherEditor from "../systems/weathereditor";
+import * as classEditor from "../systems/classeditor";
+import classes from "../systems/classes";
 import * as weatherApi from "../systems/weatherapi";
 import * as lootEditor from "../systems/looteditor";
 import * as playerEditor from "../systems/playereditor";
@@ -1854,6 +1881,17 @@ authWorker.on("message", async (result: any) => {
       return;
     }
 
+    // USER REQUEST 2026-10-14 (character creation): no character yet, and there are classes to choose from. The
+    // client goes to the gateway's character page (CHARACTER_REQUIRED) and comes back once one is made.
+    if (await classes.characterRequired(playerData.characterClass)) {
+      // Authentication marked the account online; it never got into the game, so it is not. Else the character page
+      // refuses ("Your account is in the game right now").
+      await player.clearSessionId(sessionId).catch((e) => log.error(`Session of ${playerData.username} not cleared: ${e}`));
+      sendPacket(wt, packetManager.characterRequired());
+      wt.close(1008, "Create your character first");
+      return;
+    }
+
     const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
 
     if (!playerData.isAdmin && playerData.isNoclip) {
@@ -2020,6 +2058,17 @@ authWorker.on("message", async (result: any) => {
     // admin's edit on another server, may have written it since they left.
     await refreshPlayer(playerData.username);
 
+    // The spells of the character's class up to its level that it does not know: a new character's first ones, and
+    // any a class was given after the character passed its level.
+    if (playerData.characterClass != null) {
+      try {
+        const learned = await classes.learnUpTo(playerData.username, playerData.characterClass, Number(playerData.stats?.level) || 1);
+        if (learned.length) playerData.learnedSpells = await spells.learnedDetails(playerData.username) as any;
+      } catch (error) {
+        log.error(`[Classes] The class spells of ${playerData.username} could not be learned at login: ${error}`);
+      }
+    }
+
     const inventorySlots = await getInventorySlots(playerData);
     const limitedInventory = Array.isArray(playerData.inventory) ? playerData.inventory.slice(0, inventorySlots) : [];
     const limitedFriends = Array.isArray(playerData.friends) ? playerData.friends.slice(0, 100) : [];
@@ -2061,6 +2110,7 @@ authWorker.on("message", async (result: any) => {
       currency: playerData.currency || { copper: 0, silver: 0, gold: 0 },
       isGuest: playerData.isGuest,
       isSubscribed: playerData.isSubscribed,
+      characterClass: playerData.characterClass ?? null,
       created: performance.now(),
       lastUpdated: performance.now(),
       mounted: false,
@@ -2103,11 +2153,14 @@ authWorker.on("message", async (result: any) => {
     mapIndex.addPlayer(_pcache.id, _pcache.location.map);
     loot.cancelCleanup(_pcache.username);
 
+    // Where the player is placed, not the stored position: they differ for a new character (stored at 0,0, placed at
+    // the world's spawn), a corpse, or a map that is gone. The client loads the chunks round this point and puts its
+    // camera there before the loading screen lifts; any other point and the chunks stream in after it.
     const mapMetadata = constructMapMetadata(
       spawnLocation?.map,
-      position?.x || 0,
-      position?.y || 0,
-      position?.direction || "down",
+      spawnLocation?.x || 0,
+      spawnLocation?.y || 0,
+      spawnLocation?.direction || "down",
       maps,
       mapPropertiesCache
     );
@@ -3989,6 +4042,30 @@ export default async function packetReceiver(
           for (const other of Object.values(playerCache.list()) as any[]) {
             if (!other?.wt || other.id === currentPlayer.id) continue;
             if (weatherEditor.mayHaveEditorOpen(other)) sendPacket(other.wt, updated);
+          }
+        }
+        break;
+      }
+      case "CLASS_EDITOR_LIST":
+      case "CLASS_EDITOR_SAVE":
+      case "CLASS_EDITOR_DELETE": {
+        if (!currentPlayer) return;
+        // The handler checks permission first, on every one of these; its answer carries the classes as they stand.
+        const result = await classEditor.handleEditorPacket(currentPlayer, type, data);
+        if (result.kind === "data") {
+          sendPacket(wt, packetManager.classEditorData(result.data));
+          break;
+        }
+        if (result.denied) sendPacket(wt, packetManager.notify({ message: classEditor.DENIED }));
+        sendPacket(wt, packetManager.classEditorResult({
+          ok: result.ok, errors: result.errors, fields: result.fields, name: result.name, notes: result.notes, action: type, data: result.data,
+        }));
+        if (result.changed) {
+          // Tell every other open editor to ask for the classes again.
+          const updated = packetManager.classEditorUpdated({ by: currentPlayer.username });
+          for (const other of Object.values(playerCache.list()) as any[]) {
+            if (!other?.wt || other.id === currentPlayer.id) continue;
+            if (classEditor.mayHaveEditorOpen(other)) sendPacket(other.wt, updated);
           }
         }
         break;
@@ -8449,6 +8526,16 @@ export default async function packetReceiver(
               break;
             }
             sendPacket(wt, packetManager.toggleWeatherEditor());
+            break;
+          }
+
+          case "CLE":
+          case "CLASSEDITOR": {
+            if (!(await classEditor.canUseEditor(currentPlayer))) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(wt, packetManager.toggleClassEditor());
             break;
           }
 

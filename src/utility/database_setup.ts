@@ -1,6 +1,7 @@
 
 import query from "../controllers/sqldatabase";
 import log from "../modules/logger";
+import { CLASSES_TABLE } from "../systems/classtable";
 const database = process.env.DATABASE_NAME || "TEMP_Mystika";
 
 const createDatabase = async () => {
@@ -47,10 +48,19 @@ const createAccountsTable = async () => {
         corpse_y INT DEFAULT NULL,
         subscribed INT NOT NULL DEFAULT 0,
         stripe_customer_id VARCHAR(64) DEFAULT NULL,
-        subscription_ends BIGINT DEFAULT NULL
+        subscription_ends BIGINT DEFAULT NULL,
+        class_id INT DEFAULT NULL
       );
   `;
   await query(sql);
+};
+
+const addClassColumn = async () => {
+  const exists = (await query(
+    `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'accounts' AND COLUMN_NAME = 'class_id'`,
+    [database]
+  )) as any[];
+  if (!exists[0] || Number(exists[0].count) === 0) await query(`ALTER TABLE accounts ADD COLUMN class_id INT DEFAULT NULL`);
 };
 
 const addDeathColumns = async () => {
@@ -197,6 +207,7 @@ const createClientConfig = async () => {
         fps INT NOT NULL DEFAULT 60,
         music_volume INT NOT NULL DEFAULT 100,
         effects_volume INT NOT NULL DEFAULT 100,
+        ambience_volume INT NOT NULL DEFAULT 100,
         muted INT NOT NULL DEFAULT 0,
         hotbar_config JSON DEFAULT NULL,
         inventory_config JSON DEFAULT NULL
@@ -435,6 +446,8 @@ const createPermissionTypesTable = async () => {
   await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.trades')`);
   // Resetting a player's cooldowns.
   await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.cooldowns')`);
+  // The class editor (character classes).
+  await query(`INSERT IGNORE INTO permission_types (name) VALUES ('tools.class_editor')`);
   // Choosing what a player who has not subscribed may not do.
   await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.subscription')`);
 };
@@ -1361,6 +1374,9 @@ const setupDatabase = async () => {
   await createParticleTable();
   await createWeatherTable();
   await createDefaultWeather();
+  // Character classes (systems/classes.ts), and accounts.class_id on a database made before it
+  await query(CLASSES_TABLE.mysql);
+  await addClassColumn();
   await createWorldTable();
   await createWorld('overworld', 'rainy');
   await dropLegacyQuestTables();

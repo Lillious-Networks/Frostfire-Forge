@@ -18,13 +18,14 @@ import "../utility/validate_config.ts";
 import crypto from "crypto";
 import { packetManager } from "./packet_manager.ts";
 import { packetTypes } from "./types.ts";
-import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady, teleportPlayerWrapper, removePlayerFromCleanupMaps, removeFromAuthenticationQueues, releaseDraggedBy } from "./receiver.ts";
+import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady, teleportPlayerWrapper, removePlayerFromCleanupMaps, removeFromAuthenticationQueues, releaseDraggedBy, startArea } from "./receiver.ts";
 import eventEmitter from "node:events";
 import { listener } from "../modules/event_bus.ts";
 import { Events, setPlayerPvp } from "../systems/events";
 const event = new eventEmitter();
 import log from "../modules/logger.ts";
-import player from "../systems/player.ts";
+import player, { ensureAmbienceColumn } from "../systems/player.ts";
+import { ensureClassSchema } from "../systems/classes.ts";
 import worlds from "../systems/worlds.ts";
 import playerCache from "../services/playermanager.ts";
 import { loadTables, forgetPlayer } from "../services/datacache.ts";
@@ -161,6 +162,10 @@ const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
 // The subscription columns and tables first, before the first login and before the table caches
 // read them. A failure is said once and leaves subscriptions off: it never stops the start.
 await ensureSubscriptionSchema();
+// The Ambience slider's column (clientconfig.ambience_volume), the same way: added if missing, never stops the start.
+await ensureAmbienceColumn();
+// The classes table and accounts.class_id (characters), the same way.
+await ensureClassSchema();
 await loadTables();
 await refreshSubscriptions();
 
@@ -293,6 +298,15 @@ Bun.serve({
       }), {
         status: 200,
         headers
+      });
+    }
+
+    // The start area the gateway's character page pans over: the default map and the spawn, no player or creature.
+    if (url.pathname === "/start-area" && req.method === "GET") {
+      const area = startArea();
+      return new Response(JSON.stringify(area ?? { error: "The start map is not loaded" }), {
+        status: area ? 200 : 404,
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-cache", ...getCORSHeaders(requestOrigin) },
       });
     }
 

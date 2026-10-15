@@ -113,6 +113,14 @@ function write(text: string, args: any[]): any {
     return { affectedRows: 1 };
   }
 
+  // A column added at start to a database that is already live (ensureAmbienceColumn): every row takes its default.
+  const alter = text.match(/^ALTER TABLE (\w+) ADD COLUMN (\w+) \w+ NOT NULL DEFAULT (\d+)$/);
+  if (alter) {
+    const [, table, name, value] = alter;
+    for (const row of tables[table] || []) row[name] = Number(value);
+    return { affectedRows: 0 };
+  }
+
   if (text === "TRUNCATE TABLE parties") {
     tables.parties = [];
     return { affectedRows: 0 };
@@ -786,6 +794,25 @@ describe("a player's client config", () => {
     // Now it shows.
     await player.saveInventoryConfig("pc_hero", { 0: "shield" });
     expect((await fromCache(() => player.getConfig("pc_hero")) as any)[0].inventory_config).toEqual({ 0: "shield" });
+  });
+
+  // USER REQUEST 2026-10-14 (rain on a new "ambience" sound track): the Ambience slider's level
+  test("the Ambience level is added to a live database at start, saved with the others, and left alone by a client that sends none", async () => {
+    const { ensureAmbienceColumn } = await import("../systems/player");
+    expect(await ensureAmbienceColumn()).toBe(true);
+    expect(row("pc_hero", "clientconfig").ambience_volume).toBe(100);
+    online("6101", "pc_hero");
+    await player.getConfig("pc_hero");
+    expect(await sentBy(() => player.setConfig("6101", { fps: 60, music_volume: 10, effects_volume: 20, ambience_volume: 30, muted: false }))).toEqual([
+      "UPDATE clientconfig SET fps = ?, music_volume = ?, effects_volume = ?, ambience_volume = ?, muted = ? WHERE username = ?",
+    ]);
+    expect(row("pc_hero", "clientconfig")).toMatchObject({ fps: 60, music_volume: 10, effects_volume: 20, ambience_volume: 30, muted: 0 });
+    expect(await fromCache(() => player.getConfig("pc_hero"))).toEqual([config("pc_hero", { fps: 60, music_volume: 10, effects_volume: 20, ambience_volume: 30, muted: 0 })]);
+    // a client from before the slider
+    expect(await sentBy(() => player.setConfig("6101", { fps: 60, music_volume: 11, effects_volume: 20, muted: false }))).toEqual([
+      "UPDATE clientconfig SET fps = ?, music_volume = ?, effects_volume = ?, muted = ? WHERE username = ?",
+    ]);
+    expect(row("pc_hero", "clientconfig")).toMatchObject({ music_volume: 11, ambience_volume: 30 });
   });
 
   const WRITES: Record<string, () => Promise<any>> = {

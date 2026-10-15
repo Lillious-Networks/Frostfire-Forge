@@ -119,6 +119,44 @@ const configRows = rowCache<Record<string, any>>("clientconfig", async (username
   return parseConfigJson(username, rows?.[0]);
 }, { perPlayer: true });
 
+/**
+ * USER REQUEST 2026-10-14 ("Hard Rain.wav" and "Soft Rain.wav" on "a new 'ambience' sound track"): the pause menu's
+ * Ambience slider is kept with the other sound levels, in clientconfig.ambience_volume. The setup scripts make the
+ * column; a database that is already live gets it here at start, before the first login reads the table. Safe on
+ * every start, and it never throws: without the column the slider still works, it is only not remembered.
+ */
+let ambienceColumn = false;
+/** Whether accounts.class_id is there, once a login has found out (null: not asked yet). See GetPlayerLoginData. */
+let classIdColumn: boolean | null = null;
+export async function ensureAmbienceColumn(): Promise<boolean> {
+  const lite = (process.env.DATABASE_ENGINE || "mysql") === "sqlite";
+  const has = async () => {
+    if (lite) {
+      const rows = (await query(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'clientconfig'`)) as any[];
+      return /\bambience_volume\b/.test(String(rows?.[0]?.sql || ""));
+    }
+    const rows = (await query(
+      `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'clientconfig' AND COLUMN_NAME = 'ambience_volume'`
+    )) as any[];
+    return Number(rows?.[0]?.count) > 0;
+  };
+  try {
+    if (!(await has())) {
+      try {
+        await query(`ALTER TABLE clientconfig ADD COLUMN ambience_volume ${lite ? "INTEGER" : "INT"} NOT NULL DEFAULT 100`);
+      } catch (error) {
+        // another realm starting at the same moment may have added it first
+        if (!(await has())) throw error;
+      }
+    }
+    ambienceColumn = true;
+  } catch (error) {
+    log.warn(`[Config] The ambience_volume column could not be added to clientconfig, so the Ambience slider is not saved: ${error}`);
+    ambienceColumn = false;
+  }
+  return ambienceColumn;
+}
+
 /** When a failed read of accounts.subscribed was last said, so a database without it is warned of once a minute, not at every login. */
 let subscribedWarnedAt = 0;
 
@@ -1189,17 +1227,23 @@ const player = {
       return [];
     const username = playerCache.get(session_id)?.username;
     if (!username) return [];
-    const saved = {
+    // (the Ambience level: only from a client that sends it, and only to a database that has the column)
+    const ambience = ambienceColumn && typeof data.ambience_volume == "number";
+    const saved: Record<string, number> = {
       fps: data.fps,
       music_volume: data.music_volume || 0,
       effects_volume: data.effects_volume || 0,
+      ...(ambience ? { ambience_volume: data.ambience_volume || 0 } : {}),
     };
     const response = await writing(configRows, username, () => query(
-      "UPDATE clientconfig SET fps = ?, music_volume = ?, effects_volume = ?, muted = ? WHERE username = ?",
+      ambience
+        ? "UPDATE clientconfig SET fps = ?, music_volume = ?, effects_volume = ?, ambience_volume = ?, muted = ? WHERE username = ?"
+        : "UPDATE clientconfig SET fps = ?, music_volume = ?, effects_volume = ?, muted = ? WHERE username = ?",
       [
         saved.fps,
         saved.music_volume,
         saved.effects_volume,
+        ...(ambience ? [saved.ambience_volume] : []),
         data.muted,
         username,
       ]
@@ -1843,14 +1887,26 @@ const player = {
     if (!username) return null;
     username = username.toLowerCase();
 
-    const accountQuery = `
+    const accountQuery = (withClass: boolean) => `
       SELECT a.id, a.username, a.map, a.position, a.direction, a.role,
              a.guest_mode, a.stealth, a.noclip, a.party_id, a.guild_id,
-             a.is_dead, a.corpse_map, a.corpse_x, a.corpse_y
+             a.is_dead, a.corpse_map, a.corpse_x, a.corpse_y${withClass ? ", a.class_id" : ""}
       FROM accounts a WHERE a.username = ?
     `;
 
-    const result = await query(accountQuery, [username]) as any[];
+    // accounts.class_id is added at start (systems/classes.ts ensureClassSchema). This runs on a login worker, which
+    // does not know whether that step went through: a database without the column is read without it, once found.
+    let result: any[];
+    if (classIdColumn !== false) {
+      try {
+        result = await query(accountQuery(true), [username]) as any[];
+        classIdColumn = true;
+      } catch (error) {
+        if (!/class_id/i.test(String((error as Error)?.message ?? error))) throw error;
+        classIdColumn = false;
+        result = await query(accountQuery(false), [username]) as any[];
+      }
+    } else result = await query(accountQuery(false), [username]) as any[];
     if (!result || result.length === 0) return null;
 
     const data = result[0];
@@ -1871,7 +1927,7 @@ const player = {
       query("SELECT permissions FROM permissions WHERE username = ?", [username]) as Promise<any[]>,
       query("SELECT copper, silver, gold FROM currency WHERE username = ?", [username]) as Promise<any[]>,
       query("SELECT friends FROM friendslist WHERE username = ?", [username]) as Promise<any[]>,
-      query("SELECT fps, music_volume, effects_volume, muted, hotbar_config, inventory_config FROM clientconfig WHERE username = ?", [username]) as Promise<any[]>,
+      query(`SELECT fps, music_volume, effects_volume, ${ambienceColumn ? "ambience_volume, " : ""}muted, hotbar_config, inventory_config FROM clientconfig WHERE username = ?`, [username]) as Promise<any[]>,
       query("SELECT quest_id, state, accepted_at, completed_at, times_completed FROM quest_log WHERE username = ?", [username]) as Promise<any[]>,
       query("SELECT quest_id, objective_id, count FROM quest_objective_progress WHERE username = ?", [username]) as Promise<any[]>,
       query("SELECT head, body, helmet, necklace, shoulderguards, chestplate, wristguards, gloves, belt, pants, boots, ring_1, ring_2, trinket_1, trinket_2, weapon FROM equipment WHERE username = ?", [username]) as Promise<any[]>,
@@ -1958,6 +2014,7 @@ const player = {
         fps: config.fps,
         music_volume: config.music_volume,
         effects_volume: config.effects_volume,
+        ambience_volume: config.ambience_volume ?? 100,
         muted: config.muted,
         hotbar_config: config.hotbar_config || null,
         inventory_config: config.inventory_config || null
@@ -1977,6 +2034,8 @@ const player = {
         x: Number(data.corpse_x) || 0,
         y: Number(data.corpse_y) || 0,
       } : null,
+      // The character's class (systems/classes.ts): null while the account has made no character.
+      characterClass: data.class_id === null || data.class_id === undefined ? null : Number(data.class_id),
       equipment: {
         head: equip.head,
         body: equip.body,
