@@ -222,6 +222,9 @@ beforeEach(async () => {
   assets.set("mounts", [{ name: "Unicorn", description: "A unicorn." }]);
   store.resetChanges();
   await clearCaches();
+  // Only the players a test puts online are online: test files that run earlier can leave players in the shared
+  // cache (the order files run in differs between machines, see src/tests/setup.ts standInFor).
+  playerCache.clear();
 });
 
 afterEach(() => {
