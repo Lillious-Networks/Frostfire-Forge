@@ -488,8 +488,8 @@ const insertHomeItem = async () => {
   if (held[0] && Number(held[0].count) > 0) return;
   log.info("Creating the home item...");
   await query(
-    `INSERT OR IGNORE INTO items (name, type, quality, description, sell_price, teleports_home)
-     VALUES ('Home Stone', 'consumable', 'uncommon', 'Returns you to your home inn.', 0, 1)`
+    `INSERT OR IGNORE INTO items (name, type, quality, description, icon, sell_price, teleports_home)
+     VALUES ('Home Stone', 'consumable', 'uncommon', 'Returns you to your home inn.', 'home_stone', 0, 1)`
   );
 };
 
@@ -1129,6 +1129,29 @@ const createCreatureTables = async () => {
     rare_chance_pct REAL NOT NULL DEFAULT 0,
     rare_template_id INTEGER DEFAULT NULL
   )`);
+  // Achievements (/achievements) and each player's progress toward them. Same SQL as ACHIEVEMENT_TABLES.sqlite in
+  // systems/achievements/store.ts, which makes them at engine start too.
+  await query(`CREATE TABLE IF NOT EXISTS achievements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    description TEXT NOT NULL DEFAULT '',
+    icon TEXT NULL,
+    type TEXT NOT NULL,
+    target TEXT NULL,
+    count INTEGER NOT NULL DEFAULT 1,
+    reward_item TEXT NULL,
+    reward_quantity INTEGER NOT NULL DEFAULT 1,
+    reward_mount TEXT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1
+  )`);
+  await query(`CREATE TABLE IF NOT EXISTS player_achievements (
+    username TEXT NOT NULL,
+    achievement_id INTEGER NOT NULL,
+    progress INTEGER NOT NULL DEFAULT 0,
+    completed_at TEXT NULL,
+    PRIMARY KEY (username, achievement_id)
+  )`);
+  await query("CREATE INDEX IF NOT EXISTS idx_player_achievements_achievement ON player_achievements (achievement_id)");
   // Gathering areas (/gathering): where resource nodes spawn. Same SQL as GATHERING_AREAS_TABLE.sqlite in
   // systems/gathering/editor.ts, which makes it at engine start too.
   await query(`CREATE TABLE IF NOT EXISTS gathering_areas (

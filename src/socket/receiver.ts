@@ -180,6 +180,21 @@ async function vendorFor(wt: any, shopper: any, npcId: unknown): Promise<Npc | n
 }
 
 /**
+ * A chat line as it is sent, and the links in it: each `[Name]` that names a real item (from the
+ * in-memory item list) or, failing that, an enabled achievement (from the achievements cache) is
+ * written with its exact name and comes with the link's data. A line with no links is returned as
+ * it is, with `links` empty.
+ */
+async function chatLinksOf(text: string): Promise<{ message: string; links: ChatLink[] }> {
+  // The party, whisper and guild paths do not cap a line's length: a line over the chat cap is sent
+  // as it is, with no links, instead of being scanned.
+  if (typeof text !== "string" || text.length > MAX_CHAT_LENGTH || !text.includes("[")) return { message: text, links: [] };
+  const items = ((await assetCache.get("items")) || []) as Item[];
+  const links = await findChatLinks(text, items, achievementDefinitions, MAX_ITEM_LINKS, getIconUrl);
+  return { message: canonicalLinks(text, links), links };
+}
+
+/**
  * What an NPC stocks, as the NPC editor sent it: the entries that name an item and a price. The
  * editor is told what was wrong with any that were left out.
  */
@@ -414,6 +429,8 @@ async function castGather(caster: any, nodeId: unknown): Promise<void> {
     sendPacket(live, packetManager.notify({ message: outcome.reason }));
     return;
   }
+  // the items are in the bags: achievements count the gather (systems/achievements), whatever the re-read below does
+  listener.emit(Events.GATHER_COMPLETED, { player: after, item: outcome.item, quantity: outcome.quantity });
   // Re-read the bags, as a loot pickup does: a new item needs its full details on the client.
   after.inventory = await patchInventoryBagSlots(await inventory.get(after.username), after.username);
   playerCache.set(after.id, after);
@@ -600,6 +617,8 @@ import { mapMarkers } from "../systems/mapmarkers";
 import mail, { atMailbox, mailboxesOn, BODY_MAX, MAIL_ITEMS_MAX, POSTAGE_COPPER, SUBJECT_MAX, type Mailbox } from "../systems/mail";
 import homes, { cannotSetHome, isInnkeeper, HOME_CAST_MS, HOME_COOLDOWN_MS } from "../systems/homes";
 import { audience as chatAudience } from "../systems/chatgate";
+import { canonicalLinks, findChatLinks, protectLinks, restoreLinks, MAX_ITEM_LINKS, type ChatLink } from "../systems/itemlinks";
+import { definitions as achievementDefinitions } from "../systems/achievements/store";
 import parties from "../systems/parties.ts";
 import guilds from "../systems/guild.ts";
 import spells from "../systems/spells";
@@ -614,6 +633,8 @@ import dots from "../systems/dots";
 import { rollHeal, spellManaCost } from "../systems/spellmath";
 import creatures from "../systems/creatures";
 import gathering from "../systems/gathering";
+import achievements from "../systems/achievements";
+import collectables from "../systems/collectables";
 import { projectileTravelMs } from "../systems/creatures/projectile";
 import * as itemEditor from "../systems/itemeditor";
 import * as spellEditor from "../systems/spelleditor";
@@ -3532,11 +3553,12 @@ export default async function packetReceiver(
 
         const mode = messageData?.mode;
 
-        const sendMessageToPlayer = (playerWs: any, message: string) => {
+        const sendMessageToPlayer = (playerWs: any, message: string, links: ChatLink[] = []) => {
           const chatData = {
             id: wt.data.id,
             message,
             username: currentPlayer.username,
+            ...(links.length > 0 ? { links } : {}),
           };
           sendPacket(playerWs, packetManager.chat(chatData));
         };
@@ -3572,7 +3594,14 @@ export default async function packetReceiver(
           decryptedMessage = generateGhostSpeak();
         }
 
-        sendMessageToPlayer(wt, decryptedMessage as string);
+        // Item links come from the text actually sent: a ghost's spirit-tongue has none.
+        const linked = ghostSpeak
+          ? { message: decryptedMessage as string, links: [] as ChatLink[] }
+          : await chatLinksOf(decryptedMessage as string);
+        const sentMessage = linked.message;
+        const sentLinks = linked.links;
+
+        sendMessageToPlayer(wt, sentMessage, sentLinks);
 
         const cache = playerCache.list();
         let playersInMap = Object.values(cache).filter(
@@ -3597,20 +3626,33 @@ export default async function packetReceiver(
         if (playersInMap.length === 0) return;
 
         const translations: Record<string, string> = {};
+        // Link tokens go through the translator as placeholders and are put back after, so a link
+        // is never translated; a translation that lost one is dropped for the line as sent.
+        const protectedLine = protectLinks(sentMessage, sentLinks);
 
         playersInMap.forEach(async (player) => {
           if (!translations[player.language]) {
 
-            translations[player.language] =
-              player.language === currentPlayer.language
-                ? decryptedMessage
-                : await language.translate(decryptedMessage, player.language);
+            // A translator that throws must not cost the recipient the line: they get it as sent,
+            // links included (this runs once per language, so it logs once per language).
+            let line = sentMessage;
+            if (player.language !== currentPlayer.language) {
+              try {
+                line = sentLinks.length === 0
+                  ? await language.translate(sentMessage, player.language) ?? sentMessage
+                  : restoreLinks(await language.translate(protectedLine.text, player.language), protectedLine.held) ?? sentMessage;
+              } catch (error) {
+                log.warn(`Chat translation to ${player.language} failed, sending the line untranslated: ${error}`);
+              }
+            }
+            translations[player.language] = line;
           }
 
           const chatData = {
             id: wt.data.id,
             message: translations[player.language],
             username: currentPlayer.username,
+            ...(sentLinks.length > 0 ? { links: sentLinks } : {}),
           };
 
           sendPacket(player.wt, packetManager.chat(chatData));
@@ -7250,6 +7292,7 @@ export default async function packetReceiver(
             }
 
             const partyHearing = await chatHearing(currentPlayer.username, "party", message, partyMembers);
+            const partyLine = await chatLinksOf(message);
 
             partyMembers.forEach(async (member: any) => {
               if (!partyHearing.has(String(member).toLowerCase())) return;
@@ -7260,7 +7303,8 @@ export default async function packetReceiver(
                   memberPlayer.wt,
                   packetManager.partyChat({
                     id: wt.data.id,
-                    message,
+                    message: partyLine.message,
+                    ...(partyLine.links.length > 0 ? { links: partyLine.links } : {}),
                     username:
                       currentPlayer.username.charAt(0).toUpperCase() +
                       currentPlayer.username.slice(1),
@@ -7301,12 +7345,15 @@ export default async function packetReceiver(
             // The whisper is shown as sent either way: a muted player, or one
             // the target ignores, is not told that it went nowhere.
             const whispered = await chatAudience(currentPlayer.username, "whisper", args.slice(1).join(" "), [targetPlayer.username]);
+            const whisperLine = await chatLinksOf(args.slice(1).join(" "));
+            const whisperLinks = whisperLine.links.length > 0 ? { links: whisperLine.links } : {};
             if (whispered.recipients.length > 0) {
               sendPacket(
                 targetPlayer.wt,
                 packetManager.whisper({
                   id: wt.data.id,
-                  message: args.slice(1).join(" "),
+                  message: whisperLine.message,
+                  ...whisperLinks,
 
                   username: `<- ${currentPlayer.username.charAt(0).toUpperCase() +
                     currentPlayer.username.slice(1)
@@ -7319,7 +7366,8 @@ export default async function packetReceiver(
               wt,
               packetManager.whisper({
                 id: targetPlayer.id,
-                message: args.slice(1).join(" "),
+                message: whisperLine.message,
+                ...whisperLinks,
                 username: `-> ${targetPlayer.username.charAt(0).toUpperCase() +
                   targetPlayer.username.slice(1)
                   }`,
@@ -7450,6 +7498,7 @@ export default async function packetReceiver(
             }
 
             const guildHearing = await chatHearing(currentPlayer.username, "guild", message, guildMembers);
+            const guildLine = await chatLinksOf(message);
 
             guildMembers.forEach(async (member: any) => {
               if (!guildHearing.has(String(member).toLowerCase())) return;
@@ -7460,7 +7509,8 @@ export default async function packetReceiver(
                   memberPlayer.wt,
                   packetManager.guildChat({
                     id: wt.data.id,
-                    message,
+                    message: guildLine.message,
+                    ...(guildLine.links.length > 0 ? { links: guildLine.links } : {}),
                     username:
                       currentPlayer.username.charAt(0).toUpperCase() +
                       currentPlayer.username.slice(1),
@@ -8784,6 +8834,15 @@ export default async function packetReceiver(
               break;
             }
             sendPacket(wt, packetManager.toggleGatheringEditor());
+            break;
+          }
+
+          case "ACHIEVEMENTS": {
+            if (!(await achievements.canUseEditor(currentPlayer))) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(wt, packetManager.toggleAchievementEditor());
             break;
           }
 
@@ -10616,6 +10675,7 @@ export default async function packetReceiver(
           return;
         }
 
+        const guildLine = await chatLinksOf(message);
         for (const member of guildMembers) {
           const session_id = await player.getSessionIdByUsername(member);
           const memberPlayer = playerCache.get(session_id);
@@ -10624,7 +10684,8 @@ export default async function packetReceiver(
               memberPlayer.wt,
               packetManager.guildChat({
                 id: wt.data.id,
-                message,
+                message: guildLine.message,
+                ...(guildLine.links.length > 0 ? { links: guildLine.links } : {}),
                 username:
                   currentPlayer.username.charAt(0).toUpperCase() +
                   currentPlayer.username.slice(1),
@@ -11019,8 +11080,10 @@ export default async function packetReceiver(
                 inviter.wt,
                 packetManager.updateFriends({ friends: updatedFriendsList })
               );
+
+              // only an accepted request makes friends
+              listener.emit(Events.FRIEND_ADDED, { type: "add", playerUsername: currentPlayer.username, friendUsername: inviter.username });
             }
-            listener.emit(Events.FRIEND_ADDED, { type: "add", playerUsername: currentPlayer.username, friendUsername: inviter.username });
             break;
           }
           case "INVITE_PARTY": {
@@ -12177,6 +12240,21 @@ export default async function packetReceiver(
         }
         break;
       }
+      case "ACHIEVEMENT_EDITOR_LIST":
+      case "ACHIEVEMENT_EDITOR_SAVE":
+      case "ACHIEVEMENT_EDITOR_DELETE": {
+        if (!currentPlayer) return;
+        // The handler checks permission first, on every one of these, and sends its own answers.
+        await achievements.handleEditorPacket(currentPlayer, type, data);
+        break;
+      }
+      case "ACHIEVEMENTS_LIST": {
+        if (!currentPlayer) return;
+        if (isQuestRateLimited(`achievements:${wt.data.id}`)) return;
+        // read from the caches only (systems/achievements/store.ts)
+        await achievements.sendList(currentPlayer);
+        break;
+      }
       case "GATHERING_EDITOR_LIST":
       case "GATHERING_EDITOR_SAVE":
       case "GATHERING_EDITOR_DELETE":
@@ -12855,6 +12933,26 @@ setCreatureEngineBridge({
   },
 });
 setPlayerDeathHandler(handlePlayerDeath);
+
+// What the achievements (systems/achievements) need of the receiver after a reward: the player's bags, collectables
+// and mail count sent again, as the player editor's bridge below does after an admin's change.
+achievements.setBridge({
+  syncInventory: async (target) => {
+    target.inventory = await patchInventoryBagSlots(await inventory.get(target.username), target.username);
+    playerCache.set(target.id, target);
+    sendPacket(target.wt, packetManager.inventory(target.inventory, await getInventorySlots(target)));
+  },
+  sendCollectables: async (target) => {
+    // As at login (socket/authentication.ts): each mount with its icon, a mount that no longer exists left out.
+    const mounts = new Map((((await assetCache.get("mounts")) || []) as any[]).map((m: any): [string, any] => [String(m.name).toLowerCase(), m]));
+    target.collectables = (((await collectables.list(target.username)) || []) as any[])
+      .filter((c: any) => c.type !== "mount" || mounts.has(String(c.item).toLowerCase()))
+      .map((c: any) => ({ type: c.type, item: c.item, icon: c.type === "mount" ? (mounts.get(String(c.item).toLowerCase())?.icon ?? null) : null }));
+    playerCache.set(target.id, target);
+    sendPacket(target.wt, packetManager.collectables(target.collectables.map((c: any) => ({ ...c, iconUrl: getIconUrl(c.icon), icon: undefined }))));
+  },
+  sendMailNotice: (target) => sendMailNotice(target),
+});
 
 // What the player editor (systems/playereditor.ts) needs from the socket layer
 // to bring an online player's client, and the clients around them, up to date.

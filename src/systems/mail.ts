@@ -384,6 +384,33 @@ const mail = {
   },
 
   /**
+   * A mail from the game itself, as part of `batch` (the caller names `recipient` in its atomically): no postage,
+   * nothing leaves anyone's bags, and it is let in past INBOX_MAX so a reward is never turned away. For a reward that
+   * did not fit in the bags (systems/achievements). `sender` is a name shown as the sender, not an account. It is stored as
+   * already sent back (returned), so it is never returned to a sender, and one that expires is deleted.
+   */
+  async deliverIn(batch: Batch, recipient: string, letter: { sender: string; subject: string; body: string; items: MailItem[] }, now = Date.now()): Promise<void> {
+    const to = lower(recipient);
+    const box = await pendingIn(batch, to);
+    const sent: Mail = {
+      id: 0, recipient: to, sender: letter.sender, subject: cleaned(letter.subject, false).slice(0, SUBJECT_MAX),
+      body: cleaned(letter.body, true).slice(0, BODY_MAX), items: letter.items.map((item) => ({ name: item.name, quantity: Number(item.quantity) })),
+      coins: noCoins(), sent_at: now, expires_at: now + MAIL_DAYS * DAY_MS, read: false, returned: true,
+    };
+    batch.add({
+      sql: "INSERT INTO mail (recipient, sender, subject, body, items, copper, silver, gold, sent_at, expires_at, is_read, returned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)",
+      values: [to, sent.sender, sent.subject, sent.body, JSON.stringify(sent.items), 0, 0, 0, sent.sent_at, sent.expires_at],
+      mustChange: true,
+    }, (result) => {
+      const id = insertedId(result);
+      if (id === null) box.unknown = true;
+      else sent.id = id;
+    });
+    box.held = [...box.held, sent];
+    box.written = true;
+  },
+
+  /**
    * Takes what is attached to one of a player's mails into their bags and purse: `part` is
    * "all", "coins", or the index of one item. A mail with no text and nothing left is deleted.
    */

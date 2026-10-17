@@ -1076,6 +1076,39 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "GATHERING_EDITOR_UPDATED", data })),
     ] as any[];
   },
+  /** An achievement was just earned (systems/achievements): the earner's popup. */
+  achievementEarned: (data: { id: number; name: string; description: string; icon: string | null; rewardItem: string | null; rewardQuantity: number; rewardMount: string | null; mailed: boolean }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "ACHIEVEMENT_EARNED", data })),
+    ] as any[];
+  },
+  /** Every enabled achievement with the player's progress: their achievements window. */
+  achievements: (data: { achievements: any[] }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "ACHIEVEMENTS", data })),
+    ] as any[];
+  },
+  /** Opens the achievement editor (/achievements), or closes it. */
+  toggleAchievementEditor: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "TOGGLE_ACHIEVEMENT_EDITOR", data: null })),
+    ] as any[];
+  },
+  achievementEditorData: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "ACHIEVEMENT_EDITOR_DATA", data })),
+    ] as any[];
+  },
+  achievementEditorResult: (data: { ok: boolean; errors: string[]; fields?: Record<string, string>; id: number | null; notes: string[]; action?: string; data: any }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "ACHIEVEMENT_EDITOR_RESULT", data })),
+    ] as any[];
+  },
+  achievementEditorUpdated: (data: { by: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "ACHIEVEMENT_EDITOR_UPDATED", data })),
+    ] as any[];
+  },
   toggleLootEditor: () => {
     return [
       packet.encode(JSON.stringify({ type: "TOGGLE_LOOT_EDITOR", data: null })),

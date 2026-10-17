@@ -29,7 +29,8 @@ import { ensureClassSchema } from "../systems/classes.ts";
 import { ensureMailSchema } from "../systems/mail.ts";
 import { ensureMailboxSchema } from "../systems/mailboxeditor.ts";
 import { ensureGatheringSchema } from "../systems/gathering/editor.ts";
-import { ensureBuyPriceColumn, ensureSoulboundColumn } from "../systems/items.ts";
+import { ensureAchievementSchema } from "../systems/achievements/store.ts";
+import { ensureBuyPriceColumn, ensureHomeItemIcon, ensureSoulboundColumn } from "../systems/items.ts";
 import worlds from "../systems/worlds.ts";
 import playerCache from "../services/playermanager.ts";
 import { loadTables, forgetPlayer } from "../services/datacache.ts";
@@ -62,6 +63,7 @@ import { ensureSubscriptionSchema, refreshSubscriptions, subscriptionsReady, ref
 import loot from "../systems/loot";
 import creatures from "../systems/creatures";
 import gathering from "../systems/gathering";
+import achievements from "../systems/achievements";
 import cooldownManager from "../services/cooldownmanager";
 
 const _cert = process.env.TLS_CERT_PATH;
@@ -178,10 +180,14 @@ await ensureMailSchema();
 await ensureMailboxSchema();
 // The gathering areas (/gathering), the same way.
 await ensureGatheringSchema();
+// The achievements (/achievements) and each player's progress, the same way: before the table caches are read.
+await ensureAchievementSchema();
 // items.soulbound, the same way: before the items are read.
 await ensureSoulboundColumn();
 // items.buy_price, the same way.
 await ensureBuyPriceColumn();
+// The home item's icon, when it has none: before the items are read.
+await ensureHomeItemIcon();
 await loadTables();
 await refreshSubscriptions();
 
@@ -723,6 +729,7 @@ listener.emit(Events.START);
 gameLoop.start();
 await creatures.init();
 await gathering.init();
+await achievements.init();
 startAutoPartyLayerSync(sendAnimationTo);
 startAutoLayerCondensation(sendAnimationTo);
 
@@ -1337,6 +1344,18 @@ async function gracefulShutdown(signal: string) {
   } catch (error) {
     log.debug(`Failed to close HTTP servers: ${error}`);
   }
+
+  // Achievement progress is written on the 60 s save tick: write what changed since, so a restart loses none of it
+  // (USER REQUEST 2026-10-17: "flush achievement progress on engine shutdown"). At most ACHIEVEMENT_FLUSH_MS, so a
+  // database that does not answer cannot hold the shutdown.
+  const ACHIEVEMENT_FLUSH_MS = 5_000;
+  let flushTimer: ReturnType<typeof setTimeout> | undefined;
+  const flushed = await Promise.race([
+    achievements.onSave().then(() => true),
+    new Promise<boolean>((resolve) => { flushTimer = setTimeout(() => resolve(false), ACHIEVEMENT_FLUSH_MS); }),
+  ]);
+  clearTimeout(flushTimer);
+  if (!flushed) log.warn(`Achievement progress was not all written within ${ACHIEVEMENT_FLUSH_MS / 1000} s of shutting down.`);
 
   log.info("Shutdown complete");
   process.exit(0);

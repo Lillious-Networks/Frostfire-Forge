@@ -80,6 +80,9 @@ export const Events = {
     QUEST_READY: "onQuestReady",
     QUEST_COMPLETED: "onQuestCompleted",
     QUEST_ABANDONED: "onQuestAbandoned",
+    // Achievements (systems/achievements) count these; plugins may listen too.
+    GATHER_COMPLETED: "onGatherCompleted",
+    COLLECTABLE_ADDED: "onCollectableAdded",
 } as const;
 
 // ── Event payload types ──
@@ -303,6 +306,20 @@ export interface PlayerLootEvent {
     mapName: string;
     x: number;
     y: number;
+}
+
+/** A gather succeeded: the items are in the player's bags (socket/receiver.ts castGather). */
+export interface GatherCompletedEvent {
+    player: any;
+    item: string;
+    quantity: number;
+}
+
+/** Something was added to a player's collectables (systems/collectables.ts), once it is written. */
+export interface CollectableAddedEvent {
+    username: string;
+    type: string;
+    item: string;
 }
 
 export interface PartyChatEvent {

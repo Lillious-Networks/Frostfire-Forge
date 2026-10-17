@@ -67,6 +67,22 @@ export async function ensureBuyPriceColumn(): Promise<boolean> {
   }
 }
 
+/** The icon (on the asset server, icons/home_stone.png) the home item is drawn with when it has none of its own. */
+export const HOME_ITEM_ICON = "home_stone";
+
+/**
+ * Start-time step: the home item made by the setup scripts had no icon before they set one, so a home item with no
+ * icon is given HOME_ITEM_ICON. An icon chosen in the item editor is never replaced. USER REQUEST 2026-10-17: "make
+ * sure the home_stone has the icon home_stone.png". Never throws: when it cannot be set, one warning is logged.
+ */
+export async function ensureHomeItemIcon(): Promise<void> {
+  try {
+    await query("UPDATE items SET icon = ? WHERE teleports_home = 1 AND (icon IS NULL OR icon = '')", [HOME_ITEM_ICON]);
+  } catch (error) {
+    log.warn(`[Items] The home item could not be given the ${HOME_ITEM_ICON} icon: ${error}`);
+  }
+}
+
 /** Adds a whole-number column to items, 0 by default, unless it is there. Whether it was added now. */
 async function ensureItemColumn(name: string): Promise<boolean> {
   const lite = (process.env.DATABASE_ENGINE || "mysql") === "sqlite";

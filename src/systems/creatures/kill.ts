@@ -248,10 +248,13 @@ export async function takeCorpseLoot(
 
   // The items and every share of the money are kept together or not at all.
   let balances: Map<string, Currency>;
+  // The items that were really added: the batch add answers nothing for a name that is not an item.
+  let added: CorpseItem[] = [];
   try {
     balances = await atomically([player.username, ...result.copper.keys()], async (batch) => {
+      added = [];
       for (const item of result.taken) {
-        await inventory.add(player.username, { name: item.itemName, quantity: item.quantity } as any, batch);
+        if (await inventory.add(player.username, { name: item.itemName, quantity: item.quantity } as any, batch)) added.push(item);
       }
       const after = new Map<string, Currency>();
       for (const [name, copper] of result.copper) {
@@ -273,6 +276,10 @@ export async function takeCorpseLoot(
       send(recipient.wt, packetManager.currency(newBalance));
       send(recipient.wt, packetManager.notify({ message: `You receive loot: ${formatMoney(copper)}` }));
     }
+  }
+  // The same hook a pickup from the ground has (systems/loot.ts), so what counts loot counts this too.
+  for (const item of added) {
+    listener.emit(Events.PLAYER_LOOT_RETRIEVED, { player, itemName: item.itemName, quantity: item.quantity, mapName: creature!.map, x: creature!.x, y: creature!.y } as any);
   }
   if (result.empty) {
     send(player.wt, packetManager.creatureLootable({ id: creature!.id, lootable: false }));
