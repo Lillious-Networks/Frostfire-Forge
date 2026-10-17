@@ -8,7 +8,7 @@ import assetCache from "../services/assetCache";
 import log from "../modules/logger";
 import { refreshAuthItems } from "../socket/authentication_pool";
 import { listIcons, type SpriteSheetOption } from "./creatures/editor";
-import itemTable from "./items";
+import itemTable, { BUY_PRICE_MARKUP } from "./items";
 
 /** The most copper a vendor pays for one item. */
 export const SELL_PRICE_MAX = 2147483647;
@@ -131,10 +131,14 @@ export function normalizeItem(input: any): Item {
     attack_speed_ms: num(input?.attack_speed_ms),
     // What a vendor pays for one, in copper: one unless the item says otherwise. Nothing (0) is an item vendors do not buy.
     sell_price: num(input?.sell_price) ?? 1,
+    // What a vendor charges for one, in copper, where the NPC sets no price of its own: when none is sent, a few times
+    // what a vendor pays for it.
+    buy_price: num(input?.buy_price) ?? (num(input?.sell_price) ?? 1) * BUY_PRICE_MARKUP,
     restore_health: restores ? num(input?.restore_health) ?? 0 : 0,
     restore_stamina: restores ? num(input?.restore_stamina) ?? 0 : 0,
     no_combat: consumable && !!input?.no_combat,
     teleports_home,
+    soulbound: input?.soulbound === true || Number(input?.soulbound) === 1,
   };
 }
 
@@ -161,9 +165,14 @@ export function validateItem(input: any, existingNames: Set<string>, originalNam
   if (item.level_requirement !== null && item.level_requirement < 1) errors.push("Level requirement must be at least 1.");
   if (item.bag_slots !== null && item.bag_slots < 0) errors.push("Bag slots cannot be negative.");
   const price = item.sell_price ?? 1;
-  if (price < 0) errors.push("Vendor sell price cannot be negative.");
+  if (price < 0) errors.push("Sell price cannot be negative.");
   // The most its column holds: a little under 214,749 gold.
-  if (price > SELL_PRICE_MAX) errors.push("Vendor sell price is too high.");
+  if (price > SELL_PRICE_MAX) errors.push("Sell price is too high.");
+  const buy = item.buy_price ?? 0;
+  if (buy < 0) errors.push("Buy price cannot be negative.");
+  if (buy > SELL_PRICE_MAX) errors.push("Buy price is too high.");
+  // Bought for less than a vendor pays, it could be bought and sold back for more. A quest item is never bought.
+  if (item.type !== "quest" && buy >= 0 && buy < price) errors.push("Buy price cannot be below the sell price.");
 
   if (item.type === "consumable") {
     const restores = [item.restore_health ?? 0, item.restore_stamina ?? 0];
@@ -191,16 +200,17 @@ const COLUMNS = [
   "name", "quality", "type", "description", "icon", "stat_armor", "stat_damage",
   "stat_critical_chance", "stat_critical_damage", "stat_health", "stat_stamina",
   "stat_avoidance", "level_requirement", "equipable", "equipment_slot",
-  "damage_min", "damage_max", "attack_speed_ms", "sell_price",
-  "restore_health", "restore_stamina", "no_combat", "teleports_home",
+  "damage_min", "damage_max", "attack_speed_ms", "sell_price", "buy_price",
+  "restore_health", "restore_stamina", "no_combat", "teleports_home", "soulbound",
 ];
 
 const values = (item: Item) => [
   item.name, item.quality, item.type, item.description, item.icon, item.stat_armor, item.stat_damage,
   item.stat_critical_chance, item.stat_critical_damage, item.stat_health, item.stat_stamina,
   item.stat_avoidance, item.level_requirement, item.equipable ? 1 : 0, item.equipment_slot,
-  item.damage_min, item.damage_max, item.attack_speed_ms, item.sell_price ?? 1,
+  item.damage_min, item.damage_max, item.attack_speed_ms, item.sell_price ?? 1, item.buy_price ?? 0,
   item.restore_health ?? 0, item.restore_stamina ?? 0, item.no_combat ? 1 : 0, item.teleports_home ? 1 : 0,
+  item.soulbound ? 1 : 0,
 ];
 
 /**

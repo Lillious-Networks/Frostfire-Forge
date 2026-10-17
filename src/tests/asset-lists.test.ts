@@ -183,13 +183,13 @@ const GUARD = {
   id: 5, last_updated: "2026-01-01 09:00:00", map: "overworld", name: "Guard", position: { x: 120, y: 80, direction: "left" }, hidden: false, script: null,
   dialog: "Halt.", gossip: null, particles: "ember", quest_giver: true, sprite_type: "animated", sprite_body: "guard", sprite_head: null, sprite_helmet: null,
   sprite_shoulderguards: null, sprite_neck: null, sprite_hands: null, sprite_chest: null, sprite_feet: null, sprite_legs: null, sprite_weapon: null,
-  vendor_items: [{ item: "Bread", price: 25 }, { item: "Rope", price: 0 }], innkeeper: true,
+  vendor_items: [{ item: "Bread", price: 25 }, { item: "Rope", price: 0 }], innkeeper: true, sound_npc: false, sound: null, sound_radius: 0,
 };
 const LURKER = {
   id: 9, last_updated: "2026-01-02 09:00:00", map: "cave", name: null, position: { x: 10, y: 20, direction: "down" }, hidden: true, script: null,
   dialog: null, gossip: null, particles: "smoke,ember", quest_giver: false, sprite_type: "none", sprite_body: null, sprite_head: null, sprite_helmet: null,
   sprite_shoulderguards: null, sprite_neck: null, sprite_hands: null, sprite_chest: null, sprite_feet: null, sprite_legs: null, sprite_weapon: null,
-  vendor_items: [], innkeeper: false,
+  vendor_items: [], innkeeper: false, sound_npc: false, sound: null, sound_radius: 0,
 };
 /** A particle emitter a map places: never a database row. */
 const TORCH = { ...LURKER, id: -1, map: "overworld", particles: "ember", hidden: false } as unknown as Npc;
@@ -197,7 +197,7 @@ const npc = (over: Row = {}) => ({
   id: null, last_updated: null, map: "overworld", name: "Smith", position: { x: 300, y: 40, direction: "right" }, hidden: false, script: null, dialog: "Hot.",
   gossip: null, particles: "ember,smoke", quest_giver: false, sprite_type: "animated", sprite_body: "smith", sprite_head: null, sprite_helmet: null,
   sprite_shoulderguards: null, sprite_neck: null, sprite_hands: null, sprite_chest: null, sprite_feet: null, sprite_legs: null, sprite_weapon: null,
-  vendor_items: [], innkeeper: false, ...over,
+  vendor_items: [], innkeeper: false, sound_npc: false, sound: null, sound_radius: 0, ...over,
 } as unknown as Npc);
 /** An NPC as held, but for when it was written. */
 const timeless = (list: any[]) => list.map((entry) => ({ ...entry, last_updated: null }));
@@ -481,9 +481,10 @@ describe("npcs", () => {
   });
 
   test("what a vendor stocks is written as text and held as a list, and an NPC that stocks nothing has none written", async () => {
-    await npcs.add(npc({ vendor_items: [{ item: "Bread", price: 30 }, { item: "Nails", price: 2 }] }));
-    expect(db.npcs.at(-1)!.vendor_items).toBe('[{"item":"Bread","price":30},{"item":"Nails","price":2}]');
-    expect((await npcs.list()).at(-1)!.vendor_items).toEqual([{ item: "Bread", price: 30 }, { item: "Nails", price: 2 }]);
+    // Nails have no price here: they sell at the item's own buy price.
+    await npcs.add(npc({ vendor_items: [{ item: "Bread", price: 30 }, { item: "Nails", price: null }] }));
+    expect(db.npcs.at(-1)!.vendor_items).toBe('[{"item":"Bread","price":30},{"item":"Nails","price":null}]');
+    expect((await npcs.list()).at(-1)!.vendor_items).toEqual([{ item: "Bread", price: 30 }, { item: "Nails", price: null }]);
 
     await npcs.update({ ...GUARD, vendor_items: [] } as unknown as Npc);
     expect(db.npcs[0].vendor_items).toBeNull();
@@ -508,6 +509,24 @@ describe("npcs", () => {
     expect(db.npcs[1].innkeeper).toBe(1);
     expect((await npcs.list())[1]!.innkeeper).toBe(true);
     expect(reads()).toEqual([]);
+  });
+
+  test("a sound NPC keeps its audio and radius, the radius whole and within the limit; any other NPC keeps neither", async () => {
+    await npcs.add(npc({ sound_npc: true, sound: "Waterfall.wav", sound_radius: 300.6 }));
+    expect(db.npcs.at(-1)).toMatchObject({ sound_npc: 1, sound: "Waterfall.wav", sound_radius: 301 });
+    expect((await npcs.list()).at(-1)).toMatchObject({ sound_npc: true, sound: "Waterfall.wav", sound_radius: 301 });
+
+    await npcs.update({ ...GUARD, sound_npc: true, sound: "Wind.wav", sound_radius: 99999 } as unknown as Npc);
+    expect((await npcs.list())[0]).toMatchObject({ sound_npc: true, sound: "Wind.wav", sound_radius: 2048 });
+
+    await npcs.update({ ...LURKER, sound_npc: false, sound: "Wind.wav", sound_radius: 500 } as unknown as Npc);
+    expect(db.npcs[1]).toMatchObject({ sound_npc: 0, sound: null, sound_radius: 0 });
+    expect(reads()).toEqual([]);
+
+    const { npcForClient } = await import("../systems/npcStreaming");
+    const [guard, lurker] = await npcs.list();
+    expect(await npcForClient(guard!)).toMatchObject({ sound_npc: true, sound: "Wind.wav", sound_radius: 2048 });
+    expect(await npcForClient(lurker!)).toMatchObject({ sound_npc: false, sound: null, sound_radius: 0 });
   });
 
   test("a player's game is told which NPCs keep an inn, so they can be talked to", async () => {

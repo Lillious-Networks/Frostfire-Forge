@@ -9,7 +9,7 @@
 import assetCache from "../services/assetCache";
 import { atomically } from "../services/batch";
 import log from "../modules/logger";
-import { isKept } from "./consumables";
+import { isKept, isSoulbound } from "./consumables";
 import currency, { CURRENCY_LIMITS, coinsWorth } from "./currency";
 import inventory from "./inventory";
 import { inUse } from "./spare";
@@ -129,9 +129,18 @@ const AMOUNT = "That is not an amount.";
 const wholeUpTo = (value: unknown, most: number) => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= most;
 
 /** An offer as a player sent it, checked against what they hold: the offer to keep, or why it is refused. */
-async function readOffer(username: string, raw: any): Promise<TradeGave | string> {
+function readOffer(username: string, raw: any): Promise<TradeGave | string> {
+  return readGift(username, raw, { most: TRADE_ITEMS_MAX, holder: "A trade", verb: "traded" });
+}
+
+/**
+ * Items and coins a player means to hand over (a trade offer, a mail's attachments), checked
+ * against what they hold: what they give, or why it is refused. `most` different items at most,
+ * which `holder` holds ("A trade"); a refusal says the item cannot be `verb` ("traded").
+ */
+export async function readGift(username: string, raw: any, { most, holder, verb }: { most: number; holder: string; verb: string }): Promise<TradeGave | string> {
   if (!raw || typeof raw !== "object" || !Array.isArray(raw.items) || (raw.coins != null && typeof raw.coins !== "object")) return "That is not an offer.";
-  if (raw.items.length > TRADE_ITEMS_MAX) return `A trade holds ${TRADE_ITEMS_MAX} different items at most.`;
+  if (raw.items.length > most) return `${holder} holds ${most} different items at most.`;
 
   const definitions = ((await assetCache.get("items")) as Item[]) || [];
   const items: TradeGave["items"] = [];
@@ -146,11 +155,12 @@ async function readOffer(username: string, raw: any): Promise<TradeGave | string
 
     const held = definition ? (await inventory.find(username, { name, quantity: 0 }))?.[0] : undefined;
     if (!definition || !held || Number(held.quantity) < quantity) return `You do not have ${quantity} ${name}.`;
-    if (definition.type === "quest") return `${name} is a quest item and cannot be traded.`;
-    if (isKept(definition)) return `${name} cannot be traded.`;
+    if (definition.type === "quest") return `${name} is a quest item and cannot be ${verb}.`;
+    if (isKept(definition)) return `${name} cannot be ${verb}.`;
+    if (isSoulbound(definition)) return `${name} is soulbound and cannot be ${verb}.`;
     const spare = Number(held.quantity) - (await inUse(username, name, Number(held.equipped) === 1));
-    if (spare <= 0) return `${name} is in use and cannot be traded.`;
-    if (spare < quantity) return `Only ${spare} ${name} can be traded: the rest is in use.`;
+    if (spare <= 0) return `${name} is in use and cannot be ${verb}.`;
+    if (spare < quantity) return `Only ${spare} ${name} can be ${verb}: the rest is in use.`;
     items.push({ name, quantity });
   }
 

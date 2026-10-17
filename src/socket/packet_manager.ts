@@ -753,6 +753,13 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "LIGHTNING", data })),
     ] as any[];
   },
+  // The tornadoes on a map now (systems/tornadoes.ts): sent to its players about five times a second while there are
+  // any, and once with none when the last has gone.
+  tornadoes: (data: { map: string; tornadoes: Array<{ id: string; x: number; y: number }> }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "TORNADOES", data })),
+    ] as any[];
+  },
   collisionDebug: (data: { tileX: number; tileY: number }) => {
     return [
       packet.encode(JSON.stringify({ type: "COLLISION_DEBUG", data })),
@@ -773,7 +780,7 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "TOGGLE_NPC_EDITOR", data: null })),
     ] as any[];
   },
-  npcList: (npcs: any[], quests?: Array<{ id: number; name: string }>, assets?: { spriteSheets: Record<string, Array<{ name: string; image: string | null }>>; icons: Array<{ name: string; image: string | null }>; items?: Array<{ name: string; icon: string | null; quality: string; sell_price: number }> }) => {
+  npcList: (npcs: any[], quests?: Array<{ id: number; name: string }>, assets?: { spriteSheets: Record<string, Array<{ name: string; image: string | null }>>; icons: Array<{ name: string; image: string | null }>; items?: Array<{ name: string; icon: string | null; quality: string; sell_price: number; buy_price: number }> }) => {
     return [
       packet.encode(JSON.stringify({ type: "NPC_LIST", data: npcs, quests: quests || [], spriteSheets: assets?.spriteSheets || {}, icons: assets?.icons || [], items: assets?.items || [] })),
     ] as any[];
@@ -979,6 +986,48 @@ export const packetManager = {
   lootChestContents: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "LOOT_CHEST_CONTENTS", data })),
+    ] as any[];
+  },
+  /** The mailboxes of the map the player is on (map px, the middle of each one's foot), and the picture they are drawn with. Sent with the map's markers. */
+  mailboxes: (data: { map: string; mailboxes: Array<{ id: string; x: number; y: number }>; iconUrl: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "MAILBOXES", data })),
+    ] as any[];
+  },
+  /** A player's mail, the newest first: this opens their mail window, or brings it up to date. */
+  mailInbox: (data: { mail: any[]; postage: number; itemsMax: number; subjectMax: number; bodyMax: number }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "MAIL_INBOX", data })),
+    ] as any[];
+  },
+  /** What became of a mail the player sent. */
+  mailSent: (data: { ok: boolean; message: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "MAIL_SENT", data })),
+    ] as any[];
+  },
+  /** How many of the player's mails are unread. */
+  mailNotice: (data: { unread: number }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "MAIL_NOTICE", data })),
+    ] as any[];
+  },
+  /** The player's mail window is closed: they are no longer at a mailbox. */
+  mailClosed: (data: { message: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "MAIL_CLOSED", data })),
+    ] as any[];
+  },
+  /** Opens the mailbox editor (/mailbox), or closes it. */
+  toggleMailboxEditor: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "TOGGLE_MAILBOX_EDITOR", data: null })),
+    ] as any[];
+  },
+  /** The mailboxes of the map the editor is on; `placed`: by hand, not in front of the inns. `message`: why a change was refused. */
+  mailboxEditorData: (data: { map: string; mailboxes: Array<{ id: string; x: number; y: number }>; placed: boolean; max: number; message?: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "MAILBOX_EDITOR_DATA", data })),
     ] as any[];
   },
   toggleLootEditor: () => {

@@ -164,10 +164,12 @@ const createItemsTable = async () => {
         damage_max INT DEFAULT NULL,
         attack_speed_ms INT DEFAULT NULL,
         sell_price INT NOT NULL DEFAULT 1,
+        buy_price INT NOT NULL DEFAULT 0,
         restore_health INT NOT NULL DEFAULT 0,
         restore_stamina INT NOT NULL DEFAULT 0,
         no_combat INT NOT NULL DEFAULT 0,
-        teleports_home INT NOT NULL DEFAULT 0
+        teleports_home INT NOT NULL DEFAULT 0,
+        soulbound INT NOT NULL DEFAULT 0
     )
   `;
   await query(sql);
@@ -208,6 +210,7 @@ const createClientConfig = async () => {
         music_volume INT NOT NULL DEFAULT 100,
         effects_volume INT NOT NULL DEFAULT 100,
         ambience_volume INT NOT NULL DEFAULT 100,
+        weather_volume INT NOT NULL DEFAULT 100,
         muted INT NOT NULL DEFAULT 0,
         hotbar_config JSON DEFAULT NULL,
         inventory_config JSON DEFAULT NULL
@@ -450,6 +453,8 @@ const createPermissionTypesTable = async () => {
   await query(`INSERT IGNORE INTO permission_types (name) VALUES ('tools.class_editor')`);
   // Choosing what a player who has not subscribed may not do.
   await query(`INSERT IGNORE INTO permission_types (name) VALUES ('admin.subscription')`);
+  // The mailbox editor (/mailbox).
+  await query(`INSERT IGNORE INTO permission_types (name) VALUES ('tools.mailbox_editor')`);
 };
 
 /** Quest-giver flag added to npcs after its first release. */
@@ -502,7 +507,10 @@ const createNpcTable = async () => {
       sprite_legs VARCHAR(255) DEFAULT NULL,
       sprite_weapon VARCHAR(255) DEFAULT NULL,
       vendor_items TEXT,
-      innkeeper INT NOT NULL DEFAULT 0
+      innkeeper INT NOT NULL DEFAULT 0,
+      sound_npc INT NOT NULL DEFAULT 0,
+      sound VARCHAR(255) DEFAULT NULL,
+      sound_radius INT NOT NULL DEFAULT 0
     )
   `;
   await query(sql);
@@ -590,10 +598,14 @@ const createDefaultWeather = async () => {
     log.debug("Default weather 'darkness' already exists - skipping");
   }
 
-  // "rainy" and "snowy" are drawn by name, as much as their precipitation says.
+  // "rainy" and "snowy" are drawn by name, as much as their precipitation says; "sandstorm" only in the desert
+  // zones, as harsh as its wind speed says.
   const more: Array<[string, string]> = [
     ["rainy", "('rainy', 0, 'left', 6, 85, 58, 50)"],
     ["snowy", "('snowy', 0, 'left', 4, 80, 25, 80)"],
+    ["sandstorm", "('sandstorm', 0, 'right', 35, 10, 100, 0)"],
+    // "tornado": drawn as a thunderstorm, with tornadoes (systems/tornadoes.ts)
+    ["tornado", "('tornado', 0.85, 'right', 30, 85, 68, 75)"],
   ];
   for (const [name, values] of more) {
     const found = await query(`SELECT COUNT(*) as count FROM weather WHERE name = '${name}'`) as Array<{ count: number }>;
@@ -767,6 +779,31 @@ const createModerationTables = async () => {
       INDEX idx_reports_status (status)
     )
   `);
+};
+
+/** Mail between players: what is attached (items as JSON, and coins) waits until it is taken. Times are milliseconds since the epoch. */
+const createMailTable = async () => {
+  log.info("Creating mail table...");
+  await query(`
+    CREATE TABLE IF NOT EXISTS mail (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      recipient VARCHAR(255) NOT NULL,
+      sender VARCHAR(255) NOT NULL,
+      subject VARCHAR(64) NOT NULL,
+      body TEXT NOT NULL,
+      items TEXT NOT NULL,
+      copper INT NOT NULL DEFAULT 0,
+      silver INT NOT NULL DEFAULT 0,
+      gold INT NOT NULL DEFAULT 0,
+      sent_at BIGINT NOT NULL,
+      expires_at BIGINT NOT NULL,
+      is_read INT NOT NULL DEFAULT 0,
+      returned INT NOT NULL DEFAULT 0,
+      INDEX idx_mail_recipient (recipient)
+    )
+  `);
+  // The mailboxes placed by hand (/mailbox): a map's spots as a JSON list. A map without a row has them in front of its inns.
+  await query(`CREATE TABLE IF NOT EXISTS mailbox_spots (map VARCHAR(191) NOT NULL PRIMARY KEY, spots TEXT NOT NULL)`);
 };
 
 /** Every trade two players completed: what each gave (JSON: items and coins). Times are milliseconds since the epoch. */
@@ -988,13 +1025,33 @@ const addVendorColumns = async () => {
  * Consumables and inns, added after the first release: what using an item restores, whether it can
  * be used in combat, which item takes its player home, and which NPCs keep an inn.
  */
+/**
+ * What a vendor charges for an item where the NPC sets no price of its own, added after vendors:
+ * set at four times what vendors pay for it, as the NPC editor priced a newly stocked item.
+ */
+const addBuyPriceColumn = async () => {
+  const exists = (await query(
+    `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'items' AND COLUMN_NAME = 'buy_price'`,
+    [database]
+  )) as any[];
+  if (exists[0] && Number(exists[0].count) > 0) return;
+  await query("ALTER TABLE items ADD COLUMN buy_price INT NOT NULL DEFAULT 0");
+  await query("UPDATE items SET buy_price = sell_price * 4");
+};
+
 const addConsumableColumns = async () => {
   const columns = [
     { table: "items", name: "restore_health", type: "INT NOT NULL DEFAULT 0" },
     { table: "items", name: "restore_stamina", type: "INT NOT NULL DEFAULT 0" },
     { table: "items", name: "no_combat", type: "INT NOT NULL DEFAULT 0" },
     { table: "items", name: "teleports_home", type: "INT NOT NULL DEFAULT 0" },
+    // Soulbound items cannot be traded or mailed. Added with mail.
+    { table: "items", name: "soulbound", type: "INT NOT NULL DEFAULT 0" },
     { table: "npcs", name: "innkeeper", type: "INT NOT NULL DEFAULT 0" },
+    // Sound NPCs: an audio file played to players within sound_radius pixels. Added with sound NPCs.
+    { table: "npcs", name: "sound_npc", type: "INT NOT NULL DEFAULT 0" },
+    { table: "npcs", name: "sound", type: "VARCHAR(255) DEFAULT NULL" },
+    { table: "npcs", name: "sound_radius", type: "INT NOT NULL DEFAULT 0" },
   ];
   for (const col of columns) {
     const exists = (await query(
@@ -1385,6 +1442,7 @@ const setupDatabase = async () => {
   await createFriendsListTable();
   await createModerationTables();
   await createTradeLogTable();
+  await createMailTable();
   await createPartiesTable();
   await createCurrencyTable();
   await createGuildsTable();
@@ -1402,6 +1460,7 @@ const setupDatabase = async () => {
   await addItemWeaponColumns();
   await addVendorColumns();
   await addConsumableColumns();
+  await addBuyPriceColumn();
   await createPlayerHomeTable();
   await insertHomeItem();
   await insertDemoQuests();

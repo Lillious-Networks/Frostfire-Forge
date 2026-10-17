@@ -58,6 +58,11 @@ export function teleportsHome(item: Pick<Item, "type" | "teleports_home"> | null
   return !!item && item.type === "consumable" && !!item.teleports_home;
 }
 
+/** Whether an item is soulbound: it cannot be traded or mailed. The table holds 1 or 0. */
+export function isSoulbound(item: Pick<Item, "soulbound"> | null | undefined): boolean {
+  return !!item && (item.soulbound === true || Number(item.soulbound) === 1);
+}
+
 /** Whether an item stays with its player for good: it cannot be deleted, traded or sold. The home item is. */
 export function isKept(item: Pick<Item, "type" | "teleports_home"> | null | undefined): boolean {
   return teleportsHome(item);

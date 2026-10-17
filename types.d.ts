@@ -264,6 +264,8 @@ declare interface Item {
   attack_speed_ms: Nullable<number>;
   /** What a vendor pays for one, in copper. Nothing set is 1; 0 is an item vendors do not buy. */
   sell_price?: Nullable<number>;
+  /** What a vendor charges for one, in copper, where the NPC sets no price of its own. */
+  buy_price?: Nullable<number>;
   /** Consumables: the health and stamina using one gives back, at once. */
   restore_health?: Nullable<number>;
   restore_stamina?: Nullable<number>;
@@ -271,12 +273,15 @@ declare interface Item {
   no_combat?: boolean;
   /** The home item: a consumable that is never used up and takes its player to their home inn. One item is it. */
   teleports_home?: boolean;
+  /** Soulbound: stays with whoever has it. It cannot be traded or mailed (it can still be sold or deleted). */
+  soulbound?: boolean;
 }
 
 /** One thing a vendor stocks: the item's name, and what one costs to buy there, in copper. */
 declare interface VendorItem {
   item: string;
-  price: number;
+  /** What one costs at this NPC, in copper. Null: the item's own buy price. */
+  price: number | null;
 }
 
 declare interface Equipment {
@@ -327,6 +332,12 @@ declare interface Npc {
   vendor_items?: Nullable<VendorItem[]>;
   /** Whether players can make this NPC's inn their home. */
   innkeeper?: boolean;
+  /** A sound NPC: draws nothing and plays `sound` to players within `sound_radius` pixels, louder toward its middle. */
+  sound_npc?: boolean;
+  /** The audio file it plays (a name in the asset server's audio folder). */
+  sound?: Nullable<string>;
+  /** How far it is heard, in pixels. */
+  sound_radius?: number;
   sprite_type: 'none' | 'static' | 'animated';
   sprite_body: Nullable<string>;
   sprite_head: Nullable<string>;
@@ -571,6 +582,7 @@ declare interface PlayerData {
     music_volume: number;
     effects_volume: number;
     ambience_volume: number;
+    weather_volume: number;
     muted: boolean;
     hotbar_config: any[];
   }>;

@@ -119,6 +119,10 @@ export async function npcForClient(npc: Npc): Promise<any> {
     vendor: Array.isArray(npc.vendor_items) && npc.vendor_items.length > 0,
     // Whether it keeps an inn: a reason to talk to it too.
     innkeeper: npc.innkeeper === true,
+    // A sound NPC: draws nothing, and plays its sound to players within its radius.
+    sound_npc: npc.sound_npc === true,
+    sound: npc.sound_npc ? npc.sound ?? null : null,
+    sound_radius: npc.sound_npc ? npc.sound_radius ?? 0 : 0,
   };
 }
 

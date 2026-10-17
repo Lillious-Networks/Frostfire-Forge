@@ -6,14 +6,14 @@
  * taken at startup and every few minutes and held here, in memory, the same
  * for every world. The client draws by a weather's name, so it is never told
  * "weather_api": it is told the one of the names it draws (clear, rainy,
- * snowy, thunderstorm) that the last reading looks like.
+ * snowy, thunderstorm, sandstorm) that the last reading looks like.
  */
 import log from "../modules/logger";
 
 export const WEATHER_API = "weather_api";
 
 /** What the client is told a reading looks like: weathers it draws by name. */
-export type Look = "clear" | "rainy" | "snowy" | "thunderstorm";
+export type Look = "clear" | "rainy" | "snowy" | "thunderstorm" | "sandstorm";
 
 const ENDPOINT = "https://api.openweathermap.org/data/2.5/weather";
 /** OpenWeatherMap renews a place's reading about every ten minutes. */
@@ -26,6 +26,16 @@ const TIMEOUT_MS = 10_000;
 const SNOW_WEIGHT = 3;
 /** Wind slower than this (mph) has no direction worth showing. */
 const CALM = 1;
+/**
+ * USER REQUEST 2026-10-16 ("if it's windy with the weather_api, a sandstorm should occur at different levels of
+ * harshness"): a dry reading with wind this fast (mph) or more looks like a sandstorm, as do the sand and dust
+ * conditions (731 sand and dust whirls, 751 sand, 761 dust) at any wind. The client draws it only in the desert zones
+ * (clear elsewhere), harsher the faster the wind. Then ("Any wind detected with weather_api in a desert biome should
+ * trigger some sandstorm effects to a degree"): any wind that blows at all (CALM or more) is enough, a light one
+ * drawn as little more than a few grains.
+ */
+export const SANDSTORM_WIND = CALM;
+const SAND_CONDITIONS = [731, 751, 761];
 
 /** The weather until the first reading, and with no key or place to read: a still, clear day. */
 const STILL: WeatherData = { name: WEATHER_API, temperature: 68, humidity: 30, wind_speed: 0, wind_direction: "none", precipitation: 0, ambience: 0 };
@@ -78,13 +88,14 @@ export function readingToWeather(body: any): { row: WeatherData; look: Look; utc
   const shift = body?.timezone;
   const utcOffset = typeof shift === "number" && Number.isFinite(shift) && Math.abs(shift) <= 14 * 3600 ? Math.round(shift) : null;
   const id = finite(body?.weather?.[0]?.id, 800);
-  const look = lookOfCondition(id);
   const speed = Math.max(0, finite(body?.wind?.speed, 0));
+  const dry = lookOfCondition(id);
+  const look: Look = dry === "clear" && (speed >= SANDSTORM_WIND || SAND_CONDITIONS.includes(id)) ? "sandstorm" : dry;
   const amount = Math.max(0, finite(body?.rain?.["1h"], 0)) + Math.max(0, finite(body?.snow?.["1h"], 0)) * SNOW_WEIGHT;
-  const precipitation = look === "clear" ? 0 : fallOf(amount > 0 ? amount : null, id);
+  const precipitation = look === "clear" || look === "sandstorm" ? 0 : fallOf(amount > 0 ? amount : null, id);
   const clouds = clamp(finite(body?.clouds?.all, 0), 0, 100) / 100;
   // The sky darkens with what falls, most in a thunderstorm; dry, only as far as its clouds.
-  const ambience = look === "thunderstorm" ? 0.8 : look === "clear" ? clouds * 0.3 : 0.3 + precipitation / 100 * 0.3;
+  const ambience = look === "thunderstorm" ? 0.8 : look === "clear" || look === "sandstorm" ? clouds * 0.3 : 0.3 + precipitation / 100 * 0.3;
   return {
     look,
     utcOffset,

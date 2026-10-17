@@ -526,6 +526,18 @@ describe("what a map marks on the minimap", () => {
     expect(caveMarkers("overworld", { a: warp("Warp_1", "underworld", 0, 0) }, outdoors)).toEqual([{ x: 32, y: 0 }]);
   });
 
+  // USER REQUEST 2026-10-16: the underworld is cave systems on one map; a warp from one into another is a cave too
+  test("on a map of cave systems, a way from one into another is a cave, a way within one is not", () => {
+    const layout = { sections: [{ x: 0, y: 0, width: 100, height: 100 }, { x: 200, y: 0, width: 100, height: 100 }], tileWidth: 16, tileHeight: 16 };
+    const across = { ...warp("Warp_3", "underworld", 160, 320, 64, 64), x: 3300, y: 400 }; // into the second system
+    const within = { ...warp("Warp_4", "underworld", 480, 640, 64, 64), x: 800, y: 800 }; // elsewhere in the first
+    const back = { ...warp("Warp_5", "underworld", 3300, 400, 64, 64), x: 192, y: 352 }; // from the second, back
+    expect(caveMarkers("underworld", [across, within, back], outdoors, layout)).toEqual([{ x: 192, y: 320 }, { x: 3332, y: 400 }]);
+    // with no cave systems said, the same map is never a cave (the rule above)
+    expect(caveMarkers("underworld", [across], outdoors)).toEqual([]);
+    expect(caveMarkers("underworld", [across], outdoors, { sections: [], tileWidth: 16, tileHeight: 16 })).toEqual([]);
+  });
+
   test("a house is a door from open country into a map that is indoors: marked once, at the middle of the door's top edge", () => {
     const warps = [
       warp("House_1", "house_12_58", 1000, 2000, 32, 32), warp("House_2", "house_30_10.json", 3000, 4000, 32, 32),

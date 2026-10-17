@@ -29,6 +29,69 @@ async function write(sql: string, values: any[]): Promise<any> {
   }
 }
 
+/**
+ * Start-time safety step: the setup scripts add items.soulbound, but a database that is already
+ * live may not have had its setup run before this version starts, and the item editor writes the
+ * column. Added here if it is missing. It never throws: when it cannot be added, one warning is
+ * logged and no item reads as soulbound.
+ */
+export async function ensureSoulboundColumn(): Promise<boolean> {
+  try {
+    await ensureItemColumn("soulbound");
+    return true;
+  } catch (error) {
+    log.warn(`[Items] The soulbound column could not be added to items, so no item is soulbound: ${error}`);
+    return false;
+  }
+}
+
+/** What a newly priced item costs at a vendor, as a multiple of what vendors pay for it: as the NPC editor priced a newly stocked item. */
+export const BUY_PRICE_MARKUP = 4;
+
+/**
+ * The same for items.buy_price, what a vendor charges for an item where the NPC sets no price of
+ * its own. Added after vendors were: when it is added here, each item's is set at BUY_PRICE_MARKUP
+ * times what vendors pay for it. The prices NPCs already had stay theirs, so nothing a player pays
+ * changes. When it cannot be added, one warning is logged and vendors charge what their NPC says.
+ */
+export async function ensureBuyPriceColumn(): Promise<boolean> {
+  try {
+    if (await ensureItemColumn("buy_price")) {
+      await query(`UPDATE items SET buy_price = sell_price * ${BUY_PRICE_MARKUP}`);
+      log.info(`[Items] Added items.buy_price, set at ${BUY_PRICE_MARKUP} times each item's sell price.`);
+    }
+    return true;
+  } catch (error) {
+    log.warn(`[Items] The buy_price column could not be added to items, so vendors charge only what their NPC says: ${error}`);
+    return false;
+  }
+}
+
+/** Adds a whole-number column to items, 0 by default, unless it is there. Whether it was added now. */
+async function ensureItemColumn(name: string): Promise<boolean> {
+  const lite = (process.env.DATABASE_ENGINE || "mysql") === "sqlite";
+  const has = async () => {
+    if (lite) {
+      const rows = (await query(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'items'`)) as any[];
+      return new RegExp(`\\b${name}\\b`).test(String(rows?.[0]?.sql || ""));
+    }
+    const rows = (await query(
+      `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'items' AND COLUMN_NAME = ?`,
+      [name]
+    )) as any[];
+    return Number(rows?.[0]?.count) > 0;
+  };
+  if (await has()) return false;
+  try {
+    await query(`ALTER TABLE items ADD COLUMN ${name} ${lite ? "INTEGER" : "INT"} NOT NULL DEFAULT 0`);
+    return true;
+  } catch (error) {
+    // another realm starting at the same moment may have added it first
+    if (await has()) return false;
+    throw error;
+  }
+}
+
 const items = {
   async add(item: Item) {
     if (!item?.name || !item?.quality || !item?.description || !item?.type || !item?.level_requirement || !item?.equipable) return;

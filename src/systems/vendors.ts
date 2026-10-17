@@ -1,10 +1,11 @@
 // Buying from and selling to an NPC.
 //
-// An NPC with something in stock is a vendor. What it stocks, and what each
-// thing costs there, is the NPC's own (`vendor_items`, set in the NPC editor);
-// what a vendor pays for an item is the item's (`sell_price`, set in the item
-// editor). Stock never runs out. Every deal is one batch: the coins and the
-// items are written together, or neither is.
+// An NPC with something in stock is a vendor. What it stocks is the NPC's own
+// (`vendor_items`, set in the NPC editor). What a vendor charges for an item is
+// the item's buy price (`buy_price`, set in the item editor), unless the NPC
+// sets a price of its own for it; what a vendor pays for an item is the item's
+// sell price (`sell_price`). Stock never runs out. Every deal is one batch: the
+// coins and the items are written together, or neither is.
 //
 // What a player sold can be bought back for what they were paid, from a short
 // list kept here in memory until they leave.
@@ -63,13 +64,20 @@ export function sellPriceOf(item: Pick<Item, "sell_price"> | null | undefined): 
   return Math.max(0, Math.trunc(Number(price)));
 }
 
+/** What a vendor charges for one of an item where the NPC sets no price of its own, in copper: 0 when the item says nothing. */
+export function buyPriceOf(item: Pick<Item, "buy_price"> | null | undefined): number {
+  const price = Number(item?.buy_price);
+  return Number.isFinite(price) ? Math.max(0, Math.trunc(price)) : 0;
+}
+
 /**
- * What one of an item costs at a vendor: the price set there, and never less than a vendor pays
- * for the item. Sold for less, it could be bought and sold back for more, over and over: coins
- * from nowhere. A quest item is never bought, so it can cost anything, or nothing.
+ * What one of an item costs at a vendor: the NPC's own price for it, or else the item's buy price,
+ * and never less than a vendor pays for the item. Sold for less, it could be bought and sold back
+ * for more, over and over: coins from nowhere. A quest item is never bought, so it can cost
+ * anything, or nothing.
  */
 export function priceAt(entry: VendorItem, item: Item): number {
-  return Math.max(entry.price, item.type === "quest" ? 0 : sellPriceOf(item));
+  return Math.max(entry.price ?? buyPriceOf(item), item.type === "quest" ? 0 : sellPriceOf(item));
 }
 
 /**
@@ -79,6 +87,8 @@ export function priceAt(entry: VendorItem, item: Item): number {
 export function readVendorItems(input: unknown, itemNames: string[]): { items: VendorItem[]; errors: string[] } {
   if (input === undefined || input === null || input === "") return { items: [], errors: [] };
   if (!Array.isArray(input)) return { items: [], errors: ["A vendor's stock is a list of items and prices."] };
+  // No price (null, or nothing typed): the item's own buy price.
+  const unset = (price: unknown) => price === null || price === undefined || (typeof price === "string" && price.trim() === "");
 
   const names = new Map(itemNames.map((name) => [lower(name), name]));
   const items: VendorItem[] = [];
@@ -101,7 +111,11 @@ export function readVendorItems(input: unknown, itemNames: string[]): { items: V
       errors.push(`${name} is in the stock twice.`);
       continue;
     }
-    const price = typeof entry.price === "string" && entry.price.trim() !== "" ? Number(entry.price) : entry.price;
+    if (unset(entry.price)) {
+      items.push({ item: name, price: null });
+      continue;
+    }
+    const price = typeof entry.price === "string" ? Number(entry.price) : entry.price;
     if (!Number.isInteger(price) || price < 0) {
       errors.push(`The price of ${name} must be a whole number of copper, 0 or more.`);
       continue;

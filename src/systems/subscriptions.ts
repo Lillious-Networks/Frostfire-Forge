@@ -39,6 +39,7 @@ export const LOCKS: ReadonlyArray<{ id: string; label: string }> = [
   { id: "loot", label: "Loot" },
   { id: "quests", label: "Quests" },
   { id: "vendor", label: "Vendors" },
+  { id: "mail", label: "Mail" },
 ];
 
 const KNOWN = new Set(LOCKS.map((lock) => lock.id));

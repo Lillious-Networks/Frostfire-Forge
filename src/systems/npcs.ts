@@ -23,13 +23,14 @@ const COLUMNS = [
   "last_updated", "map", "name", "position", "direction", "hidden", "script", "dialog", "gossip", "particles", "quest_giver",
   "sprite_type", "sprite_body", "sprite_head", "sprite_helmet", "sprite_shoulderguards", "sprite_neck",
   "sprite_hands", "sprite_chest", "sprite_feet", "sprite_legs", "sprite_weapon", "vendor_items", "innkeeper",
+  "sound_npc", "sound", "sound_radius",
 ] as const;
 type Written = Record<(typeof COLUMNS)[number], unknown>;
 
 /**
  * What an NPC stocks, from its column (text, or already read by a JSON column) or from an NPC as
- * held: the entries that are an item's name and a whole price of 0 or more. Anything else is no
- * stock. Whether the items exist is not asked here (see vendors.readVendorItems for what an editor
+ * held: the entries that are an item's name and a whole price of 0 or more, or no price (null:
+ * the item's own buy price). Anything else is no stock. Whether the items exist is not asked here (see vendors.readVendorItems for what an editor
  * sends).
  */
 function stockOf(stored: unknown): VendorItem[] {
@@ -43,14 +44,26 @@ function stockOf(stored: unknown): VendorItem[] {
   }
   if (!Array.isArray(list)) return [];
   return list
-    .filter((entry) => entry && typeof entry.item === "string" && entry.item && Number.isInteger(entry.price) && entry.price >= 0)
-    .map((entry) => ({ item: entry.item as string, price: entry.price as number }));
+    .filter((entry) => entry && typeof entry.item === "string" && entry.item && (entry.price == null || (Number.isInteger(entry.price) && entry.price >= 0)))
+    .map((entry) => ({ item: entry.item as string, price: entry.price == null ? null : (entry.price as number) }));
 }
 
 /** The stock as its column keeps it: text, and nothing for an NPC that stocks nothing. */
 function stockText(stock: unknown): string | null {
   const list = stockOf(stock);
   return list.length > 0 ? JSON.stringify(list) : null;
+}
+
+/**
+ * The most a sound NPC is heard from, in pixels. Players hold the NPCs of at least 2048 px around them (npcStreaming
+ * windowAround: two 1024 px chunks each way), so a sound NPC is always loaded while a player is inside its radius.
+ */
+const SOUND_RADIUS_MAX = 2048;
+
+/** How far a sound NPC is heard: whole pixels, 0 to SOUND_RADIUS_MAX. */
+function radiusOf(value: unknown): number {
+  const radius = Math.round(Number(value) || 0);
+  return Math.min(SOUND_RADIUS_MAX, Math.max(0, radius));
 }
 
 /** An npcs row as the server holds it. `row` is what the table gives, or what was just written to it. */
@@ -86,11 +99,14 @@ function fromRow(npc: any): Npc {
     sprite_weapon: npc?.sprite_weapon || null,
     vendor_items: stockOf(npc?.vendor_items),
     innkeeper: npc?.innkeeper === 1 || npc?.innkeeper === true,
+    sound_npc: npc?.sound_npc === 1 || npc?.sound_npc === true,
+    sound: npc?.sound || null,
+    sound_radius: radiusOf(npc?.sound_radius),
   };
 }
 
 /** The columns that keep a flag, 0 or 1, where every other keeps text. */
-const FLAGS = new Set<string>(["hidden", "quest_giver", "innkeeper"]);
+const FLAGS = new Set<string>(["hidden", "quest_giver", "innkeeper", "sound_npc"]);
 
 /** When a row was written, as its DATETIME column keeps it: to the second. */
 const writtenAt = (last_updated: string) => new Date(`${last_updated.replace(" ", "T")}Z`) as unknown as number;
@@ -207,13 +223,16 @@ const npcs = {
       sprite_weapon: npc.sprite_weapon || null,
       vendor_items: stockText(npc.vendor_items),
       innkeeper: npc.innkeeper ? 1 : 0,
+      sound_npc: npc.sound_npc ? 1 : 0,
+      sound: npc.sound_npc && npc.sound ? String(npc.sound) : null,
+      sound_radius: npc.sound_npc ? radiusOf(npc.sound_radius) : 0,
     };
 
     return await write(
       `INSERT INTO npcs (last_updated, map, name, position, direction, hidden, script, dialog, gossip, particles, quest_giver,
         sprite_type, sprite_body, sprite_head, sprite_helmet, sprite_shoulderguards, sprite_neck,
-        sprite_hands, sprite_chest, sprite_feet, sprite_legs, sprite_weapon, vendor_items, innkeeper)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        sprite_hands, sprite_chest, sprite_feet, sprite_legs, sprite_weapon, vendor_items, innkeeper, sound_npc, sound, sound_radius)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       COLUMNS.map((column) => written[column]),
       // The new NPC is what was written, under the id the database answered with. An NPC is addressed by its id:
       // an answer without one leaves it unknown, and the table is read instead.
@@ -275,13 +294,17 @@ const npcs = {
       sprite_weapon: npc.sprite_weapon || null,
       vendor_items: stockText(npc.vendor_items),
       innkeeper: npc.innkeeper ? 1 : 0,
+      sound_npc: npc.sound_npc ? 1 : 0,
+      sound: npc.sound_npc && npc.sound ? String(npc.sound) : null,
+      sound_radius: npc.sound_npc ? radiusOf(npc.sound_radius) : 0,
     };
 
     return await write(
       `UPDATE npcs SET last_updated = ?, map = ?, name = ?, position = ?, direction = ?, hidden = ?, script = ?,
         dialog = ?, gossip = ?, particles = ?, quest_giver = ?, sprite_type = ?, sprite_body = ?, sprite_head = ?,
         sprite_helmet = ?, sprite_shoulderguards = ?, sprite_neck = ?, sprite_hands = ?,
-        sprite_chest = ?, sprite_feet = ?, sprite_legs = ?, sprite_weapon = ?, vendor_items = ?, innkeeper = ? WHERE id = ?`,
+        sprite_chest = ?, sprite_feet = ?, sprite_legs = ?, sprite_weapon = ?, vendor_items = ?, innkeeper = ?,
+        sound_npc = ?, sound = ?, sound_radius = ? WHERE id = ?`,
       [...COLUMNS.map((column) => written[column]), npc.id],
       (rows) => rows.map((held) => (sameId(npc.id)(held) ? asWritten(held.id, written) : held))
     );

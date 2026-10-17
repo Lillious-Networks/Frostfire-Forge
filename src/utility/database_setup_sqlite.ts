@@ -189,10 +189,12 @@ const createItemsTable = async () => {
         damage_max INTEGER DEFAULT NULL,
         attack_speed_ms INTEGER DEFAULT NULL,
         sell_price INTEGER NOT NULL DEFAULT 1,
+        buy_price INTEGER NOT NULL DEFAULT 0,
         restore_health INTEGER NOT NULL DEFAULT 0,
         restore_stamina INTEGER NOT NULL DEFAULT 0,
         no_combat INTEGER NOT NULL DEFAULT 0,
-        teleports_home INTEGER NOT NULL DEFAULT 0
+        teleports_home INTEGER NOT NULL DEFAULT 0,
+        soulbound INTEGER NOT NULL DEFAULT 0
     );
   `;
   await query(sql);
@@ -233,6 +235,7 @@ const createClientConfig = async () => {
         music_volume INTEGER NOT NULL DEFAULT 100,
         effects_volume INTEGER NOT NULL DEFAULT 100,
         ambience_volume INTEGER NOT NULL DEFAULT 100,
+        weather_volume INTEGER NOT NULL DEFAULT 100,
         muted INTEGER NOT NULL DEFAULT 0,
         hotbar_config TEXT DEFAULT NULL,
         inventory_config TEXT DEFAULT NULL
@@ -362,6 +365,7 @@ const createPermissionTypesTable = async () => {
       ('tools.particle_editor'),
       ('tools.weather_editor'),
       ('tools.class_editor'),
+      ('tools.mailbox_editor'),
       ('tools.creature_editor'),
       ('tools.item_editor'),
       ('tools.spell_editor'),
@@ -419,6 +423,30 @@ const createModerationTables = async () => {
       resolution TEXT DEFAULT NULL
     );
   `);
+};
+
+/** Mail between players: what is attached (items as JSON, and coins) waits until it is taken. Times are milliseconds since the epoch. */
+const createMailTable = async () => {
+  log.info("Creating mail table...");
+  await query(`
+    CREATE TABLE IF NOT EXISTS mail (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      recipient TEXT NOT NULL,
+      sender TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      body TEXT NOT NULL,
+      items TEXT NOT NULL,
+      copper INTEGER NOT NULL DEFAULT 0,
+      silver INTEGER NOT NULL DEFAULT 0,
+      gold INTEGER NOT NULL DEFAULT 0,
+      sent_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      is_read INTEGER NOT NULL DEFAULT 0,
+      returned INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  // The mailboxes placed by hand (/mailbox): a map's spots as a JSON list. A map without a row has them in front of its inns.
+  await query(`CREATE TABLE IF NOT EXISTS mailbox_spots (map TEXT NOT NULL PRIMARY KEY, spots TEXT NOT NULL)`);
 };
 
 /** Every trade two players completed: what each gave (JSON: items and coins). Times are milliseconds since the epoch. */
@@ -492,10 +520,19 @@ const createNpcTable = async () => {
         sprite_legs TEXT DEFAULT NULL,
         sprite_weapon TEXT DEFAULT NULL,
         vendor_items TEXT DEFAULT NULL,
-        innkeeper INTEGER NOT NULL DEFAULT 0
+        innkeeper INTEGER NOT NULL DEFAULT 0,
+        sound_npc INTEGER NOT NULL DEFAULT 0,
+        sound TEXT DEFAULT NULL,
+        sound_radius INTEGER NOT NULL DEFAULT 0
     );
   `;
   await query(sql);
+  // Sound NPCs: an audio file played to players within sound_radius pixels. Added with sound NPCs.
+  await addMissingColumns("npcs", [
+    { name: "sound_npc", type: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "sound", type: "TEXT DEFAULT NULL" },
+    { name: "sound_radius", type: "INTEGER NOT NULL DEFAULT 0" },
+  ]);
   // What a vendor stocks (JSON: a list of item names and their prices there), added after the first release.
   await addMissingColumns("npcs", [{ name: "vendor_items", type: "TEXT DEFAULT NULL" }]);
   // Whether players can make the NPC's inn their home. Added with inns.
@@ -577,7 +614,12 @@ const createDefaultWeather = async () => {
   // "thunderstorm", "rainy" and "snowy" are drawn by name, as much as their precipitation says.
   await query(`INSERT OR IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('thunderstorm', 0.8, 'right', 25, 90, 55, 80);`);
   await query(`INSERT OR IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('rainy', 0, 'left', 6, 85, 58, 50);`);
-  await query(`INSERT OR IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('snowy', 0, 'left', 4, 80, 25, 80);`);}
+  await query(`INSERT OR IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('snowy', 0, 'left', 4, 80, 25, 80);`);
+  // "sandstorm" is drawn only in the desert zones, as harsh as its wind speed says.
+  await query(`INSERT OR IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('sandstorm', 0, 'right', 35, 10, 100, 0);`);
+  // "tornado" is drawn as a thunderstorm, with tornadoes (systems/tornadoes.ts).
+  await query(`INSERT OR IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('tornado', 0.85, 'right', 30, 85, 68, 75);`);
+}
 
 const createWorldTable = async () => {
   log.info("Creating world table...");
@@ -970,6 +1012,15 @@ const addItemWeaponColumns = async () => {
     { name: "no_combat", type: "INTEGER NOT NULL DEFAULT 0" },
     { name: "teleports_home", type: "INTEGER NOT NULL DEFAULT 0" },
   ]);
+  // Soulbound items cannot be traded or mailed. Added with mail.
+  await addMissingColumns("items", [{ name: "soulbound", type: "INTEGER NOT NULL DEFAULT 0" }]);
+  // What a vendor charges for an item where the NPC sets no price of its own: set at four times what vendors pay for it,
+  // as the NPC editor priced a newly stocked item.
+  const items = (await query(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'items'`)) as any[];
+  if (items[0]?.sql && !/\bbuy_price\b/.test(String(items[0].sql))) {
+    await query("ALTER TABLE items ADD COLUMN buy_price INTEGER NOT NULL DEFAULT 0");
+    await query("UPDATE items SET buy_price = sell_price * 4");
+  }
   await addMissingColumns("items", [
     { name: "damage_min", type: "INTEGER DEFAULT NULL" },
     { name: "damage_max", type: "INTEGER DEFAULT NULL" },
@@ -1127,6 +1178,7 @@ const createIndexes = async () => {
     ,{ name: "idx_reports_status", sql: "CREATE INDEX idx_reports_status ON reports(status)" }
     ,{ name: "idx_trade_log_player_a", sql: "CREATE INDEX idx_trade_log_player_a ON trade_log(player_a)" }
     ,{ name: "idx_trade_log_player_b", sql: "CREATE INDEX idx_trade_log_player_b ON trade_log(player_b)" }
+    ,{ name: "idx_mail_recipient", sql: "CREATE INDEX idx_mail_recipient ON mail(recipient)" }
     ,{ name: "idx_player_home_npc", sql: "CREATE INDEX idx_player_home_npc ON player_home(npc_id)" }
   ];
 
@@ -1195,6 +1247,7 @@ const setupDatabase = async () => {
   await createFriendsListTable();
   await createModerationTables();
   await createTradeLogTable();
+  await createMailTable();
   await createPartiesTable();
   await createCurrencyTable();
   await createGuildsTable();

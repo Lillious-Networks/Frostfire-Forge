@@ -807,12 +807,25 @@ describe("a player's client config", () => {
       "UPDATE clientconfig SET fps = ?, music_volume = ?, effects_volume = ?, ambience_volume = ?, muted = ? WHERE username = ?",
     ]);
     expect(row("pc_hero", "clientconfig")).toMatchObject({ fps: 60, music_volume: 10, effects_volume: 20, ambience_volume: 30, muted: 0 });
-    expect(await fromCache(() => player.getConfig("pc_hero"))).toEqual([config("pc_hero", { fps: 60, music_volume: 10, effects_volume: 20, ambience_volume: 30, muted: 0 })]);
+    expect(await fromCache(() => player.getConfig("pc_hero"))).toEqual([config("pc_hero", { fps: 60, music_volume: 10, effects_volume: 20, ambience_volume: 30, weather_volume: 100, muted: 0 })]);
     // a client from before the slider
     expect(await sentBy(() => player.setConfig("6101", { fps: 60, music_volume: 11, effects_volume: 20, muted: false }))).toEqual([
       "UPDATE clientconfig SET fps = ?, music_volume = ?, effects_volume = ?, muted = ? WHERE username = ?",
     ]);
     expect(row("pc_hero", "clientconfig")).toMatchObject({ music_volume: 11, ambience_volume: 30 });
+  });
+
+  // USER REQUEST 2026-10-16: weather (rain, wind, thunder) on its own slider, apart from the Ambience one
+  test("the Weather level is added beside the Ambience one at start, and saved with the others", async () => {
+    const { ensureAmbienceColumn } = await import("../systems/player");
+    expect(await ensureAmbienceColumn()).toBe(true);
+    expect(row("pc_hero", "clientconfig").weather_volume).toBe(100);
+    online("6101", "pc_hero");
+    await player.getConfig("pc_hero");
+    expect(await sentBy(() => player.setConfig("6101", { fps: 60, music_volume: 10, effects_volume: 20, ambience_volume: 30, weather_volume: 40, muted: false }))).toEqual([
+      "UPDATE clientconfig SET fps = ?, music_volume = ?, effects_volume = ?, ambience_volume = ?, weather_volume = ?, muted = ? WHERE username = ?",
+    ]);
+    expect(row("pc_hero", "clientconfig")).toMatchObject({ ambience_volume: 30, weather_volume: 40 });
   });
 
   const WRITES: Record<string, () => Promise<any>> = {

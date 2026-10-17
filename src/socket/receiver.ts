@@ -356,13 +356,87 @@ async function sendMapMarkers(wt: any, map: unknown): Promise<void> {
   try {
     const name = String(map ?? "").replaceAll(".json", "");
     if (!wt || !name) return;
-    const properties: any = getWorldMap(name)?.properties
-      ?? (((await assetCache.get("mapProperties")) || []) as any[]).find((held) => String(held?.name ?? "").replaceAll(".json", "") === name);
+    const properties = await mapPropertiesOf(name);
     const npcs = ((await assetCache.get("npcs")) || []) as Npc[];
-    sendPacket(wt, packetManager.mapMarkers({ map: name, markers: mapMarkers(name, npcs, properties?.warps, (other) => !!getWorldMap(other)) }));
+    // a world made of cave systems (the underworld): the warps between them are caves too
+    const world: any = getWorldMap(name);
+    const layout = Array.isArray(world?.map?.data?.sections)
+      ? { sections: world.map.data.sections, tileWidth: Number(world.tileWidth), tileHeight: Number(world.tileHeight) }
+      : null;
+    sendPacket(wt, packetManager.mapMarkers({ map: name, markers: mapMarkers(name, npcs, properties?.warps, (other) => !!getWorldMap(other), layout) }));
+    await sendMailboxes(wt, name);
   } catch (error) {
     log.warn(`The minimap markers of ${map} could not be sent: ${error}`);
   }
+}
+
+/** What the loader read of a map: its warps, among others. */
+async function mapPropertiesOf(name: string): Promise<any> {
+  return getWorldMap(name)?.properties
+    ?? (((await assetCache.get("mapProperties")) || []) as any[]).find((held) => String(held?.name ?? "").replaceAll(".json", "") === name);
+}
+
+/** Sends a player where the mailboxes of a map stand. */
+async function sendMailboxes(wt: any, map: string): Promise<void> {
+  sendPacket(wt, packetManager.mailboxes({ map, mailboxes: await mailboxesOf(map), iconUrl: getIconUrl("mailbox") || "" }));
+}
+
+/** Sends the mailbox editor the mailboxes of the map its player is on; `message`: why a change was refused. */
+async function sendMailboxEditor(wt: any, who: any, message?: string): Promise<void> {
+  const map = standing(who).map.replaceAll(".json", "");
+  const placed = await mailboxEditor.placedOn(map);
+  sendPacket(wt, packetManager.mailboxEditorData({
+    map, mailboxes: placed ?? await mailboxesOf(map), placed: placed !== null, max: mailboxEditor.MAILBOXES_MAX, ...(message ? { message } : {}),
+  }));
+}
+
+/**
+ * The mailboxes of a map: the ones placed by hand (/mailbox) when it has any list of them, else in
+ * front of its inns (see systems/mail), clear of what is solid on a world.
+ */
+async function mailboxesOf(map: unknown): Promise<Mailbox[]> {
+  const name = String(map ?? "").replaceAll(".json", "");
+  if (!name) return [];
+  const placed = await mailboxEditor.placedOn(name);
+  if (placed) return placed;
+  const world = getWorldMap(name);
+  const blocked = world
+    ? (x: number, y: number) => world.collision.isSet(Math.floor(x / world.tileWidth), Math.floor(y / world.tileHeight)) === 1
+    : undefined;
+  const npcs = ((await assetCache.get("npcs")) || []) as Npc[];
+  return mailboxesOn(name, npcs, (await mapPropertiesOf(name))?.warps, (other) => !!getWorldMap(other), blocked);
+}
+
+/** Where a player stands. A position is kept as an object, or as "x,y". */
+function standing(who: any): { map: string; x: number; y: number } {
+  const position = who?.location?.position;
+  const [x, y] = typeof position === "string" ? position.split(",").map(Number) : [Number(position?.x), Number(position?.y)];
+  return { map: String(who?.location?.map ?? ""), x, y };
+}
+
+/** Whether a player may use their mail now: alive and at a mailbox. When not, their mail window is closed and they are told why. */
+async function mayUseMail(wt: any, who: any): Promise<boolean> {
+  const at = standing(who);
+  const reason = who.isDead || who.isGhost
+    ? "You cannot use a mailbox while dead."
+    : atMailbox(await mailboxesOf(at.map), at.x, at.y) ? null : "You are too far from a mailbox.";
+  if (!reason) return true;
+  sendPacket(wt, packetManager.mailClosed({ message: reason }));
+  return false;
+}
+
+/** Sends a player their mail: this opens their mail window, or brings it up to date. */
+async function sendMailbox(wt: any, who: any): Promise<void> {
+  sendPacket(wt, packetManager.mailInbox({ mail: await mail.inbox(who.username), postage: POSTAGE_COPPER, itemsMax: MAIL_ITEMS_MAX, subjectMax: SUBJECT_MAX, bodyMax: BODY_MAX }));
+  await sendMailNotice(who);
+}
+
+/** Tells a player online how many of their mails are unread; `arrived`: and that new mail came. */
+async function sendMailNotice(who: any, arrived = false): Promise<void> {
+  if (!who?.wt) return;
+  const unread = await mail.unread(who.username);
+  sendPacket(who.wt, packetManager.mailNotice({ unread }));
+  if (arrived) sendPacket(who.wt, packetManager.notify({ message: "You have new mail." }));
 }
 
 /** An innkeeper or a vendor was added, changed or removed: everyone online is sent what the map they are on marks again. */
@@ -434,6 +508,7 @@ import vendors, { cannotShop, readVendorItems, type VendorAnswer } from "../syst
 import consumables, { CONSUMABLE_COOLDOWN_MS, isKept } from "../systems/consumables";
 import { resetCooldowns } from "../systems/cooldowns";
 import { mapMarkers } from "../systems/mapmarkers";
+import mail, { atMailbox, mailboxesOn, BODY_MAX, MAIL_ITEMS_MAX, POSTAGE_COPPER, SUBJECT_MAX, type Mailbox } from "../systems/mail";
 import homes, { cannotSetHome, isInnkeeper, HOME_CAST_MS, HOME_COOLDOWN_MS } from "../systems/homes";
 import { audience as chatAudience } from "../systems/chatgate";
 import parties from "../systems/parties.ts";
@@ -454,8 +529,10 @@ import * as itemEditor from "../systems/itemeditor";
 import * as spellEditor from "../systems/spelleditor";
 import * as weatherEditor from "../systems/weathereditor";
 import * as classEditor from "../systems/classeditor";
+import * as mailboxEditor from "../systems/mailboxeditor";
 import classes from "../systems/classes";
 import * as weatherApi from "../systems/weatherapi";
+import * as tornadoes from "../systems/tornadoes";
 import * as lootEditor from "../systems/looteditor";
 import * as playerEditor from "../systems/playereditor";
 import * as controlPanel from "../systems/controlpanel";
@@ -524,9 +601,8 @@ async function resolveWorldWeather(worldName: string): Promise<{ weather: string
     const cached = resolvedWeatherCache.get(normalized);
     if (cached) return cached;
 
-    const allWeathers = await assetCache.get("weather") as WeatherData[];
-    if (allWeathers?.length) {
-      const randomWeather = allWeathers[Math.floor(Math.random() * allWeathers.length)];
+    const randomWeather = randomPick(await assetCache.get("weather") as WeatherData[]);
+    if (randomWeather) {
       const resolved = { weather: randomWeather.name, weatherData: randomWeather };
       resolvedWeatherCache.set(normalized, resolved);
       return resolved;
@@ -539,12 +615,37 @@ async function resolveWorldWeather(worldName: string): Promise<{ weather: string
 
   // "clear" has a row like any other weather (its wind still blows), and is clear without one.
   const allWeathers = await assetCache.get("weather") as WeatherData[];
-  const weatherData = allWeathers?.find((w: WeatherData) => w.name === weatherName) || null;
+  const weatherData = rowOf(allWeathers, weatherName);
   return { weather: weatherName, weatherData };
 }
 
-/** What WEATHER and CHANGE_WEATHER carry: the weather under the name the client draws it by. */
-const weatherShown = (weather: string, weatherData: WeatherData | null) => ({ weather: weatherApi.shownAs(weather), weatherData });
+/**
+ * USER REQUEST 2026-10-17 (tornadoes, systems/tornadoes.ts): "tornado" is a thunderstorm with tornadoes. The client
+ * draws it as a thunderstorm (rain, dark sky, lightning) and a world on it always has a tornado. Like "clear" it is a
+ * word of /weather that needs no row of the weather table: without one it carries the thunderstorm's values. It is
+ * never picked at random: a random world gets tornadoes by the rare chance every thunderstorm has.
+ */
+const TORNADO = "tornado";
+/** The name the client draws a weather by. */
+const lookOf = (weather: string) => (weather === TORNADO ? "thunderstorm" : weatherApi.shownAs(weather));
+/** A weather of the table picked at random for a "random" world (never "tornado"); null when there is none. */
+const randomPick = (all: WeatherData[] | null | undefined): WeatherData | null => {
+  const pool = (all || []).filter((w) => w.name !== TORNADO);
+  return pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
+};
+/** A weather's row, a "tornado" without one taking the thunderstorm's. */
+const rowOf = (all: WeatherData[] | null | undefined, name: string): WeatherData | null =>
+  all?.find((w) => w.name === name) || (name === TORNADO ? all?.find((w) => w.name === "thunderstorm") || null : null);
+
+/**
+ * What WEATHER and CHANGE_WEATHER carry: the weather under the name the client draws it by. USER REPORT 2026-10-17
+ * ("tornado weather is not causing a sandstorm in the desert biome"): a "tornado" is told as a thunderstorm, so its
+ * values say `sandstorm: true` as well, and the client blows a sandstorm in the desert zones too, as harsh as its wind.
+ */
+const weatherShown = (weather: string, weatherData: WeatherData | null) => ({
+  weather: lookOf(weather),
+  weatherData: weather === TORNADO && weatherData ? { ...weatherData, sandstorm: true } : weatherData,
+});
 
 // What the weather editor (systems/weathereditor.ts) needs from the socket
 // layer: which weather each world shows, and the players to show a change to.
@@ -1486,6 +1587,8 @@ function constructMapMetadata(
     // Rectangles in tiles a map is made of, when it says so (the cave systems of a world's underworld,
     // modules/worldmaps.ts): the client's world map shows only the one the player is in
     sections: Array.isArray(map?.data?.sections) ? map.data.sections : null,
+    // The desert zones of a world, as outlines in tiles (modules/worldmaps.ts): a sandstorm is only drawn inside them
+    deserts: Array.isArray(map?.data?.deserts) ? map.data.deserts : null,
     // The inside of a building (isInteriorMap): the client shows no world map there and keeps its minimap zoomed
     // all the way in
     interior: isInteriorMap(normalizedName),
@@ -2578,6 +2681,12 @@ authWorker.on("message", async (result: any) => {
     );
     await sendQuestMarkersFor(wt, playerData.username, spawnLocation.map);
     await sendMapMarkers(wt, spawnLocation.map);
+    try {
+      const self = playerCache.getByUsername(playerData.username);
+      if (self && (await mail.unread(self.username)) > 0) await sendMailNotice(self, true);
+    } catch (error) {
+      log.warn(`The mail of ${playerData.username} could not be looked at: ${error}`);
+    }
   }
 });
 
@@ -6588,7 +6697,7 @@ export default async function packetReceiver(
           const [spriteSheets, icons] = await Promise.all([listSpriteSheets(), listIcons()]);
           // The items there are, for picking what a vendor stocks.
           const items = (((await assetCache.get("items")) || []) as Item[])
-            .map((item) => ({ name: item.name, icon: item.icon ?? null, quality: item.quality, sell_price: item.sell_price ?? 1 }));
+            .map((item) => ({ name: item.name, icon: item.icon ?? null, quality: item.quality, sell_price: item.sell_price ?? 1, buy_price: item.buy_price ?? 0 }));
 
           sendPacket(wt, packetManager.npcList(resolvedNpcs, questCatalog, { spriteSheets, icons, items }));
         } catch (error: any) {
@@ -6641,6 +6750,9 @@ export default async function packetReceiver(
             sprite_weapon: clientData?.sprite_weapon ?? null,
             vendor_items: await vendorStockFrom(wt, clientData?.vendor_items),
             innkeeper: clientData?.innkeeper === true || clientData?.innkeeper === 1,
+            sound_npc: clientData?.sound_npc === true || clientData?.sound_npc === 1,
+            sound: typeof clientData?.sound === "string" ? clientData.sound : null,
+            sound_radius: Number(clientData?.sound_radius) || 0,
           };
 
           await npcSystem.add(newNpc);
@@ -6722,6 +6834,16 @@ export default async function packetReceiver(
           npcData.innkeeper = npcData.innkeeper === undefined
             ? (((await assetCache.get("npcs")) || []) as Npc[]).find((held) => Number(held.id) === Number(npcData.id))?.innkeeper === true
             : npcData.innkeeper === true || (npcData.innkeeper as unknown) === 1;
+          // Its sound, the same way: an editor from before sound NPCs leaves what the NPC plays.
+          if (npcData.sound_npc === undefined) {
+            const held = (((await assetCache.get("npcs")) || []) as Npc[]).find((n) => Number(n.id) === Number(npcData.id));
+            npcData.sound_npc = held?.sound_npc === true;
+            npcData.sound = held?.sound ?? null;
+            npcData.sound_radius = held?.sound_radius ?? 0;
+          } else {
+            npcData.sound_npc = npcData.sound_npc === true || (npcData.sound_npc as unknown) === 1;
+            npcData.sound = typeof npcData.sound === "string" ? npcData.sound : null;
+          }
 
           await npcSystem.update(npcData);
           const updatedNpcs = await npcSystem.list();
@@ -8529,6 +8651,15 @@ export default async function packetReceiver(
             break;
           }
 
+          case "MAILBOX": {
+            if (!(await mailboxEditor.canUseEditor(currentPlayer))) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(wt, packetManager.toggleMailboxEditor());
+            break;
+          }
+
           case "CLE":
           case "CLASSEDITOR": {
             if (!(await classEditor.canUseEditor(currentPlayer))) {
@@ -9492,13 +9623,13 @@ export default async function packetReceiver(
             if (!weatherName) {
               sendPacket(
                 wt,
-                packetManager.notify({ message: "Usage: /weather <weather_name|clear|random|weather_api>" })
+                packetManager.notify({ message: "Usage: /weather <weather_name|clear|random|weather_api|tornado>" })
               );
               break;
             }
 
-            // "clear", "random" and "weather_api" are /weather's own words: they need no row of the weather table.
-            if (weatherName !== "clear" && weatherName !== "random" && weatherName !== weatherApi.WEATHER_API) {
+            // "clear", "random", "weather_api" and "tornado" are /weather's own words: they need no row of the weather table.
+            if (weatherName !== "clear" && weatherName !== "random" && weatherName !== weatherApi.WEATHER_API && weatherName !== TORNADO) {
               const allWeathers = await assetCache.get("weather") as WeatherData[];
               if (!allWeathers?.find((w: WeatherData) => w.name === weatherName)) {
                 sendPacket(
@@ -9523,9 +9654,8 @@ export default async function packetReceiver(
             let weatherData = null;
             let resolvedWeatherName = weatherName;
             if (weatherName === "random") {
-              const allWeathers = await assetCache.get("weather") as WeatherData[];
-              if (allWeathers?.length) {
-                const randomWeather = allWeathers[Math.floor(Math.random() * allWeathers.length)];
+              const randomWeather = randomPick(await assetCache.get("weather") as WeatherData[]);
+              if (randomWeather) {
                 weatherData = randomWeather;
                 resolvedWeatherName = randomWeather.name;
                 resolvedWeatherCache.set(currentMapName, { weather: resolvedWeatherName, weatherData: randomWeather });
@@ -9535,8 +9665,7 @@ export default async function packetReceiver(
             } else if (weatherName === weatherApi.WEATHER_API) {
               weatherData = weatherApi.currentWeather();
             } else {
-              const allWeathers = await assetCache.get("weather") as WeatherData[];
-              weatherData = allWeathers?.find((w: WeatherData) => w.name === weatherName) || null;
+              weatherData = rowOf(await assetCache.get("weather") as WeatherData[], weatherName);
             }
 
             const playerIds = mapIndex.getPlayersOnMap(currentMapName);
@@ -11885,6 +12014,104 @@ export default async function packetReceiver(
         sendPacket(wt, packetManager.notify({ message: `Took all ${result.taken.length} item(s).` }));
         break;
       }
+      case "MAILBOX_EDITOR_LIST":
+      case "MAILBOX_EDITOR_SAVE":
+      case "MAILBOX_EDITOR_RESET": {
+        if (!currentPlayer) return;
+        if (!(await mailboxEditor.canUseEditor(currentPlayer))) {
+          sendPacket(wt, packetManager.notify({ message: mailboxEditor.DENIED }));
+          break;
+        }
+        if (type === "MAILBOX_EDITOR_LIST") {
+          await sendMailboxEditor(wt, currentPlayer);
+          break;
+        }
+        // Only the map the editor stands on is changed: the one it shows.
+        const map = standing(currentPlayer).map.replaceAll(".json", "");
+        if (String((data as any)?.map ?? "").replaceAll(".json", "") !== map) {
+          await sendMailboxEditor(wt, currentPlayer, "You are no longer on that map.");
+          break;
+        }
+        const changed = type === "MAILBOX_EDITOR_SAVE"
+          ? await mailboxEditor.place(map, (data as any)?.mailboxes)
+          : await mailboxEditor.reset(map);
+        await sendMailboxEditor(wt, currentPlayer, changed.ok ? undefined : changed.message);
+        if (!changed.ok) break;
+        // Everyone on the map sees them where they now stand; an open editor asks again when it is sent them.
+        for (const online of Object.values(playerCache.list()) as any[]) {
+          if (online?.wt && String(online.location?.map ?? "").replaceAll(".json", "") === map) await sendMailboxes(online.wt, map);
+        }
+        break;
+      }
+      case "MAIL_OPEN": {
+        if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "mail")) return;
+        if (isQuestRateLimited(`mail:${wt.data.id}`)) return;
+        if (!(await mayUseMail(wt, currentPlayer))) break;
+        await sendMailbox(wt, currentPlayer);
+        break;
+      }
+      case "MAIL_SEND": {
+        if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "mail")) return;
+        if (isQuestRateLimited(`mail:${wt.data.id}`)) return;
+        if (!(await mayUseMail(wt, currentPlayer))) break;
+        if (trades.of(currentPlayer.username)) {
+          sendPacket(wt, packetManager.mailSent({ ok: false, message: "You cannot send mail while trading." }));
+          break;
+        }
+        const sent = await mail.send(currentPlayer, data);
+        sendPacket(wt, packetManager.mailSent({ ok: sent.ok, message: sent.message }));
+        if (!sent.ok) break;
+        await sendBelongingsOf(currentPlayer);
+        await sendMailNotice(playerCache.getByUsername(sent.recipient), true);
+        break;
+      }
+      case "MAIL_TAKE": {
+        if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "mail")) return;
+        if (isQuestRateLimited(`mail:${wt.data.id}`)) return;
+        if (!(await mayUseMail(wt, currentPlayer))) break;
+        const part = (data as any)?.part;
+        if (part !== "all" && part !== "coins" && !(Number.isInteger(part) && part >= 0 && part < MAIL_ITEMS_MAX)) return;
+        const taken = await mail.take(currentPlayer.username, Number((data as any)?.mailId), part);
+        // What was taken shows in the bags: only a refusal is said.
+        if (!taken.ok) sendPacket(wt, packetManager.notify({ message: taken.message }));
+        if (taken.ok) await sendBelongingsOf(currentPlayer);
+        await sendMailbox(wt, currentPlayer);
+        break;
+      }
+      case "MAIL_READ": {
+        if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "mail")) return;
+        if (!(await mayUseMail(wt, currentPlayer))) break;
+        await mail.markRead(currentPlayer.username, Number((data as any)?.mailId));
+        await sendMailNotice(currentPlayer);
+        break;
+      }
+      case "MAIL_DELETE": {
+        if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "mail")) return;
+        if (isQuestRateLimited(`mail:${wt.data.id}`)) return;
+        if (!(await mayUseMail(wt, currentPlayer))) break;
+        const deleted = await mail.remove(currentPlayer.username, Number((data as any)?.mailId));
+        if (!deleted.ok) sendPacket(wt, packetManager.notify({ message: deleted.message }));
+        await sendMailbox(wt, currentPlayer);
+        break;
+      }
+      case "MAIL_RETURN": {
+        if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "mail")) return;
+        if (isQuestRateLimited(`mail:${wt.data.id}`)) return;
+        if (!(await mayUseMail(wt, currentPlayer))) break;
+        const mailId = Number((data as any)?.mailId);
+        const sender = (await mail.inbox(currentPlayer.username)).find((held) => held.id === mailId)?.sender;
+        const returned = await mail.returnToSender(currentPlayer.username, mailId);
+        sendPacket(wt, packetManager.notify({ message: returned.message }));
+        await sendMailbox(wt, currentPlayer);
+        if (returned.ok && sender) await sendMailNotice(playerCache.getByUsername(sender), true);
+        break;
+      }
       case "LIST_LOOT_TABLES": {
         if (!currentPlayer) return;
         // Only the loot editor window asks for this, and /le opens it for those it lets through.
@@ -13066,7 +13293,7 @@ function scheduleLightning() {
       for (const world of await getLiveWorlds()) {
         const resolved = resolvedWeatherCache.get(world.name);
         const activeWeather = resolved ? resolved.weather : world.weather;
-        if (weatherApi.shownAs(activeWeather) !== "thunderstorm") continue;
+        if (lookOf(activeWeather) !== "thunderstorm") continue;
         const playersOnMap = mapIndex.getPlayersOnMap(world.name);
         if (playersOnMap.size === 0) continue;
 
@@ -13099,10 +13326,8 @@ function scheduleWeatherCycle() {
       for (const world of worldsCache) {
         if (world.weather !== "random") continue;
 
-        const allWeathers = await assetCache.get("weather") as WeatherData[];
-        if (!allWeathers?.length) continue;
-
-        const randomWeather = allWeathers[Math.floor(Math.random() * allWeathers.length)];
+        const randomWeather = randomPick(await assetCache.get("weather") as WeatherData[]);
+        if (!randomWeather) continue;
         resolvedWeatherCache.set(world.name, { weather: randomWeather.name, weatherData: randomWeather });
 
         const playerIds = mapIndex.getPlayersOnMap(world.name);
@@ -13122,6 +13347,68 @@ function scheduleWeatherCycle() {
     scheduleWeatherCycle();
   }, 30 * 60 * 1000);
 }
+
+// What the tornadoes (systems/tornadoes.ts) need from the socket layer, and their tick.
+tornadoes.setTornadoBridge({
+  weathers: async () => (await getLiveWorlds()).map((world) => {
+    const name = resolvedWeatherCache.get(world.name)?.weather ?? world.weather ?? "clear";
+    return { map: world.name, weather: name === TORNADO ? "tornado" : lookOf(name) === "thunderstorm" ? "storm" : "none" };
+  }),
+  players: (map) => Array.from(mapIndex.getPlayersOnMap(map)).map((id) => playerCache.get(id)).filter((p: any) => p?.wt),
+  size: (map) => {
+    const data = (maps as any[])?.find((m: any) => String(m?.name ?? "").replace(".json", "") === map)?.data;
+    return data?.width && data?.tilewidth ? { width: data.width * data.tilewidth, height: data.height * data.tileheight } : null;
+  },
+  // (the body a walking player is tested with)
+  walkable: (_map, x, y, who) =>
+    player.checkCollisionSync(who.location.map, { x, y, direction: who.location?.position?.direction || "down" }, { width: 24, height: 40 }).value === false,
+  move: async (who, x, y) => {
+    who.location.position = { ...who.location.position, x, y };
+    // a walking player's next step goes on from here, and tells them and those around them
+    if (gameLoop.isPlayerMoving(who.id)) return;
+    globalStateRevision++;
+    if (shouldUpdateAOI(who)) await updatePlayerAOI(who, spawnBatchQueue, despawnBatchQueue);
+    broadcastToAOI(who, packetManager.moveXY({
+      i: who.id,
+      d: { x, y, dr: who.location.position.direction },
+      r: globalStateRevision,
+      s: who.isStealth ? 1 : 0,
+    }), true);
+  },
+  // As a creature's blow is taken (setCreatureEngineBridge's damagePlayer).
+  hurt: async (target, amount) => {
+    if (target.isDead || target.isGhost || !target.stats) return;
+    const absorbed = spellEffects.consumeBarrier(target, amount);
+    if (absorbed > 0) spellEffects.broadcastEffectsUpdate(target);
+    target.stats.health = Math.max(0, Math.round(target.stats.health - (amount - absorbed)));
+    const attacker = { id: "tornado", username: "Tornado", isCreature: true };
+    listener.emit(Events.PLAYER_DAMAGED, { attacker, target, damage: amount, isCrit: false });
+    playerCache.set(target.id, target);
+    if (target.stats.health <= 0) {
+      await handlePlayerDeath(target, null, { damage: amount, isCrit: false });
+      return;
+    }
+    broadcastStatsUpdateToAOI(
+      target,
+      target,
+      packetManager.updateStats({ id: target.id, target: target.id, stats: target.stats, isCrit: false, damage: amount, absorb: absorbed })
+    );
+    sendStatsToPartyMembers(target.username, target.id, target.stats);
+  },
+  show: (map, list) => {
+    const packet = packetManager.tornadoes({ map, tornadoes: list });
+    for (const id of mapIndex.getPlayersOnMap(map)) {
+      const p = playerCache.get(id);
+      if (p?.wt && p.wt.readyState === 1) sendPacket(p.wt, packet);
+    }
+  },
+});
+listener.on(Events.FIXED_UPDATE, () => {
+  void tornadoes.tick(Date.now());
+});
+// The pull goes on the movement loop's own tick, before its steps: as smooth as a walk, and a walker's step goes on
+// from where it left them.
+gameLoop.addTickHook(() => tornadoes.pull(Date.now()));
 
 scheduleWeatherCycle();
 

@@ -113,9 +113,24 @@ describe("item validation", () => {
   test("what a vendor pays for it is a whole number of copper a purse can hold, 0 or more", () => {
     expect(editor.validateItem(weapon({ sell_price: 0 }), names(), null)).toEqual([]);
     expect(editor.validateItem(weapon({ sell_price: 12_345 }), names(), null)).toEqual([]);
-    expect(editor.validateItem(weapon({ sell_price: -1 }), names(), null)).toContain("Vendor sell price cannot be negative.");
-    expect(editor.validateItem(weapon({ sell_price: editor.SELL_PRICE_MAX }), names(), null)).toEqual([]);
-    expect(editor.validateItem(weapon({ sell_price: editor.SELL_PRICE_MAX + 1 }), names(), null)).toContain("Vendor sell price is too high.");
+    expect(editor.validateItem(weapon({ sell_price: -1 }), names(), null)).toContain("Sell price cannot be negative.");
+    expect(editor.validateItem(weapon({ sell_price: editor.SELL_PRICE_MAX, buy_price: editor.SELL_PRICE_MAX }), names(), null)).toEqual([]);
+    expect(editor.validateItem(weapon({ sell_price: editor.SELL_PRICE_MAX + 1 }), names(), null)).toContain("Sell price is too high.");
+  });
+
+  test("what a vendor charges for it is its own, a few times what a vendor pays when none is given", () => {
+    expect(editor.normalizeItem(weapon({ sell_price: 5, buy_price: 120 }))).toMatchObject({ sell_price: 5, buy_price: 120 });
+    expect(editor.normalizeItem(weapon({ sell_price: 5 }))).toMatchObject({ buy_price: 20 });
+    expect(editor.normalizeItem(weapon({}))).toMatchObject({ sell_price: 1, buy_price: 4 });
+  });
+
+  test("what a vendor charges is never below what a vendor pays, nor more than a purse holds", () => {
+    expect(editor.validateItem(weapon({ sell_price: 50, buy_price: 50 }), names(), null)).toEqual([]);
+    expect(editor.validateItem(weapon({ sell_price: 50, buy_price: 49 }), names(), null)).toContain("Buy price cannot be below the sell price.");
+    expect(editor.validateItem(weapon({ buy_price: -1 }), names(), null)).toContain("Buy price cannot be negative.");
+    expect(editor.validateItem(weapon({ buy_price: editor.SELL_PRICE_MAX + 1 }), names(), null)).toContain("Buy price is too high.");
+    // A quest item is never bought from a vendor.
+    expect(editor.validateItem(weapon({ type: "quest", equipable: false, equipment_slot: null, damage_min: null, damage_max: null, attack_speed_ms: null, sell_price: 10, buy_price: 0 }), names(), null)).not.toContain("Buy price cannot be below the sell price.");
   });
 });
 

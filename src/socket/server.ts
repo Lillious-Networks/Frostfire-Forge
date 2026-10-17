@@ -26,6 +26,9 @@ const event = new eventEmitter();
 import log from "../modules/logger.ts";
 import player, { ensureAmbienceColumn } from "../systems/player.ts";
 import { ensureClassSchema } from "../systems/classes.ts";
+import { ensureMailSchema } from "../systems/mail.ts";
+import { ensureMailboxSchema } from "../systems/mailboxeditor.ts";
+import { ensureBuyPriceColumn, ensureSoulboundColumn } from "../systems/items.ts";
 import worlds from "../systems/worlds.ts";
 import playerCache from "../services/playermanager.ts";
 import { loadTables, forgetPlayer } from "../services/datacache.ts";
@@ -162,10 +165,19 @@ const keyPair = generateKeyPair(process.env.RSA_PASSPHRASE);
 // The subscription columns and tables first, before the first login and before the table caches
 // read them. A failure is said once and leaves subscriptions off: it never stops the start.
 await ensureSubscriptionSchema();
-// The Ambience slider's column (clientconfig.ambience_volume), the same way: added if missing, never stops the start.
+// The Ambience and Weather sliders' columns (clientconfig.ambience_volume, weather_volume), the same way: added if
+// missing, never stops the start.
 await ensureAmbienceColumn();
 // The classes table and accounts.class_id (characters), the same way.
 await ensureClassSchema();
+// The mail table, the same way.
+await ensureMailSchema();
+// The mailboxes placed by hand (/mailbox), the same way.
+await ensureMailboxSchema();
+// items.soulbound, the same way: before the items are read.
+await ensureSoulboundColumn();
+// items.buy_price, the same way.
+await ensureBuyPriceColumn();
 await loadTables();
 await refreshSubscriptions();
 

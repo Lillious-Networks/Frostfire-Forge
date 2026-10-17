@@ -114,6 +114,8 @@ const assets = new Map<string, any>([
   ["items", [
     item("Iron Ore"), item("Rat Tail"), item("Health Potion", "consumable"), item("Iron Helmet", "equipment"),
     item("Small Pouch", "equipment"), item("Sealed Letter", "quest"), { ...item("Home Stone", "consumable"), teleports_home: true },
+    // The table holds the flag as 1 or 0.
+    { ...item("Bound Ring", "equipment"), soulbound: 1 },
     ...Array.from({ length: 9 }, (_, index) => item(`Gem ${index + 1}`)),
   ]],
 ]);
@@ -298,6 +300,13 @@ describe("offering", () => {
     await clearCaches();
     opened();
     expect(await trades.offer("hero", offering([["Home Stone", 1]]), NOW)).toEqual({ ok: false, message: "Home Stone cannot be traded." });
+  });
+
+  test("refuses a soulbound item", async () => {
+    tables.inventory.push({ id: 91, username: "hero", item: "Bound Ring", quantity: 1, equipped: 0, slot: 21, bag_slot: 0 });
+    await clearCaches();
+    opened();
+    expect(await trades.offer("hero", offering([["Bound Ring", 1]]), NOW)).toEqual({ ok: false, message: "Bound Ring is soulbound and cannot be traded." });
   });
 
   const REFUSED: Array<[string, any, string]> = [

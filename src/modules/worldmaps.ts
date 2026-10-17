@@ -109,6 +109,32 @@ function readBits(file: string, role: number, chunkSize: number, chunksX: number
   return new WorldBits(bytes, chunkSize, chunksX, chunksY);
 }
 
+export interface Desert {
+  name: string;
+  /** The zone's bounds in tiles. */
+  bbox: { x: number; y: number; w: number; h: number };
+  /** Its rings in tiles, each [[x, y], ...]: a point is inside when an odd number of them surround it. */
+  outline: number[][][];
+}
+
+/** The zones of a manifest whose kind is "desert", with what is not a number left out. */
+export function desertsOf(zones: unknown): Desert[] {
+  if (!Array.isArray(zones)) return [];
+  const finite = (n: unknown) => typeof n === "number" && Number.isFinite(n);
+  const deserts: Desert[] = [];
+  for (const zone of zones) {
+    if (zone?.kind !== "desert" || !Array.isArray(zone.outline)) continue;
+    const outline = zone.outline
+      .filter((ring: unknown) => Array.isArray(ring))
+      .map((ring: unknown[]) => ring.filter((p: any) => Array.isArray(p) && finite(p[0]) && finite(p[1])).map((p: any) => [p[0], p[1]]))
+      .filter((ring: number[][]) => ring.length >= 3);
+    const b = zone.bbox;
+    if (!outline.length || !b || ![b.x, b.y, b.w, b.h].every(finite)) continue;
+    deserts.push({ name: String(zone.name ?? ""), bbox: { x: b.x, y: b.y, w: b.w, h: b.h }, outline });
+  }
+  return deserts;
+}
+
 function openWorld(dir: string, id: string): WorldMap {
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf-8"));
 
@@ -152,6 +178,7 @@ function openWorld(dir: string, id: string): WorldMap {
   });
 
   const name = `${id}.json`;
+  const deserts = desertsOf(manifest.zones);
   const spawn = manifest.spawn && Number.isFinite(manifest.spawn.x) && Number.isFinite(manifest.spawn.y)
     ? { x: Number(manifest.spawn.x), y: Number(manifest.spawn.y) }
     : null;
@@ -181,6 +208,8 @@ function openWorld(dir: string, id: string): WorldMap {
         ...(manifest.graveyards ? { graveyards: manifest.graveyards } : {}),
         // the cave systems of an underworld, as rectangles in tiles (sent to the client with the map)
         ...(Array.isArray(manifest.sections) ? { sections: manifest.sections } : {}),
+        // the desert zones, as outlines in tiles: a sandstorm is only drawn inside them (sent to the client with the map)
+        ...(deserts.length ? { deserts } : {}),
       },
       compressed: Buffer.alloc(0),
     } as any,

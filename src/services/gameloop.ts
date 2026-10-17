@@ -12,6 +12,8 @@ const GL_PROFILE = process.env.BENCHMARK_PROFILE === "1" || process.env.BENCHMAR
 
 class GameLoop {
   private movingPlayers: Map<string, MovingPlayer>;
+  /** Run at the start of every tick, before the movers step (systems/tornadoes.ts: its pull). */
+  private tickHooks: Array<() => void | Promise<void>> = [];
   private loopInterval: ReturnType<typeof setInterval> | null;
   private readonly FRAME_TIME = 1000 / 30;
 
@@ -49,7 +51,19 @@ class GameLoop {
     }
   }
 
+  /** Runs `hook` at the start of every tick, whether or not anyone is moving, before the movers step. */
+  addTickHook(hook: () => void | Promise<void>): void {
+    this.tickHooks.push(hook);
+  }
+
   private async tick(): Promise<void> {
+    for (const hook of this.tickHooks) {
+      try {
+        await hook();
+      } catch (error) {
+        log.error(`A game loop hook failed: ${error}`);
+      }
+    }
     if (this.movingPlayers.size === 0) return;
 
     if (GL_PROFILE) {

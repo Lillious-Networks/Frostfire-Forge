@@ -181,6 +181,11 @@ describe("a vendor's stock, as an editor sends it", () => {
       .toEqual({ items: [{ item: "Iron Ore", price: 20 }, { item: "Health Potion", price: 150 }, { item: "Iron Helmet", price: 0 }], errors: [] });
   });
 
+  test("an entry with no price is sold at the item's own buy price", () => {
+    expect(readVendorItems([{ item: "Iron Ore", price: null }, { item: "Health Potion", price: "" }, { item: "Iron Helmet" }], names))
+      .toEqual({ items: [{ item: "Iron Ore", price: null }, { item: "Health Potion", price: null }, { item: "Iron Helmet", price: null }], errors: [] });
+  });
+
   test("nothing, or an empty list, is no stock", () => {
     for (const none of [undefined, null, [], ""]) expect(readVendorItems(none, names)).toEqual({ items: [], errors: [] });
   });
@@ -271,6 +276,24 @@ describe("what a vendor shows", () => {
     // Selling the two spare ones back returns what was paid, and no more.
     expect(await vendors.sell("hero", "Iron Helmet")).toEqual({ ok: true, item: "Iron Helmet", quantity: 2, coins: 500 });
     expect(purse("hero")).toBe(10250);
+  });
+
+  test("an item is sold at its own buy price, unless the NPC sets a price of its own", async () => {
+    const before = assets.get("items");
+    try {
+      assets.set("items", (assets.get("items") as any[]).map((held) => (held.name === "Health Potion" ? { ...held, buy_price: 80 } : held)));
+      const stocked = async (price: number | null) =>
+        (await vendors.stock({ ...smith, vendor_items: [{ item: "Health Potion", price }] }))[0].price;
+      expect(await stocked(null)).toBe(80);
+      expect(await stocked(50)).toBe(50);
+      // A buy price below what a vendor pays is not charged either.
+      assets.set("items", (assets.get("items") as any[]).map((held) => (held.name === "Health Potion" ? { ...held, buy_price: 3 } : held)));
+      expect(await stocked(null)).toBe(12);
+      expect(await vendors.buy("hero", { ...smith, vendor_items: [{ item: "Health Potion", price: null }] }, "Health Potion", 2))
+        .toEqual({ ok: true, item: "Health Potion", quantity: 2, coins: 24 });
+    } finally {
+      assets.set("items", before);
+    }
   });
 
   test("an item that no longer exists is left out", async () => {
