@@ -1,6 +1,7 @@
 import query from "../controllers/sqldatabase";
 import log from "../modules/logger";
 import assetCache from "../services/assetCache";
+import { parseSounds, soundsText } from "./weathersounds";
 
 // The weathers a WHERE on a name picks: MySQL compares text without regard to case, the other engines exactly.
 const sameName = (a: string, b: string) =>
@@ -15,6 +16,7 @@ async function held(): Promise<WeatherData[]> {
 const rowOf = (weather: WeatherData): WeatherData => ({
   name: weather.name, temperature: weather.temperature, humidity: weather.humidity, wind_speed: weather.wind_speed,
   wind_direction: weather.wind_direction, precipitation: weather.precipitation, ambience: weather.ambience,
+  sounds: parseSounds(weather.sounds ?? null),
 });
 
 /**
@@ -50,8 +52,8 @@ const weather = {
   async add(weather: WeatherData) {
     if (!weather?.name) return;
     return await write(
-      "INSERT INTO weather (name, temperature, humidity, wind_speed, wind_direction, precipitation, ambience) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [weather.name, weather.temperature, weather.humidity, weather.wind_speed, weather.wind_direction, weather.precipitation, weather.ambience],
+      "INSERT INTO weather (name, temperature, humidity, wind_speed, wind_direction, precipitation, ambience, sounds) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [weather.name, weather.temperature, weather.humidity, weather.wind_speed, weather.wind_direction, weather.precipitation, weather.ambience, soundsText(weather.sounds)],
       (list) => [...list, rowOf(weather)]
     );
   },
@@ -67,14 +69,16 @@ const weather = {
   async update(weather: WeatherData) {
     if (!weather?.name) return;
     return await write(
-      "UPDATE weather SET temperature = ?, humidity = ?, wind_speed = ?, wind_direction = ?, precipitation = ?, ambience = ? WHERE name = ?",
-      [weather.temperature, weather.humidity, weather.wind_speed, weather.wind_direction, weather.precipitation, weather.ambience, weather.name],
+      "UPDATE weather SET temperature = ?, humidity = ?, wind_speed = ?, wind_direction = ?, precipitation = ?, ambience = ?, sounds = ? WHERE name = ?",
+      [weather.temperature, weather.humidity, weather.wind_speed, weather.wind_direction, weather.precipitation, weather.ambience, soundsText(weather.sounds), weather.name],
       // The statement changes the rows of that name, but for the name itself, and adds none.
       (list) => list.map((w) => (sameName(w.name, weather.name) ? { ...rowOf(weather), name: w.name } : w))
     );
   },
+  /** Every row, its sounds read from the column's text. */
   async list() {
-    return await query("SELECT * FROM weather");
+    const rows = await query("SELECT * FROM weather");
+    return Array.isArray(rows) ? rows.map((row: any) => ({ ...row, sounds: parseSounds(row?.sounds ?? null) })) : rows;
   },
   async random() {
     const weathers = await assetCache.get("weather") as WeatherData[];

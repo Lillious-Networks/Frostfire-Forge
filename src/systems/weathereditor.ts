@@ -11,6 +11,7 @@ import assetCache from "../services/assetCache";
 import permissions from "./permissions";
 import weather from "./weather";
 import { WEATHER_API } from "./weatherapi";
+import { SOUND_KINDS, SOUND_NAME_MAX, SOUND_RULES, SOUNDS_MAX, parseSounds, validateSounds, type SoundKind, type SoundKindRule } from "./weathersounds";
 
 /** The tool's own permission and the wildcards over it, as the spell editor has its own. */
 export const EDITOR_PERMISSIONS = ["tools.weather_editor", "tools.*", "server.admin", "server.*"];
@@ -130,7 +131,16 @@ function toEditorWeather(row: WeatherData): WeatherData {
     wind_direction: String(row.wind_direction ?? "none"),
     precipitation: Number(row.precipitation) || 0,
     ambience: Number(row.ambience) || 0,
+    sounds: parseSounds(row.sounds ?? null),
   };
+}
+
+/** The rules a weather's sounds are held to (systems/weathersounds.ts), as the editor is sent them. */
+export interface SoundsRules {
+  kinds: SoundKind[];
+  rules: Record<SoundKind, SoundKindRule>;
+  max: number;
+  nameMax: number;
 }
 
 export interface WeatherEditorData {
@@ -145,6 +155,7 @@ export interface WeatherEditorData {
   protected: string[];
   /** What a world is given when its weather is deleted. */
   fallback: string;
+  sounds: SoundsRules;
 }
 
 /** Everything the editor shows: the weathers as they stand, where each is shown, and the rules a save is held to. */
@@ -158,6 +169,7 @@ export async function buildEditorData(): Promise<WeatherEditorData> {
     reserved: RESERVED,
     protected: PROTECTED,
     fallback: FALLBACK,
+    sounds: { kinds: [...SOUND_KINDS], rules: SOUND_RULES, max: SOUNDS_MAX, nameMax: SOUND_NAME_MAX },
   };
 }
 
@@ -196,6 +208,7 @@ export function validateWeather(data: any, ctx: { existingNames: Set<string>; or
     if (typeof value !== "number" || !Number.isFinite(value)) add(key, `${rule.label} must be a number.`);
     else if (value < rule.min || value > rule.max) add(key, `${rule.label} must be between ${rule.min} and ${rule.max}.`);
   }
+  for (const error of validateSounds(data?.sounds)) add(error.field, error.message);
   return errors;
 }
 
@@ -240,6 +253,8 @@ async function saveWeather(admin: any, data: any): Promise<Outcome> {
     wind_direction: data.wind_direction,
     precipitation: data.precipitation,
     ambience: data.ambience,
+    // An editor that sends no sounds (one opened before they could be edited) leaves the weather's own.
+    sounds: data.sounds === undefined ? parseSounds(list.find((w) => w.name === originalName)?.sounds ?? null) : parseSounds(data.sounds),
   };
   if (originalName !== null) await weather.update(row);
   else await weather.add(row);

@@ -347,7 +347,8 @@ describe("weather", () => {
   test("add, update and remove are written to the database and then to the weather held, which stays the whole list", async () => {
     await weather.add(storm);
     expect(held("weather").map((w) => w.name)).toEqual(["clear", "rainy", "storm"]);
-    expect(await weather.find({ name: "storm" } as WeatherData)).toEqual(storm);
+    // Held with its sounds, none here (systems/weathersounds.ts).
+    expect(await weather.find({ name: "storm" } as WeatherData)).toEqual({ ...storm, sounds: { rain: [], wind: [], thunder: [] } });
 
     await weather.update({ ...storm, wind_speed: 12 });
     expect((await weather.find({ name: "storm" } as WeatherData))!.wind_speed).toBe(12);

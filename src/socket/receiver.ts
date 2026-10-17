@@ -642,10 +642,14 @@ const rowOf = (all: WeatherData[] | null | undefined, name: string): WeatherData
  * ("tornado weather is not causing a sandstorm in the desert biome"): a "tornado" is told as a thunderstorm, so its
  * values say `sandstorm: true` as well, and the client blows a sandstorm in the desert zones too, as harsh as its wind.
  */
-const weatherShown = (weather: string, weatherData: WeatherData | null) => ({
-  weather: lookOf(weather),
-  weatherData: weather === TORNADO && weatherData ? { ...weatherData, sandstorm: true } : weatherData,
-});
+const weatherShown = async (weather: string, weatherData: WeatherData | null) => {
+  const look = lookOf(weather);
+  let data = weather === TORNADO && weatherData ? { ...weatherData, sandstorm: true } : weatherData;
+  // USER REQUEST 2026-10-17 (weather sounds chosen in the weather editor, systems/weathersounds.ts): a weather with no
+  // sounds of its own (the real weather, weather_api, which is no row) sounds like the weather it is drawn as.
+  if (data && !data.sounds) data = { ...data, sounds: rowOf(await assetCache.get("weather") as WeatherData[], look)?.sounds ?? null };
+  return { weather: look, weatherData: data };
+};
 
 // What the weather editor (systems/weathereditor.ts) needs from the socket
 // layer: which weather each world shows, and the players to show a change to.
@@ -663,13 +667,14 @@ const weatherBridge: weatherEditor.WeatherEditorBridge = {
     if (existingWorld) existingWorld.weather = weatherName;
     resolvedWeatherCache.delete(worldName);
   },
-  show: (worldName, weatherName, weatherData) => {
+  show: async (worldName, weatherName, weatherData) => {
     // Only a "random" world has settled on a weather: it has settled on this one now.
     if (resolvedWeatherCache.has(worldName)) resolvedWeatherCache.set(worldName, { weather: weatherName, weatherData });
+    const shown = await weatherShown(weatherName, weatherData);
     for (const playerId of mapIndex.getPlayersOnMap(worldName)) {
       const player = playerCache.get(playerId);
       if (player?.wt && player.wt.readyState === 1) {
-        sendPacket(player.wt, packetManager.changeWeather(weatherShown(weatherName, weatherData)));
+        sendPacket(player.wt, packetManager.changeWeather(shown));
       }
     }
   },
@@ -1665,7 +1670,7 @@ async function transitionPlayerToMap(
       if ((await getLiveWorlds()).some((w) => w.name === normalizedMap)) {
         const resolved = await resolveWorldWeather(normalizedMap);
         if (resolved.weather) {
-          sendPacket(wt, packetManager.weather(weatherShown(resolved.weather, resolved.weatherData)));
+          sendPacket(wt, packetManager.weather(await weatherShown(resolved.weather, resolved.weatherData)));
         }
       }
     } catch (e) {
@@ -2153,7 +2158,7 @@ authWorker.on("message", async (result: any) => {
     if (world) {
       const resolved = await resolveWorldWeather(spawnLocation.map.replace(".json", ""));
       if (resolved.weather) {
-        sendPacket(wt, packetManager.weather(weatherShown(resolved.weather, resolved.weatherData)));
+        sendPacket(wt, packetManager.weather(await weatherShown(resolved.weather, resolved.weatherData)));
       }
     }
 
@@ -9674,7 +9679,7 @@ export default async function packetReceiver(
               if (player?.wt && player.wt.readyState === 1) {
                 sendPacket(
                   player.wt,
-                  packetManager.changeWeather(weatherShown(resolvedWeatherName, weatherData))
+                  packetManager.changeWeather(await weatherShown(resolvedWeatherName, weatherData))
                 );
               }
             }
@@ -13336,7 +13341,7 @@ function scheduleWeatherCycle() {
           if (player?.wt && player.wt.readyState === 1) {
             sendPacket(
               player.wt,
-              packetManager.changeWeather(weatherShown(randomWeather.name, randomWeather))
+              packetManager.changeWeather(await weatherShown(randomWeather.name, randomWeather))
             );
           }
         }

@@ -2,6 +2,7 @@
 import query from "../controllers/sqldatabase";
 import log from "../modules/logger";
 import { CLASSES_TABLE } from "../systems/classtable";
+import { DEFAULT_SOUNDS, soundsText } from "../systems/weathersounds";
 const database = process.env.DATABASE_NAME || "TEMP_Mystika";
 
 const createDatabase = async () => {
@@ -558,11 +559,25 @@ const createWeatherTable = async () => {
       wind_speed FLOAT NOT NULL DEFAULT 0,
       humidity FLOAT NOT NULL DEFAULT 30,
       temperature FLOAT NOT NULL DEFAULT 68,
-      precipitation FLOAT NOT NULL DEFAULT 0
+      precipitation FLOAT NOT NULL DEFAULT 0,
+      sounds TEXT DEFAULT NULL
     )
   `;
   await query(sql);
+  // What a weather sounds like (systems/weathersounds.ts), added after the table's first release.
+  const exists = (await query(
+    `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'weather' AND COLUMN_NAME = 'sounds'`,
+    [database]
+  )) as any[];
+  if (!exists[0] || Number(exists[0].count) === 0) await query(`ALTER TABLE weather ADD COLUMN sounds TEXT DEFAULT NULL`);
 }
+
+/** The seeded weathers that have no sounds yet are given the ones the game played before they could be chosen. */
+const fillDefaultWeatherSounds = async () => {
+  for (const [name, sounds] of Object.entries(DEFAULT_SOUNDS)) {
+    await query(`UPDATE weather SET sounds = ? WHERE name = ? AND sounds IS NULL`, [soundsText(sounds), name]);
+  }
+};
 
 const createDefaultWeather = async () => {
   log.info("Creating default weather...");
@@ -1431,6 +1446,7 @@ const setupDatabase = async () => {
   await createParticleTable();
   await createWeatherTable();
   await createDefaultWeather();
+  await fillDefaultWeatherSounds();
   // Character classes (systems/classes.ts), and accounts.class_id on a database made before it
   await query(CLASSES_TABLE.mysql);
   await addClassColumn();

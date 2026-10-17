@@ -461,6 +461,23 @@ declare interface WeatherData {
   wind_direction: string;
   precipitation: number;
   ambience: number;
+  /** What the weather sounds like (systems/weathersounds.ts); none when absent. */
+  sounds?: WeatherSounds | null;
+}
+
+/** An audio file of the asset server heard while a weather's intensity is from `from` to `to`, at `volume` (0 to 1). */
+declare interface WeatherSound {
+  name: string;
+  from: number;
+  to: number;
+  volume: number;
+}
+
+/** A weather's sounds of each kind (systems/weathersounds.ts). */
+declare interface WeatherSounds {
+  rain: WeatherSound[];
+  wind: WeatherSound[];
+  thunder: WeatherSound[];
 }
 
 /** What a weather reads, as the control panel shows it: degrees Fahrenheit, percent, miles an hour, where the wind blows to on screen, and how much falls (0 to 100). */

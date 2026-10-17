@@ -18,8 +18,8 @@ const queries: Array<{ sql: string; params: any[] }> = [];
 
 const PERMISSIONS = "SELECT permissions FROM permissions WHERE username = ?";
 const REREAD = "SELECT * FROM weather";
-const INSERT = "INSERT INTO weather (name, temperature, humidity, wind_speed, wind_direction, precipitation, ambience) VALUES (?, ?, ?, ?, ?, ?, ?)";
-const UPDATE = "UPDATE weather SET temperature = ?, humidity = ?, wind_speed = ?, wind_direction = ?, precipitation = ?, ambience = ? WHERE name = ?";
+const INSERT = "INSERT INTO weather (name, temperature, humidity, wind_speed, wind_direction, precipitation, ambience, sounds) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+const UPDATE = "UPDATE weather SET temperature = ?, humidity = ?, wind_speed = ?, wind_direction = ?, precipitation = ?, ambience = ?, sounds = ? WHERE name = ?";
 const DELETE = "DELETE FROM weather WHERE name = ?";
 
 // As MySQL compares a name: without regard to case.
@@ -40,16 +40,16 @@ function apply(text: string, params: any[]): any {
   if (text === PERMISSIONS) return tables.permissions.filter((r) => r.username === params[0]);
   if (text === REREAD) return tables.weather.map((r) => ({ ...r }));
   if (text === INSERT) {
-    const [name, temperature, humidity, wind_speed, wind_direction, precipitation, ambience] = params;
+    const [name, temperature, humidity, wind_speed, wind_direction, precipitation, ambience, sounds] = params;
     // The name is the table's primary key.
     if (tables.weather.some((r) => sameName(r.name, name))) throw new Error(`Duplicate entry '${name}' for key 'PRIMARY'`);
-    tables.weather.push({ name, temperature, humidity, wind_speed, wind_direction, precipitation, ambience });
+    tables.weather.push({ name, temperature, humidity, wind_speed, wind_direction, precipitation, ambience, sounds });
     return [];
   }
   if (text === UPDATE) {
-    const [temperature, humidity, wind_speed, wind_direction, precipitation, ambience, name] = params;
+    const [temperature, humidity, wind_speed, wind_direction, precipitation, ambience, sounds, name] = params;
     for (const row of tables.weather.filter((r) => sameName(r.name, name))) {
-      Object.assign(row, { temperature, humidity, wind_speed, wind_direction, precipitation, ambience });
+      Object.assign(row, { temperature, humidity, wind_speed, wind_direction, precipitation, ambience, sounds });
     }
     return [];
   }
@@ -86,10 +86,13 @@ const MODERATOR = { id: "we-3", username: "mod", isGuest: false, permissions: ["
 
 const PACKETS = ["WEATHER_EDITOR_LIST", "WEATHER_EDITOR_SAVE", "WEATHER_EDITOR_DELETE"];
 
+const NO_SOUNDS = { rain: [], wind: [], thunder: [] };
 const weatherOf = (over: Row = {}): Row => ({
-  name: "foggy", temperature: 48, humidity: 95, wind_speed: 4, wind_direction: "left", precipitation: 10, ambience: 0.3,
+  name: "foggy", temperature: 48, humidity: 95, wind_speed: 4, wind_direction: "left", precipitation: 10, ambience: 0.3, sounds: NO_SOUNDS,
   ...over,
 });
+/** A weather as its row holds it: the sounds as the column's text. */
+const rowFor = (weather: Row): Row => ({ ...weather, sounds: JSON.stringify(weather.sounds) });
 
 /** The socket layer as the editor sees it: the worlds, and what was done to them. */
 let worlds: Array<{ name: string; weather: string; showing: string }>;
@@ -238,7 +241,7 @@ describe("listing", () => {
     const result = await editor.handleEditorPacket(ADMIN, "WEATHER_EDITOR_LIST", null);
     if (result.kind !== "data") throw new Error("Expected the editor's data");
     expect(result.data.weathers.map((w) => w.name)).toEqual(["clear", "darkness", "rainy", "thunderstorm"]);
-    expect(result.data.weathers[3]).toEqual({ name: "thunderstorm", temperature: 55, humidity: 90, wind_speed: 25, wind_direction: "right", precipitation: 80, ambience: 0.8 });
+    expect(result.data.weathers[3]).toEqual({ name: "thunderstorm", temperature: 55, humidity: 90, wind_speed: 25, wind_direction: "right", precipitation: 80, ambience: 0.8, sounds: NO_SOUNDS });
     expect(result.data.worlds).toEqual(worlds);
     expect(result.data.directions).toEqual(["none", "left", "right", "up", "down"]);
     expect(result.data.numbers.ambience).toEqual({ label: "Ambience", min: 0, max: 1 });
@@ -257,7 +260,7 @@ describe("listing", () => {
     cache.set("weather", [{ name: "odd", temperature: "50", humidity: "40", wind_speed: "2.5", wind_direction: "up", precipitation: null, ambience: "0.25" }]);
     const result = await editor.handleEditorPacket(ADMIN, "WEATHER_EDITOR_LIST", null);
     if (result.kind !== "data") throw new Error("Expected the editor's data");
-    expect(result.data.weathers).toEqual([{ name: "odd", temperature: 50, humidity: 40, wind_speed: 2.5, wind_direction: "up", precipitation: 0, ambience: 0.25 }]);
+    expect(result.data.weathers).toEqual([{ name: "odd", temperature: 50, humidity: 40, wind_speed: 2.5, wind_direction: "up", precipitation: 0, ambience: 0.25, sounds: NO_SOUNDS }]);
   });
 });
 
@@ -336,8 +339,8 @@ describe("saving", () => {
     expect(result.errors).toEqual([]);
     expect(result.name).toBe("foggy");
     expect(result.changed).toBe(true);
-    expect(writes()).toEqual([{ sql: INSERT, params: ["foggy", 48, 95, 4, "left", 10, 0.3] }]);
-    expect(stored("foggy")).toEqual(weatherOf());
+    expect(writes()).toEqual([{ sql: INSERT, params: ["foggy", 48, 95, 4, "left", 10, 0.3, JSON.stringify(NO_SOUNDS)] }]);
+    expect(stored("foggy")).toEqual(rowFor(weatherOf()));
     expect(heldOf("foggy")).toEqual(weatherOf());
     expect(result.data!.weathers.map((w) => w.name)).toEqual(["clear", "darkness", "foggy", "rainy", "thunderstorm"]);
     // Nothing shows it yet, and the answer says how to see it.
@@ -375,9 +378,9 @@ describe("saving", () => {
     const result = await save({ ...weatherOf({ name: "rainy", wind_speed: 40, wind_direction: "right", ambience: 0.5 }), originalName: "rainy" });
     expect(result.ok).toBe(true);
     expect(result.name).toBe("rainy");
-    expect(writes()).toEqual([{ sql: UPDATE, params: [48, 95, 40, "right", 10, 0.5, "rainy"] }]);
+    expect(writes()).toEqual([{ sql: UPDATE, params: [48, 95, 40, "right", 10, 0.5, JSON.stringify(NO_SOUNDS), "rainy"] }]);
     const saved = weatherOf({ name: "rainy", wind_speed: 40, wind_direction: "right", ambience: 0.5 });
-    expect(stored("rainy")).toEqual(saved);
+    expect(stored("rainy")).toEqual(rowFor(saved));
     expect(heldOf("rainy")).toEqual(saved);
     expect(held()).toHaveLength(4);
     expect(reads()).toEqual([]);
@@ -604,5 +607,76 @@ describe("the rest", () => {
     expect(saved.data!.worlds).toEqual([]);
     expect((await remove("rainy")).ok).toBe(true);
     expect(heldOf("rainy")).toBeUndefined();
+  });
+});
+
+describe("sounds", () => {
+  const SOUNDS = {
+    rain: [{ name: "soft rain", from: 0, to: 75, volume: 1 }, { name: "hard rain", from: 35, to: 100, volume: 0.8 }],
+    wind: [{ name: "gentle wind", from: 0, to: 20, volume: 1 }],
+    thunder: [{ name: "thunder", from: 0, to: 100, volume: 1 }, { name: "thunder 2", from: 0, to: 100, volume: 1 }],
+  };
+
+  test("the editor is sent the rules a weather's sounds are held to", async () => {
+    const result = await editor.handleEditorPacket(ADMIN, "WEATHER_EDITOR_LIST", null);
+    if (result.kind !== "data") throw new Error("Expected the editor's data");
+    expect(result.data.sounds.kinds).toEqual(["rain", "wind", "thunder"]);
+    expect(result.data.sounds.rules.wind).toEqual({ label: "Wind", measure: "Wind speed", unit: "mph", min: 0, max: 150 });
+    expect(result.data.sounds.max).toBe(12);
+  });
+
+  test("a weather's sounds are written to its row as text, held as lists, and shown with it", async () => {
+    const result = await save({ ...weatherOf({ name: "rainy", sounds: SOUNDS }), originalName: "rainy" });
+    expect(result.ok).toBe(true);
+    expect(stored("rainy")!.sounds).toBe(JSON.stringify(SOUNDS));
+    expect(heldOf("rainy")!.sounds).toEqual(SOUNDS);
+    expect(result.data!.weathers.find((w) => w.name === "rainy")!.sounds).toEqual(SOUNDS);
+    expect(shown.map((s) => s.weatherData!.sounds)).toEqual([SOUNDS, SOUNDS]);
+  });
+
+  test("sounds that are not valid are refused by field, and nothing is written", async () => {
+    const bad = {
+      rain: [{ name: "", from: 0, to: 50, volume: 1 }, { name: "hard rain", from: 80, to: 40, volume: 2 }],
+      wind: [{ name: "gentle wind", from: -1, to: 200, volume: 1 }],
+      thunder: Array.from({ length: 13 }, () => ({ name: "thunder", from: 0, to: 100, volume: 1 })),
+    };
+    const result = await save({ ...weatherOf({ name: "rainy", sounds: bad }), originalName: "rainy" });
+    expect(result.ok).toBe(false);
+    expect(result.fields).toEqual({
+      "sounds.rain.0.name": "Pick an audio file.",
+      "sounds.rain.1.to": "To must not be under From.",
+      "sounds.rain.1.volume": "Volume must be between 0 and 1.",
+      "sounds.wind.0.from": "From must be between 0 and 150.",
+      "sounds.wind.0.to": "To must be between 0 and 150.",
+      "sounds.thunder": "A weather can have at most 12 thunder sounds.",
+    });
+    expect(writes()).toEqual([]);
+  });
+
+  test("an editor that sends no sounds leaves the weather's own", async () => {
+    await save({ ...weatherOf({ name: "rainy", sounds: SOUNDS }), originalName: "rainy" });
+    const { sounds: _, ...without } = weatherOf({ name: "rainy", wind_speed: 12 });
+    expect((await save({ ...without, originalName: "rainy" })).ok).toBe(true);
+    expect(heldOf("rainy")!.sounds).toEqual(SOUNDS);
+    expect(heldOf("rainy")!.wind_speed).toBe(12);
+  });
+});
+
+describe("reading sounds", () => {
+  test("the column's text is read into lists, leaving out what is not a sound", async () => {
+    const { parseSounds } = await import("../systems/weathersounds");
+    expect(parseSounds(null)).toEqual(NO_SOUNDS);
+    expect(parseSounds("not json")).toEqual(NO_SOUNDS);
+    expect(parseSounds('{"rain":[{"name":" soft rain ","from":"0","to":60},{"name":"","from":0,"to":1},{"from":0}],"wind":"no"}')).toEqual({
+      rain: [{ name: "soft rain", from: 0, to: 60, volume: 1 }], wind: [], thunder: [],
+    });
+  });
+
+  test("the seeded weathers sound as the game did before sounds could be chosen", async () => {
+    const { DEFAULT_SOUNDS } = await import("../systems/weathersounds");
+    expect(DEFAULT_SOUNDS.thunderstorm!.thunder.map((s) => s.name)).toEqual(["thunder", "thunder 2", "thunder 3"]);
+    expect(DEFAULT_SOUNDS.rainy!.rain.map((s) => s.name)).toEqual(["soft rain", "hard rain"]);
+    expect(DEFAULT_SOUNDS.clear!.rain).toEqual([]);
+    expect(DEFAULT_SOUNDS.clear!.wind.map((s) => s.name)).toEqual(["gentle wind 2", "gentle wind", "regular wind"]);
   });
 });
