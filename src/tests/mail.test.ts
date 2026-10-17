@@ -283,12 +283,12 @@ describe("mailboxes placed by hand (/mailbox)", () => {
     expect(await mailboxEditor.placedOn("overworld")).toBeNull();
   });
 
-  test("spots off the map, on top of each other, too many or not a list are refused, and nothing is saved", async () => {
-    expect(await mailboxEditor.place("overworld", [{ x: -1, y: 5 }])).toEqual({ ok: false, message: "A mailbox is off the map." });
-    expect(await mailboxEditor.place("overworld", [{ x: "a", y: 5 }])).toEqual({ ok: false, message: "A mailbox is off the map." });
-    expect(await mailboxEditor.place("overworld", [{ x: 5, y: 5 }, { x: 5.2, y: 4.8 }])).toEqual({ ok: false, message: "Two mailboxes cannot stand on the same spot." });
-    const many = Array.from({ length: mailboxEditor.MAILBOXES_MAX + 1 }, (_, i) => ({ x: i, y: 0 }));
-    expect(await mailboxEditor.place("overworld", many)).toEqual({ ok: false, message: `A map has at most ${mailboxEditor.MAILBOXES_MAX} mailboxes.` });
+  test("spots off the map, on top of each other or not a list are refused, and nothing is saved", async () => {
+    const off = `X and Y must be whole numbers from 0 to ${mailboxEditor.COORDINATE_MAX}.`;
+    expect(await mailboxEditor.place("overworld", [{ x: 1, y: 1 }, { x: -1, y: 5 }])).toEqual({ ok: false, message: off, at: 1 });
+    expect(await mailboxEditor.place("overworld", [{ x: "a", y: 5 }])).toEqual({ ok: false, message: off, at: 0 });
+    expect(await mailboxEditor.place("overworld", [{ x: null, y: 5 }])).toEqual({ ok: false, message: off, at: 0 });
+    expect(await mailboxEditor.place("overworld", [{ x: 5, y: 5 }, { x: 5.2, y: 4.8 }])).toEqual({ ok: false, message: "Another mailbox stands on the same spot.", at: 1 });
     expect(await mailboxEditor.place("overworld", null)).toEqual({ ok: false, message: "No mailboxes were sent." });
     expect(tables.mailbox_spots).toEqual([]);
   });
@@ -304,6 +304,87 @@ describe("mailboxes placed by hand (/mailbox)", () => {
     expect(await mailboxEditor.canUseEditor({ username: "boss", isAdmin: true })).toBe(true);
     expect(await mailboxEditor.canUseEditor({ username: "hero" })).toBe(false);
     expect(await mailboxEditor.canUseEditor({ username: "visitor", isGuest: true, isAdmin: true })).toBe(false);
+    expect(mailboxEditor.mayHaveEditorOpen({ permissions: ["tools.mailbox_editor"] })).toBe(true);
+    expect(mailboxEditor.mayHaveEditorOpen({ permissions: ["admin.warp"] })).toBe(false);
+  });
+});
+
+describe("the mailbox editor's packets", () => {
+  const boss = { username: "boss", isAdmin: true };
+  /** The world as the receiver tells it: the admin is on the overworld, whose one inn has a mailbox. */
+  const world = (here = "overworld") => ({
+    here,
+    mailboxesOf: async (map: string) => (await mailboxEditor.placedOn(map)) ?? (map === "overworld" ? [{ id: "overworld:376:696", x: 376, y: 696 }] : []),
+    isMap: async (map: string) => ["overworld", "underworld", "house_1"].includes(map),
+    maps: async () => ["underworld.json", "house_1.json", "overworld.json"],
+  });
+
+  test("with no search, the list is the map the admin is on, then the maps they visited recently: not every map", async () => {
+    await mailboxEditor.place("underworld", [{ x: 5, y: 6 }]);
+    const answer = await mailboxEditor.handleEditorPacket(boss, "MAILBOX_EDITOR_LIST", { recent: ["underworld.json", "nowhere", "overworld"] }, world());
+    expect(answer).toEqual({
+      kind: "data",
+      data: {
+        here: "overworld",
+        maps: [
+          { map: "overworld", mailboxes: [{ x: 376, y: 696 }], placed: false },
+          { map: "underworld", mailboxes: [{ x: 5, y: 6 }], placed: true },
+        ],
+        query: "", truncated: 0, coordinateMax: mailboxEditor.COORDINATE_MAX, ready: true,
+      },
+    });
+    // a map placed by hand is not listed for that alone
+    const alone = await mailboxEditor.handleEditorPacket(boss, "MAILBOX_EDITOR_LIST", null, world());
+    expect(alone.kind === "data" && alone.data.maps.map((m) => m.map)).toEqual(["overworld"]);
+  });
+
+  test("at most RECENT_LIMIT recent maps are listed", async () => {
+    const many = Array.from({ length: mailboxEditor.RECENT_LIMIT + 5 }, (_, i) => `house_${i}`);
+    const answer = await mailboxEditor.handleEditorPacket(boss, "MAILBOX_EDITOR_LIST", { recent: many }, { ...world(), maps: async () => ["overworld", ...many] });
+    expect(answer.kind === "data" && answer.data.maps.map((m) => m.map)).toEqual(["overworld", ...many.slice(0, mailboxEditor.RECENT_LIMIT)]);
+  });
+
+  test("a search finds any map by its name, those that start with it first, and keeps the open map listed", async () => {
+    const found = await mailboxEditor.handleEditorPacket(boss, "MAILBOX_EDITOR_LIST", { query: "World", open: "house_1" }, world());
+    expect(found.kind === "data" && found.data.maps.map((m) => m.map)).toEqual(["overworld", "underworld", "house_1"]);
+    const starts = await mailboxEditor.handleEditorPacket(boss, "MAILBOX_EDITOR_LIST", { query: "under" }, world());
+    expect(starts.kind === "data" && starts.data.maps.map((m) => m.map)).toEqual(["underworld"]);
+  });
+
+  test("a search sends SEARCH_LIMIT maps at most and says how many more there are", async () => {
+    const many = Array.from({ length: mailboxEditor.SEARCH_LIMIT + 7 }, (_, i) => `house_${String(i).padStart(3, "0")}`);
+    const answer = await mailboxEditor.handleEditorPacket(boss, "MAILBOX_EDITOR_LIST", { query: "house" }, { ...world(), maps: async () => many });
+    expect(answer.kind === "data" && answer.data.maps.length).toBe(mailboxEditor.SEARCH_LIMIT);
+    expect(answer.kind === "data" && answer.data.truncated).toBe(7);
+  });
+
+  test("a save places the map's mailboxes and says which map changed", async () => {
+    const answer = await mailboxEditor.handleEditorPacket(boss, "MAILBOX_EDITOR_SAVE", { map: "overworld.json", mailboxes: [{ x: 10, y: 20 }] }, world());
+    expect(answer).toMatchObject({ kind: "result", ok: true, name: "overworld", changed: "overworld" });
+    expect(answer.kind === "result" && answer.data?.maps[0]).toEqual({ map: "overworld", mailboxes: [{ x: 10, y: 20 }], placed: true });
+  });
+
+  test("a save names the mailbox that is wrong, and refuses a map there is not", async () => {
+    const wrong = await mailboxEditor.handleEditorPacket(boss, "MAILBOX_EDITOR_SAVE", { map: "overworld", mailboxes: [{ x: 1, y: 1 }, { x: 1, y: 1 }] }, world());
+    expect(wrong).toMatchObject({ kind: "result", ok: false, fields: { "mailboxes.1": "Another mailbox stands on the same spot." } });
+    const nowhere = await mailboxEditor.handleEditorPacket(boss, "MAILBOX_EDITOR_SAVE", { map: "nowhere", mailboxes: [] }, world());
+    expect(nowhere).toMatchObject({ kind: "result", ok: false, errors: ["There is no map called nowhere."] });
+    expect(tables.mailbox_spots).toEqual([]);
+  });
+
+  test("a delete gives the map back to its inns; a map its inns place already is refused", async () => {
+    await mailboxEditor.place("underworld", [{ x: 5, y: 6 }]);
+    const done = await mailboxEditor.handleEditorPacket(boss, "MAILBOX_EDITOR_DELETE", { map: "underworld" }, world());
+    expect(done).toMatchObject({ kind: "result", ok: true, changed: "underworld", notes: ["Its inns place its mailboxes again."] });
+    expect(tables.mailbox_spots).toEqual([]);
+    const again = await mailboxEditor.handleEditorPacket(boss, "MAILBOX_EDITOR_DELETE", { map: "underworld" }, world());
+    expect(again).toMatchObject({ kind: "result", ok: false, errors: ["The mailboxes of underworld are already placed in front of its inns."] });
+  });
+
+  test("a player without the permission is refused before anything is read or changed", async () => {
+    const answer = await mailboxEditor.handleEditorPacket({ username: "hero" }, "MAILBOX_EDITOR_SAVE", { map: "overworld", mailboxes: [] }, world());
+    expect(answer).toEqual({ kind: "result", ok: false, errors: [mailboxEditor.DENIED], notes: [], name: null, denied: true, data: null });
+    expect(tables.mailbox_spots).toEqual([]);
   });
 });
 

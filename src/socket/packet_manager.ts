@@ -1024,10 +1024,19 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "TOGGLE_MAILBOX_EDITOR", data: null })),
     ] as any[];
   },
-  /** The mailboxes of the map the editor is on; `placed`: by hand, not in front of the inns. `message`: why a change was refused. */
-  mailboxEditorData: (data: { map: string; mailboxes: Array<{ id: string; x: number; y: number }>; placed: boolean; max: number; message?: string }) => {
+  mailboxEditorData: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "MAILBOX_EDITOR_DATA", data })),
+    ] as any[];
+  },
+  mailboxEditorResult: (data: { ok: boolean; errors: string[]; fields?: Record<string, string>; name?: string | null; notes: string[]; action?: string; data: any }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "MAILBOX_EDITOR_RESULT", data })),
+    ] as any[];
+  },
+  mailboxEditorUpdated: (data: { by: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "MAILBOX_EDITOR_UPDATED", data })),
     ] as any[];
   },
   toggleLootEditor: () => {

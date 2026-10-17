@@ -818,7 +818,7 @@ const createMailTable = async () => {
     )
   `);
   // The mailboxes placed by hand (/mailbox): a map's spots as a JSON list. A map without a row has them in front of its inns.
-  await query(`CREATE TABLE IF NOT EXISTS mailbox_spots (map VARCHAR(191) NOT NULL PRIMARY KEY, spots TEXT NOT NULL)`);
+  await query(`CREATE TABLE IF NOT EXISTS mailbox_spots (map VARCHAR(191) NOT NULL PRIMARY KEY, spots MEDIUMTEXT NOT NULL)`);
 };
 
 /** Every trade two players completed: what each gave (JSON: items and coins). Times are milliseconds since the epoch. */

@@ -381,13 +381,14 @@ async function sendMailboxes(wt: any, map: string): Promise<void> {
   sendPacket(wt, packetManager.mailboxes({ map, mailboxes: await mailboxesOf(map), iconUrl: getIconUrl("mailbox") || "" }));
 }
 
-/** Sends the mailbox editor the mailboxes of the map its player is on; `message`: why a change was refused. */
-async function sendMailboxEditor(wt: any, who: any, message?: string): Promise<void> {
-  const map = standing(who).map.replaceAll(".json", "");
-  const placed = await mailboxEditor.placedOn(map);
-  sendPacket(wt, packetManager.mailboxEditorData({
-    map, mailboxes: placed ?? await mailboxesOf(map), placed: placed !== null, max: mailboxEditor.MAILBOXES_MAX, ...(message ? { message } : {}),
-  }));
+/** What the mailbox editor is told of the world: the map its admin is on, where mailboxes stand, and which maps there are. */
+function mailboxEditorWorld(who: any): mailboxEditor.EditorWorld {
+  return {
+    here: standing(who).map.replaceAll(".json", ""),
+    mailboxesOf: (map) => mailboxesOf(map),
+    isMap: async (map) => !!getWorldMap(map) || !!(await mapPropertiesOf(map)),
+    maps: async () => (((await assetCache.get("maps")) || []) as any[]).map((held) => String(held?.name ?? "")),
+  };
 }
 
 /**
@@ -12021,30 +12022,27 @@ export default async function packetReceiver(
       }
       case "MAILBOX_EDITOR_LIST":
       case "MAILBOX_EDITOR_SAVE":
-      case "MAILBOX_EDITOR_RESET": {
+      case "MAILBOX_EDITOR_DELETE": {
         if (!currentPlayer) return;
-        if (!(await mailboxEditor.canUseEditor(currentPlayer))) {
-          sendPacket(wt, packetManager.notify({ message: mailboxEditor.DENIED }));
+        // The handler checks permission first, on every one of these; its answer carries the maps as they stand.
+        const result = await mailboxEditor.handleEditorPacket(currentPlayer, type, data, mailboxEditorWorld(currentPlayer));
+        if (result.kind === "data") {
+          sendPacket(wt, packetManager.mailboxEditorData(result.data));
           break;
         }
-        if (type === "MAILBOX_EDITOR_LIST") {
-          await sendMailboxEditor(wt, currentPlayer);
-          break;
-        }
-        // Only the map the editor stands on is changed: the one it shows.
-        const map = standing(currentPlayer).map.replaceAll(".json", "");
-        if (String((data as any)?.map ?? "").replaceAll(".json", "") !== map) {
-          await sendMailboxEditor(wt, currentPlayer, "You are no longer on that map.");
-          break;
-        }
-        const changed = type === "MAILBOX_EDITOR_SAVE"
-          ? await mailboxEditor.place(map, (data as any)?.mailboxes)
-          : await mailboxEditor.reset(map);
-        await sendMailboxEditor(wt, currentPlayer, changed.ok ? undefined : changed.message);
-        if (!changed.ok) break;
-        // Everyone on the map sees them where they now stand; an open editor asks again when it is sent them.
-        for (const online of Object.values(playerCache.list()) as any[]) {
-          if (online?.wt && String(online.location?.map ?? "").replaceAll(".json", "") === map) await sendMailboxes(online.wt, map);
+        if (result.denied) sendPacket(wt, packetManager.notify({ message: mailboxEditor.DENIED }));
+        sendPacket(wt, packetManager.mailboxEditorResult({
+          ok: result.ok, errors: result.errors, fields: result.fields, name: result.name, notes: result.notes, action: type, data: result.data,
+        }));
+        if (result.changed) {
+          const map = result.changed;
+          // Everyone on the map sees the mailboxes where they now stand, and every other open editor asks for the maps again.
+          const updated = packetManager.mailboxEditorUpdated({ by: currentPlayer.username });
+          for (const other of Object.values(playerCache.list()) as any[]) {
+            if (!other?.wt) continue;
+            if (String(other.location?.map ?? "").replaceAll(".json", "") === map) await sendMailboxes(other.wt, map);
+            if (other.id !== currentPlayer.id && mailboxEditor.mayHaveEditorOpen(other)) sendPacket(other.wt, updated);
+          }
         }
         break;
       }
