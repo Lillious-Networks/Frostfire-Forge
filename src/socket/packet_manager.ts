@@ -1039,6 +1039,43 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "MAILBOX_EDITOR_UPDATED", data })),
     ] as any[];
   },
+  /** Gathering nodes coming into view (systems/gathering). */
+  gatherNodeSpawn: (nodes: Array<{ id: number; x: number; y: number; item: string; icon: string | null; size: number }>) => {
+    return [
+      packet.encode(JSON.stringify({ type: "GATHER_NODE_SPAWN", data: { nodes } })),
+    ] as any[];
+  },
+  gatherNodeDespawn: (ids: number[]) => {
+    return [
+      packet.encode(JSON.stringify({ type: "GATHER_NODE_DESPAWN", data: { ids } })),
+    ] as any[];
+  },
+  /** Opens the gathering editor (/gathering), or closes it. */
+  toggleGatheringEditor: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "TOGGLE_GATHERING_EDITOR", data: null })),
+    ] as any[];
+  },
+  gatheringEditorData: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "GATHERING_EDITOR_DATA", data })),
+    ] as any[];
+  },
+  gatheringEditorPreview: (data: { spots: Array<{ x: number; y: number }>; wanted: number; note: string | null }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "GATHERING_EDITOR_PREVIEW_SPOTS", data })),
+    ] as any[];
+  },
+  gatheringEditorResult: (data: { ok: boolean; errors: string[]; fields?: Record<string, string>; id: number | null; notes: string[]; action?: string; data: any }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "GATHERING_EDITOR_RESULT", data })),
+    ] as any[];
+  },
+  gatheringEditorUpdated: (data: { by: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "GATHERING_EDITOR_UPDATED", data })),
+    ] as any[];
+  },
   toggleLootEditor: () => {
     return [
       packet.encode(JSON.stringify({ type: "TOGGLE_LOOT_EDITOR", data: null })),

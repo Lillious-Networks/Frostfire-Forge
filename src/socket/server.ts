@@ -28,6 +28,7 @@ import player, { ensureAmbienceColumn } from "../systems/player.ts";
 import { ensureClassSchema } from "../systems/classes.ts";
 import { ensureMailSchema } from "../systems/mail.ts";
 import { ensureMailboxSchema } from "../systems/mailboxeditor.ts";
+import { ensureGatheringSchema } from "../systems/gathering/editor.ts";
 import { ensureBuyPriceColumn, ensureSoulboundColumn } from "../systems/items.ts";
 import worlds from "../systems/worlds.ts";
 import playerCache from "../services/playermanager.ts";
@@ -60,6 +61,7 @@ import { isWhitelistEnabled, loadRealmWhitelist, onWhitelistSwitch } from "../se
 import { ensureSubscriptionSchema, refreshSubscriptions, subscriptionsReady, refusal as subscriptionRefusal } from "../systems/subscriptions.ts";
 import loot from "../systems/loot";
 import creatures from "../systems/creatures";
+import gathering from "../systems/gathering";
 import cooldownManager from "../services/cooldownmanager";
 
 const _cert = process.env.TLS_CERT_PATH;
@@ -174,6 +176,8 @@ await ensureClassSchema();
 await ensureMailSchema();
 // The mailboxes placed by hand (/mailbox), the same way.
 await ensureMailboxSchema();
+// The gathering areas (/gathering), the same way.
+await ensureGatheringSchema();
 // items.soulbound, the same way: before the items are read.
 await ensureSoulboundColumn();
 // items.buy_price, the same way.
@@ -718,6 +722,7 @@ listener.emit(Events.START);
 
 gameLoop.start();
 await creatures.init();
+await gathering.init();
 startAutoPartyLayerSync(sendAnimationTo);
 startAutoLayerCondensation(sendAnimationTo);
 

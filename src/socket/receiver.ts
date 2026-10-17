@@ -42,6 +42,25 @@ function isQuestRateLimited(id: string): boolean {
   return fresh.length > QUEST_RATE_MAX;
 }
 
+/** Gathering clears a patch of nodes in quick presses, so it has its own, wider limit than the quest packets. */
+const gatherRateLimit = new Map<string, number[]>();
+const GATHER_RATE_WINDOW = 2000;
+const GATHER_RATE_MAX = 10;
+
+function isGatherRateLimited(id: string): boolean {
+  const now = Date.now();
+  const fresh = (gatherRateLimit.get(id) || []).filter((t) => now - t < GATHER_RATE_WINDOW);
+  fresh.push(now);
+  gatherRateLimit.set(id, fresh);
+  // drop the players whose last press is outside the window, so the map does not grow with every connection
+  if (gatherRateLimit.size > 256) {
+    for (const [key, hits] of gatherRateLimit) {
+      if (now - hits[hits.length - 1]! >= GATHER_RATE_WINDOW) gatherRateLimit.delete(key);
+    }
+  }
+  return fresh.length > GATHER_RATE_MAX;
+}
+
 /**
  * Who of a party or guild receives a line from one of its members, in lower
  * case: the sender always (a muted player sees their own line as sent), and
@@ -333,11 +352,80 @@ async function castHome(caster: any, itemName: string): Promise<void> {
   listener.emit(Events.ITEM_USED, { player: after, item: itemName, health: 0, stamina: 0, home: to });
 }
 
+/** Whether a player is gathering now: its cast is the one they are in. */
+const castingGather = (player: any) => !!player?.casting && player.gatherCastId !== undefined && player.gatherCastId === player.castId;
+
+/**
+ * A player gathers a node (systems/gathering): GATHER_CAST_MS standing still, then the node is claimed, and the item
+ * goes into their bags. Players whose casts end within the same claim window get one winner, picked at random. A step,
+ * any damage, a stun or dying breaks the cast, as a cast home is broken.
+ */
+async function castGather(caster: any, nodeId: unknown): Promise<void> {
+  const wt = caster.wt;
+  if (!wt) return;
+  const started = await gathering.service.start(caster.id, nodeId);
+  if (!started.ok) {
+    sendPacket(wt, packetManager.notify({ message: started.reason }));
+    return;
+  }
+  // a cast that began while the checks were awaited is not overwritten
+  if (caster.casting || playerCache.get(caster.id)?.casting) {
+    sendPacket(wt, packetManager.notify({ message: "You are already casting." }));
+    return;
+  }
+
+  const from = { map: String(caster.location?.map), x: Number(caster.location?.position?.x), y: Number(caster.location?.position?.y) };
+  caster.casting = true;
+  caster.castOnSelf = true;
+  caster.interruptableSpell = true;
+  caster.castingSpellId = undefined;
+  caster.castId = (caster.castId || 0) + 1;
+  caster.gatherCastId = caster.castId;
+  caster.mounted = false;
+  playerCache.set(caster.id, caster);
+  const thisCast = caster.castId;
+
+  globalStateRevision++;
+  await sendPositionAnimation(wt, caster.location.position?.direction || "down", false, false, caster.mount_type || "unicorn", undefined, globalStateRevision, true);
+  broadcastCastToMap(filterPlayersByMap(caster.location.map), caster.id, packetManager.castSpell({ id: caster.id, spell: "Gathering", time: gathering.GATHER_CAST_MS / 1000 }));
+  await new Promise((resolve) => setTimeout(resolve, gathering.GATHER_CAST_MS));
+
+  const after = playerCache.get(caster.id);
+  if (!after || after.castId !== thisCast || !after.casting) return;
+  const here = after.location?.position;
+  const moved = String(after.location?.map) !== from.map || Number(here?.x) !== from.x || Number(here?.y) !== from.y;
+  if (moved || after.isDead || after.isGhost || spellEffects.isStunned(after)) {
+    await interruptPlayerCast(after);
+    return;
+  }
+  for (const held of new Set([caster, after])) {
+    held.casting = false;
+    held.interruptableSpell = false;
+    held.gatherCastId = undefined;
+  }
+  playerCache.set(after.id, after);
+  const live = after.wt;
+  if (!live) return;
+  globalStateRevision++;
+  await sendPositionAnimation(live, here?.direction || "down", false, false, after.mount_type || "unicorn", undefined, globalStateRevision, false);
+
+  const outcome = await gathering.service.finish(after.id, started.node.id);
+  if (!outcome.ok) {
+    sendPacket(live, packetManager.notify({ message: outcome.reason }));
+    return;
+  }
+  // Re-read the bags, as a loot pickup does: a new item needs its full details on the client.
+  after.inventory = await patchInventoryBagSlots(await inventory.get(after.username), after.username);
+  playerCache.set(after.id, after);
+  sendPacket(live, packetManager.inventory(after.inventory, await getInventorySlots(after)));
+}
+
 /** Breaks a player's cast home, when they are in one. */
 function breakCastHome(target: any): void {
   const player = (target?.id && playerCache.get(target.id)) || target;
-  if (!castingHome(player)) return;
-  interruptPlayerCast(player).catch((error) => log.error(`A cast home could not be broken: ${error}`));
+  // a gather (castGather) is broken the same way
+  if (!castingHome(player) && !castingGather(player)) return;
+  interruptPlayerCast(player).catch((error) => log.error(`A cast could not be broken: ${error}`));
 }
 // Any damage breaks it, and so does a stun. A step does too, where steps are read (MOVEXY), and dying where a death is handled.
 listener.on(Events.PLAYER_DAMAGED, (event: { target?: any; damage?: number }) => {
@@ -525,6 +613,7 @@ import spellEffects, { registerSpellEffect, spellHasHostileEffects, cancelEffect
 import dots from "../systems/dots";
 import { rollHeal, spellManaCost } from "../systems/spellmath";
 import creatures from "../systems/creatures";
+import gathering from "../systems/gathering";
 import { projectileTravelMs } from "../systems/creatures/projectile";
 import * as itemEditor from "../systems/itemeditor";
 import * as spellEditor from "../systems/spelleditor";
@@ -1652,6 +1741,8 @@ async function transitionPlayerToMap(
   // Loading a map clears the client's creatures, even when it is the same map
   // again: resend every creature around the player.
   creatures.resyncPlayer(player.id);
+  // and its gathering nodes, which it clears the same way
+  gathering.resyncPlayer(player.id);
 
   if (dismounted) {
     updatedPlayer.mounted = false;
@@ -8687,6 +8778,15 @@ export default async function packetReceiver(
             break;
           }
 
+          case "GATHERING": {
+            if (!(await gathering.canUseEditor(currentPlayer))) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(wt, packetManager.toggleGatheringEditor());
+            break;
+          }
+
           case "CLE":
           case "CLASSEDITOR": {
             if (!(await classEditor.canUseEditor(currentPlayer))) {
@@ -9521,6 +9621,9 @@ export default async function packetReceiver(
                   mapPropertiesCache
                 );
                 sendPacket(player.wt, packetManager.loadMap(mapMetadata));
+                // loading a map clears the client's creatures and gathering nodes
+                creatures.resyncPlayer(player.id);
+                gathering.resyncPlayer(player.id);
               });
             } else {
               log.error(`Failed to reload map ${mapName}`);
@@ -11962,6 +12065,13 @@ export default async function packetReceiver(
         sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
         break;
       }
+      case "GATHER": {
+        if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
+        if (isGatherRateLimited(String(wt.data.id))) return;
+        await castGather(currentPlayer, (data as any)?.nodeId);
+        break;
+      }
       case "BATCH_PICKUP_LOOT": {
         if (!currentPlayer) return;
         // Corpses and ghosts cannot pick up loot.
@@ -12065,6 +12175,15 @@ export default async function packetReceiver(
             if (other.id !== currentPlayer.id && mailboxEditor.mayHaveEditorOpen(other)) sendPacket(other.wt, updated);
           }
         }
+        break;
+      }
+      case "GATHERING_EDITOR_LIST":
+      case "GATHERING_EDITOR_SAVE":
+      case "GATHERING_EDITOR_DELETE":
+      case "GATHERING_EDITOR_PREVIEW": {
+        if (!currentPlayer) return;
+        // The handler checks permission first, on every one of these, and sends its own answers.
+        await gathering.handleEditorPacket(currentPlayer, type, data);
         break;
       }
       case "MAIL_OPEN": {

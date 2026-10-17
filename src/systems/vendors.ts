@@ -156,7 +156,7 @@ export function cannotShop(player: Shopper, npc: Npc | null | undefined): string
  * Whether a player has a slot for an item: more of something they hold takes none, and anything
  * else takes one. Counted as a quest's rewards are (see quests/rewards).
  */
-async function hasRoomFor(username: string, item: string): Promise<boolean> {
+export async function hasRoomFor(username: string, item: string): Promise<boolean> {
   const rows = (await inventory.get(username)) as any[];
   if (rows.some((row) => lower(row.item ?? row.name) === lower(item))) return true;
   return rows.length < (await bags.capacity(username));

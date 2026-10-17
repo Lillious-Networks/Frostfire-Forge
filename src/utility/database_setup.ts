@@ -1206,6 +1206,24 @@ const createCreatureTables = async () => {
     rare_chance_pct DECIMAL(5,2) NOT NULL DEFAULT 0,
     rare_template_id INT DEFAULT NULL
   )`);
+  // Gathering areas (/gathering): where resource nodes spawn. Same SQL as GATHERING_AREAS_TABLE.mysql in
+  // systems/gathering/editor.ts, which makes it at engine start too.
+  await query(`CREATE TABLE IF NOT EXISTS gathering_areas (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    map VARCHAR(191) NOT NULL,
+    x INT NOT NULL,
+    y INT NOT NULL,
+    radius INT NOT NULL DEFAULT 128,
+    size INT NOT NULL DEFAULT 32,
+    item VARCHAR(255) NOT NULL,
+    quantity_min INT NOT NULL DEFAULT 1,
+    quantity_max INT NOT NULL DEFAULT 1,
+    max_nodes INT NOT NULL DEFAULT 5,
+    respawn_min_s INT NOT NULL DEFAULT 60,
+    respawn_max_s INT NOT NULL DEFAULT 120,
+    enabled TINYINT(1) NOT NULL DEFAULT 1,
+    INDEX idx_gathering_areas_map (map)
+  )`);
   await query(`CREATE TABLE IF NOT EXISTS creature_spawns (
     id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
     template_id INT NOT NULL,

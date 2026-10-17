@@ -399,10 +399,21 @@ async function buildSpawnerData(): Promise<SpawnerData> {
   };
 }
 
+/** Maps another system (gathering) needs a nav grid for, besides those with creature spawns. */
+const extraNavMaps = new Set<string>();
+
+/** Builds (or keeps fresh, every server tick) the nav grids of these maps too. */
+export async function wantNavGrids(maps: Iterable<string>): Promise<void> {
+  for (const map of maps) extraNavMaps.add(normMap(map));
+  await refreshNavGrids(spawnCache);
+}
+
 /** Rebuild navigation grids for every map that has creature spawns (no-op if unchanged). */
 async function refreshNavGrids(spawns: Iterable<CreatureSpawn>): Promise<void> {
   const maps = new Set<string>();
   for (const s of spawns) maps.add(s.map);
+  const creatureMaps = new Set(maps);
+  for (const map of extraNavMaps) maps.add(map);
   if (maps.size === 0) return;
   const props = ((await assetCache.get("mapProperties")) || []) as any[];
   for (const map of maps) {
@@ -416,7 +427,8 @@ async function refreshNavGrids(spawns: Iterable<CreatureSpawn>): Promise<void> {
     const rle = await assetCache.getNested(map, "collision");
     const built = navGrids.update(map, Array.isArray(rle) ? rle : null,Number(prop?.tileWidth) || 32, Number(prop?.tileHeight) || 32);
     if (built) log.debug(`Creature nav grid built for ${map}`);
-    else if (!navGrids.get(map)) log.warn(`No collision data for creature map "${map}"; creatures there will not move`);
+    // gathering-only maps are warned about once, by gathering (reloadAreas)
+    else if (creatureMaps.has(map) && !navGrids.get(map)) log.warn(`No collision data for creature map "${map}"; creatures there will not move`);
   }
 }
 
@@ -1077,6 +1089,7 @@ export default {
   sync,
   combat,
   navGrids,
+  wantNavGrids,
   startAutoAttack,
   stopAutoAttack,
   getCreature,
