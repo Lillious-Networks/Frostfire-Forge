@@ -3011,11 +3011,11 @@ export default async function packetReceiver(
 
           // Round for collision detection only
           const _profCollStart = PROFILE ? performance.now() : 0;
-          const collision = player.checkCollisionSync(
+          const checkAt = (x: number, y: number) => player.checkCollisionSync(
             currentPlayer.location.map,
             {
-              x: Math.round(tempPosition.x),
-              y: Math.round(tempPosition.y),
+              x: Math.round(x),
+              y: Math.round(y),
               direction,
             },
             {
@@ -3023,6 +3023,27 @@ export default async function packetReceiver(
               height: playerHeight,
             }
           );
+          let collision = checkAt(tempPosition.x, tempPosition.y);
+
+          // A diagonal step into a wall only loses the blocked axis: the player slides along
+          // the open one (e.g. moving upright under a wall keeps going right) instead of stopping.
+          const startX = currentPlayer.location.position.x;
+          const startY = currentPlayer.location.position.y;
+          if (
+            collision?.reason === "tile_collision" &&
+            Math.round(tempPosition.x) !== startX &&
+            Math.round(tempPosition.y) !== startY
+          ) {
+            for (const slide of [{ x: tempPosition.x, y: startY }, { x: startX, y: tempPosition.y }]) {
+              const slideCollision = checkAt(slide.x, slide.y);
+              if (slideCollision?.reason !== "tile_collision") {
+                tempPosition.x = slide.x;
+                tempPosition.y = slide.y;
+                collision = slideCollision;
+                break;
+              }
+            }
+          }
           if (PROFILE) prof.collisionMs += performance.now() - _profCollStart;
 
           const isColliding = collision?.value === true;
