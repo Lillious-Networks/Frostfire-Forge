@@ -11,6 +11,7 @@ import { rowCache, tableCache, dropRows, dropAllRows, reloadTable, type RowCache
 import type { Batch } from "../services/batch";
 import { Events, listener } from "./events";
 import { isSick, applySicknessToStats } from "./resurrection";
+import permissions from "./permissions";
 const defaultMap = settings.default_map?.replace(".json", "") || "main";
 
 // What the engine writes of an account. The rest of the row (session, token,
@@ -289,30 +290,88 @@ async function wroteLayout(username: string, column: "hotbar_config" | "inventor
 // The caches of the per-player tables the guest clean-up deletes from.
 const CLEANED = ["accounts", "account_ids", "inventory", "stats", "clientconfig", "quest_log", "currency", "collectables", "equipment", "learned_spells", "spell_usage", "permissions", "friends"];
 
-const TOKEN_EXPIRY_MS = 24 * 60 * 60 * 1000;
+// An account token lasts this long from when it was issued, then a new
+// password login is needed. Kept in the account row (token_expires, epoch ms),
+// so the auth worker, every realm and the Gateway all see the same expiry. A
+// token with no expiry (issued before there was one) has expired.
+const TOKEN_LIFETIME_MS = (Number(process.env.TOKEN_LIFETIME_HOURS) || 24 * 7) * 60 * 60 * 1000;
 
-const tokenExpiry = new Map<string, number>();
-
-function trackToken(token: string): void {
-  tokenExpiry.set(token, Date.now() + TOKEN_EXPIRY_MS);
+/** Whether an account row's token is still within its lifetime. */
+export function tokenLive(row: { token_expires?: unknown } | undefined): boolean {
+  const expires = Number(row?.token_expires);
+  return Number.isFinite(expires) && expires > Date.now();
 }
 
-function isTokenExpired(token: string): boolean {
-  const expiry = tokenExpiry.get(token);
-  if (!expiry) return false;
-  if (Date.now() > expiry) {
-    tokenExpiry.delete(token);
+/** This realm, as it marks the sessions it holds (SERVER_ID): realms sharing a database must each have their own. */
+const SESSION_SERVER = String(process.env.SERVER_ID || "default");
+/** A realm marks its sessions this often; one not marked for SESSION_STALE_MS is taken to be gone (the realm stopped). */
+export const SESSION_HEARTBEAT_MS = 30_000;
+const SESSION_STALE_MS = 3 * SESSION_HEARTBEAT_MS;
+
+/** Whether an account's session is held by another realm that has vouched for it lately. */
+export function heldElsewhere(row: { session_server?: unknown; session_seen?: unknown } | undefined, now = Date.now()): boolean {
+  const server = row?.session_server;
+  if (typeof server !== "string" || !server || server === SESSION_SERVER) return false;
+  const seen = Number(row?.session_seen);
+  return Number.isFinite(seen) && now - seen < SESSION_STALE_MS;
+}
+
+/**
+ * The Gateway's login step an account's token has not passed, or null when it
+ * has passed them all: the token is set after the password, before a second
+ * factor or the e-mail check, so it must not log in on its own until they are
+ * done. Guests have no e-mail to verify.
+ */
+export function loginStepMissing(row: { twofa_pending?: unknown; email_verified?: unknown; guest_mode?: unknown } | undefined): string | null {
+  if (Number(row?.twofa_pending) === 1) return "two-factor authentication is pending";
+  if (Number(row?.guest_mode) !== 1 && Number(row?.email_verified) !== 1) return "the e-mail address is not verified";
+  return null;
+}
+
+async function hasAccountsColumn(name: string): Promise<boolean> {
+  if (process.env.DATABASE_ENGINE === "sqlite") {
+    const rows = (await query(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'`)) as any[];
+    return new RegExp(`\\b${name}\\b`).test(String(rows?.[0]?.sql || ""));
+  }
+  const rows = (await query(
+    `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts' AND COLUMN_NAME = ?`,
+    [name]
+  )) as any[];
+  return Number(rows?.[0]?.count) > 0;
+}
+
+/** The accounts columns every login reads. The Gateway's setup adds the last two; they are added here too if missing. */
+const LOGIN_COLUMNS = [
+  { name: "token_expires", type: "BIGINT DEFAULT NULL" },
+  { name: "session_server", type: "VARCHAR(64) DEFAULT NULL" },
+  { name: "session_seen", type: "BIGINT DEFAULT NULL" },
+  { name: "twofa_pending", type: "TINYINT DEFAULT 0" },
+  { name: "email_verified", type: "TINYINT DEFAULT 0" },
+];
+
+/**
+ * Start-time step: the accounts columns a login reads, added if missing, as
+ * the subscription columns are. A live database whose setup was not run again
+ * must have them before the first login. Never throws.
+ */
+export async function ensureLoginColumns(): Promise<boolean> {
+  try {
+    for (const column of LOGIN_COLUMNS) {
+      if (await hasAccountsColumn(column.name)) continue;
+      const type = process.env.DATABASE_ENGINE === "sqlite" ? column.type.replace("TINYINT", "INTEGER").replace("VARCHAR(64)", "TEXT") : column.type;
+      try {
+        await query(`ALTER TABLE accounts ADD COLUMN ${column.name} ${type}`);
+      } catch (error) {
+        // Another realm, or the Gateway, starting at the same moment may have added it first.
+        if (!(await hasAccountsColumn(column.name))) throw error;
+      }
+    }
     return true;
+  } catch (error) {
+    log.error(`The accounts login columns could not be added, so no login can succeed until they are: ${error}`);
+    return false;
   }
-  return false;
 }
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [token, expiry] of tokenExpiry) {
-    if (now > expiry) tokenExpiry.delete(token);
-  }
-}, 60 * 60 * 1000).unref();
 
 type CachedMap = typeof mapCache extends Map<string, infer V> ? V : never;
 
@@ -467,7 +526,8 @@ const player = {
     try {
       // Reset all accounts
       await query(
-        "UPDATE accounts SET verification_code = NULL, party_id = NULL, twofa_pending = 0"
+        // Not twofa_pending: a login waiting on its second step stays waiting across a restart.
+        "UPDATE accounts SET verification_code = NULL, party_id = NULL"
       );
 
       // Get guest usernames for cleanup
@@ -753,20 +813,26 @@ const player = {
     sessionId: string
   ): Promise<boolean | string> => {
     if (!token || !sessionId) return false;
-    if (isTokenExpired(token)) {
-      await query("UPDATE accounts SET token = NULL WHERE token = ?", [token]);
-      return false;
-    }
 
     // sessionId comes from wt.data.id which is a number via parseInt(),
     // but the DB column is VARCHAR. Normalize to string for comparisons.
     const sid = String(sessionId);
     const accountResult = await query(
-      "SELECT username, banned FROM accounts WHERE token = ?",
+      "SELECT username, banned, token_expires, twofa_pending, email_verified, guest_mode FROM accounts WHERE token = ?",
       [token]
     ) as any[];
     const username = accountResult[0]?.username as string;
     if (!username) return false;
+    if (!tokenLive(accountResult[0])) {
+      log.debug(`Token of ${username} has expired`);
+      await query("UPDATE accounts SET token = NULL, token_expires = NULL WHERE token = ?", [token]);
+      return false;
+    }
+    const refused = loginStepMissing(accountResult[0]);
+    if (refused) {
+      log.debug(`Login of ${username} refused: ${refused}`);
+      return false;
+    }
 
     if (accountResult[0]?.banned === 1) {
       log.debug(`User ${username} is banned`);
@@ -779,10 +845,10 @@ const player = {
     // (online=0 OR session_id IS NULL) or this is a re-auth.
     await query(
       `UPDATE accounts
-       SET session_id = ?, online = 1
+       SET session_id = ?, online = 1, session_server = ?, session_seen = ?
        WHERE token = ?
          AND (online = 0 OR session_id IS NULL OR session_id = ?)`,
-      [sid, token, sid]
+      [sid, SESSION_SERVER, Date.now(), token, sid]
     );
 
     // Verify the claim succeeded by reading back the session_id
@@ -797,13 +863,22 @@ const player = {
 
     // Claim failed - another session is active. Resolve it.
     const existingSessionResult = await query(
-      "SELECT session_id FROM accounts WHERE username = ?",
+      "SELECT session_id, session_server, session_seen FROM accounts WHERE username = ?",
       [username]
     ) as any[];
 
     const existingSessionId = existingSessionResult[0]?.session_id;
 
     if (String(existingSessionId ?? "") === sid) {
+      return false;
+    }
+
+    // Held by another realm that is still answering for it: this realm cannot
+    // kick that session (its player cache is not this one), so taking it over
+    // here would leave the account in the game twice. Refused until it logs
+    // out there, or that realm stops vouching for it.
+    if (heldElsewhere(existingSessionResult[0])) {
+      log.info(`Login of ${username} refused: online on realm ${existingSessionResult[0].session_server}`);
       return false;
     }
 
@@ -815,10 +890,10 @@ const player = {
     // Retry the atomic claim now that the existing session is cleared
     await query(
       `UPDATE accounts
-       SET session_id = ?, online = 1
+       SET session_id = ?, online = 1, session_server = ?, session_seen = ?
        WHERE token = ?
          AND (online = 0 OR session_id IS NULL OR session_id = ?)`,
-      [sid, token, sid]
+      [sid, SESSION_SERVER, Date.now(), token, sid]
     );
 
     // Verify the retry claim succeeded
@@ -829,11 +904,15 @@ const player = {
 
     return String(retryVerifyResult[0]?.session_id ?? "") === sid ? username : false;
   },
+  /** Vouches for the sessions this realm holds (see heldElsewhere): run every SESSION_HEARTBEAT_MS. */
+  markSessionsHeld: async () => {
+    await query("UPDATE accounts SET session_seen = ? WHERE session_server = ? AND online = 1", [Date.now(), SESSION_SERVER]);
+  },
   getSessionId: async (token: string) => {
-    if (!token || isTokenExpired(token)) return;
+    if (!token) return;
     const response = await query(
-      "SELECT session_id FROM accounts WHERE token = ?",
-      [token]
+      "SELECT session_id FROM accounts WHERE token = ? AND token_expires > ?",
+      [token, Date.now()]
     );
     return response;
   },
@@ -858,12 +937,13 @@ const player = {
     username = username.toLowerCase();
 
     const response = (await query(
-      "SELECT username, banned, token, password_hash FROM accounts WHERE username = ?",
+      "SELECT username, banned, token, token_expires, password_hash FROM accounts WHERE username = ?",
       [username]
     )) as {
       username: string;
       banned: number;
       token: string;
+      token_expires: number | null;
       password_hash: string;
     }[];
     if (response.length === 0 || response[0].banned === 1) {
@@ -877,7 +957,7 @@ const player = {
       return;
     }
 
-    const existingToken = !response[0].token || isTokenExpired(response[0].token) ? null : response[0].token;
+    const existingToken = response[0].token && tokenLive(response[0]) ? response[0].token : null;
     const token = existingToken || (await player.setToken(username));
 
     log.debug(`User ${username} logged in`);
@@ -905,13 +985,9 @@ const player = {
   },
   getUsernameByToken: async (token: string) => {
     if (!token) return;
-    if (isTokenExpired(token)) {
-      await query("UPDATE accounts SET token = NULL WHERE token = ?", [token]);
-      return;
-    }
     const response = await query(
-      "SELECT username FROM accounts WHERE token = ?",
-      [token]
+      "SELECT username FROM accounts WHERE token = ? AND token_expires > ?",
+      [token, Date.now()]
     );
     return response;
   },
@@ -939,12 +1015,11 @@ const player = {
     if (!username || !token) return;
 
     const response = await query(
-      "UPDATE accounts SET token = ? WHERE username = ?",
-      [token, username]
+      "UPDATE accounts SET token = ?, token_expires = ? WHERE username = ?",
+      [token, Date.now() + TOKEN_LIFETIME_MS, username]
     );
     if (!response) return;
 
-    trackToken(token);
     return token;
   },
   /** Whether a username is online on this server, as the rows `SELECT online` gave. */
@@ -1008,6 +1083,9 @@ const player = {
         [username]
       ))) as any;
       await accountRows.patch(username, { stealth: 0, noclip: 0 });
+      // What made them an admin goes with the role: permissions are read at
+      // every login whatever the role, and most commands check only them.
+      await permissions.clear(username);
     }
     log.debug(`${username} admin status has been updated to ${admin}`);
     return admin;

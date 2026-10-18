@@ -59,7 +59,8 @@ mock.module("../controllers/sqldatabase", () => databaseModule({ default: databa
 
 const datacache = await import("../services/datacache");
 const { default: log } = await import("../modules/logger");
-const { default: permissions } = await import("../systems/permissions");
+const permissionsModule = await import("../systems/permissions");
+const { default: permissions } = permissionsModule;
 
 const reads = () => queries.map(([sql]) => sql).filter((sql) => sql === LOAD || sql === TYPES);
 const writes = () => queries.filter(([sql]) => !sql.startsWith("SELECT"));
@@ -342,6 +343,48 @@ test("permissions.remove removes permission from user", async () => {
 test("permissions.clear clears all permissions", async () => {
   await permissions.clear("user1");
   expect(await permissions.get("user1")).toBe("");
+});
+
+describe("who may give what, and change whose", () => {
+  const { canGrant, outranks, covers, names } = permissionsModule;
+
+  test("a family's wildcard covers its members, not other families", () => {
+    expect(covers(["admin.*"], "admin.ban")).toBe(true);
+    expect(covers(["admin.*"], "permission.add")).toBe(false);
+    expect(covers(["admin.ban"], "admin.ban")).toBe(true);
+  });
+
+  test("permission.* gives anything but the server family", () => {
+    expect(canGrant(["permission.*"], "admin.ban")).toBe(true);
+    expect(canGrant(["permission.*"], "server.*")).toBe(false);
+    expect(canGrant(["permission.*"], "server.shutdown")).toBe(false);
+  });
+
+  test("a server permission is given by server.* or by one who holds it", () => {
+    expect(canGrant(["server.*"], "server.shutdown")).toBe(true);
+    expect(canGrant(["server.admin"], "server.admin")).toBe(true);
+    expect(canGrant(["server.admin"], "server.*")).toBe(false);
+  });
+
+  test("anything else only by one who holds it", () => {
+    expect(canGrant(["permission.add", "admin.kick"], "admin.kick")).toBe(true);
+    expect(canGrant(["permission.add", "admin.kick"], "admin.ban")).toBe(false);
+  });
+
+  test("a lower admin cannot change a higher one's permissions", () => {
+    const junior = ["permission.add", "permission.remove", "admin.kick"];
+    expect(outranks(junior, ["server.*"])).toBe(false);
+    expect(outranks(junior, ["admin.kick"])).toBe(true);
+    expect(outranks(["permission.*"], ["server.*"])).toBe(false);
+    expect(outranks(["server.*"], ["server.*", "admin.*"])).toBe(true);
+    expect(outranks(junior, [])).toBe(true);
+  });
+
+  test("a stored list is read as its names", () => {
+    expect(names(" admin.kick ,,server.* ")).toEqual(["admin.kick", "server.*"]);
+    expect(names("")).toEqual([]);
+    expect(names(null)).toEqual([]);
+  });
 });
 
 test("permissions.list returns all permission types", async () => {

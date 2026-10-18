@@ -462,26 +462,30 @@ describe("through a quest's whole life the rows held are what the tables hold", 
     expect(objectives.isComplete("hero", 10)).toBe(true);
     await inStep(hero);
 
-    // Handed in: the reward arrives and the quest is history.
+    // Handed in: the tails go with it, the reward arrives and the quest is history.
     const handedIn = await questLog.turnIn("hero", 10, NPC);
     expect(handedIn).toMatchObject({ ok: true, questId: 10, items: [{ name: "Bread", quantity: 1 }] });
     expect(tables.quest_log[0]).toMatchObject({ state: "completed", times_completed: 1 });
     expect(tables.inventory).toContainEqual(expect.objectContaining({ username: "hero", item: "Bread", quantity: 1 }));
+    expect(tables.inventory.some((row) => row.item === "Rat Tail")).toBe(false);
     expect(hero.questlog).toEqual({ active: [], completed: [10] });
     await inStep(hero);
 
-    // Taken again: the old counts go, and the tails still held count at once.
+    // Taken again: the old counts go, and with the tails handed in there is nothing to count at once.
     expect(await questLog.eligibility("hero", 10)).toBe("available");
     const again = await questLog.accept("hero", 10, NPC);
-    expect(again).toMatchObject({ ok: true, entry: { quest_id: 10, state: "active", times_completed: 1, progress: { 1002: 2 } } });
+    expect(again).toMatchObject({ ok: true, entry: { quest_id: 10, state: "active", times_completed: 1, progress: {} } });
     expect(tables.quest_log).toEqual([expect.objectContaining({ quest_id: 10, state: "active", completed_at: 0, times_completed: 1 })]);
-    expect(tables.quest_objective_progress).toEqual([count("hero", 10, 1002, 2)]);
+    expect(tables.quest_objective_progress).toEqual([]);
     await inStep(hero);
 
-    // And through to the second hand-in.
+    // And through to the second hand-in, with new tails.
     await objectives.credit("hero", "kill", "5", 1);
     await inStep(hero);
-    expect(await objectives.credit("hero", "kill", "5", 1)).toEqual([expect.objectContaining({ count: 2, questReady: true })]);
+    expect(await objectives.credit("hero", "kill", "5", 1)).toEqual([expect.objectContaining({ count: 2, questReady: false })]);
+    await inStep(hero);
+    await inventory.add("hero", { name: "Rat Tail", quantity: 2 } as any);
+    expect(tables.quest_log[0].state).toBe("ready");
     await inStep(hero);
     expect((await questLog.turnIn("hero", 10, NPC)).ok).toBe(true);
     expect(tables.quest_log[0]).toMatchObject({ state: "completed", times_completed: 2 });
@@ -1319,5 +1323,24 @@ describe("what a player holds is asked of the inventory and the bags, which read
     expect((await questLog.turnIn("hero", 30, NPC)).ok).toBe(true);
     expect(tables.inventory.find((row) => row.item === "Lantern")!.quantity).toBe(2);
     await inStep(hero);
+  });
+});
+
+describe("what a hand-in takes", () => {
+  const quest = (objectives: Array<{ type: string; target: string; required_count: number }>) =>
+    ({ objectives: objectives.map((o, i) => ({ id: i, quest_id: 1, sort_order: i, target_x: null, target_y: null, target_radius: null, description: null, ...o })) }) as any;
+
+  test("each collect objective's item and count, two for one item added up, nothing else", () => {
+    const wanted = questLog.collectedFor(quest([
+      { type: "collect", target: "Rat Tail", required_count: 2 },
+      { type: "kill", target: "5", required_count: 3 },
+      { type: "collect", target: "rat tail", required_count: 1 },
+      { type: "collect", target: "Pelt", required_count: 0 },
+    ]));
+    expect([...wanted]).toEqual([["Rat Tail", 3]]);
+  });
+
+  test("a quest with nothing to collect takes nothing", () => {
+    expect(questLog.collectedFor(quest([{ type: "talk", target: "7", required_count: 1 }])).size).toBe(0);
   });
 });

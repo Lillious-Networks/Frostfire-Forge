@@ -39,7 +39,10 @@ const createAccountsTable = async () => {
         subscribed INTEGER NOT NULL DEFAULT 0,
         stripe_customer_id TEXT DEFAULT NULL,
         subscription_ends INTEGER DEFAULT NULL,
-        class_id INTEGER DEFAULT NULL
+        class_id INTEGER DEFAULT NULL,
+        token_expires INTEGER DEFAULT NULL,
+        session_server TEXT DEFAULT NULL,
+        session_seen INTEGER DEFAULT NULL
       );
   `;
   await query(sql);
@@ -56,6 +59,11 @@ const addDeathColumns = async () => {
     { name: "corpse_map", type: "TEXT DEFAULT NULL" },
     { name: "corpse_x", type: "INTEGER DEFAULT NULL" },
     { name: "corpse_y", type: "INTEGER DEFAULT NULL" },
+    // When the account token stops working (epoch ms): not a death column, added here with them.
+    { name: "token_expires", type: "INTEGER DEFAULT NULL" },
+    // Which realm holds the account's session, and when it last said so.
+    { name: "session_server", type: "TEXT DEFAULT NULL" },
+    { name: "session_seen", type: "INTEGER DEFAULT NULL" },
   ];
   for (const col of columns) {
     if (!ddl.includes(col.name)) {

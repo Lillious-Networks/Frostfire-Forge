@@ -125,12 +125,14 @@ function write(text: string, args: any[]): any {
     tables.parties = [];
     return { affectedRows: 0 };
   }
-  const remove = text.match(/^DELETE FROM (\w+)(?: WHERE (\w+) (IN \(SELECT username FROM accounts WHERE guest_mode = 1\)|= 1))?$/);
+  // `= ?` is one player's rows: a demoted admin's permissions (toggleAdmin).
+  const remove = text.match(/^DELETE FROM (\w+)(?: WHERE (\w+) (IN \(SELECT username FROM accounts WHERE guest_mode = 1\)|= 1|= \?))?$/);
   if (remove) {
     const [, table, column, test] = remove;
     const guests = tables.accounts.filter((row) => row.guest_mode === 1).map((row) => row.username);
     const before = (tables[table] || []).length;
-    tables[table] = (tables[table] || []).filter((row) => (!column ? false : test === "= 1" ? row[column] !== 1 : !guests.includes(row[column])));
+    const kept = (row: Row) => !column ? false : test === "= 1" ? row[column] !== 1 : test === "= ?" ? row[column] !== args[0] : !guests.includes(row[column]);
+    tables[table] = (tables[table] || []).filter(kept);
     return { affectedRows: before - tables[table].length };
   }
 

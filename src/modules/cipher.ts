@@ -34,10 +34,20 @@ export function decryptRsa(
 
     return decrypted.toString("utf8");
   } catch (error) {
-    console.error("Decryption failed:", error);
+    // Any client can send garbage to decrypt: said once a minute at most, with how many failed.
+    failedDecryptions++;
+    const now = Date.now();
+    if (now - lastFailureLog >= 60_000) {
+      log.warn(`Chat decryption failed (${failedDecryptions} in the last minute or so): ${error}`);
+      lastFailureLog = now;
+      failedDecryptions = 0;
+    }
     return null;
   }
 }
+
+let failedDecryptions = 0;
+let lastFailureLog = -Infinity;
 
 export function generateKeyPair(passphrase: string | undefined): any {
   if (!passphrase) {

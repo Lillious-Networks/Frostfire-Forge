@@ -21,6 +21,7 @@
 //   WEBSRV_HTTP3          "false" to disable HTTP/3 on the public listener (default: on, TLS only)
 //   TLS_CERT_PATH / TLS_KEY_PATH / TLS_CA_PATH
 import fs from "node:fs";
+import tls from "node:tls";
 
 export interface HttpsServerLogger {
   info: (msg: string) => void;
@@ -117,29 +118,72 @@ export function getInternalServerOptions(certPath: string, keyPath: string, caPa
 const http3Origins = new Map<string, boolean>();
 const HTTP3_PROBE_TIMEOUT_MS = 2500;
 
+/** Whether a URL's host is this machine: 127.0.0.0/8, ::1 or localhost. */
+export function isLoopbackUrl(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+  return host === "localhost" || host.endsWith(".localhost") || host === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
+// The CA bundle the servers are configured with (TLS_CA_PATH), trusted beside
+// the system's own roots, so a deployment with its own CA is verified too.
+// Read once, when first needed.
+let extraCa: string[] | null = null;
+function trustedCas(): string[] | undefined {
+  if (extraCa === null) {
+    extraCa = [];
+    const caPath = process.env.TLS_CA_PATH;
+    try {
+      if (caPath && fs.existsSync(caPath)) extraCa = [...tls.rootCertificates, fs.readFileSync(caPath, "utf8")];
+    } catch {
+      extraCa = [];
+    }
+  }
+  return extraCa.length > 0 ? extraCa : undefined;
+}
+
+/**
+ * The TLS options for a server-to-server request. The certificate is checked,
+ * except on the hop to this same machine (the internal URLs), whose
+ * certificate is self-signed or issued for the public name: nobody else can
+ * answer on loopback. Everything else is verified, so a machine on the path
+ * cannot read the auth keys sent or answer in the asset server's place.
+ */
+export function tlsFor(url: string): { rejectUnauthorized?: boolean; ca?: string[] } {
+  if (isLoopbackUrl(url)) return { rejectUnauthorized: false };
+  const ca = trustedCas();
+  return ca ? { rejectUnauthorized: true, ca } : { rejectUnauthorized: true };
+}
+
 // Server-to-server fetch. Tries HTTP/3 first on https:// URLs (each origin is
 // probed once with a short timeout - a failed QUIC handshake would otherwise
 // stall 20s), falls back to HTTP/2, and keeps HTTP/1.1 for cleartext http://
-// URLs (development) because Bun's fetch has no h2c support. Self-signed
-// internal certificates are trusted per request instead of relying on
-// NODE_TLS_REJECT_UNAUTHORIZED.
+// URLs (development) because Bun's fetch has no h2c support. Certificates are
+// verified except on loopback (see tlsFor), per request, so
+// NODE_TLS_REJECT_UNAUTHORIZED is not needed.
 export function serverFetch(url: string, init?: RequestInit): Promise<Response> {
   if (!url.startsWith("https://")) {
     return fetch(url, init);
   }
 
   const origin = new URL(url).origin;
+  const tlsOptions = tlsFor(url);
   const known = http3Origins.get(origin);
 
   if (known === false) {
-    return fetch(url, { ...init, protocol: "http2", tls: { rejectUnauthorized: false } });
+    return fetch(url, { ...init, protocol: "http2", tls: tlsOptions });
   }
 
   if (known === true) {
-    return fetch(url, { ...init, protocol: "http3", tls: { rejectUnauthorized: false } })
+    return fetch(url, { ...init, protocol: "http3", tls: tlsOptions })
       .catch(() => {
         http3Origins.set(origin, false);
-        return fetch(url, { ...init, protocol: "http2", tls: { rejectUnauthorized: false } });
+        return fetch(url, { ...init, protocol: "http2", tls: tlsOptions });
       });
   }
 
@@ -155,14 +199,14 @@ export function serverFetch(url: string, init?: RequestInit): Promise<Response> 
   }
   const timer = setTimeout(() => probe.abort(), HTTP3_PROBE_TIMEOUT_MS);
 
-  return fetch(url, { ...init, protocol: "http3", tls: { rejectUnauthorized: false }, signal: probe.signal })
+  return fetch(url, { ...init, protocol: "http3", tls: tlsOptions, signal: probe.signal })
     .then((res) => {
       http3Origins.set(origin, true);
       return res;
     })
     .catch(() => {
       http3Origins.set(origin, false);
-      return fetch(url, { ...init, protocol: "http2", tls: { rejectUnauthorized: false } });
+      return fetch(url, { ...init, protocol: "http2", tls: tlsOptions });
     })
     .finally(() => {
       clearTimeout(timer);

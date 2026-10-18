@@ -873,7 +873,8 @@ async function createClients(amount: number, host: string, clientUrl: string, co
                     log(`Connecting to WebTransport: ${finalTransportUrl}`, 'info');
                 }
 
-                const client = await BenchmarkConnection.connect(finalTransportUrl, sharedSecret, 'Frostfire-Forge-Benchmark-CLI/1.0');
+                // The ticket is for the guest this client logs in as: the server refuses any other.
+                const client = await BenchmarkConnection.connect(finalTransportUrl, sharedSecret, 'Frostfire-Forge-Benchmark-CLI/1.0', undefined, token);
 
                 allClients.push(client);
                 openClients.add(client);

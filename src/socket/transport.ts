@@ -1,13 +1,17 @@
 import { serve } from "@lillious-networks/webtransport-bun";
 import crypto from "crypto";
-import { FrameDecoder, encodeFrame, encodeCloseReason, decodeCloseReason } from "./framing.ts";
+import { FrameDecoder, encodeFrame, encodeCloseReason, decodeCloseReason, CONNECT_FRAME_BYTES, LOGIN_FRAME_BYTES, PLAYER_FRAME_BYTES, frameLimitFor } from "./framing.ts";
 import { topicBus } from "./topics.ts";
+import type { TicketFields } from "./ticket.ts";
+import { RateBucket } from "./ratebucket.ts";
 import log from "../modules/logger.ts";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 const activeConnectionIds = new Set<string>();
+/** The server-wide datagram budget (rateLimits.datagramsPerSec / datagramsBurst), set when the server starts. */
+let serverDatagrams: RateBucket | null = null;
 
 function isSessionClosedError(error: any): boolean {
   if (!error) return false;
@@ -37,14 +41,11 @@ const MAX_SAFE_QUEUE_BYTES = 48 * 1024 * 1024;
 
 export { encodeCloseReason, decodeCloseReason };
 
+export { CONNECT_FRAME_BYTES, LOGIN_FRAME_BYTES, PLAYER_FRAME_BYTES, frameLimitFor };
+
 export interface TransportHandlers {
-  validateConnectionToken: (
-    token: string | null,
-    timestamp: string | null,
-    expiresAt: string | null,
-    signature: string | null,
-    origin: string | null
-  ) => boolean;
+  /** The account the ticket is for ("" for none), or null when it is refused. */
+  validateConnectionToken: (fields: TicketFields) => { account: string } | null;
   onOpen: (connection: TransportConnection) => void;
   onClose: (connection: TransportConnection) => void;
   onMessage: (connection: TransportConnection, message: string) => void;
@@ -75,11 +76,31 @@ export class TransportConnection {
   private closeHandled: boolean = false;
   private maxDatagramSize: number;
   private maxFrameSize: number;
+  private frameLimiter: ((bytes: number) => void) | null = null;
+  /** Set once a player has logged in on this connection: until then it is closed after idleTimeoutMs. */
+  loggedIn: boolean = false;
+  /** @internal Movement and other datagrams: excess is dropped (rateLimits.datagramsPerSec / datagramsBurst). */
+  datagramBucket: RateBucket | null = null;
 
   constructor(session: any, maxDatagramSize: number, maxFrameSize: number) {
     this.session = session;
     this.maxDatagramSize = maxDatagramSize;
     this.maxFrameSize = maxFrameSize;
+  }
+
+  /** A player logged in on this connection: it is no longer closed for sitting idle before a login. */
+  markLoggedIn(): void {
+    this.loggedIn = true;
+  }
+
+  /** The largest frame accepted from this connection from now on, at most the server's maximum. */
+  setFrameLimit(bytes: number): void {
+    this.frameLimiter?.(Math.min(bytes, this.maxFrameSize));
+  }
+
+  /** @internal The stream reader's decoder, so setFrameLimit reaches it. */
+  useFrameLimiter(limiter: (bytes: number) => void): void {
+    this.frameLimiter = limiter;
   }
 
   private lastMetricsAt = 0;
@@ -331,17 +352,39 @@ export class TransportConnection {
 }
 
 export function startWebTransportServer(options: TransportServerOptions): Promise<any> {
-  // The queue limits, rate limits and native log callback the previous library
-  // took as configuration have no equivalent here: this transport applies
-  // QUIC's own flow control, and sheds load itself via the queuedBytes
-  // tripwire in sendFrame(). See the notes on MAX_SAFE_QUEUE_BYTES.
+  // This library takes no rate limits of its own, so the configured ones are
+  // applied here: new sessions against handshakesPerSec / handshakesBurst
+  // (server-wide: the library does not say which address a session is from,
+  // so handshakesBurstPerPrefix cannot be applied), datagrams against
+  // datagramsPerSec / datagramsBurst server-wide and
+  // datagramsPerSecPerConnection / datagramsBurstPerConnection (default 240
+  // and 480: a client moves at 30 a second) for each connection, and streams by
+  // maxConcurrentStreams (a client uses one). Queues are still shed via the
+  // queuedBytes tripwire in sendFrame(). See the notes on MAX_SAFE_QUEUE_BYTES.
+  const limits = options.rateLimits || {};
+  const handshakes = new RateBucket(Number(limits.handshakesPerSec), Number(limits.handshakesBurst));
+  serverDatagrams = new RateBucket(Number(limits.datagramsPerSec), Number(limits.datagramsBurst));
+  let refusedHandshakes = 0;
+  let lastRefusalLog = -Infinity;
   return serve({
     hostname: "0.0.0.0",
     port: options.port,
     cert: options.certPem,
     key: options.keyPem,
     maxSessions: options.maxSessions,
+    maxConcurrentStreams: Number(limits.maxConcurrentStreams) || 16,
     session: (session: any) => {
+      if (!handshakes.take()) {
+        refusedHandshakes++;
+        const now = Date.now();
+        if (now - lastRefusalLog >= 10_000) {
+          log.warn(`[WebTransport] Handshake rate limit reached: ${refusedHandshakes} session(s) refused`);
+          lastRefusalLog = now;
+          refusedHandshakes = 0;
+        }
+        // Throwing rejects the session.
+        throw new Error("Handshake rate limit reached");
+      }
       handleSession(session, options).catch((error: any) => {
         if (!isSessionClosedError(error)) {
           log.debug(`[WebTransport] Session handler failed: ${error?.message || error}`);
@@ -358,6 +401,8 @@ export function startWebTransportServer(options: TransportServerOptions): Promis
 
 async function handleSession(session: any, options: TransportServerOptions): Promise<void> {
   const connection = new TransportConnection(session, options.maxDatagramSize, options.maxFrameSize);
+  const limits = options.rateLimits || {};
+  connection.datagramBucket = new RateBucket(Number(limits.datagramsPerSecPerConnection ?? 240), Number(limits.datagramsBurstPerConnection ?? 480));
 
   const authTimer = setTimeout(() => {
     if (!connection.data.id) {
@@ -404,7 +449,8 @@ async function startStreamLoop(
     }
 
     const bidi = first.value;
-    const decoder = new FrameDecoder(options.maxFrameSize);
+    const decoder = new FrameDecoder(Math.min(CONNECT_FRAME_BYTES, options.maxFrameSize));
+    connection.useFrameLimiter((bytes) => decoder.setMaxFrameSize(bytes));
     let authenticated = false;
 
     for await (const chunk of bidi.readable) {
@@ -423,6 +469,8 @@ async function startStreamLoop(
             connection.close(1008, "Unauthorized: Invalid token");
             return;
           }
+          // Room for the AUTH packet; the receiver allows a player's limit once they are logged in.
+          connection.setFrameLimit(LOGIN_FRAME_BYTES);
           continue;
         }
 
@@ -458,6 +506,9 @@ function startDatagramLoop(session: any, connection: TransportConnection, option
         if (!connection.data.id) continue;
         // Closed by a handler: late datagrams are dropped, as on the stream.
         if (!connection.isOpen()) break;
+        // Over the connection's datagram rate: dropped, as a lossy datagram may be.
+        if (connection.datagramBucket && !connection.datagramBucket.take()) continue;
+        if (serverDatagrams && !serverDatagrams.take()) continue;
 
         try {
           const message = textDecoder.decode(datagram instanceof Uint8Array ? datagram : new Uint8Array(datagram));
@@ -491,15 +542,16 @@ function tryAuthenticate(
   }
 
   const data = parsed?.data || {};
-  const valid = options.handlers.validateConnectionToken(
-    data?.token ?? null,
-    data?.timestamp ?? null,
-    data?.expiresAt ?? null,
-    data?.signature ?? null,
-    data?.origin ?? null
-  );
+  const ticket = options.handlers.validateConnectionToken({
+    token: data?.token,
+    timestamp: data?.timestamp,
+    expiresAt: data?.expiresAt,
+    signature: data?.signature,
+    origin: data?.origin,
+    account: data?.account,
+  });
 
-  if (!valid) {
+  if (!ticket) {
     log.warn(`[WebTransport] Rejected connection with invalid token from ${connection.session?.peer?.ip || "unknown"}`);
     return false;
   }
@@ -523,10 +575,23 @@ function tryAuthenticate(
     id,
     useragent: data?.useragent || "unknown",
     chatDecryptionKey: options.chatDecryptionKey,
+    // The account this connection may log in as (see ticket.ts): AUTH is refused for any other.
+    ticketAccount: ticket.account,
   };
 
   connection.attachStream(writable);
   options.handlers.onOpen(connection);
+
+  // A connection that holds a ticket but never logs anyone in is closed after
+  // idleTimeoutMs, so it cannot sit on a session slot. A logged-in player may
+  // idle (QUIC's own idle timeout closes a dead peer).
+  if (options.idleTimeoutMs > 0) {
+    const idle = setTimeout(() => {
+      if (!connection.loggedIn && connection.isOpen()) connection.close(1008, "No login");
+    }, options.idleTimeoutMs);
+    (idle as any).unref?.();
+    connection.session?.closed?.finally?.(() => clearTimeout(idle));
+  }
 
   connection.send(textEncoder.encode(JSON.stringify({ type: "AUTH_CONNECT_SUCCESS", data: null })));
 

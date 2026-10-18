@@ -232,15 +232,17 @@ interface TickStats {
 
 async function fetchStats(url: string, reset = false): Promise<TickStats | null> {
   const target = reset ? `${url}?reset=1` : url;
+  // The route answers only a caller with the server's key.
+  const init = { headers: { Authorization: `Bearer ${process.env.GATEWAY_AUTH_KEY || ""}` } };
   try {
-    const response = await serverFetch(target);
+    const response = await serverFetch(target, init);
     if (!response.ok) throw new Error(`status ${response.status}`);
     return (await response.json()) as TickStats;
   } catch (error) {
     // Older configs serve this port in the clear; try that before giving up.
     if (target.startsWith("https://")) {
       try {
-        const response = await fetch(target.replace("https://", "http://"));
+        const response = await fetch(target.replace("https://", "http://"), init);
         if (response.ok) return (await response.json()) as TickStats;
       } catch {
         // Fall through to the error below.

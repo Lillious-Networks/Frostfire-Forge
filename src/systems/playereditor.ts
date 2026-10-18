@@ -12,7 +12,7 @@ import log from "../modules/logger";
 import { packetManager } from "../socket/packet_manager";
 import { Events, listener } from "./events";
 import player from "./player";
-import permissions from "./permissions";
+import permissions, { canGrant, outranks } from "./permissions";
 import inventory from "./inventory";
 import equipment, { EQUIPMENT_SLOTS } from "./equipment";
 import currency, { CURRENCY_LIMITS } from "./currency";
@@ -1035,7 +1035,8 @@ async function setPermissions({ admin, username, data }: ActionContext): Promise
   const holds = (...names: string[]) => held.some((p) => names.includes(p));
   if (added.length && !holds("permission.add", "permission.*")) return ["You need permission.add to give permissions."];
   if (removed.length && !holds("permission.remove", "permission.*")) return ["You need permission.remove to take permissions away."];
-  const beyond = added.filter((p) => !holds(p, "permission.*", "server.*"));
+  if (!outranks(held, current)) return ["You cannot change the permissions of someone who holds permissions you cannot grant."];
+  const beyond = added.filter((p) => !canGrant(held, p));
   if (beyond.length) return beyond.map((p) => `You cannot grant the ${p} permission.`);
 
   if (next.length) await permissions.set(username, next);
@@ -1050,6 +1051,10 @@ async function setAdmin({ admin, username, data }: ActionContext): Promise<strin
   if (lower(admin.username) === username) return ["You cannot toggle your own admin status."];
   if (typeof data?.value !== "boolean") return ["Admin must be on or off."];
   if ((await player.isAdmin(username)) === data.value) return [];
+  // Demoting clears what they hold: held to the rule of changing it.
+  if (!outranks(await heldPermissions(admin.username), await heldPermissions(username))) {
+    return ["You cannot change the admin status of someone who holds permissions you cannot grant."];
+  }
 
   const isAdmin = !!(await player.toggleAdmin(username));
   const live = findOnline(username);
@@ -1059,6 +1064,7 @@ async function setAdmin({ admin, username, data }: ActionContext): Promise<strin
       // toggleAdmin clears these with the role.
       live.isStealth = false;
       live.isNoclip = false;
+      live.permissions = [];
     }
     // As /admin does: the client reloads to pick up its new role.
     send(live.wt, packetManager.reconnect());

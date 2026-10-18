@@ -22,6 +22,8 @@ export interface ChatLine {
 export const LINES_KEPT = 20;
 /** How long a player's lines are kept after their last one: long enough to report someone who has just left. */
 export const LINES_KEPT_FOR = 30 * 60_000;
+/** How much of a line is kept: the chat cap. Every channel caps a line before it gets here; this keeps what is held bounded all the same. */
+export const TEXT_KEPT = 500;
 /** Old lines are looked for once in this many lines. */
 export const PRUNE_EVERY = 200;
 
@@ -58,7 +60,7 @@ export async function audience(sender: string, channel: ChatChannel, text: strin
 
   const name = lower(sender);
   const kept = lines.get(name) ?? [];
-  kept.push({ at: now, channel, text: String(text ?? ""), to: reached.map(lower), muted });
+  kept.push({ at: now, channel, text: String(text ?? "").slice(0, TEXT_KEPT), to: reached.map(lower), muted });
   if (kept.length > LINES_KEPT) kept.splice(0, kept.length - LINES_KEPT);
   lines.set(name, kept);
   if (++sincePrune > PRUNE_EVERY) pruneLines(now);

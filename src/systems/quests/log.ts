@@ -622,6 +622,21 @@ class Refused extends Error {
   }
 }
 
+/** The items a quest's collect objectives ask for, and how many of each: two objectives for one item add up. */
+export function collectedFor(quest: Quest): Map<string, number> {
+  const wanted = new Map<string, number>();
+  const names = new Map<string, string>();
+  for (const objective of quest.objectives || []) {
+    const count = Number(objective.required_count);
+    if (objective.type !== "collect" || !objective.target || !(count > 0)) continue;
+    const key = String(objective.target).toLowerCase();
+    if (!names.has(key)) names.set(key, String(objective.target));
+    const name = names.get(key)!;
+    wanted.set(name, (wanted.get(name) || 0) + count);
+  }
+  return wanted;
+}
+
 export async function turnIn(
   username: string,
   questId: number,
@@ -648,6 +663,24 @@ export async function turnIn(
       if (entry.state !== "ready") throw new Refused({ ok: false, error: "That quest is not ready to turn in.", code: "not_ready" });
       if (!validateChoice(quest, rewardChoiceIndex)) {
         throw new Refused({ ok: false, error: "Choose a reward first.", code: "bad_choice" });
+      }
+
+      // What the quest asked to be collected is handed in with it, in the same
+      // batch as the reward: kept, one stack would complete a repeatable quest
+      // again and again. Only what is spare is taken; what is worn or carried as
+      // a bag stays.
+      const wanted = collectedFor(quest);
+      if (wanted.size > 0) {
+        const { default: inventory } = await import("../inventory");
+        const { inUse } = await import("../spare");
+        for (const [item, count] of wanted) {
+          const held = await inventory.heldIn(batch, uname, item);
+          const spare = held ? held.quantity - (await inUse(uname, item, held.equipped)) : 0;
+          if (spare < count) {
+            throw new Refused({ ok: false, error: "You no longer have everything this quest asked for.", code: "missing_items" });
+          }
+          await inventory.remove(uname, { name: item, quantity: count } as InventoryItem, batch);
+        }
       }
 
       const rewards = await grant(username, quest, rewardChoiceIndex, batch);

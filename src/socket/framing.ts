@@ -1,5 +1,28 @@
 const HEADER_BYTES = 4;
 
+// The largest frame a connection may send grows as it proves who it is, so a
+// stranger cannot make the server buffer and parse megabytes:
+/** Before AUTH_CONNECT: the connection ticket only. */
+export const CONNECT_FRAME_BYTES = 4 * 1024;
+/** After AUTH_CONNECT, until a player logs in: the AUTH packet only. */
+export const LOGIN_FRAME_BYTES = 16 * 1024;
+/** A logged-in player's packets, unless they use the tools: map saves and editor packets are large. */
+export const PLAYER_FRAME_BYTES = 256 * 1024;
+
+/**
+ * The largest frame this connection's player may send: the configured maximum
+ * for an admin or anyone holding a permission (the tools need it) and on a
+ * benchmark server, a normal player's limit otherwise, and the login limit
+ * before anyone is logged in.
+ */
+export function frameLimitFor(player: { isAdmin?: boolean; permissions?: unknown[] } | null | undefined, maxFrameSize: number, benchmark = false): number {
+  if (benchmark) return maxFrameSize;
+  if (!player) return Math.min(LOGIN_FRAME_BYTES, maxFrameSize);
+  const holdsAny = Array.isArray(player.permissions) && player.permissions.some((p) => typeof p === "string" && p.trim() !== "");
+  if (player.isAdmin || holdsAny) return maxFrameSize;
+  return Math.min(PLAYER_FRAME_BYTES, maxFrameSize);
+}
+
 export function encodeCloseReason(code: number, reason: string): string {
   return `${code}|${reason || ""}`;
 }
@@ -101,6 +124,11 @@ export class FrameDecoder {
     }
 
     return frames;
+  }
+
+  /** The largest frame accepted from now on: a connection is allowed more as it proves who it is. */
+  setMaxFrameSize(maxFrameSize: number): void {
+    this.maxFrameSize = maxFrameSize;
   }
 
   isOverflowed(): boolean {

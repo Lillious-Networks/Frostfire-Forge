@@ -1,8 +1,11 @@
 import { packetTypes } from "./types";
 import { packetManager } from "./packet_manager";
+import { frameLimitFor } from "./framing";
+import { ticketAllows } from "./ticket";
+import { atomically } from "../services/batch";
 import log from "../modules/logger";
 import player, { clearMapCache, hasLineOfSight } from "../systems/player.ts";
-import permissions from "../systems/permissions";
+import permissions, { canGrant, outranks } from "../systems/permissions";
 import { getAuthWorker } from "./authentication_pool.ts";
 import { listener } from "../modules/event_bus";
 import { Events, setPlayerPvp } from "../systems/events";
@@ -186,7 +189,7 @@ async function vendorFor(wt: any, shopper: any, npcId: unknown): Promise<Npc | n
  * it is, with `links` empty.
  */
 async function chatLinksOf(text: string): Promise<{ message: string; links: ChatLink[] }> {
-  // The party, whisper and guild paths do not cap a line's length: a line over the chat cap is sent
+  // Every channel caps a line at the chat cap before it gets here; one over it all the same is sent
   // as it is, with no links, instead of being scanned.
   if (typeof text !== "string" || text.length > MAX_CHAT_LENGTH || !text.includes("[")) return { message: text, links: [] };
   const items = ((await assetCache.get("items")) || []) as Item[];
@@ -580,6 +583,44 @@ function questDefsForEntries(active: QuestLogEntry[], completed: number[]): Ques
 }
 
 const MAX_CHAT_LENGTH = 500;
+/** The longest command line read: a command is a name and a few arguments, or a chat line sent through /party, /guild or /whisper. */
+const MAX_COMMAND_LENGTH = MAX_CHAT_LENGTH + 100;
+/** One RSA-4096 block is 512 bytes; this leaves room and no more. */
+const MAX_CIPHERTEXT_BYTES = 1024;
+
+/**
+ * The chat rate limit, one for every channel (say, party, guild, whisper): true
+ * when the player may send another line now, which counts it. When not, they are told.
+ */
+function chatRateOk(wt: any): boolean {
+  const now = Date.now();
+  const recent = (chatRateLimit.get(wt.data.id) || []).filter((t: number) => now - t < CHAT_RATE_WINDOW);
+  if (recent.length >= CHAT_RATE_MAX) {
+    chatRateLimit.set(wt.data.id, recent);
+    sendPacket(wt, packetManager.notify({ message: "You are sending messages too fast." }));
+    return false;
+  }
+  recent.push(now);
+  chatRateLimit.set(wt.data.id, recent);
+  return true;
+}
+
+/** A party, guild or whisper line: within the chat cap and the rate limit. When not, the player is told. */
+function channelLineOk(wt: any, message: unknown): message is string {
+  if (typeof message !== "string" || !message) return false;
+  if (message.length > MAX_CHAT_LENGTH) {
+    sendPacket(wt, packetManager.notify({ message: `Message too long (max ${MAX_CHAT_LENGTH} characters).` }));
+    return false;
+  }
+  return chatRateOk(wt);
+}
+
+/** Whether an encrypted chat or command line is what the client sends: a list of byte values, one RSA block long. */
+function isCiphertext(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const bytes = Object.values(value as Record<string, unknown>);
+  return bytes.length > 0 && bytes.length <= MAX_CIPHERTEXT_BYTES && bytes.every((b) => Number.isInteger(b) && (b as number) >= 0 && (b as number) <= 255);
+}
 const CHAT_RATE_MAX = 5;
 const CHAT_RATE_WINDOW = 3000;
 const activeEditorsByMap = new Map<string, Set<number>>();
@@ -677,6 +718,9 @@ import { gracefulShutdown } from "./server.ts";
 import { realmWhitelist, isWhitelistEnabled, setWhitelistEnabled } from "../services/whitelist";
 import { refusal as subscriptionRefusal, setLock as setSubscriptionLock, isLockId as isSubscriptionLock, subscriptionState } from "../systems/subscriptions";
 const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
+/** The largest frame the server takes (webtransport.maxPayloadMB), and whether it is a benchmark server, which takes it from anyone. */
+const MAX_FRAME_BYTES = 1024 * 1024 * ((settings as any)?.webtransport?.maxPayloadMB || 1);
+const BENCHMARK_ENABLED = !!(settings as any)?.webtransport?.benchmarkenabled;
 
 const useSpriteSheets = (settings as any).animation_system?.use_sprite_sheets ?? true;
 
@@ -2364,6 +2408,9 @@ authWorker.on("message", async (result: any) => {
       equipmentRevision: 0,
       questlog: { active: questActive, completed: questCompleted },
     });
+    // Logged in: as large a packet as a player sends, or as the tools need for one who uses them.
+    wt.setFrameLimit?.(frameLimitFor(playerCache.get(wt.data.id), MAX_FRAME_BYTES, BENCHMARK_ENABLED));
+    wt.markLoggedIn?.();
 
     const _pcache = playerCache.get(wt.data.id);
     if (!_pcache) return;
@@ -2818,23 +2865,16 @@ export default async function packetReceiver(
 
     if (!message) return wt.close(1008, "Empty message");
 
-    // Size check BEFORE parsing: parsing first let a hostile client force a
-    // full JSON.parse of a maxPayloadMB-sized frame (50MB by default) before
-    // the frame was ever rejected.
-    const maxPayloadBytes = 1024 * 1024 * ((settings as any)?.webtransport?.maxPayloadMB || 1);
-    const oversized = message.length > maxPayloadBytes;
+    // Size check BEFORE parsing (the transport checks the same before its
+    // parse): a player who uses no tools has no reason to send a large packet.
+    if (message.length > frameLimitFor(playerCache.get(wt.data.id), MAX_FRAME_BYTES, BENCHMARK_ENABLED)) {
+      return wt.close(1009, "Message too large");
+    }
 
     // The transport layer already parsed this frame to route it; reuse that
     // result instead of parsing the same JSON a second time.
     const parsedMessage: Packet = (preParsed ?? tryParsePacket(message)) as Packet;
     if (!parsedMessage) return wt.close(1007, "Malformed message");
-
-    if (
-      oversized &&
-      parsedMessage.type !== "BENCHMARK" &&
-      !(settings as any)?.webtransport?.benchmarkenabled
-    )
-      return wt.close(1009, "Message too large");
 
     const data = parsedMessage?.data;
     const type = parsedMessage?.type;
@@ -2843,7 +2883,7 @@ export default async function packetReceiver(
       return wt.close(1007, "Malformed message");
 
     if (!validPacketTypes.has(type as unknown as string)) {
-      wt.close(1007, "Invalid packet type");
+      return wt.close(1007, "Invalid packet type");
     }
 
     const currentPlayer = playerCache.get(wt.data.id) || null;
@@ -2900,6 +2940,15 @@ export default async function packetReceiver(
         const token = data?.toString() as string;
 
         if (!token) {
+          sendPacket(wt, packetManager.loginFailed());
+          wt.close(1008, "Invalid token");
+          break;
+        }
+
+        // The connection ticket was issued for one account: a ticket fetched
+        // for one account (or for none) logs in no other.
+        if (!ticketAllows(wt.data?.ticketAccount, token)) {
+          log.debug(`Login refused on connection ${wt.data?.id}: the token is not the one its ticket was issued for`);
           sendPacket(wt, packetManager.loginFailed());
           wt.close(1008, "Invalid token");
           break;
@@ -3535,7 +3584,11 @@ export default async function packetReceiver(
         if (subscriptionLocked(wt, currentPlayer, "chat")) return;
         const messageData = data as any;
         const message = messageData?.message;
+        const mode = messageData?.mode;
 
+        // A line is text, or in decrypt mode the bytes of one RSA block: anything
+        // else (an array of text, a huge object) would skip the length cap.
+        if (message != null && (mode === "decrypt" ? !isCiphertext(message) : typeof message !== "string")) return;
         if (typeof message === "string" && message.length > MAX_CHAT_LENGTH) {
           sendPacket(wt, packetManager.notify({ message: `Message too long (max ${MAX_CHAT_LENGTH} characters).` }));
           return;
@@ -3550,8 +3603,6 @@ export default async function packetReceiver(
         }
         recent.push(now);
         chatRateLimit.set(wt.data.id, recent);
-
-        const mode = messageData?.mode;
 
         const sendMessageToPlayer = (playerWs: any, message: string, links: ChatLink[] = []) => {
           const chatData = {
@@ -3584,6 +3635,7 @@ export default async function packetReceiver(
           ).toString();
           decryptedMessage =
             decryptRsa(encryptedMessage, decryptedPrivateKey) || "";
+          if (typeof decryptedMessage !== "string" || decryptedMessage.length > MAX_CHAT_LENGTH) return;
         } else {
           decryptedMessage = message;
         }
@@ -3888,17 +3940,23 @@ export default async function packetReceiver(
         if (currentPlayer) {
           const targetId = (data as any)?.id;
 
-          const targetPlayer = targetId
+          const found = targetId
             ? playerCache.get(targetId)
             : currentPlayer;
+          // A stealthed admin is not there to anyone but admins.
+          const targetPlayer = found && found !== currentPlayer && found.isStealth && !currentPlayer.isAdmin ? null : found;
 
           if (targetPlayer) {
+            // Their whole inventory to themselves and to admins. Anyone else gets only the rows of
+            // what they wear, which is all the inspect window draws (each slot's icon and tooltip).
+            const whole = targetPlayer === currentPlayer || targetPlayer.id === currentPlayer.id || currentPlayer.isAdmin;
+            const worn = new Set(Object.values(targetPlayer.equipment || {}).filter(Boolean).map((name: any) => String(name)));
             const inspectPlayerData = {
               id: targetPlayer.id,
               stats: targetPlayer.stats,
               username: targetPlayer.username,
               equipment: targetPlayer.equipment || {},
-              inventory: targetPlayer.inventory || [],
+              inventory: whole ? (targetPlayer.inventory || []) : (targetPlayer.inventory || []).filter((row: any) => worn.has(String(row?.name))),
             };
             sendPacket(wt, packetManager.inspectPlayer(inspectPlayerData));
           }
@@ -6836,6 +6894,11 @@ export default async function packetReceiver(
       }
       case "LIST_NPCS": {
         if (!currentPlayer) return;
+        // The NPC editor's list (scripts, stock, quest links): for those who may save NPCs, as SAVE_NPC.
+        if (!currentPlayer.permissions.some((p: string) => p === "server.admin" || p === "server.*")) {
+          sendPacket(wt, packetManager.notify({ message: "You do not have permission to edit NPCs." }));
+          return;
+        }
 
         try {
           const allNpcs = await assetCache.get("npcs") as Npc[];
@@ -7215,6 +7278,16 @@ export default async function packetReceiver(
         const command = _data?.command;
         const mode = _data?.mode;
 
+        // A command line is text, or in decrypt mode one RSA block; capped before
+        // it is split. Decrypting costs a private-key operation, so it is held to
+        // the chat rate limit.
+        if (mode === "decrypt" ? !isCiphertext(command) : typeof command !== "string") return;
+        if (typeof command === "string" && command.length > MAX_COMMAND_LENGTH) {
+          sendPacket(wt, packetManager.notify({ message: `Command too long (max ${MAX_COMMAND_LENGTH} characters).` }));
+          return;
+        }
+        if (mode === "decrypt" && !chatRateOk(wt)) return;
+
         let decryptedMessage;
         if (mode && mode == "decrypt") {
           const encryptedMessage = Buffer.from(
@@ -7229,6 +7302,7 @@ export default async function packetReceiver(
           ).toString();
           decryptedMessage =
             decryptRsa(encryptedMessage, decryptedPrivateKey) || "";
+          if (typeof decryptedMessage !== "string" || decryptedMessage.length > MAX_COMMAND_LENGTH) return;
         } else {
           decryptedMessage = command;
         }
@@ -7270,6 +7344,7 @@ export default async function packetReceiver(
               );
               break;
             }
+            if (!channelLineOk(wt, message)) break;
 
             const partyId = await player.getPartyIdByUsername(
               currentPlayer.username
@@ -7341,6 +7416,8 @@ export default async function packetReceiver(
               sendPacket(wt, packetManager.notify(notifyData));
               break;
             }
+
+            if (!channelLineOk(wt, args.slice(1).join(" "))) break;
 
             // The whisper is shown as sent either way: a muted player, or one
             // the target ignores, is not told that it went nowhere.
@@ -7484,6 +7561,7 @@ export default async function packetReceiver(
               sendPacket(wt, packetManager.notify({ message: "Please provide a message" }));
               break;
             }
+            if (!channelLineOk(wt, message)) break;
 
             const guildId = currentPlayer.guild_id;
             if (!guildId) {
@@ -8400,7 +8478,7 @@ export default async function packetReceiver(
               break;
             }
 
-            if (targetPlayer.id === currentPlayer.id) {
+            if (targetPlayer.username.toLowerCase() === currentPlayer.username.toLowerCase()) {
               const notifyData = {
                 message: "You cannot ban yourself",
               };
@@ -8408,7 +8486,9 @@ export default async function packetReceiver(
               break;
             }
 
-            if (targetPlayer.isAdmin) {
+            // Asked of the account, not the target found: one found in the
+            // database (offline) carries no isAdmin.
+            if (await player.isAdmin(targetPlayer.username)) {
               const notifyData = {
                 message: "You cannot ban other admins",
               };
@@ -8535,9 +8615,19 @@ export default async function packetReceiver(
               break;
             }
 
-            if (targetPlayer?.id === currentPlayer.id) {
+            if (targetPlayer.username.toLowerCase() === currentPlayer.username.toLowerCase()) {
               const notifyData = {
                 message: "You cannot toggle your own admin status",
+              };
+              sendPacket(wt, packetManager.notify(notifyData));
+              break;
+            }
+
+            // Demoting clears what the target holds, so it is held to the
+            // rule of changing it: a lower admin cannot demote a higher one.
+            if (!outranks(currentPlayer.permissions, await permissions.held(targetPlayer.username))) {
+              const notifyData = {
+                message: "You cannot change the admin status of someone who holds permissions you cannot grant",
               };
               sendPacket(wt, packetManager.notify(notifyData));
               break;
@@ -8547,6 +8637,8 @@ export default async function packetReceiver(
 
             if (targetPlayer && targetPlayer.wt) {
               targetPlayer.isAdmin = admin;
+              // toggleAdmin clears them with the role.
+              if (admin === false) targetPlayer.permissions = [];
               playerCache.set(targetPlayer.id, targetPlayer);
             }
             const notifyData = {
@@ -9325,6 +9417,12 @@ export default async function packetReceiver(
               break;
             }
 
+            // As kick and ban: not another admin (yourself is fine).
+            if (onlineTarget.id !== currentPlayer.id && (onlineTarget.isAdmin || await player.isAdmin(onlineTarget.username))) {
+              sendPacket(wt, packetManager.notify({ message: "You cannot kill other admins" }));
+              break;
+            }
+
             if (onlineTarget.isDead || onlineTarget.isGhost) {
               const notifyData = {
                 message: `${onlineTarget.username.charAt(0).toUpperCase() + onlineTarget.username.slice(1)} is already dead`,
@@ -9445,8 +9543,9 @@ export default async function packetReceiver(
               break;
             }
 
-            // SECURITY: Always prevent self-modification regardless of permission level
-            if (targetPlayer?.id === currentPlayer.id && mode !== "LIST") {
+            // SECURITY: Always prevent self-modification regardless of permission level.
+            // By name: a target found in the database has no session id.
+            if (targetPlayer.username.toLowerCase() === currentPlayer.username.toLowerCase() && mode !== "LIST") {
               const notifyData = {
                 message: "You cannot modify your own permissions",
               };
@@ -9462,6 +9561,16 @@ export default async function packetReceiver(
             if((mode === "ADD" || mode === "SET") && !(await player.isAdmin(targetPlayer.username))) {
               const notifyData = {
                 message: "You can only grant permissions to admin players",
+              };
+              sendPacket(wt, packetManager.notify(notifyData));
+              break;
+            }
+
+            // SECURITY: Only someone who could have given the target all they
+            // hold may change it, so a lower admin cannot strip a higher one.
+            if (mode !== "LIST" && !outranks(currentPlayer.permissions, await permissions.held(targetPlayer.username))) {
+              const notifyData = {
+                message: "You cannot change the permissions of someone who holds permissions you cannot grant",
               };
               sendPacket(wt, packetManager.notify(notifyData));
               break;
@@ -9489,14 +9598,7 @@ export default async function packetReceiver(
 
               // SECURITY: Validate user can only grant permissions they have
               for (const permission of permissionsArray) {
-                const userHasPermission = currentPlayer.permissions.some(
-                  (p: string) =>
-                    p === permission ||
-                    p === "permission.*" ||
-                    p === "server.*"
-                );
-
-                if (!userHasPermission) {
+                if (!canGrant(currentPlayer.permissions, permission)) {
                   const notifyData = {
                     message: `You cannot grant the ${permission} permission`,
                   };
@@ -10661,7 +10763,8 @@ export default async function packetReceiver(
         if (subscriptionLocked(wt, currentPlayer, "guild_chat")) return;
 
         const { message } = data as any;
-        if (!message) return;
+        // As /guild: the chat cap, the rate limit, mutes and ignores.
+        if (!channelLineOk(wt, message)) return;
 
         const guildId = currentPlayer.guild_id;
         if (!guildId) {
@@ -10675,8 +10778,10 @@ export default async function packetReceiver(
           return;
         }
 
+        const guildHearing = await chatHearing(currentPlayer.username, "guild", message, guildMembers);
         const guildLine = await chatLinksOf(message);
         for (const member of guildMembers) {
+          if (!guildHearing.has(String(member).toLowerCase())) continue;
           const session_id = await player.getSessionIdByUsername(member);
           const memberPlayer = playerCache.get(session_id);
           if (memberPlayer) {
@@ -10694,7 +10799,7 @@ export default async function packetReceiver(
           }
         }
 
-        listener.emit(Events.GUILD_CHAT, { player: currentPlayer, message, guildMembers, guildId } as any);
+        if (!guildHearing.muted) listener.emit(Events.GUILD_CHAT, { player: currentPlayer, message, guildMembers, guildId } as any);
         break;
       }
       case "INVITE_PARTY": {
@@ -11937,33 +12042,40 @@ export default async function packetReceiver(
         if (!item || !bagSlot) return;
         if (!bags.SLOTS.includes(bagSlot)) return;
 
-        const inventoryItem = currentPlayer.inventory.find((invItem: any) =>
-          invItem.name.toLowerCase() === String(item).toLowerCase() &&
-          invItem.bag_slots != null &&
-          invItem.bag_slots > 0
-        );
-        if (!inventoryItem) return;
+        // One bag change at a time for a player, and none while a batch of theirs (mail, a sale) counts
+        // what is in use: two equips read "none equipped" side by side, and one bag filled two slots.
+        await atomically([currentPlayer.username], async () => {
+          const inventoryItem = currentPlayer.inventory.find((invItem: any) =>
+            invItem.name.toLowerCase() === String(item).toLowerCase() &&
+            invItem.bag_slots != null &&
+            invItem.bag_slots > 0
+          );
+          if (!inventoryItem) return;
 
-        const existingBags = await bags.ensure(currentPlayer.username);
-        if (existingBags[bagSlot] && existingBags[bagSlot].toLowerCase() === String(item).toLowerCase()) return;
+          const existingBags = await bags.ensure(currentPlayer.username);
+          if (existingBags[bagSlot] && existingBags[bagSlot].toLowerCase() === String(item).toLowerCase()) return;
 
-        const alreadyEquippedCount = bags.SLOTS.filter((s: string) =>
-          existingBags[s] && existingBags[s].toLowerCase() === String(item).toLowerCase()
-        ).length;
-        if (alreadyEquippedCount >= inventoryItem.quantity) return;
+          // Counted against what the player holds now, not the copy made before the lock was taken.
+          const held = ((await inventory.find(currentPlayer.username, { name: inventoryItem.name, quantity: 0 } as any)) || [])
+            .reduce((sum: number, row: any) => sum + (Number(row.quantity) || 0), 0);
+          const alreadyEquippedCount = bags.SLOTS.filter((s: string) =>
+            existingBags[s] && existingBags[s].toLowerCase() === String(item).toLowerCase()
+          ).length;
+          if (alreadyEquippedCount >= held) return;
 
-        const canonicalName = inventoryItem.name;
+          const canonicalName = inventoryItem.name;
 
-        await bags.setBag(currentPlayer.username, bagSlot, canonicalName);
-        await inventory.setEquipped(currentPlayer.username, canonicalName, true);
-        if (alreadyEquippedCount + 1 >= inventoryItem.quantity) {
-          await inventory.clearSlot(currentPlayer.username, canonicalName);
-        }
-        const freshInventory = await inventory.get(currentPlayer.username);
-        currentPlayer.inventory = await patchInventoryBagSlots(freshInventory, currentPlayer.username);
-        playerCache.set(currentPlayer.id, currentPlayer);
-        sendPacket(wt, packetManager.bags(await bags.ensure(currentPlayer.username)));
-        sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
+          await bags.setBag(currentPlayer.username, bagSlot, canonicalName);
+          await inventory.setEquipped(currentPlayer.username, canonicalName, true);
+          if (alreadyEquippedCount + 1 >= held) {
+            await inventory.clearSlot(currentPlayer.username, canonicalName);
+          }
+          const freshInventory = await inventory.get(currentPlayer.username);
+          currentPlayer.inventory = await patchInventoryBagSlots(freshInventory, currentPlayer.username);
+          playerCache.set(currentPlayer.id, currentPlayer);
+          sendPacket(wt, packetManager.bags(await bags.ensure(currentPlayer.username)));
+          sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
+        });
         break;
       }
       case "BAG_UNEQUIP": {
@@ -11972,35 +12084,38 @@ export default async function packetReceiver(
         if (!bagSlot) return;
         if (!bags.SLOTS.includes(bagSlot)) return;
 
-        const bagRow = await bags.ensure(currentPlayer.username);
-        const itemName = bagRow[bagSlot];
-        if (!itemName) return;
+        // As BAG_EQUIP: one bag change at a time for a player (this one takes the bag out and puts it back to measure).
+        await atomically([currentPlayer.username], async () => {
+          const bagRow = await bags.ensure(currentPlayer.username);
+          const itemName = bagRow[bagSlot];
+          if (!itemName) return;
 
-        // Temporarily remove to calculate new max
-        await bags.setBag(currentPlayer.username, bagSlot, null);
-        const newMax = await getInventorySlots(currentPlayer);
-        await bags.setBag(currentPlayer.username, bagSlot, itemName); // restore
+          // Temporarily remove to calculate new max
+          await bags.setBag(currentPlayer.username, bagSlot, null);
+          const newMax = await getInventorySlots(currentPlayer);
+          await bags.setBag(currentPlayer.username, bagSlot, itemName); // restore
 
-        const freshInv = await inventory.get(currentPlayer.username);
-        const itemsBeyond = (freshInv || []).filter((i: any) => !i.equipped && i.slot != null && i.slot >= newMax);
-        if (itemsBeyond.length > 0) {
-          sendPacket(wt, packetManager.notify({ message: `Cannot unequip bag - ${itemsBeyond.length} item(s) occupy the extra slots. Move them to free up space first.` }));
-          break;
-        }
+          const freshInv = await inventory.get(currentPlayer.username);
+          const itemsBeyond = (freshInv || []).filter((i: any) => !i.equipped && i.slot != null && i.slot >= newMax);
+          if (itemsBeyond.length > 0) {
+            sendPacket(wt, packetManager.notify({ message: `Cannot unequip bag - ${itemsBeyond.length} item(s) occupy the extra slots. Move them to free up space first.` }));
+            return;
+          }
 
-        await bags.setBag(currentPlayer.username, bagSlot, null);
-        const updatedBags = await bags.ensure(currentPlayer.username);
-        const stillEquipped = bags.SLOTS.some((s: string) =>
-          updatedBags[s] && updatedBags[s].toLowerCase() === itemName.toLowerCase()
-        );
-        if (itemName && !stillEquipped) {
-          const invItem = currentPlayer.inventory.find((i: any) => i.name.toLowerCase() === itemName.toLowerCase());
-          await inventory.setUnequippedSlot(currentPlayer.username, itemName, invItem?.slot ?? null, invItem?.bag_slot ?? null);
-        }
-        currentPlayer.inventory = await patchInventoryBagSlots(await inventory.get(currentPlayer.username), currentPlayer.username);
-        playerCache.set(currentPlayer.id, currentPlayer);
-        sendPacket(wt, packetManager.bags(await bags.ensure(currentPlayer.username)));
-        sendPacket(wt, packetManager.inventory(currentPlayer.inventory, newMax));
+          await bags.setBag(currentPlayer.username, bagSlot, null);
+          const updatedBags = await bags.ensure(currentPlayer.username);
+          const stillEquipped = bags.SLOTS.some((s: string) =>
+            updatedBags[s] && updatedBags[s].toLowerCase() === itemName.toLowerCase()
+          );
+          if (itemName && !stillEquipped) {
+            const invItem = currentPlayer.inventory.find((i: any) => i.name.toLowerCase() === itemName.toLowerCase());
+            await inventory.setUnequippedSlot(currentPlayer.username, itemName, invItem?.slot ?? null, invItem?.bag_slot ?? null);
+          }
+          currentPlayer.inventory = await patchInventoryBagSlots(await inventory.get(currentPlayer.username), currentPlayer.username);
+          playerCache.set(currentPlayer.id, currentPlayer);
+          sendPacket(wt, packetManager.bags(await bags.ensure(currentPlayer.username)));
+          sendPacket(wt, packetManager.inventory(currentPlayer.inventory, newMax));
+        });
         break;
       }
       case "SAVE_INVENTORY_SLOTS": {

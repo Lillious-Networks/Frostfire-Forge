@@ -585,6 +585,26 @@ describe("access", () => {
     expect(live.permissions).toEqual([]);
   });
 
+  test("a higher admin's permissions are not a lower admin's to change", async () => {
+    tables.permissions.push({ username: "hero", permissions: "server.*" });
+    await expectRefused("permissions.set", { permissions: ["admin.kick"] }, /holds permissions you cannot grant/);
+    await expectRefused("admin.set", { value: false }, /holds permissions you cannot grant/, "mod");
+  });
+
+  test("permission.* does not give server permissions", async () => {
+    tables.permissions.find((row) => row.username === "boss")!.permissions = "server.admin,permission.*";
+    await expectRefused("permissions.set", { permissions: ["server.*"] }, /cannot grant the server\.\* permission/);
+  });
+
+  test("an admin who is demoted loses what they held", async () => {
+    tables.permissions.find((row) => row.username === "boss")!.permissions = "server.*";
+    const { live } = login("mod", "7003", { isAdmin: true, permissions: ["admin.*", "tools.*", "permission.*"] });
+    expect((await act("admin.set", { value: false }, "mod")).ok).toBe(true);
+    expect(tables.permissions.find((row) => row.username === "mod")).toBeUndefined();
+    expect(live.permissions).toEqual([]);
+    expect(live.isAdmin).toBe(false);
+  });
+
 });
 
 describe("search", () => {

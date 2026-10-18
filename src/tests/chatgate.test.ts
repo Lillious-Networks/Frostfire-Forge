@@ -28,7 +28,7 @@ mock.module("../controllers/sqldatabase", () => databaseModule({
 }));
 
 const datacache = await import("../services/datacache");
-const { audience, recentLines, linesSeenBy, forgetLines, pruneLines, LINES_KEPT, LINES_KEPT_FOR, PRUNE_EVERY } = await import("../systems/chatgate");
+const { audience, recentLines, linesSeenBy, forgetLines, pruneLines, LINES_KEPT, LINES_KEPT_FOR, PRUNE_EVERY, TEXT_KEPT } = await import("../systems/chatgate");
 
 const NOON = 1_800_000_000_000;
 
@@ -90,6 +90,11 @@ describe("the lines kept for a report", () => {
       { at: NOON, channel: "say", text: "first", to: ["hero"], muted: false },
       { at: NOON + 1000, channel: "whisper", text: "second", to: ["rogue"], muted: false },
     ]);
+  });
+
+  test("are kept no longer than the chat cap, whatever was sent", async () => {
+    await audience("troll", "say", "a".repeat(TEXT_KEPT * 4), ["hero"], NOON);
+    expect(recentLines("troll")[0].text).toHaveLength(TEXT_KEPT);
   });
 
   test("are no more than the latest few", async () => {

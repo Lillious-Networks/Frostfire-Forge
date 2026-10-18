@@ -13,6 +13,24 @@ const types = {
   clear: "\x1b[0m",
 };
 
+// ANSI escape sequences (CSI and OSC, and the two-byte ones), and every other control character but the line feed.
+const ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
+const CONTROL = /[\x00-\x09\x0b-\x1f\x7f]/g;
+
+/**
+ * A message as it is written: no terminal escapes and no carriage returns,
+ * and each line after the first indented, so text a player sent can neither
+ * restyle the console nor pose as an entry of its own (entries start at the
+ * margin with their time).
+ */
+export function cleanLogMessage(message: string): string {
+  return String(message)
+    .replace(ANSI, "")
+    .replace(/\r\n?/g, "\n")
+    .replace(CONTROL, "")
+    .replace(/\n/g, "\n    ");
+}
+
 const log = {
   type: (_type: string) => types[_type.toLowerCase() as keyof typeof types],
   date: () => new Date().toLocaleDateString().split("/").join("-"),
@@ -31,7 +49,7 @@ const log = {
       fs.writeFileSync(_file, "");
     }
 
-    message = `\n${message}\n`;
+    message = `\n${cleanLogMessage(message)}\n`;
     fs.appendFileSync(_file, `${timestamp} ${message}`);
 
     const _message = `${log.type(type)}- ${timestamp} - ${message} ${log.type(

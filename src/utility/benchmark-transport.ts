@@ -4,6 +4,7 @@ import crypto from "crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { FrameDecoder, encodeFrame } from "../socket/framing.ts";
+import { accountBinding, signTicket } from "../socket/ticket.ts";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -44,19 +45,22 @@ export interface ConnectionToken {
   timestamp: string;
   expiresAt: string;
   signature: string;
+  origin: string;
+  account: string;
 }
 
-export function generateConnectionToken(serverSecret: string): ConnectionToken {
+/**
+ * A connection ticket as the Gateway makes one (src/socket/ticket.ts): for the
+ * account whose token will log in on it, or for none when the client only
+ * connects.
+ */
+export function generateConnectionToken(serverSecret: string, origin: string, accountToken?: string): ConnectionToken {
   const token = crypto.randomBytes(32).toString("hex");
   const timestamp = Date.now().toString();
   const expiresAt = (Date.now() + 60000).toString();
-
-  const signature = crypto
-    .createHmac("sha256", serverSecret)
-    .update(`${token}:${timestamp}:${expiresAt}`)
-    .digest("hex");
-
-  return { token, timestamp, expiresAt, signature };
+  const account = accountToken ? accountBinding(accountToken) : "";
+  const signature = signTicket(serverSecret, token, timestamp, expiresAt, origin, account);
+  return { token, timestamp, expiresAt, signature, origin, account };
 }
 
 
@@ -154,7 +158,7 @@ export class BenchmarkConnection {
       });
   }
 
-  static async connect(url: string, serverSecret: string, useragent: string = "Frostfire-Forge-Benchmark/1.0", origin: string = "http://localhost"): Promise<BenchmarkConnection> {
+  static async connect(url: string, serverSecret: string, useragent: string = "Frostfire-Forge-Benchmark/1.0", origin: string = "http://localhost", accountToken?: string): Promise<BenchmarkConnection> {
     // A local certificate is pinned by hash; anything else goes through the
     // platform trust store. This transport has no CA-pem or skip-verify
     // option: pinning covers the local case, and is stricter than either.
@@ -179,7 +183,7 @@ export class BenchmarkConnection {
     const bidi = await session.createBidirectionalStream();
     const connection = new BenchmarkConnection(session, bidi);
 
-    const token = generateConnectionToken(serverSecret);
+    const token = generateConnectionToken(serverSecret, origin, accountToken);
     const authFrame = encodeFrame(textEncoder.encode(JSON.stringify({
       type: "AUTH_CONNECT",
       data: {
@@ -188,7 +192,8 @@ export class BenchmarkConnection {
         expiresAt: token.expiresAt,
         signature: token.signature,
         useragent,
-        origin,
+        origin: token.origin,
+        account: token.account,
       },
     })));
 

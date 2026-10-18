@@ -24,7 +24,7 @@ import { listener } from "../modules/event_bus.ts";
 import { Events, setPlayerPvp } from "../systems/events";
 const event = new eventEmitter();
 import log from "../modules/logger.ts";
-import player, { ensureAmbienceColumn } from "../systems/player.ts";
+import player, { ensureAmbienceColumn, ensureLoginColumns, SESSION_HEARTBEAT_MS } from "../systems/player.ts";
 import { ensureClassSchema } from "../systems/classes.ts";
 import { ensureMailSchema } from "../systems/mail.ts";
 import { ensureMailboxSchema } from "../systems/mailboxeditor.ts";
@@ -43,7 +43,9 @@ import { generateKeyPair } from "../modules/cipher.ts";
 import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondensation, findPlayersWithTargetInAOI } from "./aoi.ts";
 import { loadPlugins, registerAllPlugins, mergePluginSpellsIntoCache } from "../modules/plugin_loader.ts";
 import { pluginHandlers, warpInterceptors, packetInterceptors } from "./receiver.ts";
-import { startWebTransportServer, TransportConnection } from "./transport.ts";
+import { startWebTransportServer, TransportConnection, frameLimitFor } from "./transport.ts";
+import { checkTicket, type TicketFields } from "./ticket.ts";
+import { createHttpFilter, blockedSegmentsFrom, windowFromSettings } from "../modules/httpfilter.ts";
 import { topicBus } from "./topics.ts";
 import { WebTransport } from "@lillious-networks/webtransport-bun";
 import { ensureLocalCertificate, computeCertificateHash, certificateSupportsPinning, getCertificateStatus, certificateSanHostnames } from "../utility/local_cert.ts";
@@ -172,6 +174,12 @@ await ensureSubscriptionSchema();
 // The Ambience and Weather sliders' columns (clientconfig.ambience_volume, weather_volume), the same way: added if
 // missing, never stops the start.
 await ensureAmbienceColumn();
+// The accounts columns every login reads (token_expires, twofa_pending, email_verified), the same way.
+await ensureLoginColumns();
+// Other realms on this database refuse a login of an account this realm holds while this keeps vouching for it.
+setInterval(() => {
+  player.markSessionsHeld().catch((error) => log.warn(`Sessions could not be marked as held: ${error}`));
+}, SESSION_HEARTBEAT_MS).unref();
 // The classes table and accounts.class_id (characters), the same way.
 await ensureClassSchema();
 // The mail table, the same way.
@@ -265,7 +273,9 @@ Bun.serve({
 
     // Creature system health, for the creature load test. Read-only counters and
     // tick timings; no player or account data. ?reset=1 starts a fresh window.
+    // Only for a caller with the server's GATEWAY_AUTH_KEY (Authorization: Bearer).
     if (url.pathname === "/creature-stats" && req.method === "GET") {
+      if (!holdsServerKey(req)) return new Response("Unauthorized", { status: 401 });
       const snapshot = creatures.stats();
       if (url.searchParams.get("reset") === "1") creatures.resetStats();
       return new Response(JSON.stringify(snapshot), {
@@ -342,6 +352,32 @@ Bun.serve({
   },
 });
 
+// settings.json webserverRatelimit and src/config/security.cfg, applied at the
+// edge before a request reaches the API.
+const securityCfgPath = new URL("../config/security.cfg", import.meta.url);
+let blockedSegments: string[] = [];
+try {
+  if (fs.existsSync(securityCfgPath)) blockedSegments = blockedSegmentsFrom(fs.readFileSync(securityCfgPath, "utf8"));
+} catch (error) {
+  log.warn(`security.cfg could not be read, so no path is blocked: ${error}`);
+}
+const httpFilter = createHttpFilter({
+  enabled: (settings as any)?.webserverRatelimit?.enabled !== false,
+  windowMs: windowFromSettings((settings as any)?.webserverRatelimit?.windowMs),
+  max: Number((settings as any)?.webserverRatelimit?.max) || 500,
+  blockedSegments,
+});
+
+/** Whether a request carries the server's GATEWAY_AUTH_KEY as a bearer token, compared in constant time. */
+function holdsServerKey(req: Request): boolean {
+  const key = process.env.GATEWAY_AUTH_KEY;
+  const given = (req.headers.get("authorization") || "").match(/^Bearer\s+(.+)$/i)?.[1];
+  if (!key || !given) return false;
+  const a = crypto.createHash("sha256").update(given).digest();
+  const b = crypto.createHash("sha256").update(key).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
 const httpServers = startHttpsServers({
   name: "Game Server",
   sslEnabled: process.env.HTTP_USE_SSL === "true",
@@ -356,48 +392,26 @@ const httpServers = startHttpsServers({
   // HTTP/3 - Bun.serve would try to bind the same UDP port.
   http3: false,
   log,
+  filterRequest: (req, ip) => httpFilter(req, ip),
 });
 
-function validateConnectionToken(
-  token: string | null,
-  timestamp: string | null,
-  expiresAt: string | null,
-  signature: string | null,
-  origin: string | null
-): boolean {
-  if (!token || !timestamp || !expiresAt || !signature) {
-    return false;
-  }
-
+/**
+ * A connection ticket from the Gateway (see ticket.ts): signed, unexpired,
+ * from an allowed origin, and not used before. What comes back is the account
+ * it is for, which the login must match.
+ */
+function validateConnectionToken(fields: TicketFields): { account: string } | null {
   const sharedSecret = process.env.GATEWAY_GAME_SERVER_SECRET;
   if (!sharedSecret) {
     log.error("GATEWAY_GAME_SERVER_SECRET environment variable is not set");
-    return false;
+    return null;
   }
-
-  const expectedSignature = crypto
-    .createHmac("sha256", sharedSecret)
-    .update(`${token}:${timestamp}:${expiresAt}`)
-    .digest("hex");
-
-  if (signature !== expectedSignature) {
-    log.warn(`Connection attempt with invalid token signature`);
-    return false;
+  const checked = checkTicket(fields, sharedSecret, ALLOWED_ORIGINS);
+  if (!checked.ok) {
+    log.warn(`Connection attempt refused: ${checked.reason}`);
+    return null;
   }
-
-  if (Date.now() > parseInt(expiresAt)) {
-    log.warn(`Connection attempt with expired token`);
-    return false;
-  }
-
-  if (ALLOWED_ORIGINS.length > 0) {
-    if (!origin || !ALLOWED_ORIGINS.some(o => o.trim() === origin)) {
-      log.warn(`Connection attempt with disallowed origin: ${origin}`);
-      return false;
-    }
-  }
-
-  return true;
+  return { account: checked.account };
 }
 
 function onTransportOpen(connection: TransportConnection) {
@@ -540,6 +554,12 @@ function onTransportMessage(connection: TransportConnection, message: string) {
   try {
     if (!connection.data?.id || !message) return;
 
+    // Before the parse: a packet larger than this player may send is not read at all.
+    if (message.length > frameLimitFor(playerCache.get(connection.data.id), MAX_FRAME_BYTES, !!(settings as any)?.webtransport?.benchmarkenabled)) {
+      connection.close(1009, "Message too large");
+      return;
+    }
+
     const parsedMessage = JSON.parse(message);
     const packetType = parsedMessage?.type;
     _mpType = packetType || "?";
@@ -593,6 +613,9 @@ function onTransportMessage(connection: TransportConnection, message: string) {
   }
 }
 
+/** The largest frame the server takes from anyone (webtransport.maxPayloadMB): players get less, see frameLimitFor. */
+const MAX_FRAME_BYTES = 1024 * 1024 * (((settings as any)?.webtransport?.maxPayloadMB) || 1);
+
 const NO_RATE_LIMIT = Number.MAX_SAFE_INTEGER;
 
 // Handshake rate limits default to safe production values, but benchmarking
@@ -617,6 +640,9 @@ const webTransportRateLimits = {
   streamsBurst: (settings as any)?.webtransport?.rateLimits?.streamsBurst ?? 4000,
   datagramsPerSec: (settings as any)?.webtransport?.rateLimits?.datagramsPerSec ?? 500000,
   datagramsBurst: (settings as any)?.webtransport?.rateLimits?.datagramsBurst ?? 200000,
+  datagramsPerSecPerConnection: (settings as any)?.webtransport?.rateLimits?.datagramsPerSecPerConnection ?? 240,
+  datagramsBurstPerConnection: (settings as any)?.webtransport?.rateLimits?.datagramsBurstPerConnection ?? 480,
+  maxConcurrentStreams: (settings as any)?.webtransport?.rateLimits?.maxConcurrentStreams ?? 16,
 };
 
 const webTransportServer = await startWebTransportServer({
@@ -624,7 +650,7 @@ const webTransportServer = await startWebTransportServer({
   certPem: webTransportTls!.certPem,
   keyPem: webTransportTls!.keyPem,
   chatDecryptionKey: keyPair.publicKey,
-  maxFrameSize: 1024 * 1024 * (((settings as any)?.webtransport?.maxPayloadMB) || 1),
+  maxFrameSize: MAX_FRAME_BYTES,
   maxDatagramSize: (settings as any)?.webtransport?.maxDatagramSize || 1200,
   authTimeoutMs: (settings as any)?.webtransport?.authTimeoutMs || 10000,
   idleTimeoutMs: ((settings as any)?.webtransport?.idleTimeout || 120) * 1000,

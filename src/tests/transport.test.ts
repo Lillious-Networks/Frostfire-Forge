@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { FrameDecoder, encodeFrame, encodeCloseReason, decodeCloseReason } from "../socket/framing";
+import { FrameDecoder, encodeFrame, encodeCloseReason, decodeCloseReason, frameLimitFor, CONNECT_FRAME_BYTES, LOGIN_FRAME_BYTES, PLAYER_FRAME_BYTES } from "../socket/framing";
 import { topicBus } from "../socket/topics";
 
 test("encodeFrame prefixes payload with 4-byte little-endian length", () => {
@@ -155,4 +155,30 @@ test("topicBus ignores subscriber send failures", () => {
   topicBus.subscribe("FAILING_TOPIC", failing);
   expect(() => topicBus.publish("FAILING_TOPIC", new TextEncoder().encode("x"))).not.toThrow();
   topicBus.clear(failing);
+});
+
+test("FrameDecoder takes a new limit: a frame over it overflows", () => {
+  const decoder = new FrameDecoder(16);
+  const big = new Uint8Array(32);
+  expect(decoder.push(encodeFrame(big))).toEqual([]);
+  expect(decoder.isOverflowed()).toBe(true);
+
+  const raised = new FrameDecoder(16);
+  raised.setMaxFrameSize(64);
+  expect(raised.push(encodeFrame(big)).length).toBe(1);
+  expect(raised.isOverflowed()).toBe(false);
+});
+
+test("frameLimitFor: login, then a player's limit, and the maximum for admins and tool users", () => {
+  const max = 50 * 1024 * 1024;
+  expect(frameLimitFor(null, max)).toBe(LOGIN_FRAME_BYTES);
+  expect(frameLimitFor({ isAdmin: false, permissions: [] }, max)).toBe(PLAYER_FRAME_BYTES);
+  // "".split(",") is how an empty permissions column arrives.
+  expect(frameLimitFor({ isAdmin: false, permissions: [""] }, max)).toBe(PLAYER_FRAME_BYTES);
+  expect(frameLimitFor({ isAdmin: false, permissions: ["tools.*"] }, max)).toBe(max);
+  expect(frameLimitFor({ isAdmin: true, permissions: [] }, max)).toBe(max);
+  expect(frameLimitFor(null, max, true)).toBe(max);
+  // Never above the server's own maximum.
+  expect(frameLimitFor({ isAdmin: false, permissions: [] }, 1024)).toBe(1024);
+  expect(CONNECT_FRAME_BYTES).toBeLessThan(LOGIN_FRAME_BYTES);
 });

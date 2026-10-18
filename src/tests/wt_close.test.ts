@@ -35,7 +35,7 @@ test("WT session close fires onClose handler", async () => {
     maxSessions: 10,
     rateLimits: {},
     handlers: {
-      validateConnectionToken: () => true,
+      validateConnectionToken: () => ({ account: "" }),
       onOpen: () => { openCount++; },
       onClose: () => { closeCount++; },
       onMessage: () => {},

@@ -45,6 +45,38 @@ function write(username: string, sql: string, values: unknown[], left: Permissio
     });
 }
 
+/** A stored comma-separated list as its names. */
+export function names(list: string | null | undefined): string[] {
+    return String(list ?? "").split(",").map((p) => p.trim()).filter(Boolean);
+}
+
+/** Whether `held` includes `name`, itself or as its family's `family.*`. */
+export function covers(held: readonly string[], name: string): boolean {
+    if (held.includes(name)) return true;
+    const dot = name.indexOf(".");
+    return dot > 0 && held.includes(`${name.slice(0, dot)}.*`);
+}
+
+/**
+ * Whether a holder of `held` may give `name` to someone. A holder of
+ * `server.*` gives anything. The server family (`server.*` and every
+ * `server.` permission) is otherwise given only by one who holds that very
+ * permission; anything else by a holder of `permission.*`, or one who holds it.
+ */
+export function canGrant(held: readonly string[], name: string): boolean {
+    if (held.includes("server.*")) return true;
+    if (name.startsWith("server.")) return held.includes(name);
+    return held.includes("permission.*") || covers(held, name);
+}
+
+/**
+ * Whether a holder of `held` may change what a holder of `target` holds, or
+ * their admin role: only one who could have given them all of it.
+ */
+export function outranks(held: readonly string[], target: readonly string[]): boolean {
+    return target.every((name) => canGrant(held, name));
+}
+
 const permissions = {
     clear: async (username: string) => {
         await write(username, "DELETE FROM permissions WHERE username = ?", [username], []);
@@ -71,6 +103,8 @@ const permissions = {
         if (response.length === 0) return "";
         return response[0]?.permissions || "";
     },
+    /** What the player holds, as names. */
+    held: async (username: string) => names(await permissions.get(username) as string),
     add: async (username: string, permission: string) => {
 
         const response = await permissions.get(username) as string;

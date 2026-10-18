@@ -64,6 +64,12 @@ async function loadPluginFromDir(pluginDir: string, name: string, emitter?: Even
             return;
         }
 
+        // The entry must be a file inside the plugin's own folder (links resolved), never an absolute or ../ path elsewhere.
+        if (!isInside(fs.realpathSync(pluginDir), fs.realpathSync(entryPath))) {
+            log.error(`Plugin entry ${manifest.entry} is outside the folder of ${manifest.name} (skipping)`);
+            return;
+        }
+
         const pluginModule = await import(entryPath);
 
         if (typeof pluginModule.default?.register !== "function") {
@@ -99,6 +105,11 @@ async function loadPluginFromDir(pluginDir: string, name: string, emitter?: Even
     } catch (err) {
         log.error(`Failed to load plugin from ${name}: ${err}`);
     }
+}
+
+export function isInside(dir: string, file: string): boolean {
+    const relative = path.relative(dir, file);
+    return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 export async function registerPlugin(engine: EngineAPI, pluginName: string, emitter?: EventEmitter): Promise<boolean> {

@@ -23,7 +23,7 @@ mock.module("../controllers/sqldatabase", () => databaseModule({
   },
 }));
 
-const { default: permissions } = await import("../systems/permissions");
+const { default: permissions, canGrant, outranks } = await import("../systems/permissions");
 const { clearCaches } = await import("../services/datacache");
 
 // ------------------------------------------------------------------ harness
@@ -46,7 +46,7 @@ const NAMES = [
   "commandName", "currentPlayer", "wt", "args", "sendPacket", "packetManager", "player", "playerCache", "permissions", "log",
   "listener", "Events", "maps", "mapPropertiesCache", "transitionPlayerToMap", "spawnBatchQueue", "despawnBatchQueue",
   "gracefulShutdown", "drainQueries", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "Bun",
-  "defaultMap", "resurrection", "resyncNpcChunks", "filterPlayersByMap", "spellEffects",
+  "defaultMap", "resurrection", "resyncNpcChunks", "filterPlayersByMap", "spellEffects", "canGrant", "outranks",
 ];
 /** The receiver's module state (the restart countdown), declared as it is there. */
 const moduleState = [...source.matchAll(/^let (\w+)[^\n]*;\r?$/gm)].map((match) => ({ name: match[1], line: match[0] }));
@@ -120,6 +120,8 @@ function names(name: string, args: string[], over: Row = {}): Row {
       toggleAdmin: async (username: string) => {
         const row = accountOf(username);
         if (row) row.role = row.role ? 0 : 1;
+        // As systems/player.ts does: a demoted admin's permissions go with the role.
+        if (row && row.role === 0) await permissions.clear(row.username);
         return row?.role === 1;
       },
       unban: async (username: string) => {
@@ -150,6 +152,8 @@ function names(name: string, args: string[], over: Row = {}): Row {
       set: (id: string, value: any) => { online[id] = value; },
     },
     permissions,
+    canGrant,
+    outranks,
     log: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, success: () => {} },
     listener: { emit: (...event: any[]) => { emitted.push(event); } },
     Events: { GUILD_CHANGED: "onGuildChanged", PLAYER_DISCONNECT: "onPlayerDisconnect", PLAYER_RESPAWN: "onPlayerRespawn" },
@@ -310,6 +314,25 @@ describe("/permission", () => {
     expect(hero.permissions).toEqual([]);
   });
 
+  test("a lower admin cannot change a higher admin's permissions", async () => {
+    held.ac_boss = "admin.*,server.*,permission.*";
+    mod.permissions = ["admin.permission", "permission.add", "permission.remove", "admin.kick"];
+    for (const args of [["set", "ac_boss", "admin.kick"], ["remove", "ac_boss", "server.*"], ["clear", "ac_boss"]]) {
+      sent = [];
+      await run("PERMISSION", args, { currentPlayer: mod, wt: mod.wt });
+      expect(told(mod)).toEqual(["You cannot change the permissions of someone who holds permissions you cannot grant"]);
+    }
+    expect(held.ac_boss).toBe("admin.*,server.*,permission.*");
+  });
+
+  test("permission.* does not give server.*", async () => {
+    held.ac_mod = "admin.kick";
+    hero.permissions = ["admin.permission", "permission.*"];
+    await run("PERMISSION", ["add", "ac_mod", "server.*"], { currentPlayer: hero, wt: hero.wt });
+    expect(told(hero)).toEqual(["You cannot grant the server.* permission"]);
+    expect(held.ac_mod).toBe("admin.kick");
+  });
+
   test("what a former admin still holds can be listed, removed and cleared", async () => {
     held.ac_hero = "admin.kick,admin.ban";
     hero.permissions = ["admin.kick", "admin.ban"];
@@ -426,6 +449,30 @@ describe("/admin", () => {
     await run("ADMIN", ["ac_exile"]);
     expect(accountOf("ac_exile")!.role).toBe(1);
     expect(told(boss)).toEqual(["Ac_exile is now an admin"]);
+  });
+
+  test("a demoted admin loses what they held, online and in the table", async () => {
+    await run("ADMIN", ["ac_mod"]);
+    expect(accountOf("ac_mod")!.role).toBe(0);
+    expect("ac_mod" in held).toBe(false);
+    expect(mod.permissions).toEqual([]);
+  });
+
+  test("a lower admin cannot demote a higher one", async () => {
+    held.ac_boss = "server.*";
+    mod.permissions = ["server.admin"];
+    await run("ADMIN", ["ac_boss"], { currentPlayer: mod, wt: mod.wt });
+    expect(told(mod)).toEqual(["You cannot change the admin status of someone who holds permissions you cannot grant"]);
+    expect(accountOf("ac_boss")!.role).toBe(1);
+  });
+});
+
+describe("/ban of an admin", () => {
+  test("is refused when the admin is offline too", async () => {
+    delete online["9101"];
+    await run("BAN", ["ac_boss"], { currentPlayer: mod, wt: mod.wt });
+    expect(told(mod)).toEqual(["You cannot ban other admins"]);
+    expect(accountOf("ac_boss")!.banned).toBe(0);
   });
 });
 
