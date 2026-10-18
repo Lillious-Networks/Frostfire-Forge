@@ -3,11 +3,14 @@
  * credit and corpse loot. Owns the corpse loot store.
  */
 import log from "../../modules/logger";
+import { getIconUrl } from "../../modules/spriteSheetManager";
+import assetCache from "../../services/assetCache";
 import layerManager from "../../services/layermanager";
 import playerCache from "../../services/playermanager";
 import { atomically } from "../../services/batch";
 import { broadcastToAOI } from "../../socket/aoi";
 import { packetManager } from "../../socket/packet_manager";
+import bags from "../bags";
 import currency from "../currency";
 import { Events, listener } from "../events";
 import inventory from "../inventory";
@@ -168,7 +171,13 @@ async function creditQuests(members: any[], creature: CreatureInstance, template
 }
 
 async function createCorpseLoot(creature: CreatureInstance, template: CreatureTemplate, members: any[]): Promise<void> {
-  const items: CorpseItem[] = template.loot_table_id ? ((await lootTable.roll(template.loot_table_id)) as CorpseItem[]) : [];
+  const rolled: CorpseItem[] = template.loot_table_id ? ((await lootTable.roll(template.loot_table_id)) as CorpseItem[]) : [];
+  // The roll names an icon after the item; the item's own icon is the one the bags show.
+  const known = ((await assetCache.get("items")) as any[]) || [];
+  const items = rolled.map((item) => {
+    const def = known.find((k) => lower(k?.name) === lower(item.itemName));
+    return def?.icon ? { ...item, iconUrl: getIconUrl(def.icon) || item.iconUrl } : item;
+  });
   const copper = template.gold_max > 0 ? randInt(template.gold_min, template.gold_max) : 0;
   const names = members.map((m) => lower(m.username));
   const tapper = tapperPlayer(creature);
@@ -215,7 +224,28 @@ export async function handleKill(creature: CreatureInstance, template: CreatureT
   ]);
 }
 
-export type LootError = "not_found" | "too_far" | "not_allowed" | "empty" | "failed";
+export type LootError = "not_found" | "too_far" | "not_allowed" | "empty" | "failed" | "full";
+
+/**
+ * The items a player's bags have room for, in order: more of something they hold takes no slot,
+ * anything else takes one (as vendors and mail count it, systems/vendors.ts hasRoomFor).
+ */
+async function fitsInBags(username: string, items: CorpseItem[]): Promise<CorpseItem[]> {
+  const carried = ((await inventory.get(username)) as any[]) ?? [];
+  const held = new Set(carried.map((row) => lower(row.item ?? row.name)));
+  let free = (await bags.capacity(username)) - carried.length;
+  const fits: CorpseItem[] = [];
+  for (const item of items) {
+    const key = lower(item.itemName);
+    if (!held.has(key)) {
+      if (free <= 0) continue;
+      free--;
+      held.add(key);
+    }
+    fits.push(item);
+  }
+  return fits;
+}
 
 function checkLootAccess(player: any, creature: CreatureInstance | undefined): LootError | null {
   if (!creature || creature.state !== AIState.DEAD || !corpseLoot.has(creature.id)) return "empty";
@@ -238,12 +268,19 @@ export async function takeCorpseLoot(
   player: any,
   creature: CreatureInstance | undefined,
   indices: number[] | null
-): Promise<{ taken: CorpseItem[]; empty: boolean } | LootError> {
+): Promise<{ taken: CorpseItem[]; empty: boolean; full: boolean; remaining: CorpseItem[] } | LootError> {
   const error = checkLootAccess(player, creature);
   if (error) return error;
-  const loot = corpseLoot.get(creature!.id)!;
-  // Off the corpse before anything is awaited: a second take meanwhile finds it gone.
-  const result = corpseLoot.take(creature!.id, player.username, indices);
+  // Only what fits in the looter's bags is taken: the rest stays on the corpse.
+  const wanted = corpseLoot.remaining(creature!.id).filter((item) => !indices || indices.includes(item.index));
+  const fits = await fitsInBags(player.username, wanted);
+  const full = fits.length < wanted.length;
+  // Looked at again: the corpse may have been looted or gone while the bags were counted.
+  const loot = corpseLoot.get(creature!.id);
+  if (!loot || creature!.state !== AIState.DEAD) return "empty";
+  if (full && fits.length === 0 && loot.copper <= 0) return "full";
+  // Off the corpse before anything else is awaited: a second take meanwhile finds it gone.
+  const result = corpseLoot.take(creature!.id, player.username, fits.map((item) => item.index));
   if (!result) return "not_allowed";
 
   // The items and every share of the money are kept together or not at all.
@@ -279,11 +316,12 @@ export async function takeCorpseLoot(
   }
   // The same hook a pickup from the ground has (systems/loot.ts), so what counts loot counts this too.
   for (const item of added) {
+    send(player.wt, packetManager.lootReceived({ itemName: item.itemName, quantity: item.quantity, quality: item.quality || "common" }));
     listener.emit(Events.PLAYER_LOOT_RETRIEVED, { player, itemName: item.itemName, quantity: item.quantity, mapName: creature!.map, x: creature!.x, y: creature!.y } as any);
   }
   if (result.empty) {
     send(player.wt, packetManager.creatureLootable({ id: creature!.id, lootable: false }));
     creature!.combat.corpseUntil = Math.min(creature!.combat.corpseUntil, Date.now() + CORPSE_EMPTY_MS);
   }
-  return { taken: result.taken, empty: result.empty };
+  return { taken: result.taken, empty: result.empty, full, remaining: corpseLoot.remaining(creature!.id) };
 }

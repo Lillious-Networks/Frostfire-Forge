@@ -1329,6 +1329,36 @@ describe("loot taken from a corpse", () => {
     expect(copperOf("ally")).toBe(10);
     expect(transactions).toBe(2);
   });
+
+  /** Fills hero's 25 slots but `free`, with stacks of things the corpse does not have. */
+  const fillBags = (free: number) => {
+    for (let i = 0; i < 22 - free; i++) {
+      tables.inventory.push({ id: 50 + i, username: "hero", item: `Pebble ${i}`, quantity: 1, equipped: 0, slot: 3 + i, bag_slot: 0 });
+    }
+  };
+
+  test("what does not fit in the bags stays on the corpse", async () => {
+    fillBags(1);
+    const creature = corpse();
+
+    const result = await takeCorpseLoot(looter, creature, null);
+
+    expect(result).toMatchObject({ empty: false, full: true, taken: [expect.objectContaining({ itemName: "Rat Tail" })] });
+    expect((result as any).remaining.map((entry: Row) => entry.itemName)).toEqual(["Old Sack"]);
+    expect(stack("Rat Tail")!.quantity).toBe(2);
+    expect(stack("Old Sack")).toBeUndefined();
+    expect(corpseLoot.remaining(creature.id).map((entry) => entry.itemName)).toEqual(["Old Sack"]);
+  });
+
+  test("with full bags the money is still taken, and with nothing else to take the bags are said to be full", async () => {
+    fillBags(0);
+    const creature = corpse();
+
+    expect(await takeCorpseLoot(looter, creature, null)).toMatchObject({ empty: false, full: true, taken: [] });
+    expect(copperOf("hero")).toBe(61);
+    expect(await takeCorpseLoot(looter, creature, null)).toBe("full");
+    expect(corpseLoot.remaining(creature.id).map((entry) => entry.itemName)).toEqual(["Rat Tail", "Old Sack"]);
+  });
 });
 
 describe("the caches", () => {

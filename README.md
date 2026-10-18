@@ -178,6 +178,7 @@ WT_HANDSHAKE_RATE_LIMIT_DISABLED="false"     # Set to "true" to disable WebTrans
 
 # Realm Configuration
 WHITELIST="false"                             # Set to "true" to enable the username whitelist
+PVP="true"                                    # "false" stops harmful spells between players; heals and buffs still work. "true" shows an orange PvP badge in the realm list
 
 # Real weather (Optional)
 WEATHER_API_KEY=""                            # OpenWeatherMap API key; empty turns real weather off

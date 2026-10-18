@@ -600,6 +600,7 @@ declare interface PlayerData {
     effects_volume: number;
     ambience_volume: number;
     weather_volume: number;
+    auto_loot: boolean;
     muted: boolean;
     hotbar_config: any[];
   }>;

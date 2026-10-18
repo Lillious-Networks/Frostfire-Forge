@@ -5,6 +5,8 @@
  * stands, so the window never has to work out for itself what happened.
  */
 import log from "../modules/logger";
+import { getIconUrl } from "../modules/spriteSheetManager";
+import assetCache from "../services/assetCache";
 import lootTable from "./lootTable";
 
 /** The /loottable command's own rule: one of these, in the permissions copied at login. */
@@ -27,6 +29,15 @@ const GONE_ROW = "That row is no longer in its table.";
 export function canUseEditor(player: any): boolean {
   const held: string[] = Array.isArray(player?.permissions) ? player.permissions : [];
   return held.some((p) => EDITOR_PERMISSIONS.includes(p));
+}
+
+/** Every item the server has, as the editor's item search lists them: what a row can be added for. */
+export async function itemCatalogue(): Promise<Array<{ name: string; quality: string; iconUrl: string }>> {
+  const items = ((await assetCache.get("items")) as any[]) || [];
+  return items
+    .filter((item) => typeof item?.name === "string" && item.name)
+    .map((item) => ({ name: item.name as string, quality: (item.quality || "common") as string, iconUrl: getIconUrl(item.icon) || "" }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // ----------------------------------------------------------------- reading

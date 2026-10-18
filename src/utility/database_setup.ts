@@ -221,6 +221,7 @@ const createClientConfig = async () => {
         ambience_volume INT NOT NULL DEFAULT 100,
         weather_volume INT NOT NULL DEFAULT 100,
         muted INT NOT NULL DEFAULT 0,
+        auto_loot INT NOT NULL DEFAULT 0,
         hotbar_config JSON DEFAULT NULL,
         inventory_config JSON DEFAULT NULL
     )

@@ -1,5 +1,11 @@
-import { describe, expect, test } from "bun:test";
-import { areaCastRefusal, areaSpellHarms, targetedCastRefused } from "../systems/pvpzone";
+import { afterEach, describe, expect, test } from "bun:test";
+import { areaCastRefusal, areaSpellHarms, pvpEnabled, targetedCastRefused } from "../systems/pvpzone";
+
+const environmentPvp = process.env.PVP;
+afterEach(() => {
+  if (environmentPvp === undefined) delete process.env.PVP;
+  else process.env.PVP = environmentPvp;
+});
 
 // A map whose southern half (y >= 500) is a no-PvP zone.
 const allowed = async (position: { x: number; y: number }) => position.y < 500;
@@ -58,5 +64,35 @@ describe("who a harmful area spell harms", () => {
   test("a lingering zone whose caster has left the game asks for the victim alone", async () => {
     expect(await areaSpellHarms(undefined, field, allowed)).toBe(true);
     expect(await areaSpellHarms(undefined, town, allowed)).toBe(false);
+  });
+});
+
+describe("PVP in the environment", () => {
+  test("PvP is on when PVP is unset, true, or anything but false", () => {
+    delete process.env.PVP;
+    expect(pvpEnabled()).toBe(true);
+    process.env.PVP = "true";
+    expect(pvpEnabled()).toBe(true);
+    process.env.PVP = "";
+    expect(pvpEnabled()).toBe(true);
+  });
+
+  test("PvP is off when PVP is false, in any case", () => {
+    process.env.PVP = "false";
+    expect(pvpEnabled()).toBe(false);
+    process.env.PVP = " FALSE ";
+    expect(pvpEnabled()).toBe(false);
+  });
+
+  test("with PVP=false a harmful area spell harms no player, even where PvP zones allow it", async () => {
+    process.env.PVP = "false";
+    expect(await areaSpellHarms(field, { x: 140, y: 120 }, allowed)).toBe(false);
+    expect(await areaSpellHarms(undefined, field, allowed)).toBe(false);
+  });
+
+  test("with PVP=false an area spell may still be cast (it harms creatures)", async () => {
+    process.env.PVP = "false";
+    expect(await areaCastRefusal(field, null, allowed)).toBe(null);
+    expect(await areaCastRefusal(field, { x: 300, y: 200 }, allowed)).toBe(null);
   });
 });

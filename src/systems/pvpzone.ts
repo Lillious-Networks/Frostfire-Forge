@@ -12,6 +12,15 @@ export type PvpAllowed = (position: Point) => Promise<boolean>;
 export const PVP_BODY = { width: 24, height: 40 };
 
 /**
+ * PVP in the environment. "false" stops every harmful spell one player casts on
+ * another, wherever they stand; beneficial spells and spells on creatures are
+ * untouched. Unset (or anything else) leaves PvP to the no-PvP zones.
+ */
+export function pvpEnabled(): boolean {
+  return process.env.PVP?.trim().toLowerCase() !== "false";
+}
+
+/**
  * Whether a spell cast at a target is refused for a no-PvP zone: a harmful one
  * when its caster or its target stands in one. A beneficial spell (a heal, a
  * buff) harms nobody and is cast anywhere.
@@ -33,12 +42,13 @@ export async function areaCastRefusal(caster: Point, aim: Point | null, allowed:
 }
 
 /**
- * Whether a harmful area spell harms a player standing at `victim`: never
- * inside a no-PvP zone, and never while its caster stands in one. `caster` is
+ * Whether a harmful area spell harms a player standing at `victim`: never with
+ * PVP=false, never inside a no-PvP zone, and never while its caster stands in one. `caster` is
  * undefined once the caster has left the game; the zone a lingering spell left
  * behind then asks for the victim alone.
  */
 export async function areaSpellHarms(caster: Point | undefined, victim: Point, allowed: PvpAllowed): Promise<boolean> {
+  if (!pvpEnabled()) return false;
   if (caster && !(await allowed(caster))) return false;
   return allowed(victim);
 }

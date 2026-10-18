@@ -300,10 +300,8 @@ const castingHome = (player: any) => !!player?.casting && player.homeCastId !== 
 async function castHome(caster: any, itemName: string): Promise<void> {
   const wt = caster.wt;
   if (!wt) return;
-  if (caster.casting || playerCache.get(caster.id)?.casting) {
-    sendPacket(wt, packetManager.notify({ message: "You are already casting." }));
-    return;
-  }
+  // Already casting: nothing happens, and nothing is said.
+  if (caster.casting || playerCache.get(caster.id)?.casting) return;
   // A step breaks the cast, but a player already walking takes none.
   if (caster.moving) {
     sendPacket(wt, packetManager.notify({ message: "You must stand still to use that." }));
@@ -383,14 +381,12 @@ async function castGather(caster: any, nodeId: unknown): Promise<void> {
   if (!wt) return;
   const started = await gathering.service.start(caster.id, nodeId);
   if (!started.ok) {
-    sendPacket(wt, packetManager.notify({ message: started.reason }));
+    // Already casting: nothing happens, and nothing is said.
+    if (started.reason !== GATHER_REASONS.casting)sendPacket(wt, packetManager.notify({ message: started.reason }));
     return;
   }
   // a cast that began while the checks were awaited is not overwritten
-  if (caster.casting || playerCache.get(caster.id)?.casting) {
-    sendPacket(wt, packetManager.notify({ message: "You are already casting." }));
-    return;
-  }
+  if (caster.casting || playerCache.get(caster.id)?.casting) return;
 
   const from = { map: String(caster.location?.map), x: Number(caster.location?.position?.x), y: Number(caster.location?.position?.y) };
   caster.casting = true;
@@ -674,6 +670,7 @@ import dots from "../systems/dots";
 import { rollHeal, spellManaCost } from "../systems/spellmath";
 import creatures from "../systems/creatures";
 import gathering from "../systems/gathering";
+import { REASONS as GATHER_REASONS } from "../systems/gathering/service";
 import achievements from "../systems/achievements";
 import collectables from "../systems/collectables";
 import { projectileTravelMs } from "../systems/creatures/projectile";
@@ -4464,6 +4461,7 @@ export default async function packetReceiver(
           not_allowed: "You don't have permission to loot that corpse.",
           empty: "There is nothing to loot.",
           failed: "Could not take the loot. Try again.",
+          full: "Your bags are full.",
         };
         if (type === "CREATURE_LOOT") {
           const opened = creatures.openCorpseFor(currentPlayer, creatureId);
@@ -4486,6 +4484,9 @@ export default async function packetReceiver(
           playerCache.set(currentPlayer.id, currentPlayer);
           sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
         }
+        if (result.full) sendPacket(wt, packetManager.notify({ message: lootErrors.full }));
+        // The loot window shows what is left, or closes when nothing is.
+        sendPacket(wt, packetManager.creatureLootContents({ id: creatureId, items: result.remaining, copper: 0 }));
         break;
       }
       case "HOTBAR": {
@@ -12453,7 +12454,7 @@ export default async function packetReceiver(
         // Only the loot editor window asks for this, and /le opens it for those it lets through.
         if (!lootEditor.canUseEditor(currentPlayer)) return;
         const tables = await lootTable.list();
-        sendPacket(wt, packetManager.lootTableList(tables));
+        sendPacket(wt, packetManager.lootTableList(tables, await lootEditor.itemCatalogue()));
         break;
       }
       case "GET_ONLINE_PLAYERS": {
@@ -12866,6 +12867,8 @@ async function castSpellOnCreature(wt: any, currentPlayer: any, spell: SpellData
   };
 
   const creature = creatures.getCreature(creatureId);
+  // A corpse can be targeted, but not cast at.
+  if (creature?.state === "dead") return fail("invalid_target", "Your target is dead.");
   if (!creature || !creatures.isTargetableBy(currentPlayer, creature)) return fail("invalid_target", "Target not found.");
   const spellDamage = Number(spell.damage) || 0;
   const creatureEffects = new Set(["damage_over_time", "stun", "slow", "interrupt", "taunt", "threat"]);

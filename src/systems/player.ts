@@ -3,7 +3,7 @@ import { verify, randomBytes } from "../modules/hash";
 import log from "../modules/logger";
 import assetCache from "../services/assetCache";
 import { getWorldMap, type WorldBits } from "../modules/worldmaps";
-import { targetedCastRefused } from "./pvpzone";
+import { pvpEnabled, targetedCastRefused } from "./pvpzone";
 import * as settings from "../config/settings.json";
 import playerCache from "../services/playermanager.ts";
 import { realmWhitelist } from "../services/whitelist";
@@ -133,11 +133,13 @@ let ambienceColumn = false;
  * clientconfig.weather_volume, and added at start the same way.
  */
 let weatherColumn = false;
+/** The Auto loot setting (loot taken without the loot window), in clientconfig.auto_loot, added at start the same way. */
+let autoLootColumn = false;
 /** Whether accounts.class_id is there, once a login has found out (null: not asked yet). See GetPlayerLoginData. */
 let classIdColumn: boolean | null = null;
 
-/** Adds a sound level's column to clientconfig when it is missing. Whether it is there now; never throws. */
-async function ensureVolumeColumn(column: "ambience_volume" | "weather_volume", slider: string): Promise<boolean> {
+/** Adds a setting's column to clientconfig when it is missing. Whether it is there now; never throws. */
+async function ensureVolumeColumn(column: "ambience_volume" | "weather_volume" | "auto_loot", slider: string, fallback = 100): Promise<boolean> {
   const lite = (process.env.DATABASE_ENGINE || "mysql") === "sqlite";
   const has = async () => {
     if (lite) {
@@ -152,7 +154,7 @@ async function ensureVolumeColumn(column: "ambience_volume" | "weather_volume", 
   try {
     if (!(await has())) {
       try {
-        await query(`ALTER TABLE clientconfig ADD COLUMN ${column} ${lite ? "INTEGER" : "INT"} NOT NULL DEFAULT 100`);
+        await query(`ALTER TABLE clientconfig ADD COLUMN ${column} ${lite ? "INTEGER" : "INT"} NOT NULL DEFAULT ${fallback}`);
       } catch (error) {
         // another realm starting at the same moment may have added it first
         if (!(await has())) throw error;
@@ -160,7 +162,7 @@ async function ensureVolumeColumn(column: "ambience_volume" | "weather_volume", 
     }
     return true;
   } catch (error) {
-    log.warn(`[Config] The ${column} column could not be added to clientconfig, so the ${slider} slider is not saved: ${error}`);
+    log.warn(`[Config] The ${column} column could not be added to clientconfig, so the ${slider} setting is not saved: ${error}`);
     return false;
   }
 }
@@ -169,6 +171,7 @@ async function ensureVolumeColumn(column: "ambience_volume" | "weather_volume", 
 export async function ensureAmbienceColumn(): Promise<boolean> {
   ambienceColumn = await ensureVolumeColumn("ambience_volume", "Ambience");
   weatherColumn = await ensureVolumeColumn("weather_volume", "Weather");
+  autoLootColumn = await ensureVolumeColumn("auto_loot", "Auto loot", 0);
   return ambienceColumn;
 }
 
@@ -1322,12 +1325,15 @@ const player = {
     // (the Ambience and Weather levels: only from a client that sends them, and only to a database that has the column)
     const ambience = ambienceColumn && typeof data.ambience_volume == "number";
     const weather = weatherColumn && typeof data.weather_volume == "number";
+    // (Auto loot the same way; a yes or no, stored as 1 or 0)
+    const autoLoot = autoLootColumn && typeof data.auto_loot == "boolean";
     const saved: Record<string, number> = {
       fps: data.fps,
       music_volume: data.music_volume || 0,
       effects_volume: data.effects_volume || 0,
       ...(ambience ? { ambience_volume: data.ambience_volume || 0 } : {}),
       ...(weather ? { weather_volume: data.weather_volume || 0 } : {}),
+      ...(autoLoot ? { auto_loot: data.auto_loot ? 1 : 0 } : {}),
     };
     const columns = Object.keys(saved);
     const response = await writing(configRows, username, () => query(
@@ -1666,7 +1672,8 @@ const player = {
       }
     }
 
-    // Only a harmful spell answers to the no-PvP zones: a heal or a buff is cast anywhere.
+    // Only a harmful spell answers to PVP=false and the no-PvP zones: a heal or a buff is cast anywhere.
+    if (harmful && !isSelf && !pvpEnabled()) return { value: false, reason: "nopvp" };
     const map = self.location.map;
     const pvpAllowed = (position: { x: number; y: number }) => player.isInPvPZone(map, position as PositionData, playerProperties);
     if (await targetedCastRefused(harmful, selfPosition, targetPosition, pvpAllowed)) return { value: false, reason: "nopvp" };
@@ -2013,7 +2020,7 @@ const player = {
       query("SELECT permissions FROM permissions WHERE username = ?", [username]) as Promise<any[]>,
       query("SELECT copper, silver, gold FROM currency WHERE username = ?", [username]) as Promise<any[]>,
       query("SELECT friends FROM friendslist WHERE username = ?", [username]) as Promise<any[]>,
-      query(`SELECT fps, music_volume, effects_volume, ${ambienceColumn ? "ambience_volume, " : ""}${weatherColumn ? "weather_volume, " : ""}muted, hotbar_config, inventory_config FROM clientconfig WHERE username = ?`, [username]) as Promise<any[]>,
+      query(`SELECT fps, music_volume, effects_volume, ${ambienceColumn ? "ambience_volume, " : ""}${weatherColumn ? "weather_volume, " : ""}${autoLootColumn ? "auto_loot, " : ""}muted, hotbar_config, inventory_config FROM clientconfig WHERE username = ?`, [username]) as Promise<any[]>,
       query("SELECT quest_id, state, accepted_at, completed_at, times_completed FROM quest_log WHERE username = ?", [username]) as Promise<any[]>,
       query("SELECT quest_id, objective_id, count FROM quest_objective_progress WHERE username = ?", [username]) as Promise<any[]>,
       query("SELECT head, body, helmet, necklace, shoulderguards, chestplate, wristguards, gloves, belt, pants, boots, ring_1, ring_2, trinket_1, trinket_2, weapon FROM equipment WHERE username = ?", [username]) as Promise<any[]>,
@@ -2102,6 +2109,7 @@ const player = {
         effects_volume: config.effects_volume,
         ambience_volume: config.ambience_volume ?? 100,
         weather_volume: config.weather_volume ?? 100,
+        auto_loot: Number(config.auto_loot) === 1,
         muted: config.muted,
         hotbar_config: config.hotbar_config || null,
         inventory_config: config.inventory_config || null

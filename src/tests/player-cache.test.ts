@@ -809,7 +809,7 @@ describe("a player's client config", () => {
       "UPDATE clientconfig SET fps = ?, music_volume = ?, effects_volume = ?, ambience_volume = ?, muted = ? WHERE username = ?",
     ]);
     expect(row("pc_hero", "clientconfig")).toMatchObject({ fps: 60, music_volume: 10, effects_volume: 20, ambience_volume: 30, muted: 0 });
-    expect(await fromCache(() => player.getConfig("pc_hero"))).toEqual([config("pc_hero", { fps: 60, music_volume: 10, effects_volume: 20, ambience_volume: 30, weather_volume: 100, muted: 0 })]);
+    expect(await fromCache(() => player.getConfig("pc_hero"))).toEqual([config("pc_hero", { fps: 60, music_volume: 10, effects_volume: 20, ambience_volume: 30, weather_volume: 100, auto_loot: 0, muted: 0 })]);
     // a client from before the slider
     expect(await sentBy(() => player.setConfig("6101", { fps: 60, music_volume: 11, effects_volume: 20, muted: false }))).toEqual([
       "UPDATE clientconfig SET fps = ?, music_volume = ?, effects_volume = ?, muted = ? WHERE username = ?",
@@ -828,6 +828,22 @@ describe("a player's client config", () => {
       "UPDATE clientconfig SET fps = ?, music_volume = ?, effects_volume = ?, ambience_volume = ?, weather_volume = ?, muted = ? WHERE username = ?",
     ]);
     expect(row("pc_hero", "clientconfig")).toMatchObject({ ambience_volume: 30, weather_volume: 40 });
+  });
+
+  // USER REQUEST 2026-10-18: an Auto loot setting, off unless turned on
+  test("the Auto loot setting is added at start, off, and saved as 1 or 0 with the others", async () => {
+    const { ensureAmbienceColumn } = await import("../systems/player");
+    expect(await ensureAmbienceColumn()).toBe(true);
+    expect(row("pc_hero", "clientconfig").auto_loot).toBe(0);
+    online("6101", "pc_hero");
+    await player.getConfig("pc_hero");
+    expect(await sentBy(() => player.setConfig("6101", { fps: 60, music_volume: 10, effects_volume: 20, auto_loot: true, muted: false }))).toEqual([
+      "UPDATE clientconfig SET fps = ?, music_volume = ?, effects_volume = ?, auto_loot = ?, muted = ? WHERE username = ?",
+    ]);
+    expect(row("pc_hero", "clientconfig")).toMatchObject({ auto_loot: 1 });
+    // a client from before the setting leaves it as it is
+    await player.setConfig("6101", { fps: 60, music_volume: 10, effects_volume: 20, muted: false });
+    expect(row("pc_hero", "clientconfig")).toMatchObject({ auto_loot: 1 });
   });
 
   const WRITES: Record<string, () => Promise<any>> = {

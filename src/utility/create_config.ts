@@ -38,6 +38,8 @@ GATEWAY_GAME_SERVER_SECRET=""
 SERVER_ID="server-1"
 SERVER_HOST="localhost"
 PUBLIC_HOST="localhost"
+# "false" stops harmful spells between players (beneficial spells still work)
+PVP=true
 # Real weather: a world set to "weather_api" follows WEATHER_API_LOCATION ("lat,lon" or "City,CC"), read from OpenWeatherMap
 WEATHER_API_KEY=""
 WEATHER_API_LOCATION=""
@@ -73,6 +75,8 @@ LOG_LEVEL="info"
 SERVER_ID=""
 SERVER_HOST=""
 PUBLIC_HOST=""
+# "false" stops harmful spells between players (beneficial spells still work)
+PVP=true
 GATEWAY_URL=""
 GATEWAY_AUTH_KEY=""
 GATEWAY_GAME_SERVER_SECRET=""

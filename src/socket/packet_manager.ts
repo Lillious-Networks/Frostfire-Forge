@@ -1114,9 +1114,9 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "TOGGLE_LOOT_EDITOR", data: null })),
     ] as any[];
   },
-  lootTableList: (tables: any[]) => {
+  lootTableList: (tables: any[], items: Array<{ name: string; quality: string; iconUrl: string }> = []) => {
     return [
-      packet.encode(JSON.stringify({ type: "LOOT_TABLE_LIST", data: { tables } })),
+      packet.encode(JSON.stringify({ type: "LOOT_TABLE_LIST", data: { tables, items } })),
     ] as any[];
   },
   lootEditorResult: (data: { ok: boolean; errors: string[]; action?: string; request?: number; id?: number; tables: any[] | null }) => {
@@ -1172,6 +1172,12 @@ export const packetManager = {
   creatureLootContents: (data: { id: number; items: any[]; copper: number }) => {
     return [
       packet.encode(JSON.stringify({ type: "CREATURE_LOOT_CONTENTS", data })),
+    ] as any[];
+  },
+  /** An item taken from a corpse: the client says so with the name in its quality's colour. */
+  lootReceived: (data: { itemName: string; quantity: number; quality: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "LOOT_RECEIVED", data })),
     ] as any[];
   },
   creatureXp: (data: { creatureId: number; amount: number }) => {

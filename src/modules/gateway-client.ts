@@ -5,6 +5,7 @@ import os from "os";
 import fs from "node:fs";
 import { serverFetch } from "./https_servers.ts";
 import { isWhitelistEnabled } from "../services/whitelist.ts";
+import { pvpEnabled } from "../systems/pvpzone.ts";
 
 // Evaluate the TLS state at registration time rather than at import time:
 // the local certificate provisioning (ensureLocalCertificate) runs after
@@ -60,7 +61,9 @@ class GatewayClient {
           useSSL: resolveUseSSL(),
           maxConnections: this.config.maxConnections,
           authKey: process.env.GATEWAY_AUTH_KEY,
-          whitelisted: isWhitelistEnabled()
+          whitelisted: isWhitelistEnabled(),
+          // The realm list shows a PvP badge from this; PVP is read once, at start.
+          pvp: pvpEnabled()
         })
       });
 
