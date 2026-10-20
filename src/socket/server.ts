@@ -29,6 +29,8 @@ import { ensureClassSchema } from "../systems/classes.ts";
 import { ensureMailSchema } from "../systems/mail.ts";
 import { ensureMailboxSchema } from "../systems/mailboxeditor.ts";
 import { ensureGatheringSchema } from "../systems/gathering/editor.ts";
+import fishing, { ensureFishingSchema } from "../systems/fishing";
+import { ensureFootprintsSchema } from "../systems/footprints";
 import { ensureAchievementSchema } from "../systems/achievements/store.ts";
 import { ensureBuyPriceColumn, ensureHomeItemIcon, ensureSoulboundColumn } from "../systems/items.ts";
 import worlds from "../systems/worlds.ts";
@@ -188,6 +190,10 @@ await ensureMailSchema();
 await ensureMailboxSchema();
 // The gathering areas (/gathering), the same way.
 await ensureGatheringSchema();
+// The fishable tiles (the map editor's Fishing tab), the same way.
+await ensureFishingSchema();
+// The footprints set on tiles (the map editor's Footprints tab), the same way.
+await ensureFootprintsSchema();
 // The achievements (/achievements) and each player's progress, the same way: before the table caches are read.
 await ensureAchievementSchema();
 // items.soulbound, the same way: before the items are read.
@@ -755,6 +761,7 @@ listener.emit(Events.START);
 gameLoop.start();
 await creatures.init();
 await gathering.init();
+await fishing.init();
 await achievements.init();
 startAutoPartyLayerSync(sendAnimationTo);
 startAutoLayerCondensation(sendAnimationTo);

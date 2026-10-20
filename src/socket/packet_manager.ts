@@ -658,6 +658,34 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "TILE_SOUNDS", data })),
     ] as any[];
   },
+  /**
+   * A player's fishing, for everyone on the map (systems/fishing): "cast" (the bobber lands at x, y), "bite", "reel"
+   * (the player began reeling the fish in), "escape" (the fish got away: the bobber comes up again), "catch" (the fish
+   * is pulled out: its item, icon and quality) and "end" (the line is taken in).
+   */
+  fishing: (data: { id: string; state: "cast" | "bite" | "reel" | "escape" | "catch" | "end"; x?: number; y?: number; item?: string; icon?: string | null; quality?: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "FISHING", data })),
+    ] as any[];
+  },
+  /** Which tiles are fishable, by tileset key: sent at login and after every save. */
+  fishingTiles: (data: { tilesets: Record<string, number[]> }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "FISHING_TILES", data })),
+    ] as any[];
+  },
+  /** The map editor's Fishing tab: every fishable tile with what it gives, and the material items to pick from. */
+  fishingEditorData: (data: { tiles: Record<string, Record<string, Array<{ item: string; chance: number }>>>; items: Array<{ name: string; image: string | null; quality: string | null }> }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "FISHING_EDITOR_DATA", data })),
+    ] as any[];
+  },
+  /** The footprints the map editor has set on tiles, all of them (systems/footprints.ts): sent at login and after a save. */
+  tileFootprints: (data: { tilesets: Record<string, Record<string, { style: string; color: string; opacity: number; fade: number }>> }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "TILE_FOOTPRINTS", data })),
+    ] as any[];
+  },
   editorSyncReady: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "EDITOR_SYNC_READY", data })),

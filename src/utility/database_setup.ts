@@ -1290,6 +1290,25 @@ const createCreatureTables = async () => {
     enabled TINYINT(1) NOT NULL DEFAULT 1,
     INDEX idx_gathering_areas_map (map)
   )`);
+  // Tile footprints (the map editor's Footprints tab): the prints players leave on each tile of a tileset. Same SQL as
+  // TILE_FOOTPRINTS_TABLE.mysql in systems/footprints.ts, which makes it at engine start too.
+  await query(`CREATE TABLE IF NOT EXISTS tile_footprints (
+    tileset VARCHAR(64) NOT NULL,
+    tile_id INT NOT NULL,
+    style VARCHAR(16) NOT NULL,
+    color VARCHAR(7) NOT NULL,
+    opacity FLOAT NOT NULL,
+    fade_s INT NOT NULL,
+    PRIMARY KEY (tileset, tile_id)
+  )`);
+  // Fishable tiles (the map editor's Fishing tab): what each tile of a tileset gives. Same SQL as
+  // FISHING_TILES_TABLE.mysql in systems/fishing/index.ts, which makes it at engine start too.
+  await query(`CREATE TABLE IF NOT EXISTS fishing_tiles (
+    tileset VARCHAR(64) NOT NULL,
+    tile_id INT NOT NULL,
+    catches TEXT NOT NULL,
+    PRIMARY KEY (tileset, tile_id)
+  )`);
   await query(`CREATE TABLE IF NOT EXISTS creature_spawns (
     id INT NOT NULL AUTO_INCREMENT PRIMARY KEY UNIQUE,
     template_id INT NOT NULL,

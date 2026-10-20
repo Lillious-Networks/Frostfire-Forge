@@ -548,8 +548,8 @@ async function castGather(caster: any, nodeId: unknown): Promise<void> {
 /** Breaks a player's cast home, when they are in one. */
 function breakCastHome(target: any): void {
   const player = (target?.id && playerCache.get(target.id)) || target;
-  // a gather (castGather) is broken the same way
-  if (!castingHome(player) && !castingGather(player)) return;
+  // a gather (castGather) and fishing (castFish) are broken the same way
+  if (!castingHome(player) && !castingGather(player) && !castingFish(player)) return;
   interruptPlayerCast(player).catch((error) => log.error(`A cast could not be broken: ${error}`));
 }
 // Any damage breaks it, and so does a stun. A step does too, where steps are read (MOVEXY), and dying where a death is handled.
@@ -558,6 +558,260 @@ listener.on(Events.PLAYER_DAMAGED, (event: { target?: any; damage?: number }) =>
 });
 listener.on(Events.PLAYER_DEBUFF_ADDED, (event: { target?: any; effectType?: string }) => {
   if (event?.effectType === "stun") breakCastHome(event.target);
+});
+
+/** Whether a player is fishing now: its cast is the one they are in (castFish). */
+const castingFish = (player: any) => !!player?.casting && player.fishCastId !== undefined && player.fishCastId === player.castId;
+
+/** The equipment a player is drawn with: a player who is fishing holds the rod (systems/fishing), whatever they wield. */
+function drawnEquipment(target: any): any {
+  if (!castingFish(target)) return target?.equipment || null;
+  return { ...(target.equipment || {}), weapon: fishing.FISHING_ROD_SPRITE };
+}
+
+/**
+ * A FISHING packet, for everyone on a map who can see the angler. An admin in stealth (or a vanished player) is seen
+ * only by themselves, admins and their party, as broadcastToAOI has it (USER REPORT 2026-10-20: "Non admins can see
+ * admins fishing in stealth").
+ */
+function broadcastFishing(map: unknown, data: Parameters<typeof packetManager.fishing>[0]): void {
+  const packets = packetManager.fishing(data);
+  const angler = playerCache.get(data.id);
+  const hidden = !!(angler?.isStealth || angler?.isVanished);
+  for (const p of filterPlayersByMap(String(map ?? ""))) {
+    if (!p?.wt || p.wt.readyState !== 1) continue;
+    if (hidden && p.id !== data.id && !p.isAdmin && !p.party?.includes(angler.username)) continue;
+    sendPacket(p.wt, packets);
+  }
+}
+
+/** Takes a player's fishing cast off them (its session already ended): the flags, then the pose. */
+async function releaseFishCast(target: any): Promise<void> {
+  const p = (target?.id && playerCache.get(target.id)) || target;
+  if (!p) return;
+  for (const held of new Set([target, p])) {
+    held.casting = false;
+    held.interruptableSpell = false;
+    held.fishCastId = undefined;
+  }
+  // one who walks while fishing faces the water: the walk turns them back the way they go
+  restoreWalkingFacing(p);
+  playerCache.set(p.id, p);
+  if (!p.wt) return;
+  globalStateRevision++;
+  await sendPositionAnimation(p.wt, p.location?.position?.direction || "down", !!p.moving, false, p.mount_type || "unicorn", undefined, globalStateRevision, false);
+}
+
+/** Whether a fishing player has left their line: another map, or further than FISH_WALK_RANGE from where they cast. */
+function leftLine(p: any, session: { map: string; from: { x: number; y: number } }): boolean {
+  const here = p?.location?.position;
+  if (String(p?.location?.map ?? "").replaceAll(".json", "") !== session.map || !here) return true;
+  return Math.hypot(Number(here.x) - session.from.x, Number(here.y) - session.from.y) > fishing.FISH_WALK_RANGE;
+}
+
+/**
+ * Takes the staff away after `ms`: long enough for the clients to draw the line coming in (the bobber, or the fish, to
+ * the staff's tip). Nothing is done when the player cast again, or the cast was broken, in the meantime.
+ */
+async function releaseFishCastAfter(target: any, castId: number, ms: number): Promise<void> {
+  if (ms > 0) await new Promise((resolve) => setTimeout(resolve, ms));
+  const p = (target?.id && playerCache.get(target.id)) || target;
+  if (p && castingFish(p) && p.castId === castId) await releaseFishCast(p);
+}
+
+/**
+ * Ends a player's fishing, if they are fishing: the line is taken in, for everyone on the map. `holdMs` keeps the staff
+ * in their hands that long while it comes in (a line reeled in by the player); a broken cast puts it away at once.
+ */
+async function stopFishing(target: any, holdMs = 0): Promise<void> {
+  const p = (target?.id && playerCache.get(target.id)) || target;
+  if (!p?.id) return;
+  const ended = fishing.endSession(p.id);
+  if (ended) broadcastFishing(ended.map, { id: p.id, state: "end" });
+  if (!castingFish(p) && !castingFish(target)) return;
+  if (holdMs > 0) await releaseFishCastAfter(p, p.castId, holdMs);
+  else await releaseFishCast(p);
+}
+
+/**
+ * A player casts a line (systems/fishing) at a point (px) they clicked: a fishable tile within FISH_RANGE. They face
+ * it and hold the rod in the cast pose; the bobber floats there until a fish bites (fishBite), and then they reel it
+ * in (landFish). Casting again while fishing casts the line somewhere else. They may walk a little while fishing, still
+ * turned to the water (USER REQUEST 2026-10-20): walking further than FISH_WALK_RANGE from where they cast, any
+ * damage, a stun, dying or leaving the map takes the line in.
+ */
+async function castFish(caster: any, data: unknown): Promise<void> {
+  const wt = caster.wt;
+  if (!wt) return;
+  const x = Math.round(Number((data as any)?.x)), y = Math.round(Number((data as any)?.y));
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  const refuse = (message: string) => sendPacket(wt, packetManager.notify({ message }));
+  const live = playerCache.get(caster.id) || caster;
+  // In another cast: nothing happens, and nothing is said.
+  if ((live.casting || caster.casting) && !castingFish(live)) return;
+  if (live.isDead || live.isGhost) return;
+  if (spellEffects.isStunned(live)) return refuse("You can't fish while stunned.");
+  if (live.pvp || creatures.combat.isInCombatWith(live.id)) return refuse("You can't fish while in combat.");
+  const pos = live.location?.position;
+  const map = String(live.location?.map ?? "");
+  if (!pos || !map) return;
+  if (Math.hypot(x - Number(pos.x), y - Number(pos.y)) > fishing.FISH_RANGE) return refuse("That is too far away to cast.");
+  const spot = await fishing.spotAt(map, x, y);
+  if (!spot) return refuse("You can't fish there.");
+  const item = rollCatch(spot.catches, Math.random());
+  if (!item) return refuse("You can't fish there.");
+  if (!(await hasRoomFor(live.username, item))) return refuse("Your bags are full.");
+
+  // the checks were awaited: a cast that began meanwhile or a map change wins
+  const after = playerCache.get(caster.id);
+  if (!after || (after.casting && !castingFish(after)) || String(after.location?.map ?? "") !== map) return;
+  const here = after.location.position;
+  const castId = (after.castId || 0) + 1;
+  const facing = facingToward(x - Number(here.x), y - Number(here.y));
+  // casting again: the old line is taken in (for the others; this player's client puts the new one in its place)
+  const old = fishing.endSession(after.id);
+  if (old) broadcastFishing(old.map, { id: after.id, state: "end" });
+  for (const held of new Set([caster, after])) {
+    held.casting = true;
+    // a step does not break it (walking past FISH_WALK_RANGE does, in the tick below), and the walk keeps them turned to the water
+    held.castOnSelf = false;
+    held.interruptableSpell = false;
+    held.castingSpellId = undefined;
+    held.castId = castId;
+    held.fishCastId = castId;
+    held.mounted = false;
+  }
+  here.direction = facing;
+  playerCache.set(after.id, after);
+  fishing.startSession(after.id, {
+    castId, map: map.replaceAll(".json", ""), from: { x: Number(here.x), y: Number(here.y) }, x, y, spot, item, bitAt: 0, reeledAt: 0, timer: null,
+  });
+
+  globalStateRevision++;
+  await sendPositionAnimation(after.wt || wt, facing, !!after.moving, false, after.mount_type || "unicorn", undefined, globalStateRevision, true);
+  broadcastFishing(map, { id: after.id, state: "cast", x, y });
+  const session = fishing.session(after.id);
+  if (session && session.castId === castId) session.timer = setTimeout(() => fishBite(after.id, castId), fishing.biteDelay(Math.random()));
+}
+
+/** A fish takes the bait: the bobber goes under, for everyone on the map, and the player can reel it in. */
+function fishBite(playerId: string, castId: number): void {
+  const session = fishing.session(playerId);
+  if (!session || session.castId !== castId) return;
+  const p = playerCache.get(playerId);
+  if (!p || !castingFish(p) || p.castId !== castId) {
+    fishing.endSession(playerId);
+    return;
+  }
+  session.bitAt = Date.now();
+  session.reeledAt = 0;
+  broadcastFishing(p.location.map, { id: playerId, state: "bite" });
+  // not reeled in time: the fish lets go of the bait (fishEscape); FISH_REEL (fishReel) stops this
+  session.timer = setTimeout(() => fishEscape(playerId, castId), fishing.BITE_ESCAPE_MS);
+}
+
+/**
+ * The fish was not reeled in within BITE_ESCAPE_MS of its bite: it gets away. The bobber comes up again, for everyone
+ * on the map, and the line stays out: another fish bites in time, maybe of another kind.
+ */
+function fishEscape(playerId: string, castId: number): void {
+  const session = fishing.session(playerId);
+  if (!session || session.castId !== castId || !session.bitAt || session.reeledAt) return;
+  const p = playerCache.get(playerId);
+  if (!p || !castingFish(p) || p.castId !== castId) {
+    fishing.endSession(playerId);
+    return;
+  }
+  session.bitAt = 0;
+  session.item = rollCatch(session.spot.catches, Math.random()) ?? session.item;
+  if (p.wt) sendPacket(p.wt, packetManager.notify({ message: "The fish got away." }));
+  broadcastFishing(p.location.map, { id: playerId, state: "escape" });
+  session.timer = setTimeout(() => fishBite(playerId, castId), fishing.biteDelay(Math.random()));
+}
+
+/**
+ * The player began reeling in the fish on the line (FISH_REEL): it no longer gets away for waiting, only if it is not
+ * landed within HOOKED_MAX_MS.
+ */
+function fishReel(playerId: string): void {
+  const session = fishing.session(playerId);
+  if (!session || !session.bitAt || session.reeledAt) return;
+  const castId = session.castId;
+  session.reeledAt = Date.now();
+  // the others' clients draw the line reeled from now on
+  broadcastFishing(session.map, { id: playerId, state: "reel" });
+  if (session.timer) clearTimeout(session.timer);
+  session.timer = setTimeout(() => {
+    if (fishing.session(playerId)?.castId !== castId) return;
+    const now = playerCache.get(playerId);
+    if (now?.wt) sendPacket(now.wt, packetManager.notify({ message: "The fish got away." }));
+    stopFishing(now).catch((error) => log.error(`A fishing line could not be taken in: ${error}`));
+  }, fishing.HOOKED_MAX_MS);
+}
+
+/**
+ * The client has reeled the fish in (FISH_LAND): it goes into the bags, and everyone on the map sees it pulled out of
+ * the water. Taken only once the fish has been on the line MIN_REEL_MS: a land that comes sooner waits until then.
+ */
+async function landFish(caster: any): Promise<void> {
+  const first = fishing.session(caster.id);
+  if (!first || !first.bitAt) return;
+  const castId = first.castId;
+  // a land is a reel too: the fish does not get away while the land waits for MIN_REEL_MS
+  fishReel(caster.id);
+  const wait = first.bitAt + fishing.MIN_REEL_MS - Date.now();
+  if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+
+  const session = fishing.session(caster.id);
+  const p = playerCache.get(caster.id);
+  if (!session || session.castId !== castId || !p || !castingFish(p) || p.castId !== castId) return;
+  if (leftLine(p, session) || p.isDead || p.isGhost || spellEffects.isStunned(p)) {
+    await interruptPlayerCast(p);
+    return;
+  }
+  fishing.endSession(p.id);
+  const item = session.item!;
+  let given = false;
+  try {
+    given = (await hasRoomFor(p.username, item)) && await atomically([p.username], async (batch) => {
+      if (!(await inventory.add(p.username, { name: item, quantity: 1 }, batch))) throw new Error(`${item} was not added`);
+      return true;
+    });
+  } catch (error) {
+    log.error(`[Fishing] ${item} could not be given to ${p.username}: ${error}`);
+  }
+  broadcastFishing(session.map, given ? { id: p.id, state: "catch", item, icon: fishing.iconOf(item), quality: fishing.qualityOf(item) } : { id: p.id, state: "end" });
+  // the staff stays out while the fish (or the empty line) comes up to its tip, then is put away; not awaited, so the
+  // bags are sent at once
+  releaseFishCastAfter(p, castId, given ? fishing.CATCH_HOLD_MS : fishing.LINE_IN_MS).catch((error) => log.error(`A fishing cast could not be ended: ${error}`));
+  const live = playerCache.get(p.id)?.wt;
+  if (!live) return;
+  if (!given) {
+    sendPacket(live, packetManager.notify({ message: "Your bags are full. The fish got away." }));
+    return;
+  }
+  // Re-read the bags, as a gather does: a new item needs its full details on the client.
+  const after = playerCache.get(p.id) || p;
+  after.inventory = await patchInventoryBagSlots(await inventory.get(after.username), after.username);
+  playerCache.set(after.id, after);
+  sendPacket(live, packetManager.inventory(after.inventory, await getInventorySlots(after)));
+}
+
+// Leaving the map, or dying, takes the line in too (damage and a stun break the cast as any other cast).
+for (const event of [Events.MAP_ENTER, Events.PLAYER_DEATH]) {
+  listener.on(event, (payload: { player?: any }) => {
+    const target = payload?.player;
+    if (target?.id && fishing.session(target.id)) stopFishing(target).catch((error) => log.error(`A fishing line could not be taken in: ${error}`));
+  });
+}
+// So does walking too far from where the line was cast, looked at every tick (100 ms)
+listener.on(Events.FIXED_UPDATE, () => {
+  for (const [id, session] of fishing.allSessions()) {
+    const p = playerCache.get(id);
+    if (!p || !castingFish(p) || p.castId !== session.castId || !leftLine(p, session)) continue;
+    if (p.wt) sendPacket(p.wt, packetManager.notify({ message: "You walked too far from your line." }));
+    stopFishing(p).catch((error) => log.error(`A fishing line could not be taken in: ${error}`));
+  }
 });
 
 /**
@@ -756,7 +1010,7 @@ import friends from "../systems/friends";
 import ignores from "../systems/ignores";
 import * as moderation from "../systems/moderation";
 import trades, { cannotTrade, type Trade } from "../systems/trades";
-import vendors, { cannotShop, readVendorItems, type VendorAnswer } from "../systems/vendors";
+import vendors, { cannotShop, hasRoomFor, readVendorItems, type VendorAnswer } from "../systems/vendors";
 import consumables, { CONSUMABLE_COOLDOWN_MS, isKept } from "../systems/consumables";
 import { resetCooldowns } from "../systems/cooldowns";
 import { mapMarkers } from "../systems/mapmarkers";
@@ -781,6 +1035,9 @@ import { rollHeal, spellManaCost } from "../systems/spellmath";
 import creatures from "../systems/creatures";
 import gathering from "../systems/gathering";
 import { REASONS as GATHER_REASONS } from "../systems/gathering/service";
+import fishing from "../systems/fishing";
+import footprints from "../systems/footprints";
+import { facingToward, rollCatch } from "../systems/fishing/catches";
 import achievements from "../systems/achievements";
 import collectables from "../systems/collectables";
 import { projectileTravelMs } from "../systems/creatures/projectile";
@@ -1244,6 +1501,7 @@ if (PROFILE) {
             await assetCache.add("mapProperties", propsList);
           }
           clearMapCache(world.id);
+          fishing.forgetMap(world.id);
           log.info(`World ${world.id} changed on the asset server: collision, warps and graveyards updated`);
         }
       } catch (error: any) {
@@ -2993,6 +3251,14 @@ authWorker.on("message", async (result: any) => {
     );
     await sendQuestMarkersFor(wt, playerData.username, spawnLocation.map);
     await sendMapMarkers(wt, spawnLocation.map);
+    // the tiles that can be fished (systems/fishing), on every map
+    sendPacket(wt, packetManager.fishingTiles({ tilesets: fishing.publicTiles() }));
+    // and the footprints tiles take (systems/footprints)
+    try {
+      sendPacket(wt, packetManager.tileFootprints({ tilesets: await footprints.getFootprints() }));
+    } catch (error) {
+      log.warn(`The tile footprints could not be sent to ${playerData.username}: ${error}`);
+    }
     try {
       const self = playerCache.getByUsername(playerData.username);
       if (self && (await mail.unread(self.username)) > 0) await sendMailNotice(self, true);
@@ -6659,6 +6925,32 @@ export default async function packetReceiver(
         }
         break;
       }
+      case "SAVE_TILE_FOOTPRINTS": {
+        // The map editor's Footprints tab (systems/footprints.ts): kept in tile_footprints, then sent to everyone online
+        if (!currentPlayer) return;
+        const userPermissions = await permissions.get(currentPlayer.username) as string;
+        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
+        if (!footprints.mayEditFootprints(perms)) {
+          sendPacket(wt, packetManager.notify({ message: "You do not have permission to change tile footprints." }));
+          return;
+        }
+        const read = footprints.readFootprintChanges(data);
+        if ("error" in read) {
+          sendPacket(wt, packetManager.notify({ message: read.error }));
+          return;
+        }
+        try {
+          const tilesets = await footprints.saveFootprints(read.changes);
+          log.info(`Tile footprints saved by ${currentPlayer.username}: ${read.changes.reduce((n, c) => n + c.ids.length, 0)} tiles`);
+          for (const online of Object.values(playerCache.list()) as any[]) {
+            if (online?.wt) sendPacket(online.wt, packetManager.tileFootprints({ tilesets }));
+          }
+        } catch (error: any) {
+          log.error(`Error saving tile footprints: ${error.message}`);
+          sendPacket(wt, packetManager.notify({ message: `Error saving tile footprints: ${error.message}` }));
+        }
+        break;
+      }
       case "SAVE_MAP": {
         if (!currentPlayer) return;
 
@@ -6720,6 +7012,7 @@ export default async function packetReceiver(
               if (propsList) await assetCache.add("mapProperties", propsList);
               clearMapCache(worldName);
             }
+            if (changed.length > 0) fishing.forgetMap(worldName);
             if (changed.length > 0 || graveyards || warps) await refreshWorldMap(worldName);
 
             sendPacket(wt, packetManager.notify({
@@ -12556,6 +12849,66 @@ export default async function packetReceiver(
         await castGather(currentPlayer, (data as any)?.nodeId);
         break;
       }
+      case "FISH_CAST": {
+        // A click on a fishable tile (systems/fishing), under the same limit as gathering's presses
+        if (!currentPlayer) return;
+        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
+        if (isGatherRateLimited(String(wt.data.id))) return;
+        await castFish(currentPlayer, data);
+        break;
+      }
+      case "FISH_REEL": {
+        // the player began reeling in a fish that bit (systems/fishing BITE_ESCAPE_MS)
+        if (!currentPlayer) return;
+        fishReel(currentPlayer.id);
+        break;
+      }
+      case "FISH_LAND": {
+        if (!currentPlayer) return;
+        if (isGatherRateLimited(String(wt.data.id))) return;
+        await landFish(currentPlayer);
+        break;
+      }
+      case "FISH_CANCEL": {
+        if (!currentPlayer) return;
+        // the player reeled the line in with no fish on it: the staff stays out while the bobber comes back to it
+        if (castingFish(playerCache.get(currentPlayer.id) || currentPlayer)) await stopFishing(currentPlayer, fishing.LINE_IN_MS);
+        break;
+      }
+      case "FISHING_EDITOR_LIST":
+      case "FISHING_EDITOR_SAVE": {
+        // The map editor's Fishing tab: what it shows, and its saves (as for tile sounds: server.admin or server.*)
+        if (!currentPlayer) return;
+        const userPermissions = await permissions.get(currentPlayer.username) as string;
+        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
+        if (!fishing.mayEditFishing(perms)) {
+          sendPacket(wt, packetManager.notify({ message: "You do not have permission to change fishing." }));
+          return;
+        }
+        if (type === "FISHING_EDITOR_SAVE") {
+          await fishing.loadItems();
+          const read = fishing.readFishingChanges(data, fishing.materialName);
+          if ("error" in read) {
+            sendPacket(wt, packetManager.notify({ message: read.error }));
+            return;
+          }
+          try {
+            await fishing.saveFishing(read.changes);
+            log.info(`Fishing saved by ${currentPlayer.username}: ${read.changes.reduce((n, c) => n + c.ids.length, 0)} tiles`);
+          } catch (error: any) {
+            log.error(`Error saving fishing: ${error.message}`);
+            sendPacket(wt, packetManager.notify({ message: `Error saving fishing: ${error.message}` }));
+            return;
+          }
+          // every player is told which tiles are fishable now
+          const tiles = packetManager.fishingTiles({ tilesets: fishing.publicTiles() });
+          for (const online of Object.values(playerCache.list()) as any[]) {
+            if (online?.wt) sendPacket(online.wt, tiles);
+          }
+        }
+        sendPacket(wt, packetManager.fishingEditorData(await fishing.editorData()));
+        break;
+      }
       case "BATCH_PICKUP_LOOT": {
         if (!currentPlayer) return;
         // Corpses and ghosts cannot pick up loot.
@@ -12823,6 +13176,8 @@ async function forceStopPlayerMovement(target: any) {
 // Interrupt a player's in-progress cast: aborts the pending cast promise via castId,
 // broadcasts the interrupted cast bar, and reverts the casting animation.
 async function interruptPlayerCast(target: any) {
+  // fishing (castFish) ends with its line taken in, not with an interrupted cast bar: it never showed one
+  const fishingCast = castingFish(target) || castingFish(playerCache.get(target.id));
   target.casting = false;
   target.castId = (target.castId || 0) + 1;
   target.lastInterruptTime = performance.now();
@@ -12846,11 +13201,16 @@ async function interruptPlayerCast(target: any) {
   }
 
   const playersInMap = filterPlayersByMap(target.location.map);
-  broadcastCastToMap(
-    playersInMap,
-    target.id,
-    packetManager.castSpell({ id: target.id, spell: 'interrupted', time: 1 })
-  );
+  if (fishingCast) {
+    const ended = fishing.endSession(target.id);
+    broadcastFishing(ended?.map ?? target.location.map, { id: target.id, state: "end" });
+  } else {
+    broadcastCastToMap(
+      playersInMap,
+      target.id,
+      packetManager.castSpell({ id: target.id, spell: 'interrupted', time: 1 })
+    );
+  }
   playersInMap.forEach((p) => {
     sendPacket(
       p.wt,
@@ -13776,7 +14136,7 @@ async function sendSpriteSheetAnimation(wt: any, name: string, playerId?: string
   const currentPlayer = playerCache.get(playerId || wt.data.id);
   if (!currentPlayer) return;
 
-  const playerEquipment = currentPlayer.equipment || null;
+  const playerEquipment = drawnEquipment(currentPlayer);
 
   const spriteSheetData = await getPlayerSpriteSheetData(name, playerEquipment);
 
@@ -13883,7 +14243,7 @@ async function getAnimationData(name: string, playerId: string, revision?: numbe
     return null;
   }
 
-  const playerEquipment = targetPlayer.equipment || null;
+  const playerEquipment = drawnEquipment(targetPlayer);
   const spriteSheetData = await getPlayerSpriteSheetData(name, playerEquipment);
 
   if (!spriteSheetData.bodySprite && !spriteSheetData.headSprite) {
@@ -13918,7 +14278,7 @@ export async function sendAnimationTo(targetWs: any, name: string, playerId?: st
     return;
   }
 
-  const playerEquipment = targetPlayer.equipment || null;
+  const playerEquipment = drawnEquipment(targetPlayer);
 
   const spriteSheetData = await getPlayerSpriteSheetData(name, playerEquipment);
 
@@ -13946,6 +14306,13 @@ export async function sendAnimationTo(targetWs: any, name: string, playerId?: st
   };
 
   sendPacket(targetWs, packetManager.spriteSheetAnimation(spriteSheetPacketData));
+  // a player who comes into view while fishing comes with their line (castFish)
+  const line = castingFish(targetPlayer) ? fishing.session(targetPlayer.id) : undefined;
+  if (line && targetWs !== targetPlayer.wt) {
+    sendPacket(targetWs, packetManager.fishing({ id: targetPlayer.id, state: "cast", x: line.x, y: line.y }));
+    if (line.bitAt) sendPacket(targetWs, packetManager.fishing({ id: targetPlayer.id, state: "bite" }));
+    if (line.bitAt && line.reeledAt) sendPacket(targetWs, packetManager.fishing({ id: targetPlayer.id, state: "reel" }));
+  }
 }
 
 function scheduleLightning() {

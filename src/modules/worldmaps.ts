@@ -67,6 +67,8 @@ export interface WorldMap {
   height: number;
   tileWidth: number;
   tileHeight: number;
+  /** Tiles along a side of a chunk, as the asset server serves the world's tiles (/map-chunk). */
+  chunkSize: number;
   collision: WorldBits;
   nopvp: WorldBits;
   /** Where new players start, in pixels (the generator picks a town square). */
@@ -200,6 +202,7 @@ function openWorld(dir: string, id: string): WorldMap {
     height,
     tileWidth: tilewidth,
     tileHeight: tileheight,
+    chunkSize,
     collision,
     nopvp,
     spawn,
