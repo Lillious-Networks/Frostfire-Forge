@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { desertsOf } from "../modules/worldmaps";
+import { desertsOf, snowfieldsOf } from "../modules/worldmaps";
 
 const square = (x: number, y: number, size: number) => [[x, y], [x + size, y], [x + size, y + size], [x, y + size]];
 
@@ -24,4 +24,14 @@ test("a manifest without zones, and rings or bounds that are not numbers, give n
   ];
   // The ring with a bad point keeps its good ones.
   expect(desertsOf(broken)).toEqual([{ name: "Bad points", bbox: { x: 0, y: 0, w: 4, h: 4 }, outline: [[[0, 0], [4, 0], [4, 4]]] }]);
+});
+
+test("the snow zones are kept the same way, apart from the deserts", () => {
+  const zones = [
+    { name: "Red Barrens", kind: "desert", bbox: { x: 20, y: 20, w: 30, h: 30 }, outline: [square(20, 20, 30)] },
+    { name: "Snowy Wastes", kind: "snow", bbox: { x: 0, y: 0, w: 10, h: 10 }, outline: [square(0, 0, 10)] },
+  ];
+  expect(snowfieldsOf(zones)).toEqual([{ name: "Snowy Wastes", bbox: { x: 0, y: 0, w: 10, h: 10 }, outline: [square(0, 0, 10)] }]);
+  expect(desertsOf(zones).map((z) => z.name)).toEqual(["Red Barrens"]);
+  expect(snowfieldsOf(undefined)).toEqual([]);
 });

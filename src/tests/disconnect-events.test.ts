@@ -293,7 +293,7 @@ describe("a connection that ends", () => {
 
 // ----------------------------------------------------------------- guild join
 
-const inviteNames = ["type", "response", "inviter", "currentPlayer", "wt", "guilds", "sendPacket", "packetManager", "playerCache", "broadcastPlayerUpdate", "player", "listener", "Events"];
+const inviteNames = ["type", "response", "inviter", "currentPlayer", "wt", "guilds", "sendPacket", "packetManager", "playerCache", "broadcastPlayerUpdate", "player", "listener", "Events", "GuildPermission", "pushGuild"];
 const guildInvite = withNames(
   inviteNames,
   `return (async () => { switch (type) {${cut(receiver, '\n          case "INVITE_GUILD": {', /\r?\n {10}}\r?\n/)}\n          }\n} })();`,
@@ -303,7 +303,7 @@ const guildInvite = withNames(
 let guildOf: Record<string, number>;
 const guilds = {
   getGuildId: async (username: string) => guildOf[username.toLowerCase()] ?? null,
-  isGuildLeader: async (username: string) => username === "leader",
+  can: async (username: string) => username === "leader",
   isInGuild: async (username: string) => username.toLowerCase() in guildOf,
   add: async (username: string, guildId: number) => {
     guildOf[username] = guildId;
@@ -327,6 +327,8 @@ function answerInvite(invited: any, inviter: any, response: string): Promise<voi
     player: { getSessionIdByUsername: async (username: string) => Object.values(online).find((live) => live.username === username)?.id },
     listener,
     Events,
+    GuildPermission: { INVITE: 1 << 4 },
+    pushGuild: async () => {},
   });
 }
 

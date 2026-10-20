@@ -1,8 +1,9 @@
 
-import query from "../controllers/sqldatabase";
+import query, { transaction } from "../controllers/sqldatabase";
 import log from "../modules/logger";
 import { CLASSES_TABLE } from "../systems/classtable";
 import { DEFAULT_SOUNDS, soundsText } from "../systems/weathersounds";
+import { migrateGuildRanks } from "./guild_ranks_migration";
 const database = process.env.DATABASE_NAME || "TEMP_Mystika";
 
 const createDatabase = async () => {
@@ -630,6 +631,8 @@ const createDefaultWeather = async () => {
     ["sandstorm", "('sandstorm', 0, 'right', 35, 10, 100, 0)"],
     // "tornado": drawn as a thunderstorm, with tornadoes (systems/tornadoes.ts)
     ["tornado", "('tornado', 0.85, 'right', 30, 85, 68, 75)"],
+    // "blizzard": only in the snow zones, as harsh as its wind speed says, falling as its precipitation says
+    ["blizzard", "('blizzard', 0, 'right', 35, 85, 10, 80)"],
   ];
   for (const [name, values] of more) {
     const found = await query(`SELECT COUNT(*) as count FROM weather WHERE name = '${name}'`) as Array<{ count: number }>;
@@ -905,6 +908,36 @@ const createGuildsTable = async () => {
     )
   `;
   await query(sql);
+};
+
+const createGuildRankTables = async () => {
+  log.info("Creating guild rank tables...");
+  await query(`
+    CREATE TABLE IF NOT EXISTS guild_ranks (
+      guild_id INT NOT NULL,
+      rank_index INT NOT NULL,
+      name VARCHAR(20) NOT NULL,
+      permissions INT NOT NULL DEFAULT 0,
+      PRIMARY KEY (guild_id, rank_index)
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS guild_members (
+      username VARCHAR(255) NOT NULL PRIMARY KEY,
+      guild_id INT NOT NULL,
+      rank_index INT NOT NULL,
+      public_note VARCHAR(31) NOT NULL DEFAULT '',
+      officer_note VARCHAR(31) NOT NULL DEFAULT '',
+      joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  const exists = (await query(
+    `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'guilds' AND COLUMN_NAME = 'motd'`,
+    [database]
+  )) as any[];
+  if (!exists[0] || Number(exists[0].count) === 0) await query(`ALTER TABLE guilds ADD COLUMN motd VARCHAR(128) NOT NULL DEFAULT ''`);
+  const migrated = await migrateGuildRanks((sql, values) => query(sql, values || []), transaction);
+  if (migrated > 0) log.info(`Gave ${migrated} guild(s) ranks and member rows`);
 };
 
 const createMountsTable = async () => {
@@ -1362,6 +1395,7 @@ const createIndexes = async () => {
     { name: "idx_guilds_id", sql: "CREATE INDEX idx_guilds_id ON guilds(id)" },
     { name: "idx_guilds_name", sql: "CREATE INDEX idx_guilds_name ON guilds(name)" },
     { name: "idx_guilds_leader", sql: "CREATE INDEX idx_guilds_leader ON guilds(leader)" },
+    { name: "idx_guild_members_guild_id", sql: "CREATE INDEX idx_guild_members_guild_id ON guild_members(guild_id)" },
 
     { name: "idx_mounts_name", sql: "CREATE INDEX idx_mounts_name ON mounts(name)" },
 
@@ -1513,6 +1547,7 @@ const setupDatabase = async () => {
   await createPartiesTable();
   await createCurrencyTable();
   await createGuildsTable();
+  await createGuildRankTables();
   await createMountsTable();
   await insertDefaultMount();
   await createWhitelistTable();

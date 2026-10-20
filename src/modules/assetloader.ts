@@ -12,7 +12,7 @@ import questDefinitions from "../systems/quests/definitions";
 import assetCache from "../services/assetCache";
 import zlib from "zlib";
 import { serverFetch } from "./https_servers.ts";
-import { loadWorldMaps, syncWorldMaps } from "./worldmaps";
+import { addWorldMap, loadWorldMaps, syncWorldMaps, type WorldMap } from "./worldmaps";
 import { removeUnlistedMaps } from "./mapmirror";
 import { placedNpc } from "./mapnpc";
 import * as settings from "../config/settings.json";
@@ -48,7 +48,6 @@ await assetCache.add("mounts", await mounts.list());
 const mountList = await assetCache.get("mounts") as Mount[];
 
 log.success(`Loaded ${mountList.length} mount(s) from the database in ${(performance.now() - mountNow).toFixed(2)}ms`);
-log.info(`Mounts loaded: ${mountList.map((m) => m.name).join(", ")}`);
 
 const spellnow = performance.now();
 const spellList = await spell.list() as any[];
@@ -69,7 +68,6 @@ await assetCache.add("spells", spellList);
 const spells = await assetCache.get("spells") as SpellData[];
 
 log.success(`Loaded ${spells.length} spell(s) from the database in ${(performance.now() - spellnow).toFixed(2)}ms`);
-log.info(`Spells loaded: ${spells.map((s) => s.name).join(", ")}`);
 
 const npcnow = performance.now();
 await assetCache.add("npcs", await npc.list());
@@ -202,27 +200,7 @@ function loadAllMaps() {
   // two lists without tile data; their warps, graveyards and particle objects are read like any map's.
   for (const world of loadWorldMaps(mapDir, new Set(mapFiles))) {
     try {
-      maps.push(world.map);
-      const properties: MapProperties = {
-        name: world.name,
-        width: world.width,
-        height: world.height,
-        tileWidth: world.tileWidth,
-        tileHeight: world.tileHeight,
-        warps: null,
-        graveyards: null,
-        shadowLayerNames: null,
-        version: String(fs.statSync(path.join(mapDir, `${world.id}.world`, "manifest.json")).mtimeMs),
-        spawn: world.spawn,
-      };
-      mapProperties.push(properties);
-      world.properties = properties;
-      extractAndCompressLayers(world.map);
-      // The particle objects are NPCs now: the map entry does not keep a second copy (a large world has tens of
-      // thousands of them, and the whole maps list is handed to every auth worker)
-      for (const layer of world.map.data.layers) {
-        if (layer.type === "objectgroup" && String(layer.name).toLowerCase() === "particles") layer.objects = [];
-      }
+      registerWorld(world, maps);
       log.success(`Loaded world ${world.id} (${world.width} x ${world.height} tiles)`);
     } catch (error) {
       log.error(`Failed to load world ${world.id}: ${error}`);
@@ -237,6 +215,64 @@ function loadAllMaps() {
   assetCache.add("maps", maps);
   assetCache.add("mapProperties", mapProperties);
   log.success(`Loaded ${maps.length} map(s) in ${(performance.now() - now).toFixed(2)}ms`);
+}
+
+/** A world joins the maps list and the map properties (its props first: extractAndCompressLayers reads them). */
+function registerWorld(world: WorldMap, maps: MapData[]): void {
+  maps.push(world.map);
+  const properties: MapProperties = {
+    name: world.name,
+    width: world.width,
+    height: world.height,
+    tileWidth: world.tileWidth,
+    tileHeight: world.tileHeight,
+    warps: null,
+    graveyards: null,
+    shadowLayerNames: null,
+    version: String(fs.statSync(path.join(mapDir, `${world.id}.world`, "manifest.json")).mtimeMs),
+    spawn: world.spawn,
+  };
+  mapProperties.push(properties);
+  world.properties = properties;
+  extractAndCompressLayers(world.map);
+  // The particle objects are NPCs now: the map entry does not keep a second copy (a large world has tens of
+  // thousands of them, and the whole maps list is handed to every auth worker)
+  for (const layer of world.map.data.layers) {
+    if (layer.type === "objectgroup" && String(layer.name).toLowerCase() === "particles") layer.objects = [];
+  }
+}
+
+/**
+ * A map the asset server has just made from the map editor (CREATE_MAP, systems/mapcreate.ts), taken in without a
+ * restart: a Tiled map from the data it answered with, written to the local maps folder like a synced one; a world
+ * fetched from it as the worlds are at start. Afterwards it can be warped to like any map.
+ */
+export async function addCreatedMap(name: string, kind: "map" | "world", data?: any): Promise<void> {
+  const maps = ((await assetCache.get("maps")) as MapData[] | null) ?? [];
+  if (maps.some(m => m.name === `${name}.json`)) throw new Error(`${name} is already a map`);
+  if (kind === "world") {
+    registerWorld(await addWorldMap(name), maps);
+  } else {
+    const { writeMapContent } = await import("./checksums.ts");
+    if (!data || !writeMapContent(name, data)) throw new Error(`${name}.json could not be written`);
+    const map = processMapFile(`${name}.json`);
+    if (!map) throw new Error(`${name}.json could not be read back`);
+    maps.push(map);
+    mapProperties.push({
+      name: map.name,
+      width: map.data.layers[0].width,
+      height: map.data.layers[0].height,
+      tileWidth: map.data.tilewidth,
+      tileHeight: map.data.tileheight,
+      warps: null,
+      graveyards: null,
+      shadowLayerNames: null,
+      version: String(fs.statSync(path.join(mapDir, map.name)).mtimeMs),
+    });
+    extractAndCompressLayers(map);
+  }
+  assetCache.add("maps", maps);
+  assetCache.add("mapProperties", mapProperties);
 }
 
 // Tiled stores "infinite" maps as per-layer `chunks` arrays instead of a flat

@@ -69,6 +69,7 @@ export const Events = {
     PLAYER_LOOT_RETRIEVED: "onPlayerLootRetrieved",
     PARTY_CHAT: "onPartyChat",
     GUILD_CHAT: "onGuildChat",
+    OFFICER_CHAT: "onOfficerChat",
     PLAYER_ENTERED_PVP: "onPlayerEnteredPVP",
     PLAYER_LEFT_PVP: "onPlayerLeftPVP",
     PLAYER_ENTER_AOE: "onPlayerEnterAOE",

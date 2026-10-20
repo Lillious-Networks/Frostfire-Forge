@@ -94,7 +94,9 @@ export function worldWeather(
   const read = (row: WeatherData | null | undefined): WeatherConditions | null => row
     ? { temperature: Number(row.temperature) || 0, humidity: Number(row.humidity) || 0, wind_speed: Number(row.wind_speed) || 0, wind_direction: String(row.wind_direction || "none"), precipitation: Number(row.precipitation) || 0 }
     : null;
-  if (weather === "weather_api") return { weather, showing: live.look, conditions: read(live.row) };
+  // USER REPORT 2026-10-20 (the panel said "Sandstorm" for weather_api away from any desert): a dry reading with wind is
+  // told to the client as "sandstorm", which is only drawn in the desert zones; over the world it is a clear sky.
+  if (weather === "weather_api") return { weather, showing: live.look === "sandstorm" ? "clear" : live.look, conditions: read(live.row) };
   if (weather === "random") return { weather, showing: settled?.weather || weather, conditions: read(settled?.weatherData) };
   if (weather === "clear") return { weather, showing: weather, conditions: null };
   return { weather, showing: weather, conditions: read(rows.find((row) => String(row.name).toLowerCase() === weather.toLowerCase())) };

@@ -119,11 +119,21 @@ export interface Desert {
 
 /** The zones of a manifest whose kind is "desert", with what is not a number left out. */
 export function desertsOf(zones: unknown): Desert[] {
+  return zonesOf(zones, "desert");
+}
+
+/** The zones of a manifest whose kind is "snow" (a blizzard is only drawn inside them), as desertsOf. */
+export function snowfieldsOf(zones: unknown): Desert[] {
+  return zonesOf(zones, "snow");
+}
+
+/** The zones of a manifest of one kind, with what is not a number left out. */
+function zonesOf(zones: unknown, kind: string): Desert[] {
   if (!Array.isArray(zones)) return [];
   const finite = (n: unknown) => typeof n === "number" && Number.isFinite(n);
   const deserts: Desert[] = [];
   for (const zone of zones) {
-    if (zone?.kind !== "desert" || !Array.isArray(zone.outline)) continue;
+    if (zone?.kind !== kind || !Array.isArray(zone.outline)) continue;
     const outline = zone.outline
       .filter((ring: unknown) => Array.isArray(ring))
       .map((ring: unknown[]) => ring.filter((p: any) => Array.isArray(p) && finite(p[0]) && finite(p[1])).map((p: any) => [p[0], p[1]]))
@@ -178,7 +188,7 @@ function openWorld(dir: string, id: string): WorldMap {
   });
 
   const name = `${id}.json`;
-  const deserts = desertsOf(manifest.zones);
+  const deserts = desertsOf(manifest.zones), snowfields = snowfieldsOf(manifest.zones);
   const spawn = manifest.spawn && Number.isFinite(manifest.spawn.x) && Number.isFinite(manifest.spawn.y)
     ? { x: Number(manifest.spawn.x), y: Number(manifest.spawn.y) }
     : null;
@@ -210,6 +220,8 @@ function openWorld(dir: string, id: string): WorldMap {
         ...(Array.isArray(manifest.sections) ? { sections: manifest.sections } : {}),
         // the desert zones, as outlines in tiles: a sandstorm is only drawn inside them (sent to the client with the map)
         ...(deserts.length ? { deserts } : {}),
+        // the snow zones, the same way: a blizzard is only drawn inside them
+        ...(snowfields.length ? { snowfields } : {}),
       },
       compressed: Buffer.alloc(0),
     } as any,
@@ -246,6 +258,16 @@ export function loadWorldMaps(mapDir: string, tiledMapNames: Set<string>): World
   return [...worlds.values()];
 }
 
+/** A world the asset server has just made (the map editor's New map): fetched like the others, then opened and kept. */
+export async function addWorldMap(id: string): Promise<WorldMap> {
+  if (!worldsDir) throw new Error("the worlds have not been loaded");
+  if (worlds.has(id)) throw new Error(`${id} is already a world`);
+  await syncWorldMaps(worldsDir);
+  const world = openWorld(path.join(worldsDir, `${id}.world`), id);
+  worlds.set(id, world);
+  return world;
+}
+
 /**
  * After an editor save on the asset server: fetches the world's changed files and puts the new collision and no-pvp
  * bits in place, without a restart. The world keeps its objects and its size (a save only changes tiles).
@@ -274,14 +296,19 @@ function fileHash(file: string): string | null {
   }
 }
 
+// The file hashes the asset server last listed for each world, once the local copy matched them: a world listed with
+// the same hashes again is up to date without hashing its local files (two 13 MB bitsets for a large world).
+const syncedFiles = new Map<string, string>();
+
 /**
  * Brings the local copy of every world the asset server has up to date: its manifest and its two bitsets, each
- * fetched only when the local file differs. Never removes a local world. Does nothing when the asset server is not
- * configured, cannot be reached or has no worlds.
+ * fetched only when the local file differs. Returns the ids of the worlds whose files were fetched. Does nothing
+ * when the asset server is not configured, cannot be reached or has no worlds.
  */
-export async function syncWorldMaps(mapDir: string): Promise<void> {
+export async function syncWorldMaps(mapDir: string): Promise<string[]> {
+  const synced: string[] = [];
   const assetServerUrl = process.env.ASSET_SERVER_INTERNAL_URL || process.env.ASSET_SERVER_URL;
-  if (!assetServerUrl) return;
+  if (!assetServerUrl) return synced;
 
   const authKey = process.env.ASSET_SERVER_AUTH_KEY || process.env.GATEWAY_AUTH_KEY;
   const { serverFetch } = await import("./https_servers.ts");
@@ -296,10 +323,10 @@ export async function syncWorldMaps(mapDir: string): Promise<void> {
     if (!response.ok) {
       // An asset server without world support answers 404 or a redirect: nothing to sync
       log.debug(`World sync skipped: the asset server answered ${response.status}`);
-      return;
+      return synced;
     }
     const result = await response.json().catch(() => null) as any;
-    if (!result?.success || !Array.isArray(result.worlds)) return;
+    if (!result?.success || !Array.isArray(result.worlds)) return synced;
 
     for (const world of result.worlds) {
       const id = String(world?.id ?? "");
@@ -308,8 +335,13 @@ export async function syncWorldMaps(mapDir: string): Promise<void> {
         continue;
       }
       const dir = path.join(mapDir, `${id}.world`);
+      const listed = JSON.stringify(WORLD_FILES.map(file => world.files?.[file] ?? null));
+      if (syncedFiles.get(id) === listed) continue;
       const outdated = WORLD_FILES.filter(file => fileHash(path.join(dir, file)) !== world.files?.[file]);
-      if (outdated.length === 0) continue;
+      if (outdated.length === 0) {
+        syncedFiles.set(id, listed);
+        continue;
+      }
 
       log.info(`Syncing world ${id} from asset server (${outdated.join(", ")})...`);
       fs.mkdirSync(dir, { recursive: true });
@@ -331,7 +363,11 @@ export async function syncWorldMaps(mapDir: string): Promise<void> {
         fs.writeFileSync(`${target}.tmp`, bytes);
         fs.renameSync(`${target}.tmp`, target);
       }
-      if (complete) log.success(`Synced world: ${id}`);
+      if (complete) {
+        syncedFiles.set(id, listed);
+        synced.push(id);
+        log.success(`Synced world: ${id}`);
+      }
     }
 
     // A local world the asset server no longer lists is removed (modules/mapmirror.ts).
@@ -340,5 +376,77 @@ export async function syncWorldMaps(mapDir: string): Promise<void> {
     }
   } catch (error) {
     log.warn(`Failed to sync worlds from asset server: ${error}`);
+  }
+  return synced;
+}
+
+/**
+ * A world's warps and graveyards from its manifest objects, in the shape the loader gives them for any map
+ * (modules/assetloader.ts extractAndCompressLayers): an object's class or type, or else its layer's name, says what
+ * it is. A list the manifest keeps on its own (warps / graveyards) is used when the objects hold none.
+ */
+export function warpsAndGraveyardsOf(manifest: any): { warps: any[] | null; graveyards: any[] | null } {
+  const warps: any[] = [];
+  const graveyards: any[] = [];
+  for (const obj of Array.isArray(manifest?.objects) ? manifest.objects : []) {
+    const layerName = String(obj?.layer ?? "");
+    const type = String(obj?.class || obj?.type || layerName).toLowerCase();
+    const props = new Map((Array.isArray(obj?.properties) ? obj.properties : []).map((p: any) => [p?.name, p?.value]));
+    if (type === "warp") {
+      const map = props.get("map"), x = props.get("x"), y = props.get("y");
+      if (!map || x === undefined || y === undefined) continue;
+      warps.push({
+        name: obj.name, map, x, y,
+        position: { x: Math.floor(obj.x), y: Math.floor(obj.y) },
+        size: { width: Math.floor(obj.width), height: Math.floor(obj.height) },
+        layer: layerName,
+      });
+    } else if (type === "graveyard") {
+      graveyards.push({ name: obj.name, position: { x: Math.floor(obj.x), y: Math.floor(obj.y) }, layer: layerName });
+    }
+  }
+  const listed = (value: any) => (Array.isArray(value) ? value : value && typeof value === "object" ? Object.values(value) : []);
+  return {
+    warps: warps.length ? warps : listed(manifest?.warps).length ? listed(manifest.warps) : null,
+    graveyards: graveyards.length ? graveyards : listed(manifest?.graveyards).length ? listed(manifest.graveyards) : null,
+  };
+}
+
+let checking = false;
+
+/**
+ * Picks up worlds changed on the asset server by anything but this server (the Tiled extension, another game
+ * server's editor save): fetches their new files and puts the new collision and no-pvp bits, warps and graveyards in
+ * place. The map version changes, so players who load the map again get the new chunks. Returns the worlds that
+ * changed. Particle NPCs and the world's size are not updated; a change of size needs a restart.
+ */
+export async function checkWorldChanges(): Promise<WorldMap[]> {
+  if (!worldsDir || checking) return [];
+  checking = true;
+  try {
+    const changed: WorldMap[] = [];
+    for (const id of await syncWorldMaps(worldsDir)) {
+      const world = worlds.get(id);
+      if (!world) continue; // a world new to this server joins at the next start
+      const dir = path.join(worldsDir, `${id}.world`);
+      try {
+        const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf-8"));
+        const fresh = openWorld(dir, id);
+        world.collision.adopt(fresh.collision);
+        world.nopvp.adopt(fresh.nopvp);
+        if (world.properties) {
+          const { warps, graveyards } = warpsAndGraveyardsOf(manifest);
+          world.properties.warps = warps;
+          world.properties.graveyards = graveyards;
+          world.properties.version = String(fs.statSync(path.join(dir, "manifest.json")).mtimeMs);
+        }
+        changed.push(world);
+      } catch (error: any) {
+        log.error(`World ${id} changed on the asset server but could not be taken in: ${error?.message ?? error}. Restart to load it.`);
+      }
+    }
+    return changed;
+  } finally {
+    checking = false;
   }
 }

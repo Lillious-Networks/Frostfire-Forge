@@ -756,7 +756,8 @@ declare interface PlayerEditorSnapshot {
   collectables: Array<{ type: string; item: string; icon: Nullable<string>; known: boolean }>;
   spells: string[];
   friends: string[];
-  guild: Nullable<{ id: number; name: string; leader: string; members: string[] }>;
+  /** `rank` is the name of the player's rank in the guild. */
+  guild: Nullable<{ id: number; name: string; leader: string; members: string[]; rank: string }>;
   party: Nullable<{ id: number; leader: string; members: string[] }>;
   quests: {
     active: Array<{

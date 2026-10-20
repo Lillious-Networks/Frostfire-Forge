@@ -1043,4 +1043,11 @@ describe("the weather a world has now", () => {
       conditions: { temperature: 28, humidity: 81, wind_speed: 12, wind_direction: "down", precipitation: 20 },
     });
   });
+
+  test("a dry, windy real reading is a clear sky over the world, not a sandstorm (that is only in the deserts)", () => {
+    const dry = { look: "sandstorm", row: { ...live.row, precipitation: 0 } };
+    expect(panel.worldWeather("weather_api", undefined, dry, rows).showing).toBe("clear");
+    // a sandstorm set by name is still one
+    expect(now("sandstorm").showing).toBe("sandstorm");
+  });
 });

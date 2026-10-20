@@ -6,6 +6,8 @@ import { atomically } from "../services/batch";
 import log from "../modules/logger";
 import player, { clearMapCache, hasLineOfSight } from "../systems/player.ts";
 import permissions, { canGrant, outranks } from "../systems/permissions";
+import { mayEditTileSounds, readTileSoundChanges, saveTileSounds } from "../systems/tilesounds";
+import { mayCreateMaps, readCreateMap, requestCreateMap } from "../systems/mapcreate";
 import { getAuthWorker } from "./authentication_pool.ts";
 import { listener } from "../modules/event_bus";
 import { Events, setPlayerPvp } from "../systems/events";
@@ -65,6 +67,24 @@ function isGatherRateLimited(id: string): boolean {
 }
 
 /**
+ * Guild edits, each kind once a second for each player: each one sends the guild to every member online. Kinds are
+ * counted apart, so one Save that sends a public and an officer note together has both go through.
+ */
+const guildEditTimes = new Map<number, Map<string, number>>();
+const GUILD_EDIT_INTERVAL = 1000;
+
+/** Whether this player may make a guild edit of this kind now. A repeat inside the second is dropped without a word. */
+function guildEditOk(wt: any, kind: string): boolean {
+  const id = Number(wt.data.id);
+  const now = Date.now();
+  let times = guildEditTimes.get(id);
+  if (!times) guildEditTimes.set(id, (times = new Map()));
+  if (now - (times.get(kind) ?? 0) < GUILD_EDIT_INTERVAL) return false;
+  times.set(kind, now);
+  return true;
+}
+
+/**
  * Who of a party or guild receives a line from one of its members, in lower
  * case: the sender always (a muted player sees their own line as sent), and
  * the members the chat gate lets it through to. `muted` says the line went
@@ -75,6 +95,95 @@ async function chatHearing(sender: string, channel: "party" | "guild", message: 
   const others = members.map((member) => String(member).toLowerCase()).filter((member) => member !== me);
   const reached = await chatAudience(sender, channel, message, others);
   return Object.assign(new Set([me, ...reached.recipients]), { muted: reached.muted });
+}
+
+/** Every online member of the guild gets the guild as their rank may see it. */
+async function pushGuild(guildId: number | null | undefined): Promise<void> {
+  if (!guildId) return;
+  try {
+    const members = await guilds.getGuildMembers(guildId);
+    const guildName = await guilds.getGuildName(guildId);
+    const online: any[] = [];
+    for (const member of members) {
+      const p = await onlineNamed(member);
+      if (p) online.push(p);
+    }
+    // Built once for all of them; only officer notes and each one's own rank differ.
+    const packets = await guilds.packetsFor(guildId, online.map((p) => p.username));
+    for (const p of online) {
+      p.guild_id = guildId;
+      p.guild = members;
+      p.guild_name = guildName;
+      playerCache.set(p.id, p);
+      const packet = packets.get(p.username);
+      if (packet) sendPacket(p.wt, packetManager.updateGuild(packet));
+    }
+  } catch (error) {
+    log.error(`The guild ${guildId} could not be sent to its members: ${error}`);
+  }
+}
+
+/** After a kick went through: the kicked player, when online, holds no guild and is told. */
+async function kickedFromGuild(actor: any, guildId: number, kickedUsername: string): Promise<void> {
+  const kickedPlayer = await onlineNamed(kickedUsername);
+  if (kickedPlayer) {
+    sendPacket(kickedPlayer.wt, packetManager.updateGuild({ members: [] }));
+    sendPacket(kickedPlayer.wt, packetManager.notify({ message: "You have been kicked from the guild" }));
+    kickedPlayer.guild_id = null;
+    kickedPlayer.guild = [];
+    kickedPlayer.guild_name = null;
+    playerCache.set(kickedPlayer.id, kickedPlayer);
+  }
+  listener.emit(Events.GUILD_CHANGED, { type: "kick", guildId, guildName: actor.guild_name, playerUsername: actor.username, kickedUsername });
+}
+
+/** Says why a guild action was refused. Answers whether it went through; `changed: false` on it is a save of what was there. */
+function guildDone(wt: any, result: GuildResult): result is Extract<GuildResult, { ok: true }> {
+  if (result.ok) return true;
+  sendPacket(wt, packetManager.notify({ message: refusalText[result.reason] }));
+  return false;
+}
+
+/** A guild or officer line's listeners and its sender, who sees their own line even when their rank may not listen. */
+function withSender(listeners: string[], sender: string): string[] {
+  const me = sender.toLowerCase();
+  return listeners.some((name) => String(name).toLowerCase() === me) ? listeners : [...listeners, sender];
+}
+
+/** The online player named `username`, any case, or null. */
+async function onlineNamed(username: string): Promise<any> {
+  const session_id = await player.getSessionIdByUsername(username);
+  return (session_id && playerCache.get(session_id)) || null;
+}
+
+/** A line to the guild's officers: everyone whose rank may listen to officer chat. */
+async function officerChat(wt: any, currentPlayer: any, message: unknown): Promise<void> {
+  if (subscriptionLocked(wt, currentPlayer, "guild_chat")) return;
+  if (!channelLineOk(wt, message)) return;
+  const guildId = currentPlayer.guild_id;
+  if (!guildId) {
+    sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
+    return;
+  }
+  if (!(await guilds.can(currentPlayer.username, GuildPermission.OFFICER_CHAT_SPEAK))) {
+    sendPacket(wt, packetManager.notify({ message: refusalText.no_permission }));
+    return;
+  }
+  const officers = await guilds.listeners(guildId, GuildPermission.OFFICER_CHAT_LISTEN);
+  const hearing = await chatHearing(currentPlayer.username, "guild", message, officers);
+  const line = await chatLinksOf(message);
+  for (const officer of withSender(officers, currentPlayer.username)) {
+    if (!hearing.has(String(officer).toLowerCase())) continue;
+    const p = await onlineNamed(officer);
+    if (!p) continue;
+    sendPacket(p.wt, packetManager.officerChat({
+      id: wt.data.id,
+      message: line.message,
+      ...(line.links.length > 0 ? { links: line.links } : {}),
+      username: currentPlayer.username.charAt(0).toUpperCase() + currentPlayer.username.slice(1),
+    }));
+  }
+  if (!hearing.muted) listener.emit(Events.OFFICER_CHAT, { player: currentPlayer, message, officers, guildId } as any);
 }
 
 /**
@@ -632,8 +741,8 @@ import assetCache from "../services/assetCache";
 import { refreshPlayer } from "../services/datacache";
 import cooldownManager from "../services/cooldownmanager";
 import effectManager from "../services/effectmanager";
-import { reloadMap } from "../modules/assetloader";
-import { getWorldMap, refreshWorldMap } from "../modules/worldmaps";
+import { addCreatedMap, reloadMap } from "../modules/assetloader";
+import { checkWorldChanges, getWorldMap, refreshWorldMap } from "../modules/worldmaps";
 import { serverFetch } from "../modules/https_servers.ts";
 import language from "../systems/language";
 import questDefinitions from "../systems/quests/definitions";
@@ -658,6 +767,7 @@ import { canonicalLinks, findChatLinks, protectLinks, restoreLinks, MAX_ITEM_LIN
 import { definitions as achievementDefinitions } from "../systems/achievements/store";
 import parties from "../systems/parties.ts";
 import guilds from "../systems/guild.ts";
+import { GuildPermission, refusalText, type GuildResult } from "../systems/guildranks";
 import spells from "../systems/spells";
 import equipment from "../systems/equipment.ts";
 import inventory from "../systems/inventory";
@@ -796,7 +906,12 @@ const rowOf = (all: WeatherData[] | null | undefined, name: string): WeatherData
  */
 const weatherShown = async (weather: string, weatherData: WeatherData | null) => {
   const look = lookOf(weather);
-  let data = weather === TORNADO && weatherData ? { ...weatherData, sandstorm: true } : weatherData;
+  let data = weather === TORNADO && weatherData ? { ...weatherData, sandstorm: true, blizzard: true } : weatherData;
+  // USER REQUEST 2026-10-19 ("make similar weather but for a blizzard in the snow biome"): the snow zones have their own
+  // storm, "blizzard", drawn only there (the client's blizzard.ts). A tornado's storm blows one there, as it blows a
+  // sandstorm in the deserts; and so does any wind of the real weather (weather_api), as any of it blows sand in a
+  // desert: snow lifted off the ground and driven, harsher the faster it blows, whatever falls from the sky.
+  if (weather === weatherApi.WEATHER_API && data && Number(data.wind_speed) >= weatherApi.SANDSTORM_WIND) data = { ...data, blizzard: true };
   // USER REQUEST 2026-10-17 (weather sounds chosen in the weather editor, systems/weathersounds.ts): a weather with no
   // sounds of its own (the real weather, weather_api, which is no row) sounds like the weather it is drawn as.
   if (data && !data.sounds) data = { ...data, sounds: rowOf(await assetCache.get("weather") as WeatherData[], look)?.sounds ?? null };
@@ -1111,6 +1226,33 @@ if (PROFILE) {
 // saturate the single native UDP send path (~9% loss + lag oscillation). So the
 // floor slides: 33ms (30 Hz) when the server is nearly idle, 50ms (20 Hz) once
 // there's real outbound volume.
+// Worlds changed on the asset server by something other than this server (the Tiled extension, another game server's
+// editor save) are taken in without a restart: new collision and no-pvp bits, warps and graveyards, and a new map
+// version, so players who load the map again get the new chunks. WORLD_SYNC_INTERVAL is in seconds; 0 turns it off.
+{
+  const seconds = Number(process.env.WORLD_SYNC_INTERVAL ?? 10);
+  if (Number.isFinite(seconds) && seconds > 0) {
+    setInterval(async () => {
+      try {
+        for (const world of await checkWorldChanges()) {
+          const propsList = await assetCache.get("mapProperties");
+          const props = propsList?.find((m: any) => m.name === world.name);
+          if (props && world.properties) {
+            props.warps = world.properties.warps;
+            props.graveyards = world.properties.graveyards;
+            props.version = world.properties.version;
+            await assetCache.add("mapProperties", propsList);
+          }
+          clearMapCache(world.id);
+          log.info(`World ${world.id} changed on the asset server: collision, warps and graveyards updated`);
+        }
+      } catch (error: any) {
+        log.warn(`World change check failed: ${error?.message ?? error}`);
+      }
+    }, seconds * 1000).unref();
+  }
+}
+
 // Rolling count of movement datagrams sent, sampled every second into a rate.
 let movementDatagramsSent = 0;
 let movementDatagramRatePerSec = 0;
@@ -1746,6 +1888,8 @@ function constructMapMetadata(
     sections: Array.isArray(map?.data?.sections) ? map.data.sections : null,
     // The desert zones of a world, as outlines in tiles (modules/worldmaps.ts): a sandstorm is only drawn inside them
     deserts: Array.isArray(map?.data?.deserts) ? map.data.deserts : null,
+    // and its snow zones: a blizzard is only drawn inside them
+    snowfields: Array.isArray(map?.data?.snowfields) ? map.data.snowfields : null,
     // The inside of a building (isInteriorMap): the client shows no world map there and keeps its minimap zoomed
     // all the way in
     interior: isInteriorMap(normalizedName),
@@ -2053,6 +2197,7 @@ export function releaseDraggedBy(adminId: string | number) {
 export function removePlayerFromCleanupMaps(playerId: string | number) {
     const id = Number(playerId);
     chatRateLimit.delete(id);
+    guildEditTimes.delete(id);
     draggedPlayersMap.delete(id);
 
     for (const [mapName, editors] of activeEditorsByMap.entries()) {
@@ -2504,6 +2649,11 @@ authWorker.on("message", async (result: any) => {
         effects: spellEffects.getEffectsPayload(currentPlayer),
       };
       sendPacket(wt, packetManager.spawnPlayer(spawnDataForAll));
+      if (currentPlayer.guild_id) {
+        sendPacket(wt, packetManager.updateGuild(await guilds.packetFor(currentPlayer.guild_id, currentPlayer.username)));
+        const motd = await guilds.getMotd(currentPlayer.guild_id);
+        if (motd) sendPacket(wt, packetManager.guildChat({ id: null, username: "", system: true, motd: true, message: `Guild Message of the Day: ${motd}` }));
+      }
 
       const snapshotRevision = globalStateRevision;
 
@@ -6435,6 +6585,80 @@ export default async function packetReceiver(
         });
         break;
       }
+      case "CREATE_MAP": {
+        // The map editor's New map (systems/mapcreate.ts): made blank on the asset server, taken in here, then the
+        // admin who asked is warped onto it (where /warp would put them: a world's spawn, a map's middle)
+        if (!currentPlayer) return;
+        const refuse = (message: string) => {
+          sendPacket(wt, packetManager.notify({ message }));
+          sendPacket(wt, packetManager.createMapFailed({ message }));
+        };
+        const userPermissions = await permissions.get(currentPlayer.username) as string;
+        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
+        if (!mayCreateMaps(perms)) {
+          refuse("You do not have permission to create maps.");
+          return;
+        }
+        const read = readCreateMap(data);
+        if ("error" in read) {
+          refuse(read.error);
+          return;
+        }
+        const request = read.request;
+        if ((maps as any[]).some((m: MapData) => m.name === `${request.name}.json`)) {
+          refuse(`A map named ${request.name} already exists.`);
+          return;
+        }
+        try {
+          const made = await requestCreateMap(request);
+          await addCreatedMap(request.name, made.kind, made.data);
+          log.info(`Map ${request.name} created by ${currentPlayer.username} (${request.kind}, ${request.width} x ${request.height} tiles${request.infinite ? ", infinite" : ""})`);
+        } catch (error: any) {
+          log.error(`Error creating map ${request.name}: ${error.message}`);
+          refuse(`Error creating the map: ${error.message}`);
+          return;
+        }
+        const props = mapPropertiesCache.find((m: any) => m.name === `${request.name}.json`);
+        const arrival = {
+          x: props?.spawn ? props.spawn.x : props ? (props.width * props.tileWidth) / 2 : 0,
+          y: props?.spawn ? props.spawn.y : props ? (props.height * props.tileHeight) / 2 : 0,
+          direction: currentPlayer.location.position?.direction || "down",
+        };
+        const moved = await player.setLocation(currentPlayer.id, request.name, arrival);
+        if (moved && typeof moved === "object" && "affectedRows" in moved && ((moved as { affectedRows: number | null; count?: number }).affectedRows ?? (moved as { count?: number }).count) != 0) {
+          await transitionPlayerToMap(currentPlayer, request.name, arrival, wt, spawnBatchQueue, despawnBatchQueue);
+          sendPacket(wt, packetManager.notify({ message: `Map ${request.name} created.` }));
+        } else {
+          refuse(`Map ${request.name} was created, but you could not be moved there. Use /warp ${request.name}.`);
+        }
+        break;
+      }
+      case "SAVE_TILE_SOUNDS": {
+        // The map editor's Sounds tab (systems/tilesounds.ts): kept on the asset server, then sent to everyone online
+        if (!currentPlayer) return;
+        const userPermissions = await permissions.get(currentPlayer.username) as string;
+        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
+        if (!mayEditTileSounds(perms)) {
+          sendPacket(wt, packetManager.notify({ message: "You do not have permission to change tile sounds." }));
+          return;
+        }
+        const read = readTileSoundChanges(data);
+        if ("error" in read) {
+          sendPacket(wt, packetManager.notify({ message: read.error }));
+          return;
+        }
+        try {
+          const tilesets = await saveTileSounds(read.changes);
+          log.info(`Tile sounds saved by ${currentPlayer.username}: ${read.changes.reduce((n, c) => n + c.ids.length, 0)} tiles`);
+          for (const online of Object.values(playerCache.list()) as any[]) {
+            if (online?.wt) sendPacket(online.wt, packetManager.tileSounds({ tilesets }));
+          }
+        } catch (error: any) {
+          log.error(`Error saving tile sounds: ${error.message}`);
+          sendPacket(wt, packetManager.notify({ message: `Error saving tile sounds: ${error.message}` }));
+        }
+        break;
+      }
       case "SAVE_MAP": {
         if (!currentPlayer) return;
 
@@ -7318,7 +7542,7 @@ export default async function packetReceiver(
         // commands while awaiting release.
         if (
           currentPlayer.isDead &&
-          !["P", "PARTY", "W", "WHISPER", "G", "GUILD"].includes(commandName || "")
+          !["P", "PARTY", "W", "WHISPER", "G", "GUILD", "O", "OFFICER"].includes(commandName || "")
         ) {
           sendPacket(
             wt,
@@ -7570,17 +7794,23 @@ export default async function packetReceiver(
               break;
             }
 
-            const guildMembers = await guilds.getGuildMembers(guildId);
-            if (!guildMembers || guildMembers.length === 0) {
+            const allMembers = await guilds.getGuildMembers(guildId);
+            if (!allMembers || allMembers.length === 0) {
               sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
               break;
             }
 
+            if (!(await guilds.can(currentPlayer.username, GuildPermission.GUILD_CHAT_SPEAK))) {
+              sendPacket(wt, packetManager.notify({ message: refusalText.no_permission }));
+              break;
+            }
+
+            const guildMembers = await guilds.listeners(guildId, GuildPermission.GUILD_CHAT_LISTEN);
             const guildHearing = await chatHearing(currentPlayer.username, "guild", message, guildMembers);
             const guildLine = await chatLinksOf(message);
 
-            guildMembers.forEach(async (member: any) => {
-              if (!guildHearing.has(String(member).toLowerCase())) return;
+            for (const member of withSender(guildMembers, currentPlayer.username)) {
+              if (!guildHearing.has(String(member).toLowerCase())) continue;
               const session_id = await player.getSessionIdByUsername(member);
               const memberPlayer = playerCache.get(session_id);
               if (memberPlayer) {
@@ -7596,9 +7826,84 @@ export default async function packetReceiver(
                   })
                 );
               }
-            });
+            }
 
             if (!guildHearing.muted) listener.emit(Events.GUILD_CHAT, { player: currentPlayer, message, guildMembers, guildId } as any);
+            break;
+          }
+
+          case "O":
+          case "OFFICER": {
+            if (!currentPlayer) return;
+            const officerLine = args.join(" ");
+            if (!officerLine) {
+              sendPacket(wt, packetManager.notify({ message: "Please provide a message" }));
+              break;
+            }
+            await officerChat(wt, currentPlayer, officerLine);
+            break;
+          }
+
+          case "GPROMOTE":
+          case "GDEMOTE": {
+            if (!currentPlayer) return;
+            if (subscriptionLocked(wt, currentPlayer, "guild")) break;
+            const target = args[0];
+            if (!target) {
+              sendPacket(wt, packetManager.notify({ message: "Please provide a username" }));
+              break;
+            }
+            if (!guildEditOk(wt, commandName)) break;
+            const up = commandName === "GPROMOTE";
+            const result = up ? await guilds.promote(currentPlayer.username, target) : await guilds.demote(currentPlayer.username, target);
+            if (!guildDone(wt, result)) break;
+            await pushGuild(currentPlayer.guild_id);
+            listener.emit(Events.GUILD_CHANGED, { type: up ? "promote" : "demote", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username, targetUsername: target });
+            break;
+          }
+
+          case "GREMOVE": {
+            if (!currentPlayer) return;
+            if (subscriptionLocked(wt, currentPlayer, "guild")) break;
+            const target = args[0];
+            if (!target) {
+              sendPacket(wt, packetManager.notify({ message: "Please provide a username" }));
+              break;
+            }
+            if (!guildEditOk(wt, commandName)) break;
+            const guildId = currentPlayer.guild_id;
+            const kicked = await guilds.kick(currentPlayer.username, target);
+            if (!guildDone(wt, kicked)) break;
+            sendPacket(wt, packetManager.notify({ message: `${target} has been kicked from the guild` }));
+            await pushGuild(guildId);
+            await kickedFromGuild(currentPlayer, guildId, target);
+            break;
+          }
+
+          case "GMOTD": {
+            if (!currentPlayer) return;
+            if (subscriptionLocked(wt, currentPlayer, "guild")) break;
+            if (!guildEditOk(wt, commandName)) break;
+            const result = await guilds.setMotd(currentPlayer.username, args.join(" "));
+            if (!guildDone(wt, result) || result.changed === false) break;
+            await pushGuild(currentPlayer.guild_id);
+            listener.emit(Events.GUILD_CHANGED, { type: "motd", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username });
+            break;
+          }
+
+          case "GLEADER": {
+            if (!currentPlayer) return;
+            if (subscriptionLocked(wt, currentPlayer, "guild")) break;
+            const target = args[0];
+            if (!target) {
+              sendPacket(wt, packetManager.notify({ message: "Please provide a username" }));
+              break;
+            }
+            if (!guildEditOk(wt, commandName)) break;
+            const result = await guilds.transferLeader(currentPlayer.username, target);
+            if (!guildDone(wt, result)) break;
+            await pushGuild(currentPlayer.guild_id);
+            listener.emit(Events.GUILD_CHANGED, { type: "transfer", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username, targetUsername: target });
             break;
           }
 
@@ -7616,9 +7921,8 @@ export default async function packetReceiver(
               break;
             }
 
-            const isLeader = await guilds.isGuildLeader(currentPlayer.username);
-            if (!isLeader) {
-              sendPacket(wt, packetManager.notify({ message: "You are not the guild leader" }));
+            if (!(await guilds.can(currentPlayer.username, GuildPermission.INVITE))) {
+              sendPacket(wt, packetManager.notify({ message: refusalText.no_permission }));
               break;
             }
 
@@ -10499,6 +10803,12 @@ export default async function packetReceiver(
           return;
         }
 
+        // First, so nobody is told of a disband the guild refused (a transfer got there first).
+        if (!(await guilds.disband(currentPlayer.username))) {
+          sendPacket(wt, packetManager.notify({ message: "Failed to disband guild" }));
+          return;
+        }
+
         for (const member of members) {
           const session_id = await player.getSessionIdByUsername(member);
           const p = session_id && playerCache.get(session_id);
@@ -10515,7 +10825,6 @@ export default async function packetReceiver(
           }
         }
 
-        await guilds.disband(currentPlayer.username);
         listener.emit(Events.GUILD_CHANGED, { type: "disband", guildId, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username });
 
         break;
@@ -10543,7 +10852,8 @@ export default async function packetReceiver(
 
         const result = await guilds.leave(currentPlayer.username);
 
-        if (typeof result === "boolean" && !result) {
+        // No one left is a leave refused (the Guild Master never leaves) or not written.
+        if (!result || (Array.isArray(result) && result.length === 0)) {
           sendPacket(wt, packetManager.notify({ message: "Failed to leave guild" }));
           return;
         }
@@ -10557,18 +10867,7 @@ export default async function packetReceiver(
 
         broadcastPlayerUpdate(currentPlayer);
         sendPacket(wt, packetManager.updateGuild({ members: [] }));
-
-        if (Array.isArray(result) && result.length > 0) {
-          for (const member of result) {
-            const session_id = await player.getSessionIdByUsername(member);
-            const p = session_id && playerCache.get(session_id);
-            if (p) {
-              if (p.id !== currentPlayer.id) {
-                sendPacket(p.wt, packetManager.updateGuild({ members: result, guild_name: currentPlayer.guild_name || await guilds.getGuildName(guildId) }));
-              }
-            }
-          }
-        }
+        await pushGuild(guildId);
 
         break;
       }
@@ -10581,69 +10880,76 @@ export default async function packetReceiver(
           return;
         }
 
-        const isLeader = await guilds.isGuildLeader(currentPlayer.username);
-        if (!isLeader) {
-          sendPacket(wt, packetManager.notify({ message: "You are not the guild leader" }));
-          return;
-        }
-
         const memberUsername = (data as any)?.username;
-        if (!memberUsername) {
+        if (!memberUsername || typeof memberUsername !== "string") {
           sendPacket(wt, packetManager.notify({ message: "Please provide a username" }));
           return;
         }
-
-        const members = await guilds.getGuildMembers(guildId);
-        if (!members || members.length === 0) {
-          sendPacket(wt, packetManager.notify({ message: "Your guild has no members" }));
-          return;
-        }
-
-        if (!members.includes(memberUsername)) {
-          sendPacket(wt, packetManager.notify({
-            message: `${memberUsername} is not in your guild`,
-          }));
-          return;
-        }
-
-        if (memberUsername.toLowerCase() === currentPlayer.username.toLowerCase()) {
-          sendPacket(wt, packetManager.notify({ message: "You cannot kick yourself." }));
-          return;
-        }
-
-        const result = await guilds.remove(memberUsername);
-
-        if (typeof result === "boolean" && !result) {
-          sendPacket(wt, packetManager.notify({ message: `Failed to kick ${memberUsername} from the guild` }));
-          return;
-        }
-
+        if (!guildEditOk(wt, type)) return;
+        const kicked = await guilds.kick(currentPlayer.username, memberUsername);
+        if (!guildDone(wt, kicked)) return;
         sendPacket(wt, packetManager.notify({ message: `${memberUsername} has been kicked from the guild` }));
+        await pushGuild(guildId);
+        await kickedFromGuild(currentPlayer, guildId, memberUsername);
 
-        if (Array.isArray(result) && result.length > 0) {
-          for (const member of result) {
-            const session_id = await player.getSessionIdByUsername(member);
-            const p = session_id && playerCache.get(session_id);
-            if (p) {
-              sendPacket(p.wt, packetManager.updateGuild({ members: result, guild_name: currentPlayer.guild_name }));
-              p.guild = result;
-              playerCache.set(p.id, p);
-            }
-          }
-        }
-
-        const kickedSessionId = await player.getSessionIdByUsername(memberUsername);
-        const kickedPlayer = kickedSessionId && playerCache.get(kickedSessionId);
-        if (kickedPlayer) {
-          sendPacket(kickedPlayer.wt, packetManager.updateGuild({ members: [] }));
-          sendPacket(kickedPlayer.wt, packetManager.notify({ message: "You have been kicked from the guild" }));
-          kickedPlayer.guild_id = null;
-          kickedPlayer.guild = [];
-          kickedPlayer.guild_name = null;
-          playerCache.set(kickedPlayer.id, kickedPlayer);
-        }
-        listener.emit(Events.GUILD_CHANGED, { type: "kick", guildId, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username, kickedUsername: memberUsername });
-
+        break;
+      }
+      case "GUILD_PROMOTE":
+      case "GUILD_DEMOTE": {
+        if (!currentPlayer) return;
+        const target = (data as any)?.username;
+        if (typeof target !== "string" || !target) return;
+        if (!guildEditOk(wt, type)) return;
+        const up = type === "GUILD_PROMOTE";
+        const result = up ? await guilds.promote(currentPlayer.username, target) : await guilds.demote(currentPlayer.username, target);
+        if (!guildDone(wt, result)) return;
+        await pushGuild(currentPlayer.guild_id);
+        listener.emit(Events.GUILD_CHANGED, { type: up ? "promote" : "demote", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username, targetUsername: target });
+        break;
+      }
+      case "GUILD_SET_MOTD": {
+        if (!currentPlayer) return;
+        if (!guildEditOk(wt, type)) return;
+        const result = await guilds.setMotd(currentPlayer.username, (data as any)?.motd);
+        if (!guildDone(wt, result) || result.changed === false) return;
+        await pushGuild(currentPlayer.guild_id);
+        listener.emit(Events.GUILD_CHANGED, { type: "motd", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username });
+        break;
+      }
+      case "GUILD_SET_NOTE": {
+        if (!currentPlayer) return;
+        const { username: target, note, officer } = (data as any) || {};
+        if (typeof target !== "string" || !target) return;
+        if (!guildEditOk(wt, officer === true ? "GUILD_SET_OFFICER_NOTE" : type)) return;
+        const result = await guilds.setNote(currentPlayer.username, target, note, officer === true);
+        if (!guildDone(wt, result) || result.changed === false) return;
+        await pushGuild(currentPlayer.guild_id);
+        listener.emit(Events.GUILD_CHANGED, { type: "note", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username, targetUsername: target });
+        break;
+      }
+      case "GUILD_ADD_RANK":
+      case "GUILD_EDIT_RANK":
+      case "GUILD_DELETE_RANK": {
+        if (!currentPlayer) return;
+        if (!guildEditOk(wt, type)) return;
+        const body = (data as any) || {};
+        const result = type === "GUILD_ADD_RANK" ? await guilds.addRank(currentPlayer.username, body.name)
+          : type === "GUILD_EDIT_RANK" ? await guilds.editRank(currentPlayer.username, Number(body.index), { name: body.name, permissions: body.permissions })
+          : await guilds.deleteRank(currentPlayer.username);
+        if (!guildDone(wt, result) || result.changed === false) return;
+        await pushGuild(currentPlayer.guild_id);
+        listener.emit(Events.GUILD_CHANGED, { type: "rank", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username });
+        break;
+      }
+      case "GUILD_TRANSFER_LEADER": {
+        if (!currentPlayer) return;
+        const target = (data as any)?.username;
+        if (typeof target !== "string" || !target) return;
+        if (!guildEditOk(wt, type)) return;
+        const result = await guilds.transferLeader(currentPlayer.username, target);
+        if (!guildDone(wt, result)) return;
+        await pushGuild(currentPlayer.guild_id);
+        listener.emit(Events.GUILD_CHANGED, { type: "transfer", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username, targetUsername: target });
         break;
       }
       case "CREATE_GUILD": {
@@ -10685,7 +10991,7 @@ export default async function packetReceiver(
         playerCache.set(currentPlayer.id, currentPlayer);
 
         broadcastPlayerUpdate(currentPlayer);
-        sendPacket(wt, packetManager.updateGuild({ members: result, guild_name: guildName.trim() }));
+        await pushGuild(guildId);
         sendPacket(wt, packetManager.notify({ message: `Guild "${guildName.trim()}" created successfully` }));
         listener.emit(Events.GUILD_CHANGED, { type: "create", guildId: currentPlayer.guild_id, guildName: guildName.trim(), playerUsername: currentPlayer.username });
         break;
@@ -10715,9 +11021,8 @@ export default async function packetReceiver(
           return;
         }
 
-        const isLeader = await guilds.isGuildLeader(currentPlayer.username);
-        if (!isLeader) {
-          sendPacket(wt, packetManager.notify({ message: "You are not the guild leader" }));
+        if (!(await guilds.can(currentPlayer.username, GuildPermission.INVITE))) {
+          sendPacket(wt, packetManager.notify({ message: refusalText.no_permission }));
           return;
         }
 
@@ -10773,15 +11078,21 @@ export default async function packetReceiver(
           return;
         }
 
-        const guildMembers = await guilds.getGuildMembers(guildId);
-        if (!guildMembers || guildMembers.length === 0) {
+        const allMembers = await guilds.getGuildMembers(guildId);
+        if (!allMembers || allMembers.length === 0) {
           sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
           return;
         }
 
+        if (!(await guilds.can(currentPlayer.username, GuildPermission.GUILD_CHAT_SPEAK))) {
+          sendPacket(wt, packetManager.notify({ message: refusalText.no_permission }));
+          return;
+        }
+
+        const guildMembers = await guilds.listeners(guildId, GuildPermission.GUILD_CHAT_LISTEN);
         const guildHearing = await chatHearing(currentPlayer.username, "guild", message, guildMembers);
         const guildLine = await chatLinksOf(message);
-        for (const member of guildMembers) {
+        for (const member of withSender(guildMembers, currentPlayer.username)) {
           if (!guildHearing.has(String(member).toLowerCase())) continue;
           const session_id = await player.getSessionIdByUsername(member);
           const memberPlayer = playerCache.get(session_id);
@@ -10801,6 +11112,11 @@ export default async function packetReceiver(
         }
 
         if (!guildHearing.muted) listener.emit(Events.GUILD_CHAT, { player: currentPlayer, message, guildMembers, guildId } as any);
+        break;
+      }
+      case "OFFICER_CHAT": {
+        if (!currentPlayer) return;
+        await officerChat(wt, currentPlayer, (data as any)?.message);
         break;
       }
       case "INVITE_PARTY": {
@@ -11361,9 +11677,8 @@ export default async function packetReceiver(
                 return;
               }
 
-              const isLeader = await guilds.isGuildLeader(inviter.username);
-              if (!isLeader) {
-                sendPacket(wt, packetManager.notify({ message: "The inviter is no longer the guild leader" }));
+              if (!(await guilds.can(inviter.username, GuildPermission.INVITE))) {
+                sendPacket(wt, packetManager.notify({ message: "The inviter can no longer invite to the guild" }));
                 return;
               }
 
@@ -11397,17 +11712,7 @@ export default async function packetReceiver(
               playerCache.set(currentPlayer.id, currentPlayer);
 
               broadcastPlayerUpdate(currentPlayer);
-              sendPacket(wt, packetManager.updateGuild({ members: updatedGuildMembers, guild_name: guildName }));
-
-              for (const member of updatedGuildMembers) {
-                const session_id = await player.getSessionIdByUsername(member);
-                const p = session_id && playerCache.get(session_id);
-                if (p && p.id !== currentPlayer.id) {
-                  sendPacket(p.wt, packetManager.updateGuild({ members: updatedGuildMembers, guild_name: guildName }));
-                  p.guild = updatedGuildMembers;
-                  playerCache.set(p.id, p);
-                }
-              }
+              await pushGuild(guildId);
               listener.emit(Events.GUILD_CHANGED, { type: "join", guildId, guildName, playerUsername: currentPlayer.username });
             }
             break;

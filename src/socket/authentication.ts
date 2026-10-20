@@ -102,10 +102,16 @@ const authentication = {
 
             // By id, from the database: on this thread the guild and party
             // systems hold no copy of their tables and would read every row.
+            // Guild members come from guild_members, leader (rank 0) first.
             const membersOf = (rows: any) => String(rows?.[0]?.members ?? "").split(",").map((member) => member.trim()).filter((member) => member);
+            const namesOf = (rows: any) => ((rows || []) as any[]).map((row) => String(row.username));
             const [partyMembers, guildMembers] = await Promise.all([
                 playerData.party_id ? query("SELECT members FROM parties WHERE id = ?", [Number(playerData.party_id)]).then(membersOf) : null,
-                playerData.guild_id ? query("SELECT members FROM guilds WHERE id = ?", [Number(playerData.guild_id)]).then(membersOf) : null,
+                // A guild list that cannot be read (setup not run yet) does not stop the login.
+                playerData.guild_id ? query("SELECT username FROM guild_members WHERE guild_id = ? ORDER BY rank_index, username", [Number(playerData.guild_id)]).then(namesOf).catch((error) => {
+                    log.error(`The guild members of ${username} could not be read: ${error}`);
+                    return null;
+                }) : null,
             ]);
 
             playerData.inventory = playerInventoryData;

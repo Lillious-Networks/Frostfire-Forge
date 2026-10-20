@@ -1237,7 +1237,8 @@ import { listener } from "@engine/systems/events";
 | `onPlayerEnteredPVP` | `{ player }` | After a player's PvP flag transitions from false to true (combat starts). |
 | `onPlayerLeftPVP` | `{ player }` | After a player's PvP flag transitions from true to false (combat ends). |
 | `onPartyChat` | `{ player, message, partyMembers }` | After a party chat message is sent. `partyMembers` is the list of usernames in the party. |
-| `onGuildChat` | `{ player, message, guildMembers, guildId }` | After a guild chat message is sent. `guildMembers` is the list of usernames in the guild. |
+| `onGuildChat` | `{ player, message, guildMembers, guildId }` | After a guild chat message is sent. `guildMembers` is the list of usernames whose rank may hear guild chat. |
+| `onOfficerChat` | `{ player, message, officers, guildId }` | After an officer chat message is sent. `officers` is the list of usernames whose rank may listen. |
 | `onPartyChanged` | `{ type, members, username?, kickedUsername? }` | After party join/kick/leave/disband. `type` = `"join"` \| `"kick"` \| `"leave"` \| `"disband"`. `members` = affected usernames. |
 | `onPartyInvite` | `{ inviterUsername, invitedUsername }` | After party invitation sent |
 | `onVendorBuy` | `{ player, npcId, item, quantity, coins }` | After a player buys from a vendor, or buys back something they sold. `coins` = copper paid |
@@ -1245,7 +1246,7 @@ import { listener } from "@engine/systems/events";
 | `onItemUsed` | `{ player, item, health, stamina, home }` | After a player uses a consumable. `health` / `stamina` = what it restored. For the home item both are 0 and `home` = `{ map, x, y }` where they arrived (fired once the cast has finished); otherwise `home` = `null` |
 | `onHomeSet` | `{ player, npcId, inn }` | After a player makes an innkeeper's inn their home. `inn` = the NPC's name |
 | `onTradeCompleted` | `{ trade }` | After two players complete a trade. `trade` = `{ id, player_a, player_b, a_gave, b_gave, created_at }`; each `gave` is `{ items: [{ name, quantity }], coins }` |
-| `onGuildChanged` | `{ type, guildId, guildName, playerUsername, kickedUsername? }` | After guild create/join/leave/kick/disband. `type` = `"create"` \| `"join"` \| `"leave"` \| `"kick"` \| `"disband"` |
+| `onGuildChanged` | `{ type, guildId, guildName, playerUsername, kickedUsername?, targetUsername? }` | After a guild change. `type` = `"create"` \| `"join"` \| `"leave"` \| `"kick"` \| `"disband"` \| `"promote"` \| `"demote"` \| `"motd"` \| `"note"` \| `"rank"` \| `"transfer"` |
 | `onFriendAdded` | `{ type, playerUsername, friendUsername }` | After friend request accepted and lists updated |
 | `onFriendRemoved` | `{ type, playerUsername, friendUsername }` | After friend removed and list synced |
 

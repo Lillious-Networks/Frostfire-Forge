@@ -125,8 +125,18 @@ function write(text: string, args: any[]): any {
     tables.parties = [];
     return { affectedRows: 0 };
   }
+  // The ranks and members of the guilds guests lead, deleted before those guilds are (clear).
+  const guestGuild = text.match(/^DELETE FROM (guild_ranks|guild_members) WHERE guild_id IN \(SELECT id FROM guilds WHERE leader IN \(SELECT username FROM accounts WHERE guest_mode = 1\)\)$/);
+  if (guestGuild) {
+    const table = guestGuild[1];
+    const guests = tables.accounts.filter((row) => row.guest_mode === 1).map((row) => row.username);
+    const ids = (tables.guilds || []).filter((row) => guests.includes(row.leader)).map((row) => row.id);
+    const before = (tables[table] || []).length;
+    tables[table] = (tables[table] || []).filter((row) => !ids.includes(row.guild_id));
+    return { affectedRows: before - tables[table].length };
+  }
   // `= ?` is one player's rows: a demoted admin's permissions (toggleAdmin).
-  const remove = text.match(/^DELETE FROM (\w+)(?: WHERE (\w+) (IN \(SELECT username FROM accounts WHERE guest_mode = 1\)|= 1|= \?))?$/);
+  const remove =text.match(/^DELETE FROM (\w+)(?: WHERE (\w+) (IN \(SELECT username FROM accounts WHERE guest_mode = 1\)|= 1|= \?))?$/);
   if (remove) {
     const [, table, column, test] = remove;
     const guests = tables.accounts.filter((row) => row.guest_mode === 1).map((row) => row.username);
@@ -892,6 +902,16 @@ describe("the guest clean-up", () => {
     expect(await player.getStats("guest_pc")).toEqual([]);
     expect(told).toContain("accounts *");
     expect(told).toContain("parties reload");
+  });
+
+  test("a guild a guest leads goes with its ranks and members, and those tables are read again", async () => {
+    tables.guild_ranks = [{ guild_id: 7, rank_index: 0 }, { guild_id: 8, rank_index: 0 }];
+    tables.guild_members = [{ username: "pc_ally", guild_id: 7 }, { username: "guest_pc", guild_id: 8 }];
+    await player.clear();
+    expect(tables.guilds.map((row) => row.id)).toEqual([7]);
+    expect(tables.guild_ranks).toEqual([{ guild_id: 7, rank_index: 0 }]);
+    expect(tables.guild_members).toEqual([{ username: "pc_ally", guild_id: 7 }]);
+    expect(told).toEqual(expect.arrayContaining(["guilds reload", "guild_ranks reload", "guild_members reload"]));
   });
 });
 

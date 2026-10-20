@@ -551,7 +551,13 @@ const player = {
       // Delete parties led by guests
       await query(`DELETE FROM parties WHERE leader IN ${guestUsernames}`);
 
-      // Delete guilds led by guests
+      // Delete guilds led by guests, their ranks and member rows first. When
+      // setup has not made the rank tables yet, the rest still runs.
+      const guestGuilds = `(SELECT id FROM guilds WHERE leader IN ${guestUsernames})`;
+      for (const table of ["guild_ranks", "guild_members"]) {
+        await query(`DELETE FROM ${table} WHERE guild_id IN ${guestGuilds}`)
+          .catch((error) => log.error(`The ${table} rows of guilds led by guests could not be deleted: ${error}`));
+      }
       await query(`DELETE FROM guilds WHERE leader IN ${guestUsernames}`);
 
       // Clear all parties
@@ -568,7 +574,7 @@ const player = {
       // and the guests are picked by the database. So the caches of these
       // tables forget everything and read again, also when it stopped half way.
       await Promise.all(CLEANED.map((name) => dropAllRows(name)));
-      await Promise.all([reloadTable("parties"), reloadTable("guilds"), allAccounts.reload()]);
+      await Promise.all([reloadTable("parties"), reloadTable("guilds"), reloadTable("guild_ranks"), reloadTable("guild_members"), allAccounts.reload()]);
     }
   },
   register: async (

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { databaseModule } from "./setup";
+import { DEFAULT_RANKS } from "../systems/guildranks";
 
 // Generated at server start (`bun create-config`) and gitignored, so CI has
 // no copy on disk. Mock the values instead of requiring the file.
@@ -211,7 +212,9 @@ function resetWorld() {
     quest_log: [],
     quest_objective_progress: [],
     equipment: [equipmentRow("hero")],
-    guilds: [{ id: 7, name: "Frostguard", leader: "ally", members: "ally" }],
+    guilds: [{ id: 7, name: "Frostguard", leader: "ally", members: "ally", motd: "" }],
+    guild_ranks: DEFAULT_RANKS.map((rank) => ({ guild_id: 7, rank_index: rank.index, name: rank.name, permissions: rank.permissions })),
+    guild_members: [{ username: "ally", guild_id: 7, rank_index: 0, public_note: "", officer_note: "" }],
     parties: [],
     inventory: [{ username: "hero", item: "Health Potion", quantity: 3, equipped: 0, slot: 0, bag_slot: 0 }],
     collectables: [{ username: "hero", type: "mount", item: "unicorn" }],
@@ -473,16 +476,35 @@ describe("guild", () => {
     const ally = login("ally", "7002", { guild_id: 7, guild: ["ally"], guild_name: "Frostguard" });
 
     const joined = await act("guild.join", { guild: "frostguard" });
-    expect(joined.snapshot?.guild).toEqual({ id: 7, name: "Frostguard", leader: "ally", members: ["ally", "hero"] });
+    expect(joined.snapshot?.guild).toEqual({ id: 7, name: "Frostguard", leader: "ally", members: ["ally", "hero"], rank: "Initiate" });
     expect(heroRow("accounts").guild_id).toBe(7);
     expect(hero.live).toMatchObject({ guild_id: 7, guild_name: "Frostguard", guild: ["ally", "hero"] });
-    expect(ally.sent).toEqual([{ type: "UPDATE_GUILD", data: { members: ["ally", "hero"], guild_name: "Frostguard" } }]);
+    expect(ally.sent).toEqual([{
+      type: "UPDATE_GUILD",
+      data: {
+        members: ["ally", "hero"],
+        guild_name: "Frostguard",
+        motd: "",
+        my_rank: 0,
+        ranks: [
+          { index: 0, name: "Guild Master", permissions: 4095 },
+          { index: 1, name: "Officer", permissions: 4095 },
+          { index: 2, name: "Veteran", permissions: 19 },
+          { index: 3, name: "Member", permissions: 3 },
+          { index: 4, name: "Initiate", permissions: 3 },
+        ],
+        roster: [
+          { username: "ally", rank: 0, public_note: "", officer_note: "" },
+          { username: "hero", rank: 4, public_note: "", officer_note: "" },
+        ],
+      },
+    }]);
     expect(bridged).toEqual(["announce"]);
     await expectRefused("guild.disband", {}, /Only the guild's leader/);
 
     // The leader heads the member list.
     const led = await act("guild.lead");
-    expect(led.snapshot?.guild).toMatchObject({ leader: "hero", members: ["hero", "ally"] });
+    expect(led.snapshot?.guild).toEqual({ id: 7, name: "Frostguard", leader: "hero", members: ["hero", "ally"], rank: "Guild Master" });
     expect(ally.live.guild).toEqual(["hero", "ally"]);
     await expectRefused("guild.lead", {}, /already leads/);
 
@@ -551,8 +573,13 @@ describe("party", () => {
       expect((await act(action, data)).ok).toBe(true);
     }
     // The two tables as wholes, and none of the questions that used to be asked one by one.
-    const asked = queries.filter((q) => /^SELECT (guild_id|party_id) FROM accounts|^SELECT (id|name|leader|members|id, name, leader, members|id, leader, members) FROM (guilds|parties)\b/.test(q));
-    expect(asked).toEqual(["SELECT id, name, leader, members FROM guilds", "SELECT id, leader, members FROM parties"]);
+    const asked = queries.filter((q) => /^SELECT (guild_id|party_id) FROM accounts|^SELECT (id|name|leader|members|id, name, leader, members|id, name, leader, motd|id, leader, members) FROM (guilds|parties)\b|^SELECT .+ FROM (guild_ranks|guild_members)\b/.test(q));
+    expect(asked).toEqual([
+      "SELECT id, name, leader, motd FROM guilds",
+      "SELECT username, guild_id, rank_index, public_note, officer_note FROM guild_members",
+      "SELECT guild_id, rank_index, name, permissions FROM guild_ranks",
+      "SELECT id, leader, members FROM parties",
+    ]);
   });
 });
 

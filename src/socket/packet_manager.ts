@@ -566,6 +566,16 @@ export const packetManager = {
       )
     ] as any[];
   },
+  officerChat: (data: any) => {
+    return [
+      packet.encode(
+        JSON.stringify({
+          type: "OFFICER_CHAT",
+          data,
+        })
+      )
+    ] as any[];
+  },
   selectPlayer: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "SELECTPLAYER", data })),
@@ -634,6 +644,18 @@ export const packetManager = {
   editorLayerLock: (data: any) => {
     return [
       packet.encode(JSON.stringify({ type: "EDITOR_LAYER_LOCK", data })),
+    ] as any[];
+  },
+  /** The map editor's New map was refused, and why (systems/mapcreate.ts). */
+  createMapFailed: (data: { message: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CREATE_MAP_FAILED", data })),
+    ] as any[];
+  },
+  /** The footstep sounds the map editor has set on tiles, all of them (systems/tilesounds.ts). */
+  tileSounds: (data: { tilesets: Record<string, Record<string, string>> }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "TILE_SOUNDS", data })),
     ] as any[];
   },
   editorSyncReady: (data: any) => {

@@ -211,8 +211,11 @@ async function ownedCollectables(username: string): Promise<PlayerEditorSnapshot
 async function guildOf(username: string): Promise<PlayerEditorSnapshot["guild"]> {
   const id = await guilds.getGuildId(username);
   if (!id) return null;
-  const [name, leader, members] = await Promise.all([guilds.getGuildName(id), guilds.getGuildLeader(id), guilds.getGuildMembers(id)]);
-  return { id, name: name || "", leader: leader || "", members };
+  const [name, leader, members, me, ranks] = await Promise.all([
+    guilds.getGuildName(id), guilds.getGuildLeader(id), guilds.getGuildMembers(id), guilds.getMember(username), guilds.getRanks(id),
+  ]);
+  const rank = me ? ranks.find((r) => r.index === me.rank_index)?.name ?? "" : "";
+  return { id, name: name || "", leader: leader || "", members, rank };
 }
 
 async function partyOf(username: string): Promise<PlayerEditorSnapshot["party"]> {
@@ -819,7 +822,9 @@ function pushGuildMembers(members: string[], guildId: number, guildName: string)
     live.guild_id = guildId;
     live.guild = members;
     live.guild_name = guildName;
-    send(live.wt, packetManager.updateGuild({ members, guild_name: guildName }));
+    void guilds.packetFor(guildId, live.username)
+      .then((packet) => send(live.wt, packetManager.updateGuild(packet)))
+      .catch((error) => log.error(`The guild could not be sent to ${live.username}: ${error}`));
   }
 }
 

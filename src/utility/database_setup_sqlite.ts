@@ -1,8 +1,9 @@
 // This file is used to create the database and tables if they don't exist
-import query from "../controllers/sqldatabase";
+import query, { transaction } from "../controllers/sqldatabase";
 import log from "../modules/logger";
 import { CLASSES_TABLE } from "../systems/classtable";
 import { DEFAULT_SOUNDS, soundsText } from "../systems/weathersounds";
+import { migrateGuildRanks } from "./guild_ranks_migration";
 
 // Create accounts table if it doesn't exist
 const createAccountsTable = async () => {
@@ -640,6 +641,8 @@ const createDefaultWeather = async () => {
   await query(`INSERT OR IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('sandstorm', 0, 'right', 35, 10, 100, 0);`);
   // "tornado" is drawn as a thunderstorm, with tornadoes (systems/tornadoes.ts).
   await query(`INSERT OR IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('tornado', 0.85, 'right', 30, 85, 68, 75);`);
+  // "blizzard" is drawn only in the snow zones, as harsh as its wind speed says, falling as its precipitation says.
+  await query(`INSERT OR IGNORE INTO weather (name, ambience, wind_direction, wind_speed, humidity, temperature, precipitation) VALUES ('blizzard', 0, 'right', 35, 85, 10, 80);`);
 }
 
 const createWorldTable = async () => {
@@ -805,6 +808,35 @@ const createGuildsTable = async () => {
       END;
   `;
   await query(sql);
+};
+
+const createGuildRankTables = async () => {
+  log.info("Creating guild rank tables...");
+  await query(`
+    CREATE TABLE IF NOT EXISTS guild_ranks (
+      guild_id INTEGER NOT NULL,
+      rank_index INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      permissions INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (guild_id, rank_index)
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS guild_members (
+      username TEXT NOT NULL PRIMARY KEY COLLATE NOCASE,
+      guild_id INTEGER NOT NULL,
+      rank_index INTEGER NOT NULL,
+      public_note TEXT NOT NULL DEFAULT '',
+      officer_note TEXT NOT NULL DEFAULT '',
+      joined_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  const guildRows = (await query(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'guilds'`)) as any[];
+  if (guildRows[0] && !String(guildRows[0].sql || "").includes("motd")) {
+    await query(`ALTER TABLE guilds ADD COLUMN motd TEXT NOT NULL DEFAULT ''`);
+  }
+  const migrated = await migrateGuildRanks((sql, values) => query(sql, values || []), transaction);
+  if (migrated > 0) log.info(`Gave ${migrated} guild(s) ranks and member rows`);
 };
 
 const createMountsTable = async () => {
@@ -1224,6 +1256,7 @@ const createIndexes = async () => {
     { name: "idx_guilds_id", sql: "CREATE INDEX idx_guilds_id ON guilds(id)" },
     { name: "idx_guilds_name", sql: "CREATE INDEX idx_guilds_name ON guilds(name)" },
     { name: "idx_guilds_leader", sql: "CREATE INDEX idx_guilds_leader ON guilds(leader)" },
+    { name: "idx_guild_members_guild_id", sql: "CREATE INDEX idx_guild_members_guild_id ON guild_members(guild_id)" },
 
     { name: "idx_mounts_name", sql: "CREATE INDEX idx_mounts_name ON mounts(name)" },
 
@@ -1313,6 +1346,7 @@ const setupDatabase = async () => {
   await createPartiesTable();
   await createCurrencyTable();
   await createGuildsTable();
+  await createGuildRankTables();
   await createMountsTable();
   await insertDefaultMount();
   await createCollectablesTable();
