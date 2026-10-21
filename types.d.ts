@@ -475,11 +475,17 @@ declare interface WeatherSound {
   volume: number;
 }
 
+/** An audio file of the asset server heard at a lightning strike, at `volume` (0 to 1): thunder has no range. */
+declare interface WeatherThunder {
+  name: string;
+  volume: number;
+}
+
 /** A weather's sounds of each kind (systems/weathersounds.ts). */
 declare interface WeatherSounds {
   rain: WeatherSound[];
   wind: WeatherSound[];
-  thunder: WeatherSound[];
+  thunder: WeatherThunder[];
 }
 
 /** What a weather reads, as the control panel shows it: degrees Fahrenheit, percent, miles an hour, where the wind blows to on screen, and how much falls (0 to 100). */

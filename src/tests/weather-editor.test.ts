@@ -614,14 +614,15 @@ describe("sounds", () => {
   const SOUNDS = {
     rain: [{ name: "soft rain", from: 0, to: 75, volume: 1 }, { name: "hard rain", from: 35, to: 100, volume: 0.8 }],
     wind: [{ name: "gentle wind", from: 0, to: 20, volume: 1 }],
-    thunder: [{ name: "thunder", from: 0, to: 100, volume: 1 }, { name: "thunder 2", from: 0, to: 100, volume: 1 }],
+    thunder: [{ name: "thunder", volume: 1 }, { name: "thunder 2", volume: 0.7 }],
   };
 
   test("the editor is sent the rules a weather's sounds are held to", async () => {
     const result = await editor.handleEditorPacket(ADMIN, "WEATHER_EDITOR_LIST", null);
     if (result.kind !== "data") throw new Error("Expected the editor's data");
     expect(result.data.sounds.kinds).toEqual(["rain", "wind", "thunder"]);
-    expect(result.data.sounds.rules.wind).toEqual({ label: "Wind", measure: "Wind speed", unit: "mph", min: 0, max: 150 });
+    expect(result.data.sounds.rules.wind).toEqual({ label: "Wind", ranged: true, measure: "Wind speed", unit: "mph", min: 0, max: 150 });
+    expect(result.data.sounds.rules.thunder).toEqual({ label: "Thunder", ranged: false });
     expect(result.data.sounds.max).toBe(12);
   });
 
@@ -638,7 +639,7 @@ describe("sounds", () => {
     const bad = {
       rain: [{ name: "", from: 0, to: 50, volume: 1 }, { name: "hard rain", from: 80, to: 40, volume: 2 }],
       wind: [{ name: "gentle wind", from: -1, to: 200, volume: 1 }],
-      thunder: Array.from({ length: 13 }, () => ({ name: "thunder", from: 0, to: 100, volume: 1 })),
+      thunder: Array.from({ length: 13 }, () => ({ name: "thunder", volume: 1 })),
     };
     const result = await save({ ...weatherOf({ name: "rainy", sounds: bad }), originalName: "rainy" });
     expect(result.ok).toBe(false);
@@ -670,6 +671,13 @@ describe("reading sounds", () => {
     expect(parseSounds('{"rain":[{"name":" soft rain ","from":"0","to":60},{"name":"","from":0,"to":1},{"from":0}],"wind":"no"}')).toEqual({
       rain: [{ name: "soft rain", from: 0, to: 60, volume: 1 }], wind: [], thunder: [],
     });
+  });
+
+  test("thunder is a list of sounds without a range; one kept with a range from before is read without it", async () => {
+    const { parseSounds, validateSounds } = await import("../systems/weathersounds");
+    expect(parseSounds('{"thunder":[{"name":"thunder","from":40,"to":100,"volume":0.5},{"name":"thunder 2"}]}').thunder)
+      .toEqual([{ name: "thunder", volume: 0.5 }, { name: "thunder 2", volume: 1 }]);
+    expect(validateSounds({ thunder: [{ name: "thunder", volume: 1 }] })).toEqual([]);
   });
 
   test("the seeded weathers sound as the game did before sounds could be chosen", async () => {

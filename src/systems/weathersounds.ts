@@ -4,36 +4,39 @@
  * adding multiple (for variant support) and allow choosing the intensity range they can happen at"): the sounds of a
  * weather, kept with its row (the weather table's `sounds` column, JSON) and sent to the client with the weather.
  *
- * Each kind is a list of sounds, each an audio file of the asset server (its name, without the extension) heard while
- * the weather's intensity for that kind is between `from` and `to`, at `volume` (0 to 1) of what the game makes of it:
+ * Each kind is a list of sounds, each an audio file of the asset server (its name, without the extension) heard at
+ * `volume` (0 to 1) of what the game makes of it. Rain and wind sounds are heard while the weather's intensity for
+ * that kind is between `from` and `to`:
  * - rain: while it rains, by the weather's precipitation (percent). Two sounds whose ranges overlap are crossed over
  *   the overlap, the quieter rain fading out as the harder one comes in.
  * - wind: while the wind blows (it has a direction), by its speed with its gusts (mph). Crossed the same way.
- * - thunder: one sound for each lightning strike, by the weather's precipitation (percent), picked at random among
- *   those whose range holds it.
- * Sounds of one kind with the same range are variants: a looping one (rain, wind) is picked at random each time the
- * weather is shown, a thunder at each strike.
+ * Rain or wind sounds with the same range are variants, one picked at random each time the weather is shown.
+ * - thunder: one sound for each lightning strike, picked at random from the list. USER REQUEST 2026-10-21 ("thunder
+ *   should be a list of thunder sounds, not a list of thunder sounds per precipitation %"): a thunder has no range.
+ *   One kept with a range from before is read without it.
  */
 
 /** The kinds of sound a weather has, in the order the editor shows them. */
 export const SOUND_KINDS = ["rain", "wind", "thunder"] as const;
 export type SoundKind = (typeof SOUND_KINDS)[number];
 
-/** What each kind is heard by, as the editor is sent it: its range is held to min and max. */
+/** What each kind is heard by, as the editor is sent it: a ranged kind's range is held to min and max. */
 export interface SoundKindRule {
   label: string;
+  /** False for a kind whose sounds have no range (thunder): the rest of the rule is absent. */
+  ranged: boolean;
   /** What `from` and `to` measure, in words. */
-  measure: string;
-  unit: string;
-  min: number;
-  max: number;
+  measure?: string;
+  unit?: string;
+  min?: number;
+  max?: number;
 }
 
 export const SOUND_RULES: Record<SoundKind, SoundKindRule> = {
-  rain: { label: "Rain", measure: "Precipitation", unit: "%", min: 0, max: 100 },
+  rain: { label: "Rain", ranged: true, measure: "Precipitation", unit: "%", min: 0, max: 100 },
   // A gust adds up to half the wind speed again (the client's calculateWindSpeed): the top of the editor's 100 mph.
-  wind: { label: "Wind", measure: "Wind speed", unit: "mph", min: 0, max: 150 },
-  thunder: { label: "Thunder", measure: "Precipitation", unit: "%", min: 0, max: 100 },
+  wind: { label: "Wind", ranged: true, measure: "Wind speed", unit: "mph", min: 0, max: 150 },
+  thunder: { label: "Thunder", ranged: false },
 };
 
 /** How many sounds one kind may hold. */
@@ -56,10 +59,10 @@ const WIND: WeatherSound[] = [
   { name: "gentle wind", from: 6, to: 26, volume: 1 },
   { name: "regular wind", from: 18, to: 150, volume: 1 },
 ];
-const THUNDER: WeatherSound[] = [
-  { name: "thunder", from: 0, to: 100, volume: 1 },
-  { name: "thunder 2", from: 0, to: 100, volume: 1 },
-  { name: "thunder 3", from: 0, to: 100, volume: 1 },
+const THUNDER: WeatherThunder[] = [
+  { name: "thunder", volume: 1 },
+  { name: "thunder 2", volume: 1 },
+  { name: "thunder 3", volume: 1 },
 ];
 export const DEFAULT_SOUNDS: Record<string, WeatherSounds> = {
   clear: { rain: [], wind: WIND, thunder: [] },
@@ -90,10 +93,16 @@ export function parseSounds(raw: unknown): WeatherSounds {
     const list = Array.isArray(value[kind]) ? value[kind] : [];
     for (const entry of list) {
       const name = typeof entry?.name === "string" ? entry.name.trim() : "";
+      if (!name) continue;
+      const read = Number(entry?.volume ?? 1);
+      const volume = Number.isFinite(read) ? read : 1;
+      if (kind === "thunder") {
+        sounds.thunder.push({ name, volume });
+        continue;
+      }
       const from = Number(entry?.from), to = Number(entry?.to);
-      if (!name || !Number.isFinite(from) || !Number.isFinite(to)) continue;
-      const volume = Number(entry?.volume ?? 1);
-      sounds[kind].push({ name, from, to, volume: Number.isFinite(volume) ? volume : 1 });
+      if (!Number.isFinite(from) || !Number.isFinite(to)) continue;
+      sounds[kind].push({ name, from, to, volume });
     }
   }
   return sounds;
@@ -126,14 +135,17 @@ export function validateSounds(data: any): Array<{ field: string; message: strin
       const name = typeof entry?.name === "string" ? entry.name.trim() : "";
       if (!name) errors.push({ field: `${at}.name`, message: "Pick an audio file." });
       else if (name.length > SOUND_NAME_MAX) errors.push({ field: `${at}.name`, message: `An audio name must be ${SOUND_NAME_MAX} characters or fewer.` });
-      const ends: Array<["from" | "to", string]> = [["from", "From"], ["to", "To"]];
-      for (const [key, label] of ends) {
-        const value = entry?.[key];
-        if (typeof value !== "number" || !Number.isFinite(value)) errors.push({ field: `${at}.${key}`, message: `${label} must be a number.` });
-        else if (value < rule.min || value > rule.max) errors.push({ field: `${at}.${key}`, message: `${label} must be between ${rule.min} and ${rule.max}.` });
-      }
-      if (typeof entry?.from === "number" && typeof entry?.to === "number" && entry.from > entry.to) {
-        errors.push({ field: `${at}.to`, message: "To must not be under From." });
+      if (rule.ranged) {
+        const { min = 0, max = 0 } = rule;
+        const ends: Array<["from" | "to", string]> = [["from", "From"], ["to", "To"]];
+        for (const [key, label] of ends) {
+          const value = entry?.[key];
+          if (typeof value !== "number" || !Number.isFinite(value)) errors.push({ field: `${at}.${key}`, message: `${label} must be a number.` });
+          else if (value < min || value > max) errors.push({ field: `${at}.${key}`, message: `${label} must be between ${min} and ${max}.` });
+        }
+        if (typeof entry?.from === "number" && typeof entry?.to === "number" && entry.from > entry.to) {
+          errors.push({ field: `${at}.to`, message: "To must not be under From." });
+        }
       }
       const volume = entry?.volume;
       if (typeof volume !== "number" || !Number.isFinite(volume)) errors.push({ field: `${at}.volume`, message: "Volume must be a number." });
