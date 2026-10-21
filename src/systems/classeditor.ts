@@ -1,16 +1,17 @@
 /**
  * Class editor: what the admin class editor window (/cle) asks for. USER REQUEST 2026-10-14 ("create a class editor
  * that can define certain base stats and learn certain spells at certain levels"). A class (systems/classes.ts) is
- * a name, a description, the stats a new character of it starts with, and the spells it learns, each at a level.
+ * a name, a description, the stats a new character of it starts with, the spells it learns, each at a level, and the
+ * items it starts with (USER REQUEST 2026-10-21).
  * Each change is checked, written to the table and then to the list held, and answered with whether it was done and
  * every class as it then stands. Like the weather editor, it reads only what the server holds (the classes and the
  * spells), never the database.
  */
 import log from "../modules/logger";
 import assetCache from "../services/assetCache";
-import { getSpriteUrl } from "../modules/spriteSheetManager";
+import { getIconUrl, getSpriteUrl } from "../modules/spriteSheetManager";
 import permissions from "./permissions";
-import classes, { classesReady, STAT_COLUMNS, type CharacterClass, type ClassSpell } from "./classes";
+import classes, { classesReady, STAT_COLUMNS, type CharacterClass, type ClassItem, type ClassSpell } from "./classes";
 
 /** The tool's own permission and the wildcards over it, as the other editors have theirs. */
 export const EDITOR_PERMISSIONS = ["tools.class_editor", "tools.*", "server.admin", "server.*"];
@@ -21,6 +22,8 @@ export const NAME_MAX = 45;
 export const DESCRIPTION_MAX = 500;
 /** The most spells one class learns, and the highest level one can be learned at. */
 export const SPELLS_MAX = 50, LEVEL_MAX = 1000;
+/** The most starter items one class has, and the most of one item. */
+export const ITEMS_MAX = 50, QUANTITY_MAX = 9999;
 
 /** Limits of a stat, as the editor is sent and held to them. */
 export interface NumberRule { label: string; min: number; max: number; hint: string }
@@ -66,14 +69,28 @@ async function spellOptions(): Promise<SpellOption[]> {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** An item as the picker shows it. */
+export interface ItemOption { name: string; icon: string | null; description: string; quality: string }
+
+async function itemOptions(): Promise<ItemOption[]> {
+  const list = await assetCache.get("items");
+  return (Array.isArray(list) ? (list as any[]) : [])
+    .filter((i) => typeof i?.name === "string" && i.name)
+    .map((i) => ({ name: String(i.name), icon: getIconUrl(i.icon ?? null), description: String(i.description ?? ""), quality: String(i.quality || "common") }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export interface ClassEditorData {
   classes: CharacterClass[];
   spells: SpellOption[];
+  items: ItemOption[];
   numbers: Record<string, NumberRule>;
   nameMax: number;
   descriptionMax: number;
   spellsMax: number;
   levelMax: number;
+  itemsMax: number;
+  quantityMax: number;
   /** False when the classes table could not be made at start: nothing can be saved. */
   ready: boolean;
 }
@@ -82,11 +99,14 @@ export async function buildEditorData(): Promise<ClassEditorData> {
   return {
     classes: await classes.list(),
     spells: await spellOptions(),
+    items: await itemOptions(),
     numbers: NUMBER_FIELDS,
     nameMax: NAME_MAX,
     descriptionMax: DESCRIPTION_MAX,
     spellsMax: SPELLS_MAX,
     levelMax: LEVEL_MAX,
+    itemsMax: ITEMS_MAX,
+    quantityMax: QUANTITY_MAX,
     ready: classesReady(),
   };
 }
@@ -95,8 +115,8 @@ export async function buildEditorData(): Promise<ClassEditorData> {
 
 export interface FieldError { field: string; message: string }
 
-/** What is wrong with a class sent by the editor, by field ("spells.3" for the fourth spell). */
-export function validateClass(data: any, ctx: { others: CharacterClass[]; spellNames: Set<string> }): FieldError[] {
+/** What is wrong with a class sent by the editor, by field ("spells.3" for the fourth spell, "items.0" for the first item). */
+export function validateClass(data: any, ctx: { others: CharacterClass[]; spellNames: Set<string>; itemNames: Set<string> }): FieldError[] {
   const errors: FieldError[] = [];
   const add = (field: string, message: string) => { if (!errors.some((e) => e.field === field)) errors.push({ field, message }); };
 
@@ -129,6 +149,23 @@ export function validateClass(data: any, ctx: { others: CharacterClass[]; spellN
       seen.add(lower(spell));
     });
   }
+
+  // a class saved before starter items existed sends none
+  const items = data?.items === undefined ? [] : Array.isArray(data.items) ? data.items : null;
+  if (!items) add("items", "Starter items must be a list.");
+  else {
+    if (items.length > ITEMS_MAX) add("items", `A class starts with ${ITEMS_MAX} items at most.`);
+    const seen = new Set<string>();
+    items.forEach((entry: any, i: number) => {
+      const item = typeof entry?.item === "string" ? entry.item : "";
+      const quantity = entry?.quantity;
+      if (!item) add(`items.${i}`, "Pick an item.");
+      else if (!ctx.itemNames.has(item)) add(`items.${i}`, `${item} is not an item (any more).`);
+      else if (seen.has(lower(item))) add(`items.${i}`, `${item} is in the list twice.`);
+      else if (typeof quantity !== "number" || !Number.isInteger(quantity) || quantity < 1 || quantity > QUANTITY_MAX) add(`items.${i}`, `The quantity must be a whole number from 1 to ${QUANTITY_MAX}.`);
+      seen.add(lower(item));
+    });
+  }
   return errors;
 }
 
@@ -151,16 +188,19 @@ async function saveClass(admin: any, data: any): Promise<Outcome> {
   if (id !== null && !all.some((c) => c.id === id)) return refuse(GONE);
 
   const spellNames = new Set((await spellOptions()).map((s) => s.name));
-  const errors = validateClass(data, { others: all.filter((c) => c.id !== id), spellNames });
+  const itemNames = new Set((await itemOptions()).map((i) => i.name));
+  const errors = validateClass(data, { others: all.filter((c) => c.id !== id), spellNames, itemNames });
   if (errors.length) return invalid(errors);
 
   const spells: ClassSpell[] = (data.spells as any[]).map((e) => ({ spell: String(e.spell), level: Number(e.level) }));
+  const items: ClassItem[] = ((data.items ?? []) as any[]).map((e) => ({ item: String(e.item), quantity: Number(e.quantity) }));
   const row = {
     id,
     name: String(data.name).trim(),
     description: String(data.description ?? "").trim(),
     ...(Object.fromEntries(STAT_COLUMNS.map((k) => [k, Number(data[k])])) as Record<(typeof STAT_COLUMNS)[number], number>),
     spells: spells.sort((a, b) => a.level - b.level || a.spell.localeCompare(b.spell)),
+    items,
   };
   const saved = await classes.save(row);
   if (!saved) return refuse("The server did not keep the class.");
@@ -172,7 +212,7 @@ async function saveClass(admin: any, data: any): Promise<Outcome> {
     notes: [
       id === null
         ? "New characters can choose it on the character page from now on."
-        : "New characters of it start with these stats. Characters already made keep theirs, and learn the spells at their levels as they reach them (the ones already passed at their next login).",
+        : "New characters of it start with these stats and items. Characters already made keep theirs, and learn the spells at their levels as they reach them (the ones already passed at their next login).",
     ],
   };
 }

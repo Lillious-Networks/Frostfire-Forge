@@ -15,7 +15,7 @@ function run(sql: string, params: any[] = []): any {
   const text = sql.replace(/\s+/g, " ").trim();
   queries.push(text);
   if (text.startsWith("CREATE TABLE IF NOT EXISTS classes")) return [];
-  if (text.includes("INFORMATION_SCHEMA.COLUMNS") && text.includes("class_id")) return [{ count: 1 }];
+  if (text.includes("INFORMATION_SCHEMA.COLUMNS") && (params[1] === "class_id" || params[1] === "items")) return [{ count: 1 }];
   if (text === "SELECT permissions FROM permissions WHERE username = ?") return tables.permissions.filter((r) => r.username === params[0]);
   if (text === "SELECT * FROM classes") return tables.classes.map((r) => ({ ...r }));
   if (text.startsWith("INSERT INTO classes")) {
@@ -61,7 +61,7 @@ mock.module("../services/assetCache", () => ({
 }));
 
 const { clearCaches } = await import("../services/datacache");
-const { default: classes, ensureClassSchema, parseSpells } = await import("../systems/classes");
+const { default: classes, ensureClassSchema, parseItems, parseSpells } = await import("../systems/classes");
 const editor = await import("../systems/classeditor");
 const { Events, listener } = await import("../systems/events");
 
@@ -69,6 +69,10 @@ const SPELLS = [
   { name: "frost_bolt", icon: "frost_bolt", description: "A bolt of ice.", type: "damage" },
   { name: "heal", icon: "heal", description: "Mends wounds.", type: "heal" },
   { name: "fireball", icon: null, description: "Burns.", type: "damage" },
+];
+const ITEMS = [
+  { name: "wooden_staff", icon: "wooden_staff", description: "A plain staff.", quality: "common" },
+  { name: "health_potion", icon: null, description: "Heals.", quality: "common" },
 ];
 const ADMIN = { id: "c-1", username: "boss", isGuest: false, isAdmin: true, permissions: [] };
 const BUILDER = { id: "c-2", username: "builder", isGuest: false, permissions: ["tools.class_editor"] };
@@ -86,6 +90,7 @@ beforeEach(async () => {
   nextId = 1;
   queries.length = 0;
   cache.set("spells", SPELLS.map((s) => ({ ...s })));
+  cache.set("items", ITEMS.map((i) => ({ ...i })));
   await clearCaches();
   await ensureClassSchema();
 });
@@ -96,6 +101,12 @@ describe("classes", () => {
     expect(parseSpells([{ spell: "heal", level: "2.7" }, { spell: "", level: 1 }, { level: 4 }, null])).toEqual([{ spell: "heal", level: 2 }]);
     expect(parseSpells("not json")).toEqual([]);
     expect(parseSpells(null)).toEqual([]);
+  });
+
+  test("the items column is read as the spells column is, and a class without one starts with nothing", () => {
+    expect(parseItems('[{"item":"health_potion","quantity":5}]')).toEqual([{ item: "health_potion", quantity: 5 }]);
+    expect(parseItems([{ item: "wooden_staff", quantity: "0" }, { item: "", quantity: 1 }, { quantity: 2 }, null])).toEqual([{ item: "wooden_staff", quantity: 1 }]);
+    expect(parseItems(null)).toEqual([]);
   });
 
   test("a character is asked for only while the account has none and there is a class to choose", async () => {
@@ -148,6 +159,7 @@ describe("the class editor", () => {
     const data = (answer as any).data;
     expect(data.classes).toEqual([]);
     expect(data.spells.map((s: any) => s.name)).toEqual(["fireball", "frost_bolt", "heal"]);
+    expect(data.items.map((i: any) => i.name)).toEqual(["health_potion", "wooden_staff"]);
     expect(data.numbers.max_health).toMatchObject({ min: 1 });
     expect(data.ready).toBe(true);
   });
@@ -164,6 +176,20 @@ describe("the class editor", () => {
     expect(tables.classes).toHaveLength(1);
     expect(tables.classes[0]).toMatchObject({ id, name: "Sorcerer", max_health: 90 });
     expect((await classes.get(id))?.spells).toEqual([{ spell: "heal", level: 2 }]);
+  });
+
+  test("saves starter items, and refuses ones that are not items, twice in the list, or of no quantity", async () => {
+    const items = [{ item: "wooden_staff", quantity: 1 }, { item: "health_potion", quantity: 5 }];
+    const made = await editor.handleEditorPacket(ADMIN, "CLASS_EDITOR_SAVE", classOf({ items })) as any;
+    expect(made.ok).toBe(true);
+    expect(tables.classes[0].items).toBe(JSON.stringify(items));
+    expect((await classes.get(made.data.classes[0].id))?.items).toEqual(items);
+
+    const bad = await editor.handleEditorPacket(ADMIN, "CLASS_EDITOR_SAVE", classOf({
+      name: "Rogue", items: [{ item: "wooden_staff", quantity: 1 }, { item: "wooden_staff", quantity: 1 }, { item: "nope", quantity: 1 }, { item: "health_potion", quantity: 0 }],
+    })) as any;
+    expect(bad.ok).toBe(false);
+    expect(Object.keys(bad.fields).sort()).toEqual(["items.1", "items.2", "items.3"]);
   });
 
   test("refuses what is wrong, field by field, and writes nothing", async () => {

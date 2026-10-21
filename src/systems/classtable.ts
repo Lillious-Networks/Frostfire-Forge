@@ -14,7 +14,8 @@ export const CLASSES_TABLE = {
       stat_critical_chance INT NOT NULL DEFAULT 10,
       stat_critical_damage INT NOT NULL DEFAULT 10,
       stat_avoidance INT NOT NULL DEFAULT 0,
-      spells TEXT DEFAULT NULL
+      spells TEXT DEFAULT NULL,
+      items TEXT DEFAULT NULL
     )`,
   sqlite: `CREATE TABLE IF NOT EXISTS classes (
       id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
@@ -27,6 +28,7 @@ export const CLASSES_TABLE = {
       stat_critical_chance INTEGER NOT NULL DEFAULT 10,
       stat_critical_damage INTEGER NOT NULL DEFAULT 10,
       stat_avoidance INTEGER NOT NULL DEFAULT 0,
-      spells TEXT DEFAULT NULL
+      spells TEXT DEFAULT NULL,
+      items TEXT DEFAULT NULL
     )`,
 };

@@ -4,7 +4,9 @@
  * stats and learn certain spells at certain levels").
  *
  * A class is a row of `classes`: a name, a description, the stats a character of it starts with (base stats only:
- * levelling works as it does for everyone), and the spells it learns, each at a level. An account's character is its
+ * levelling works as it does for everyone), the spells it learns, each at a level, and the items it starts with
+ * (USER REQUEST 2026-10-21: "allow adding starter items"; the gateway puts them in the inventory when the character
+ * is made). An account's character is its
  * class: `accounts.class_id`, NULL while no character has been made. The character is made on the gateway's character
  * page (it writes the rows while the player is out of the game; the caches read them again at login), and this
  * server refuses a login without one while there are classes to choose from (socket/receiver.ts: CHARACTER_REQUIRED).
@@ -23,6 +25,8 @@ import { CLASSES_TABLE } from "./classtable";
 
 /** A spell a class learns, at the level it is learned. */
 export interface ClassSpell { spell: string; level: number }
+/** An item a new character of a class starts with, and how many. */
+export interface ClassItem { item: string; quantity: number }
 
 export interface CharacterClass {
   id: number;
@@ -36,6 +40,7 @@ export interface CharacterClass {
   stat_critical_damage: number;
   stat_avoidance: number;
   spells: ClassSpell[];
+  items: ClassItem[];
 }
 
 /** The base stats a class sets, as the stats table names them. */
@@ -56,6 +61,18 @@ export function parseSpells(raw: unknown): ClassSpell[] {
     .sort((a, b) => a.level - b.level || a.spell.localeCompare(b.spell));
 }
 
+/** The items column, read as the spells column is. Unreadable or wrong entries are dropped. */
+export function parseItems(raw: unknown): ClassItem[] {
+  let value: unknown = raw;
+  if (typeof raw === "string") {
+    try { value = JSON.parse(raw); } catch { return []; }
+  }
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((e) => e && typeof e.item === "string" && e.item && Number.isFinite(Number(e.quantity)))
+    .map((e) => ({ item: String(e.item), quantity: Math.max(1, Math.floor(Number(e.quantity))) }));
+}
+
 function toClass(row: any): CharacterClass {
   return {
     id: Number(row.id),
@@ -69,6 +86,7 @@ function toClass(row: any): CharacterClass {
     stat_critical_damage: Number(row.stat_critical_damage) || 0,
     stat_avoidance: Number(row.stat_avoidance) || 0,
     spells: parseSpells(row.spells),
+    items: parseItems(row.items),
   };
 }
 
@@ -79,35 +97,40 @@ const classRows = tableCache<CharacterClass>("classes", async () =>
   ready ? (((await query("SELECT * FROM classes")) as any[]) || []).map(toClass) : []
 );
 
-async function hasAccountColumn(): Promise<boolean> {
+async function hasColumn(table: string, column: string): Promise<boolean> {
   if (sqlite()) {
-    const rows = (await query(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'`)) as any[];
-    return /\bclass_id\b/.test(String(rows?.[0]?.sql || ""));
+    const rows = (await query(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, [table])) as any[];
+    return new RegExp(`\\b${column}\\b`).test(String(rows?.[0]?.sql || ""));
   }
   const rows = (await query(
-    `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts' AND COLUMN_NAME = 'class_id'`
+    `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+    [table, column]
   )) as any[];
   return Number(rows?.[0]?.count) > 0;
 }
 
+/** Adds a column if it is missing. Another realm starting at the same moment may have added it first. */
+async function ensureColumn(table: string, column: string, type: string): Promise<void> {
+  if (await hasColumn(table, column)) return;
+  try {
+    await query(`ALTER TABLE ${table} ADD COLUMN ${column} ${type} DEFAULT NULL`);
+  } catch (error) {
+    if (!(await hasColumn(table, column))) throw error;
+  }
+}
+
 /**
- * Start-time step, before the first login and before the table caches are read: the classes table and
- * accounts.class_id, if missing (a live database whose setup ran before they existed). Safe on every start, and it
- * never throws: if it cannot be done, one warning is logged and characters stay off (no class to choose, no
- * character asked for).
+ * Start-time step, before the first login and before the table caches are read: the classes table,
+ * classes.items (the starter items) and accounts.class_id, if missing (a live database whose setup ran before they
+ * existed). Safe on every start, and it never throws: if it cannot be done, one warning is logged and characters
+ * stay off (no class to choose, no character asked for).
  */
 export async function ensureClassSchema(): Promise<boolean> {
   ready = false;
   try {
     await query(CLASSES_TABLE[sqlite() ? "sqlite" : "mysql"]);
-    if (!(await hasAccountColumn())) {
-      try {
-        await query(`ALTER TABLE accounts ADD COLUMN class_id ${sqlite() ? "INTEGER" : "INT"} DEFAULT NULL`);
-      } catch (error) {
-        // another realm starting at the same moment may have added it first
-        if (!(await hasAccountColumn())) throw error;
-      }
-    }
+    await ensureColumn("classes", "items", "TEXT");
+    await ensureColumn("accounts", "class_id", sqlite() ? "INTEGER" : "INT");
     ready = true;
   } catch (error) {
     log.warn(`[Classes] The classes table or accounts.class_id could not be added to the database, so characters and classes stay off: ${error}`);
@@ -135,8 +158,8 @@ const classes = {
   },
   /** Insert or update (by id), then the list held. Returns the class as saved. */
   async save(c: Omit<CharacterClass, "id"> & { id?: number | null }): Promise<CharacterClass | null> {
-    const values = [c.name, c.description || null, ...STAT_COLUMNS.map((k) => c[k]), JSON.stringify(c.spells)];
-    const columns = ["name", "description", ...STAT_COLUMNS, "spells"];
+    const values = [c.name, c.description || null, ...STAT_COLUMNS.map((k) => c[k]), JSON.stringify(c.spells), JSON.stringify(c.items)];
+    const columns = ["name", "description", ...STAT_COLUMNS, "spells", "items"];
     let id = c.id ?? null;
     if (id != null) {
       await query(`UPDATE classes SET ${columns.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`, [...values, id]);
@@ -149,7 +172,7 @@ const classes = {
       await classRows.reload();
       return classRows.find((row) => row.name === c.name);
     }
-    const saved = toClass({ ...c, id, spells: c.spells });
+    const saved = toClass({ ...c, id, spells: c.spells, items: c.items });
     await classRows.put(saved, (row) => row.id === saved.id);
     return saved;
   },
