@@ -45,6 +45,20 @@ export async function ensureSoulboundColumn(): Promise<boolean> {
   }
 }
 
+/**
+ * The same for items.sprite_sheet, the sprite sheet an equipped item is drawn with. When it cannot be
+ * added, one warning is logged and every item is drawn with the sheet named after it, as before.
+ */
+export async function ensureSpriteSheetColumn(): Promise<boolean> {
+  try {
+    await ensureItemColumn("sprite_sheet", { mysql: "VARCHAR(255) DEFAULT NULL", sqlite: "TEXT DEFAULT NULL" });
+    return true;
+  } catch (error) {
+    log.warn(`[Items] The sprite_sheet column could not be added to items, so each item is drawn with the sheet named after it: ${error}`);
+    return false;
+  }
+}
+
 /** What a newly priced item costs at a vendor, as a multiple of what vendors pay for it: as the NPC editor priced a newly stocked item. */
 export const BUY_PRICE_MARKUP = 4;
 
@@ -83,8 +97,8 @@ export async function ensureHomeItemIcon(): Promise<void> {
   }
 }
 
-/** Adds a whole-number column to items, 0 by default, unless it is there. Whether it was added now. */
-async function ensureItemColumn(name: string): Promise<boolean> {
+/** Adds a column to items unless it is there: a whole number, 0 by default, unless `type` says otherwise. Whether it was added now. */
+async function ensureItemColumn(name: string, type = { mysql: "INT NOT NULL DEFAULT 0", sqlite: "INTEGER NOT NULL DEFAULT 0" }): Promise<boolean> {
   const lite = (process.env.DATABASE_ENGINE || "mysql") === "sqlite";
   const has = async () => {
     if (lite) {
@@ -99,7 +113,7 @@ async function ensureItemColumn(name: string): Promise<boolean> {
   };
   if (await has()) return false;
   try {
-    await query(`ALTER TABLE items ADD COLUMN ${name} ${lite ? "INTEGER" : "INT"} NOT NULL DEFAULT 0`);
+    await query(`ALTER TABLE items ADD COLUMN ${name} ${lite ? type.sqlite : type.mysql}`);
     return true;
   } catch (error) {
     // another realm starting at the same moment may have added it first

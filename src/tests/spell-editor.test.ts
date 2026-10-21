@@ -137,6 +137,7 @@ let handedToLoginWorkers = 0;
 mock.module("../socket/authentication_pool", () => ({
   refreshAuthSpells: async () => { handedToLoginWorkers++; },
   refreshAuthItems: async () => {},
+  refreshAuthMounts: async () => {},
   getAuthWorker: async () => null,
   resetAuthWorker: () => {},
 }));

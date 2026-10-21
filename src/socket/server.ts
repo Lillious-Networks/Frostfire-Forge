@@ -32,7 +32,8 @@ import { ensureGatheringSchema } from "../systems/gathering/editor.ts";
 import fishing, { ensureFishingSchema } from "../systems/fishing";
 import { ensureFootprintsSchema } from "../systems/footprints";
 import { ensureAchievementSchema } from "../systems/achievements/store.ts";
-import { ensureBuyPriceColumn, ensureHomeItemIcon, ensureSoulboundColumn } from "../systems/items.ts";
+import { ensureBuyPriceColumn, ensureHomeItemIcon, ensureSoulboundColumn, ensureSpriteSheetColumn } from "../systems/items.ts";
+import { ensureMountEditorPermission } from "../systems/mounteditor.ts";
 import worlds from "../systems/worlds.ts";
 import playerCache from "../services/playermanager.ts";
 import { loadTables, forgetPlayer } from "../services/datacache.ts";
@@ -200,6 +201,10 @@ await ensureAchievementSchema();
 await ensureSoulboundColumn();
 // items.buy_price, the same way.
 await ensureBuyPriceColumn();
+// items.sprite_sheet, the same way.
+await ensureSpriteSheetColumn();
+// The mount editor's permission, so it can be granted from the list of permissions.
+await ensureMountEditorPermission();
 // The home item's icon, when it has none: before the items are read.
 await ensureHomeItemIcon();
 await loadTables();

@@ -275,6 +275,8 @@ declare interface Item {
   teleports_home?: boolean;
   /** Soulbound: stays with whoever has it. It cannot be traded or mailed (it can still be sold or deleted). */
   soulbound?: boolean;
+  /** Equipment: the sprite sheet it is drawn with when worn. Nothing set is the sheet named after the item. */
+  sprite_sheet?: Nullable<string>;
 }
 
 /** One thing a vendor stocks: the item's name, and what one costs to buy there, in copper. */

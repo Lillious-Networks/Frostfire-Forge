@@ -1295,6 +1295,27 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "ITEM_EDITOR_UPDATED", data })),
     ] as any[];
   },
+  /** Opens the mount editor (/mounteditor), or closes it. */
+  toggleMountEditor: () => {
+    return [
+      packet.encode(JSON.stringify({ type: "TOGGLE_MOUNT_EDITOR", data: null })),
+    ] as any[];
+  },
+  mountEditorData: (data: any) => {
+    return [
+      packet.encode(JSON.stringify({ type: "MOUNT_EDITOR_DATA", data })),
+    ] as any[];
+  },
+  mountEditorResult: (data: { ok: boolean; errors: string[]; fields?: Record<string, string>; name: string | null; action?: string; data: any }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "MOUNT_EDITOR_RESULT", data })),
+    ] as any[];
+  },
+  mountEditorUpdated: (data: { by: string }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "MOUNT_EDITOR_UPDATED", data })),
+    ] as any[];
+  },
   toggleSpellEditor: () => {
     return [
       packet.encode(JSON.stringify({ type: "TOGGLE_SPELL_EDITOR", data: null })),

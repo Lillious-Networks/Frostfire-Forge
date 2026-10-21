@@ -113,3 +113,19 @@ export async function refreshAuthItems(): Promise<void> {
         w.postMessage({ items: serialized });
     }
 }
+
+/**
+ * The mount list changed while the server is running (mount editor). Each
+ * worker leaves a mount it does not know out of a logging-in player's
+ * collection, so hand every worker the new list, and keep it for any worker
+ * started later.
+ */
+export async function refreshAuthMounts(): Promise<void> {
+    if (authWorkers.length === 0) return;
+    const mounts = await assetCache.get("mounts");
+    const serialized = mounts ? JSON.stringify(mounts) : null;
+    if (serializedAssets) serializedAssets.mounts = serialized;
+    for (const w of authWorkers) {
+        w.postMessage({ mounts: serialized });
+    }
+}

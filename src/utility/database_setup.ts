@@ -179,7 +179,8 @@ const createItemsTable = async () => {
         restore_stamina INT NOT NULL DEFAULT 0,
         no_combat INT NOT NULL DEFAULT 0,
         teleports_home INT NOT NULL DEFAULT 0,
-        soulbound INT NOT NULL DEFAULT 0
+        soulbound INT NOT NULL DEFAULT 0,
+        sprite_sheet VARCHAR(255) DEFAULT NULL
     )
   `;
   await query(sql);
@@ -432,6 +433,7 @@ const createPermissionTypesTable = async () => {
         ('tools.npc_editor'),
       ('tools.creature_editor'),
       ('tools.item_editor'),
+      ('tools.mount_editor'),
       ('tools.spell_editor'),
       ('tools.weather_editor'),
       ('tools.quest_editor'),
@@ -1104,6 +1106,8 @@ const addConsumableColumns = async () => {
     { table: "items", name: "teleports_home", type: "INT NOT NULL DEFAULT 0" },
     // Soulbound items cannot be traded or mailed. Added with mail.
     { table: "items", name: "soulbound", type: "INT NOT NULL DEFAULT 0" },
+    // The sprite sheet an equipped item is drawn with. Nothing set is the sheet named after the item.
+    { table: "items", name: "sprite_sheet", type: "VARCHAR(255) DEFAULT NULL" },
     { table: "npcs", name: "innkeeper", type: "INT NOT NULL DEFAULT 0" },
     // Sound NPCs: an audio file played to players within sound_radius pixels. Added with sound NPCs.
     { table: "npcs", name: "sound_npc", type: "INT NOT NULL DEFAULT 0" },
@@ -1301,12 +1305,13 @@ const createCreatureTables = async () => {
     fade_s INT NOT NULL,
     PRIMARY KEY (tileset, tile_id)
   )`);
-  // Fishable tiles (the map editor's Fishing tab): what each tile of a tileset gives. Same SQL as
-  // FISHING_TILES_TABLE.mysql in systems/fishing/index.ts, which makes it at engine start too.
+  // Fishable tiles (the map editor's Fishing tab): what each tile of a tileset gives, and the items that fish it. Same
+  // SQL as FISHING_TILES_TABLE.mysql in systems/fishing/index.ts, which makes it (and adds tools) at engine start too.
   await query(`CREATE TABLE IF NOT EXISTS fishing_tiles (
     tileset VARCHAR(64) NOT NULL,
     tile_id INT NOT NULL,
     catches TEXT NOT NULL,
+    tools TEXT NULL,
     PRIMARY KEY (tileset, tile_id)
   )`);
   await query(`CREATE TABLE IF NOT EXISTS creature_spawns (

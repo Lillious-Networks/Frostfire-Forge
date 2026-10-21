@@ -1,24 +1,27 @@
 import { describe, expect, test } from "bun:test";
 import {
-  applyFishingChanges, facingToward, fishingSpotInChunk, fishingSpotInMap, MAX_CATCHES, readFishingChanges, rollCatch, tilesetKey,
-  type FishingTiles,
+  applyFishingChanges, applyFishingTools, facingToward, fishingSpotInChunk, fishingSpotInMap, fishingTool, MAX_CATCHES, MAX_TOOLS,
+  readFishingChanges, rollCatch, tilesetKey, toolsWords, type FishingTiles,
 } from "../systems/fishing/catches";
 
 const MATERIALS = ["Trout", "Salmon", "Old Boot"];
 const itemName = (name: string) => MATERIALS.find((m) => m.toLowerCase() === name.toLowerCase()) ?? null;
+const WEAPONS = ["Wooden Fishing Rod", "Steel Rod", "Wooden Staff"];
+const toolName = (name: string) => WEAPONS.find((w) => w.toLowerCase() === name.toLowerCase()) ?? null;
+const rod = ["Wooden Fishing Rod"];
 
 describe("fishing saves", () => {
   test("a save is made tidy: tileset in lower case, each tile once and in order, items as the list spells them", () => {
-    const read = readFishingChanges({ changes: [{ tileset: " Environment ", ids: [5, 3, 5], catches: [{ item: "trout", chance: 60.005 }, { item: "SALMON", chance: 40 }] }] }, itemName);
-    expect(read).toEqual({ changes: [{ tileset: "environment", ids: [3, 5], catches: [{ item: "Trout", chance: 60.01 }, { item: "Salmon", chance: 40 }] }] });
+    const read = readFishingChanges({ changes: [{ tileset: " Environment ", ids: [5, 3, 5], catches: [{ item: "trout", chance: 60.005 }, { item: "SALMON", chance: 40 }], tools: [" steel rod "] }] }, itemName, toolName);
+    expect(read).toEqual({ changes: [{ tileset: "environment", ids: [3, 5], catches: [{ item: "Trout", chance: 60.01 }, { item: "Salmon", chance: 40 }], tools: ["Steel Rod"] }] });
   });
 
   test("null makes tiles not fishable", () => {
-    expect(readFishingChanges({ changes: [{ tileset: "water", ids: [1], catches: null }] }, itemName)).toEqual({ changes: [{ tileset: "water", ids: [1], catches: null }] });
+    expect(readFishingChanges({ changes: [{ tileset: "water", ids: [1], catches: null, tools: rod }] }, itemName, toolName)).toEqual({ changes: [{ tileset: "water", ids: [1], catches: null, tools: [] }] });
   });
 
   test("what is not a material item, a twice-listed item, a chance out of range or too many catches is refused", () => {
-    const one = (catches: unknown) => readFishingChanges({ changes: [{ tileset: "water", ids: [1], catches }] }, itemName);
+    const one = (catches: unknown) => readFishingChanges({ changes: [{ tileset: "water", ids: [1], catches, tools: rod }] }, itemName, toolName);
     expect("error" in one([{ item: "Iron Sword", chance: 50 }])).toBe(true);
     expect("error" in one([{ item: "Trout", chance: 50 }, { item: "trout", chance: 50 }])).toBe(true);
     expect("error" in one([{ item: "Trout", chance: 0 }])).toBe(true);
@@ -28,21 +31,39 @@ describe("fishing saves", () => {
   });
 
   test("bad tilesets and tile ids are refused", () => {
-    expect("error" in readFishingChanges({ changes: [] }, itemName)).toBe(true);
-    expect("error" in readFishingChanges({ changes: [{ tileset: "../x", ids: [1], catches: null }] }, itemName)).toBe(true);
-    expect("error" in readFishingChanges({ changes: [{ tileset: "water", ids: [-1], catches: null }] }, itemName)).toBe(true);
-    expect("error" in readFishingChanges({ changes: [{ tileset: "water", ids: [1.5], catches: null }] }, itemName)).toBe(true);
+    expect("error" in readFishingChanges({ changes: [] }, itemName, toolName)).toBe(true);
+    expect("error" in readFishingChanges({ changes: [{ tileset: "../x", ids: [1], catches: null }] }, itemName, toolName)).toBe(true);
+    expect("error" in readFishingChanges({ changes: [{ tileset: "water", ids: [-1], catches: null }] }, itemName, toolName)).toBe(true);
+    expect("error" in readFishingChanges({ changes: [{ tileset: "water", ids: [1.5], catches: null }] }, itemName, toolName)).toBe(true);
+  });
+
+  test("fishable tiles name at least one weapon to fish them with, each once", () => {
+    const tools = (list: unknown) => readFishingChanges({ changes: [{ tileset: "water", ids: [1], catches: [{ item: "Trout", chance: 100 }], tools: list }] }, itemName, toolName);
+    expect(tools(undefined)).toEqual({ error: "Choose at least one item to fish with." });
+    expect(tools([])).toEqual({ error: "Choose at least one item to fish with." });
+    expect(tools(["Trout"])).toEqual({ error: "Trout is not a weapon." });
+    expect(tools(["Steel Rod", "steel rod"])).toEqual({ error: "Steel Rod is in the list twice." });
+    expect("error" in tools(Array.from({ length: MAX_TOOLS + 1 }, (_, i) => `Rod ${i}`))).toBe(true);
+    expect(tools(["wooden fishing rod", "Steel Rod"])).toMatchObject({ changes: [{ tools: ["Wooden Fishing Rod", "Steel Rod"] }] });
   });
 
   test("changes are applied in order, and an emptied tileset goes away", () => {
     const base: FishingTiles = { water: { "1": [{ item: "Trout", chance: 100 }] } };
     const next = applyFishingChanges(base, [
-      { tileset: "water", ids: [2], catches: [{ item: "Salmon", chance: 100 }] },
-      { tileset: "water", ids: [1, 2], catches: null },
-      { tileset: "sea", ids: [7], catches: [{ item: "Old Boot", chance: 5 }] },
+      { tileset: "water", ids: [2], catches: [{ item: "Salmon", chance: 100 }], tools: rod },
+      { tileset: "water", ids: [1, 2], catches: null, tools: [] },
+      { tileset: "sea", ids: [7], catches: [{ item: "Old Boot", chance: 5 }], tools: rod },
     ]);
     expect(next).toEqual({ sea: { "7": [{ item: "Old Boot", chance: 5 }] } });
     expect(base.water!["1"]).toEqual([{ item: "Trout", chance: 100 }]);
+  });
+
+  test("the items that fish tiles are applied as their catches are", () => {
+    const next = applyFishingTools({ water: { "1": rod } }, [
+      { tileset: "water", ids: [2], catches: [{ item: "Salmon", chance: 100 }], tools: ["Steel Rod"] },
+      { tileset: "water", ids: [1], catches: null, tools: [] },
+    ]);
+    expect(next).toEqual({ water: { "2": ["Steel Rod"] } });
   });
 });
 
@@ -85,8 +106,8 @@ describe("finding the fishable tile", () => {
         { type: "tilelayer", name: "Collisions", width: 2, height: 1, data: [4, 4] },
       ],
     };
-    expect(fishingSpotInMap(map, 5, 5, tiles)).toEqual({ tileset: "lily", id: 0, catches: tiles.lily!["0"]! });
-    expect(fishingSpotInMap(map, 20, 5, tiles)).toEqual({ tileset: "water", id: 3, catches: tiles.water!["3"]! });
+    expect(fishingSpotInMap(map, 5, 5, tiles)).toEqual({ tileset: "lily", id: 0, catches: tiles.lily!["0"]!, tools: [] });
+    expect(fishingSpotInMap(map, 20, 5, tiles, { water: { "3": rod } })).toEqual({ tileset: "water", id: 3, catches: tiles.water!["3"]!, tools: rod });
     expect(fishingSpotInMap(map, 40, 5, tiles)).toBeNull();
   });
 
@@ -104,6 +125,27 @@ describe("finding the fishable tile", () => {
     expect(fishingSpotInChunk(chunk, 1, 0, tilesets, tiles)?.tileset).toBe("water");
     expect(fishingSpotInChunk(chunk, 0, 1, tilesets, tiles)).toBeNull();
     expect(fishingSpotInChunk(chunk, 2, 0, tilesets, tiles)).toBeNull();
+  });
+});
+
+describe("what fishes a tile", () => {
+  const spot = { tileset: "water", id: 3, catches: [{ item: "Trout", chance: 100 }], tools: ["Wooden Fishing Rod", "Steel Rod"] };
+
+  test("the equipped weapon fishes it when the tile names it, in any case", () => {
+    expect(fishingTool(spot, "steel rod")).toBe("Steel Rod");
+    expect(fishingTool(spot, "Wooden Staff")).toBeNull();
+    expect(fishingTool(spot, null)).toBeNull();
+    expect(fishingTool(spot, "null")).toBeNull();
+  });
+
+  test("a tile that names nothing is fished with nothing", () => {
+    expect(fishingTool({ ...spot, tools: [] }, "Steel Rod")).toBeNull();
+  });
+
+  test("the items are named as a player reads them", () => {
+    expect(toolsWords(["A"])).toBe("A");
+    expect(toolsWords(["A", "B"])).toBe("A or B");
+    expect(toolsWords(["A", "B", "C"])).toBe("A, B or C");
   });
 });
 

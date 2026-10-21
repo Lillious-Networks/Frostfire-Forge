@@ -35,6 +35,7 @@ mock.module("../socket/authentication_pool", () => ({
     handedToLoginWorkers.push(((cache.get("items") || []) as Item[]).map((i) => i.name));
   },
   refreshAuthSpells: async () => {},
+  refreshAuthMounts: async () => {},
   getAuthWorker: async () => null,
   resetAuthWorker: () => {},
 }));
@@ -257,7 +258,9 @@ describe("saving", () => {
     expect(insert!.sql).toMatch(/^INSERT INTO items \(.*\bsell_price\b.*\)/);
     expect(insert!.params).toContain(340);
     expect(update!.sql).toMatch(/^UPDATE items SET .*\bsell_price = \?/);
-    expect(update!.params.at(-2)).toBe(0);
+    // Its parameter is the one at its place among the columns set.
+    const set = update!.sql.replace(/^UPDATE items SET (.*) WHERE .*$/, "$1").split(", ");
+    expect(update!.params[set.indexOf("sell_price = ?")]).toBe(0);
     expect((cache.get("items") as Item[])[0]?.sell_price).toBe(0);
   });
 
@@ -440,5 +443,38 @@ describe("editor packets", () => {
     const result = await editor.handleEditorPacket("ITEM_EDITOR_NONSENSE", {});
     expect(result.kind).toBe("result");
     if (result.kind === "result") expect(result.ok).toBe(false);
+  });
+});
+
+describe("the sprite sheet an item is drawn with", () => {
+  test("is kept for an item worn where it is drawn, and dropped everywhere else", () => {
+    expect(editor.normalizeItem(weapon({ sprite_sheet: " iron_sword " })).sprite_sheet).toBe("iron_sword");
+    expect(editor.normalizeItem(weapon({ sprite_sheet: "" })).sprite_sheet).toBeNull();
+    // A ring is not drawn on its wearer, and an item that is not worn is never drawn.
+    expect(editor.normalizeItem(weapon({ equipment_slot: "ring_1", sprite_sheet: "iron_sword" })).sprite_sheet).toBeNull();
+    expect(editor.normalizeItem(weapon({ equipable: false, sprite_sheet: "iron_sword" })).sprite_sheet).toBeNull();
+  });
+
+  test("is written with the rest of the item", async () => {
+    queries.length = 0;
+    cache.set("items", []);
+    await editor.saveItem(weapon({ sprite_sheet: "iron_sword" }), null);
+    const insert = queries.find((q) => q.sql.startsWith("INSERT INTO items"))!;
+    const columns = insert.sql.replace(/^INSERT INTO items \((.*?)\).*$/, "$1").split(", ");
+    expect(insert.params[columns.indexOf("sprite_sheet")]).toBe("iron_sword");
+  });
+
+  test("is the one a worn item is drawn with, or the sheet named after it when none is chosen", async () => {
+    const { getPlayerSpriteSheetData } = await import("../modules/spriteSheetManager");
+    cache.set("items", []);
+    await editor.saveItem(weapon({ name: "Wooden Staff", sprite_sheet: "oak_staff" }), null);
+    await editor.saveItem(weapon({ name: "Iron Helm", equipment_slot: "helmet" }), null);
+    const drawn = await getPlayerSpriteSheetData("player_idle_down", { weapon: "Wooden Staff", helmet: "Iron Helm" });
+    expect(drawn.armorWeaponSprite?.name).toBe("oak_staff");
+    expect(drawn.armorHelmetSprite?.name).toBe("iron helm");
+
+    // Choosing another sheet in the editor draws it from then on.
+    await editor.saveItem(weapon({ name: "Wooden Staff", sprite_sheet: "birch_staff" }), "Wooden Staff");
+    expect((await getPlayerSpriteSheetData("player_idle_down", { weapon: "Wooden Staff" })).armorWeaponSprite?.name).toBe("birch_staff");
   });
 });

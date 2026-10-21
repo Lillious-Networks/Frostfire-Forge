@@ -20,7 +20,9 @@ import { getWorldMap, type WorldMap } from "../../modules/worldmaps";
 import assetCache from "../../services/assetCache";
 import { tableCache } from "../../services/datacache";
 import { Events, listener } from "../events";
-import { fishingSpotInChunk, fishingSpotInMap, readFishingChanges, type Catch, type FishingChange, type FishingSpot, type FishingTiles } from "./catches";
+import {
+  fishingSpotInChunk, fishingSpotInMap, readFishingChanges, type Catch, type FishingChange, type FishingSpot, type FishingTiles, type FishingTools,
+} from "./catches";
 
 export * from "./catches";
 
@@ -50,8 +52,6 @@ export const BITE_ESCAPE_MS = 5000;
  * the line is finished being reeled in").
  */
 export const CATCH_HOLD_MS = 950, LINE_IN_MS = 700;
-/** The weapon a fishing player is drawn holding, as an equipment sprite (the asset server's armor/weapon sheets). */
-export const FISHING_ROD_SPRITE = "wooden staff";
 
 const sqlite = (): boolean => (process.env.DATABASE_ENGINE || "mysql") === "sqlite";
 const normMap = (map: unknown) => String(map ?? "").replaceAll(".json", "");
@@ -62,26 +62,49 @@ export const FISHING_TILES_TABLE: Record<"mysql" | "sqlite", string> = {
     tileset VARCHAR(64) NOT NULL,
     tile_id INT NOT NULL,
     catches TEXT NOT NULL,
+    tools TEXT NULL,
     PRIMARY KEY (tileset, tile_id)
   )`,
   sqlite: `CREATE TABLE IF NOT EXISTS fishing_tiles (
     tileset TEXT NOT NULL,
     tile_id INTEGER NOT NULL,
     catches TEXT NOT NULL,
+    tools TEXT,
     PRIMARY KEY (tileset, tile_id)
   )`,
 };
 
 let ready = false;
 
+/** Whether fishing_tiles has its tools column (added after the table was). */
+async function hasToolsColumn(): Promise<boolean> {
+  if (sqlite()) {
+    const found = (await query(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'fishing_tiles'`)) as any[];
+    return /\btools\b/.test(String(found?.[0]?.sql || ""));
+  }
+  const found = (await query(
+    `SELECT COUNT(*) as count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'fishing_tiles' AND COLUMN_NAME = 'tools'`
+  )) as any[];
+  return Number(found?.[0]?.count) > 0;
+}
+
 /**
- * Start-time safety step: makes the table on a database whose setup ran before it was added. Safe on every start, and
- * never throws: without the table, nothing is fishable and a save is refused.
+ * Start-time safety step: makes the table, and its tools column, on a database whose setup ran before they were added.
+ * Safe on every start, and never throws: without the table, nothing is fishable and a save is refused. The tiles saved
+ * before the column was added name no tools, so they cannot be fished until the map editor gives them some.
  */
 export async function ensureFishingSchema(): Promise<boolean> {
   ready = false;
   try {
     await query(FISHING_TILES_TABLE[sqlite() ? "sqlite" : "mysql"]);
+    if (!(await hasToolsColumn())) {
+      try {
+        await query(`ALTER TABLE fishing_tiles ADD COLUMN tools TEXT${sqlite() ? "" : " NULL"}`);
+      } catch (error) {
+        // another realm starting at the same moment may have added it first
+        if (!(await hasToolsColumn())) throw error;
+      }
+    }
     ready = true;
   } catch (error) {
     log.warn(`[Fishing] The fishing_tiles table could not be made, so nothing can be fished: ${error}`);
@@ -89,39 +112,52 @@ export async function ensureFishingSchema(): Promise<boolean> {
   return ready;
 }
 
-interface Row { tileset: string; tile_id: number; catches: string }
+interface Row { tileset: string; tile_id: number; catches: string; tools: string | null }
 
 const rows = tableCache<Row>("fishing_tiles", async () =>
-  ready ? (((await query(`SELECT tileset, tile_id, catches FROM fishing_tiles`)) as Row[]) || []) : []
+  ready ? (((await query(`SELECT tileset, tile_id, catches, tools FROM fishing_tiles`)) as Row[]) || []) : []
 );
 
-/** The rows as one list (a row whose catches cannot be read is left out). */
-function fromRows(list: Row[]): FishingTiles {
+/** A JSON list as written, or null when it cannot be read as one. */
+function listOf(text: unknown): unknown[] | null {
+  try {
+    const parsed = JSON.parse(String(text ?? ""));
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The rows as two lists: what each tile gives, and what fishes it (a row whose catches cannot be read is left out). */
+function fromRows(list: Row[]): { tiles: FishingTiles; tools: FishingTools } {
   const out: FishingTiles = {};
+  const fishedWith: FishingTools = {};
   for (const row of list) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(String(row.catches));
-    } catch {
-      continue;
-    }
-    if (!Array.isArray(parsed)) continue;
+    const parsed = listOf(row.catches);
+    if (!parsed) continue;
     const entries: Catch[] = parsed
       .filter((entry: any) => typeof entry?.item === "string" && Number(entry?.chance) > 0)
       .map((entry: any) => ({ item: String(entry.item), chance: Number(entry.chance) }));
     if (!entries.length) continue;
-    const key = String(row.tileset).toLowerCase();
-    (out[key] ??= {})[String(Number(row.tile_id))] = entries;
+    const key = String(row.tileset).toLowerCase(), id = String(Number(row.tile_id));
+    (out[key] ??= {})[id] = entries;
+    (fishedWith[key] ??= {})[id] = (listOf(row.tools) ?? []).filter((tool): tool is string => typeof tool === "string" && !!tool.trim());
   }
-  return out;
+  return { tiles: out, tools: fishedWith };
 }
 
 let tiles: FishingTiles = {};
+let tools: FishingTools = {};
 
 /** Reads the list again from the cache (start, saves, and now and then: another realm on the database may have saved). */
 export async function refreshTiles(): Promise<FishingTiles> {
-  tiles = ready ? fromRows(await rows.all()) : {};
+  ({ tiles, tools } = ready ? fromRows(await rows.all()) : { tiles: {}, tools: {} });
   return tiles;
+}
+
+/** What fishes every fishable tile. */
+export function getFishingTools(): FishingTools {
+  return tools;
 }
 
 /** Every fishable tile and what it gives. */
@@ -154,13 +190,13 @@ export async function saveFishing(changes: FishingChange[]): Promise<FishingTile
           await query(`DELETE FROM fishing_tiles WHERE tileset = ? AND tile_id IN (${ids.map(() => "?").join(", ")})`, [change.tileset, ...ids]);
           continue;
         }
-        const json = JSON.stringify(change.catches);
-        const values = ids.map(() => "(?, ?, ?)").join(", ");
-        const params = ids.flatMap((id) => [change.tileset, id, json]);
+        const json = JSON.stringify(change.catches), toolsJson = JSON.stringify(change.tools);
+        const values = ids.map(() => "(?, ?, ?, ?)").join(", ");
+        const params = ids.flatMap((id) => [change.tileset, id, json, toolsJson]);
         await query(
           sqlite()
-            ? `INSERT OR REPLACE INTO fishing_tiles (tileset, tile_id, catches) VALUES ${values}`
-            : `INSERT INTO fishing_tiles (tileset, tile_id, catches) VALUES ${values} ON DUPLICATE KEY UPDATE catches = VALUES(catches)`,
+            ? `INSERT OR REPLACE INTO fishing_tiles (tileset, tile_id, catches, tools) VALUES ${values}`
+            : `INSERT INTO fishing_tiles (tileset, tile_id, catches, tools) VALUES ${values} ON DUPLICATE KEY UPDATE catches = VALUES(catches), tools = VALUES(tools)`,
           params
         );
       }
@@ -179,15 +215,25 @@ export async function saveFishing(changes: FishingChange[]): Promise<FishingTile
 
 /** item name (lower case) -> item, of the material items only: what can be caught. */
 let materials = new Map<string, any>();
+/** item name (lower case) -> item, of the weapons only (equipable in the weapon slot): what can fish. */
+let weapons = new Map<string, any>();
 
 async function refreshItems(): Promise<void> {
   const list = ((await assetCache.get("items")) || []) as any[];
-  materials = new Map(list.filter((item) => item?.name && item.type === "material").map((item) => [String(item.name).toLowerCase(), item]));
+  const byName = (keep: (item: any) => boolean) => new Map(list.filter((item) => item?.name && keep(item)).map((item) => [String(item.name).toLowerCase(), item]));
+  materials = byName((item) => item.type === "material");
+  weapons = byName((item) => !!item.equipable && Number(item.equipable) !== 0 && String(item.equipment_slot).toLowerCase() === "weapon");
 }
 
 /** A material item's own name for a name in any case, or null. */
 export function materialName(name: string): string | null {
   const item = materials.get(String(name).toLowerCase());
+  return item ? String(item.name) : null;
+}
+
+/** A weapon's own name for a name in any case, or null: what a tile can be fished with. */
+export function weaponName(name: string): string | null {
+  const item = weapons.get(String(name).toLowerCase());
   return item ? String(item.name) : null;
 }
 
@@ -201,13 +247,18 @@ export function qualityOf(item: string): string {
   return String(materials.get(item.toLowerCase())?.quality || "common");
 }
 
-/** What the editor is sent: every fishable tile with its catches, and the material items to pick from. */
-export async function editorData(): Promise<{ tiles: FishingTiles; items: Array<{ name: string; image: string | null; quality: string | null }> }> {
+type EditorItem = { name: string; image: string | null; quality: string | null };
+
+/**
+ * What the editor is sent: every fishable tile with its catches and what fishes it, the material items to pick catches
+ * from, and the weapons to pick what fishes from.
+ */
+export async function editorData(): Promise<{ tiles: FishingTiles; tools: FishingTools; items: EditorItem[]; weapons: EditorItem[] }> {
   await refreshItems();
-  const items = [...materials.values()]
+  const listed = (from: Map<string, any>): EditorItem[] => [...from.values()]
     .map((item) => ({ name: String(item.name), image: getIconUrl(item.icon ?? null), quality: item.quality ? String(item.quality) : null }))
     .sort((a, b) => a.name.localeCompare(b.name));
-  return { tiles, items };
+  return { tiles, tools, items: listed(materials), weapons: listed(weapons) };
 }
 
 /** Make sure the item list is fresh before a save is read. */
@@ -259,11 +310,11 @@ export async function spotAt(mapName: string, x: number, y: number): Promise<Fis
     if (tx >= world.width || ty >= world.height) return null;
     const size = world.chunkSize, cx = Math.floor(tx / size), cy = Math.floor(ty / size);
     const chunk = await worldChunk(world, cx, cy);
-    return chunk ? fishingSpotInChunk(chunk, tx - cx * size, ty - cy * size, world.map.data.tilesets || [], tiles) : null;
+    return chunk ? fishingSpotInChunk(chunk, tx - cx * size, ty - cy * size, world.map.data.tilesets || [], tiles, tools) : null;
   }
   const maps = ((await assetCache.get("maps")) || []) as any[];
   const map = maps.find((m: any) => m?.name === `${name}.json`)?.data;
-  return map ? fishingSpotInMap(map, x, y, tiles) : null;
+  return map ? fishingSpotInMap(map, x, y, tiles, tools) : null;
 }
 
 // ---------------------------------------------------------------- sessions
@@ -276,6 +327,8 @@ export interface FishingSession {
   x: number;
   y: number;
   spot: FishingSpot;
+  /** The weapon the line was cast with: unequipping it takes the line in. */
+  tool: string;
   item: string | null;
   bitAt: number;
   /** When the player began reeling the fish in (FISH_REEL), 0 while they have not. */
@@ -335,7 +388,7 @@ export async function init(): Promise<void> {
 }
 
 export default {
-  init, ensureFishingSchema, refreshTiles, getFishingTiles, publicTiles, mayEditFishing, readFishingChanges, saveFishing, materialName, iconOf,
-  qualityOf, editorData, loadItems, spotAt, forgetMap, session, allSessions, startSession, endSession, biteDelay,
-  FISH_RANGE, FISH_WALK_RANGE, CATCH_HOLD_MS, LINE_IN_MS, BITE_MIN_MS, BITE_MAX_MS, MIN_REEL_MS, HOOKED_MAX_MS, BITE_ESCAPE_MS, FISHING_ROD_SPRITE,
+  init, ensureFishingSchema, refreshTiles, getFishingTiles, getFishingTools, publicTiles, mayEditFishing, readFishingChanges, saveFishing,
+  materialName, weaponName, iconOf, qualityOf, editorData, loadItems, spotAt, forgetMap, session, allSessions, startSession, endSession, biteDelay,
+  FISH_RANGE, FISH_WALK_RANGE, CATCH_HOLD_MS, LINE_IN_MS, BITE_MIN_MS, BITE_MAX_MS, MIN_REEL_MS, HOOKED_MAX_MS, BITE_ESCAPE_MS,
 };

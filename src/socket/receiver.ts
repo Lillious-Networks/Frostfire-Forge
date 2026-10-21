@@ -563,10 +563,12 @@ listener.on(Events.PLAYER_DEBUFF_ADDED, (event: { target?: any; effectType?: str
 /** Whether a player is fishing now: its cast is the one they are in (castFish). */
 const castingFish = (player: any) => !!player?.casting && player.fishCastId !== undefined && player.fishCastId === player.castId;
 
-/** The equipment a player is drawn with: a player who is fishing holds the rod (systems/fishing), whatever they wield. */
+/**
+ * The equipment a player is drawn with. A player who is fishing holds the rod they cast with, which is the weapon they
+ * have equipped (systems/fishing: a tile is fished only with a weapon it names), so it is their own equipment.
+ */
 function drawnEquipment(target: any): any {
-  if (!castingFish(target)) return target?.equipment || null;
-  return { ...(target.equipment || {}), weapon: fishing.FISHING_ROD_SPRITE };
+  return target?.equipment || null;
 }
 
 /**
@@ -658,6 +660,10 @@ async function castFish(caster: any, data: unknown): Promise<void> {
   if (Math.hypot(x - Number(pos.x), y - Number(pos.y)) > fishing.FISH_RANGE) return refuse("That is too far away to cast.");
   const spot = await fishing.spotAt(map, x, y);
   if (!spot) return refuse("You can't fish there.");
+  // The weapon equipped must be one the tile names (the map editor's Fishing tab). A tile that names none is not fished.
+  if (!spot.tools.length) return refuse("You can't fish there yet.");
+  const tool = fishingTool(spot, live.equipment?.weapon);
+  if (!tool) return refuse(`Equip ${toolsWords(spot.tools)} to fish here.`);
   const item = rollCatch(spot.catches, Math.random());
   if (!item) return refuse("You can't fish there.");
   if (!(await hasRoomFor(live.username, item))) return refuse("Your bags are full.");
@@ -665,6 +671,7 @@ async function castFish(caster: any, data: unknown): Promise<void> {
   // the checks were awaited: a cast that began meanwhile or a map change wins
   const after = playerCache.get(caster.id);
   if (!after || (after.casting && !castingFish(after)) || String(after.location?.map ?? "") !== map) return;
+  if (fishingTool(spot, after.equipment?.weapon) !== tool) return refuse(`Equip ${toolsWords(spot.tools)} to fish here.`);
   const here = after.location.position;
   const castId = (after.castId || 0) + 1;
   const facing = facingToward(x - Number(here.x), y - Number(here.y));
@@ -684,7 +691,7 @@ async function castFish(caster: any, data: unknown): Promise<void> {
   here.direction = facing;
   playerCache.set(after.id, after);
   fishing.startSession(after.id, {
-    castId, map: map.replaceAll(".json", ""), from: { x: Number(here.x), y: Number(here.y) }, x, y, spot, item, bitAt: 0, reeledAt: 0, timer: null,
+    castId, map: map.replaceAll(".json", ""), from: { x: Number(here.x), y: Number(here.y) }, x, y, spot, tool, item, bitAt: 0, reeledAt: 0, timer: null,
   });
 
   globalStateRevision++;
@@ -804,12 +811,15 @@ for (const event of [Events.MAP_ENTER, Events.PLAYER_DEATH]) {
     if (target?.id && fishing.session(target.id)) stopFishing(target).catch((error) => log.error(`A fishing line could not be taken in: ${error}`));
   });
 }
-// So does walking too far from where the line was cast, looked at every tick (100 ms)
+// So does walking too far from where the line was cast, or taking off the rod it was cast with (by any means: the
+// equipment window, a trade, an admin), looked at every tick (100 ms)
 listener.on(Events.FIXED_UPDATE, () => {
   for (const [id, session] of fishing.allSessions()) {
     const p = playerCache.get(id);
-    if (!p || !castingFish(p) || p.castId !== session.castId || !leftLine(p, session)) continue;
-    if (p.wt) sendPacket(p.wt, packetManager.notify({ message: "You walked too far from your line." }));
+    if (!p || !castingFish(p) || p.castId !== session.castId) continue;
+    const rodOff = String(p.equipment?.weapon ?? "").toLowerCase() !== session.tool.toLowerCase();
+    if (!rodOff && !leftLine(p, session)) continue;
+    if (p.wt) sendPacket(p.wt, packetManager.notify({ message: rodOff ? `You put away your ${session.tool}.` : "You walked too far from your line." }));
     stopFishing(p).catch((error) => log.error(`A fishing line could not be taken in: ${error}`));
   }
 });
@@ -1037,11 +1047,12 @@ import gathering from "../systems/gathering";
 import { REASONS as GATHER_REASONS } from "../systems/gathering/service";
 import fishing from "../systems/fishing";
 import footprints from "../systems/footprints";
-import { facingToward, rollCatch } from "../systems/fishing/catches";
+import { facingToward, fishingTool, rollCatch, toolsWords } from "../systems/fishing/catches";
 import achievements from "../systems/achievements";
 import collectables from "../systems/collectables";
 import { projectileTravelMs } from "../systems/creatures/projectile";
 import * as itemEditor from "../systems/itemeditor";
+import * as mountEditor from "../systems/mounteditor";
 import * as spellEditor from "../systems/spelleditor";
 import * as weatherEditor from "../systems/weathereditor";
 import * as classEditor from "../systems/classeditor";
@@ -4727,6 +4738,28 @@ export default async function packetReceiver(
           for (const other of Object.values(playerCache.list()) as any[]) {
             if (!other?.wt || other.id === currentPlayer.id) continue;
             if (itemEditor.canUseEditor(other)) sendPacket(other.wt, updated);
+          }
+        }
+        break;
+      }
+      case "MOUNT_EDITOR_LIST":
+      case "MOUNT_EDITOR_SAVE":
+      case "MOUNT_EDITOR_DELETE": {
+        if (!currentPlayer) return;
+        // The handler checks permission first, on every one of these, not just on /mounteditor.
+        const result = await mountEditor.handleEditorPacket(currentPlayer, type, data);
+        if (result.kind === "data") {
+          sendPacket(wt, packetManager.mountEditorData(result.data));
+          break;
+        }
+        if (result.denied) sendPacket(wt, packetManager.notify({ message: mountEditor.DENIED }));
+        sendPacket(wt, packetManager.mountEditorResult({ ok: result.ok, errors: result.errors, fields: result.fields, name: result.name, action: type, data: result.data }));
+        if (result.changed) {
+          // Mounts are cached per process; tell every other editor to reload.
+          const updated = packetManager.mountEditorUpdated({ by: currentPlayer.username });
+          for (const other of Object.values(playerCache.list()) as any[]) {
+            if (!other?.wt || other.id === currentPlayer.id) continue;
+            if (mountEditor.canUseEditor(other)) sendPacket(other.wt, updated);
           }
         }
         break;
@@ -9489,6 +9522,16 @@ export default async function packetReceiver(
             break;
           }
 
+          case "ME":
+          case "MOUNTEDITOR": {
+            if (!mountEditor.canUseEditor(currentPlayer)) {
+              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
+              break;
+            }
+            sendPacket(wt, packetManager.toggleMountEditor());
+            break;
+          }
+
           case "SE":
           case "SPELLEDITOR": {
             if (!(await spellEditor.canUseEditor(currentPlayer))) {
@@ -12887,7 +12930,7 @@ export default async function packetReceiver(
         }
         if (type === "FISHING_EDITOR_SAVE") {
           await fishing.loadItems();
-          const read = fishing.readFishingChanges(data, fishing.materialName);
+          const read = fishing.readFishingChanges(data, fishing.materialName, fishing.weaponName);
           if ("error" in read) {
             sendPacket(wt, packetManager.notify({ message: read.error }));
             return;

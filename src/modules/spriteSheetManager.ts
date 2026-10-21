@@ -1,4 +1,26 @@
+import assetCache from '../services/assetCache';
+
 const assetServerUrl = process.env.ASSET_SERVER_URL || 'http://localhost:8000';
+
+/** Each item's sheet by its lowercased name, worked out once per item list held. */
+const sheetsByList = new WeakMap<object, Map<string, string>>();
+
+/**
+ * The sheet a worn item is drawn with: the one chosen for it in the item editor,
+ * or the sheet named after it when none was.
+ */
+async function equipmentSheets(): Promise<Map<string, string>> {
+  const items = ((await assetCache.get('items')) || []) as Item[];
+  let sheets = sheetsByList.get(items);
+  if (!sheets) {
+    sheets = new Map();
+    for (const item of items) {
+      if (item?.name && item.sprite_sheet) sheets.set(item.name.toLowerCase(), item.sprite_sheet);
+    }
+    sheetsByList.set(items, sheets);
+  }
+  return sheets;
+}
 
 export interface SpriteUrl {
   name: string;
@@ -34,8 +56,12 @@ export async function getPlayerSpriteSheetData(
     };
   }
 
-  // Helper function to generate sprite URLs for equipment (uses shared template)
-  function generateEquipmentSpriteUrl(name: string): SpriteUrl {
+  const sheets = equipment ? await equipmentSheets() : null;
+
+  // Helper function to generate sprite URLs for equipment (uses shared template).
+  // `item` is the worn item's name; its sheet is the one chosen for it, else its own name.
+  function generateEquipmentSpriteUrl(item: string): SpriteUrl {
+    const name = sheets?.get(item.toLowerCase()) ?? item.toLowerCase();
     return {
       name,
       templateUrl: `${assetServerUrl}/sprite-sheet-template?name=${encodeURIComponent(name)}`,
@@ -49,42 +75,42 @@ export async function getPlayerSpriteSheetData(
 
   let armorHelmetSprite: SpriteUrl | null = null;
   if (equipment?.helmet && equipment.helmet !== 'null') {
-    armorHelmetSprite = generateEquipmentSpriteUrl(equipment.helmet.toLowerCase());
+    armorHelmetSprite = generateEquipmentSpriteUrl(equipment.helmet);
   }
 
   let armorShoulderguardsSprite: SpriteUrl | null = null;
   if (equipment?.shoulderguards && equipment.shoulderguards !== 'null') {
-    armorShoulderguardsSprite = generateEquipmentSpriteUrl(equipment.shoulderguards.toLowerCase());
+    armorShoulderguardsSprite = generateEquipmentSpriteUrl(equipment.shoulderguards);
   }
 
   let armorNeckSprite: SpriteUrl | null = null;
   if (equipment?.necklace && equipment.necklace !== 'null') {
-    armorNeckSprite = generateEquipmentSpriteUrl(equipment.necklace.toLowerCase());
+    armorNeckSprite = generateEquipmentSpriteUrl(equipment.necklace);
   }
 
   let armorHandsSprite: SpriteUrl | null = null;
   if (equipment?.gloves && equipment.gloves !== 'null') {
-    armorHandsSprite = generateEquipmentSpriteUrl(equipment.gloves.toLowerCase());
+    armorHandsSprite = generateEquipmentSpriteUrl(equipment.gloves);
   }
 
   let armorChestSprite: SpriteUrl | null = null;
   if (equipment?.chestplate && equipment.chestplate !== 'null') {
-    armorChestSprite = generateEquipmentSpriteUrl(equipment.chestplate.toLowerCase());
+    armorChestSprite = generateEquipmentSpriteUrl(equipment.chestplate);
   }
 
   let armorFeetSprite: SpriteUrl | null = null;
   if (equipment?.boots && equipment.boots !== 'null') {
-    armorFeetSprite = generateEquipmentSpriteUrl(equipment.boots.toLowerCase());
+    armorFeetSprite = generateEquipmentSpriteUrl(equipment.boots);
   }
 
   let armorLegsSprite: SpriteUrl | null = null;
   if (equipment?.pants && equipment.pants !== 'null') {
-    armorLegsSprite = generateEquipmentSpriteUrl(equipment.pants.toLowerCase());
+    armorLegsSprite = generateEquipmentSpriteUrl(equipment.pants);
   }
 
   let armorWeaponSprite: SpriteUrl | null = null;
   if (equipment?.weapon && equipment.weapon !== 'null') {
-    armorWeaponSprite = generateEquipmentSpriteUrl(equipment.weapon.toLowerCase());
+    armorWeaponSprite = generateEquipmentSpriteUrl(equipment.weapon);
   }
 
   return {

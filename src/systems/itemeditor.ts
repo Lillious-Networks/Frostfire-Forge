@@ -7,7 +7,7 @@ import query from "../controllers/sqldatabase";
 import assetCache from "../services/assetCache";
 import log from "../modules/logger";
 import { refreshAuthItems } from "../socket/authentication_pool";
-import { listIcons, type SpriteSheetOption } from "./creatures/editor";
+import { listIcons, listSpriteSheets, type SpriteSheetOption } from "./creatures/editor";
 import itemTable, { BUY_PRICE_MARKUP } from "./items";
 
 /** The most copper a vendor pays for one item. */
@@ -24,6 +24,15 @@ export const ITEM_SLOTS: ItemSlot[] = [
   "helmet", "necklace", "shoulderguards", "cape", "chestplate", "wristguards", "gloves",
   "belt", "pants", "boots", "ring_1", "ring_2", "trinket_1", "trinket_2", "weapon", "bag",
 ];
+
+/**
+ * The slots whose item is drawn on its wearer, and which of the asset server's sprite sheet slots
+ * its sheet is listed under. An item in any other slot is not drawn, so it has no sheet.
+ */
+export const DRAWN_SLOTS: Partial<Record<ItemSlot, string>> = {
+  helmet: "helmet", shoulderguards: "shoulderguards", necklace: "neck", gloves: "hands",
+  chestplate: "chest", boots: "feet", pants: "legs", weapon: "weapon",
+};
 
 /** Admins and holders of tools.item_editor / tools.* may use the editor. */
 export function canUseEditor(player: any): boolean {
@@ -42,17 +51,24 @@ export interface ItemEditorData {
   slots: string[];
   /** Icons the asset server has, for the icon picker. */
   icons: SpriteSheetOption[];
+  /** Sprite sheets the asset server has, by its slot, for the sheet an equipped item is drawn with. */
+  spriteSheets: Record<string, SpriteSheetOption[]>;
+  /** Which of those slots each drawn item slot picks its sheet from. */
+  drawnSlots: Partial<Record<ItemSlot, string>>;
   itemCount: number;
 }
 
 /** The editor opens with no items: they are fetched by search. */
 export async function buildEditorData(): Promise<ItemEditorData> {
   const items = ((await assetCache.get("items")) || []) as Item[];
+  const [icons, spriteSheets] = await Promise.all([listIcons(), listSpriteSheets()]);
   return {
     types: ITEM_TYPES,
     qualities: ITEM_QUALITIES,
     slots: ITEM_SLOTS,
-    icons: await listIcons(),
+    icons,
+    spriteSheets,
+    drawnSlots: DRAWN_SLOTS,
     itemCount: items.length,
   };
 }
@@ -109,6 +125,8 @@ export function normalizeItem(input: any): Item {
   const consumable = type === "consumable";
   const teleports_home = consumable && !!input?.teleports_home;
   const restores = consumable && !teleports_home;
+  // Only an item that is drawn when worn has a sheet; none chosen is the sheet named after the item.
+  const sheet = String(input?.sprite_sheet ?? "").trim();
   return {
     name: String(input?.name ?? "").trim(),
     quality: ITEM_QUALITIES.includes(input?.quality) ? input.quality : "common",
@@ -139,6 +157,7 @@ export function normalizeItem(input: any): Item {
     no_combat: consumable && !!input?.no_combat,
     teleports_home,
     soulbound: input?.soulbound === true || Number(input?.soulbound) === 1,
+    sprite_sheet: equipable && slot && DRAWN_SLOTS[slot] && sheet ? sheet : null,
   };
 }
 
@@ -160,6 +179,7 @@ export function validateItem(input: any, existingNames: Set<string>, originalNam
   if (!ITEM_TYPES.includes(item.type)) errors.push("Type is not valid.");
   if (!ITEM_QUALITIES.includes(item.quality)) errors.push("Quality is not valid.");
   if (item.description.length > 255) errors.push("Description must be 255 characters or fewer.");
+  if ((item.sprite_sheet ?? "").length > 255) errors.push("Sprite sheet name must be 255 characters or fewer.");
   if (item.equipable && !item.equipment_slot) errors.push("Equipable items need an equipment slot.");
   if (!!input?.equipable && item.type !== "equipment") errors.push("Only equipment can be equipable.");
   if (item.level_requirement !== null && item.level_requirement < 1) errors.push("Level requirement must be at least 1.");
@@ -201,7 +221,7 @@ const COLUMNS = [
   "stat_critical_chance", "stat_critical_damage", "stat_health", "stat_stamina",
   "stat_avoidance", "level_requirement", "equipable", "equipment_slot",
   "damage_min", "damage_max", "attack_speed_ms", "sell_price", "buy_price",
-  "restore_health", "restore_stamina", "no_combat", "teleports_home", "soulbound",
+  "restore_health", "restore_stamina", "no_combat", "teleports_home", "soulbound", "sprite_sheet",
 ];
 
 const values = (item: Item) => [
@@ -210,7 +230,7 @@ const values = (item: Item) => [
   item.stat_avoidance, item.level_requirement, item.equipable ? 1 : 0, item.equipment_slot,
   item.damage_min, item.damage_max, item.attack_speed_ms, item.sell_price ?? 1, item.buy_price ?? 0,
   item.restore_health ?? 0, item.restore_stamina ?? 0, item.no_combat ? 1 : 0, item.teleports_home ? 1 : 0,
-  item.soulbound ? 1 : 0,
+  item.soulbound ? 1 : 0, item.sprite_sheet ?? null,
 ];
 
 /**
@@ -265,7 +285,9 @@ export async function saveItem(input: any, originalName: string | null): Promise
     );
   }
 
-  const items = ((await assetCache.get("items")) || []) as Item[];
+  // A new list, not the held one changed in place: what is worked out from the list held (each item's sprite sheet) is
+  // kept until the list is replaced.
+  const items = [...(((await assetCache.get("items")) || []) as Item[])];
   const index = items.findIndex(isRow);
   if (index === -1) items.push(item);
   else items[index] = item;
@@ -276,7 +298,7 @@ export async function saveItem(input: any, originalName: string | null): Promise
 
 export async function deleteItem(name: string): Promise<void> {
   await write("DELETE FROM items WHERE name = ?", [name]);
-  const items = ((await assetCache.get("items")) || []) as Item[];
+  const items = [...(((await assetCache.get("items")) || []) as Item[])];
   const index = items.findIndex((i) => i.name.toLowerCase() === name.toLowerCase());
   if (index !== -1) {
     items.splice(index, 1);

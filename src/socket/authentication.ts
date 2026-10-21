@@ -192,7 +192,7 @@ const authentication = {
     }
 }
 
-parentPort?.on("message", async (data: { token: string, id: string, spells?: string | null, items?: string | null }) => {
+parentPort?.on("message", async (data: { token: string, id: string, spells?: string | null, items?: string | null, mounts?: string | null }) => {
     // The spell editor changed the spell list: replace the copy taken at startup.
     if (data.spells !== undefined) {
         for (const name of Object.keys(spellsByName)) delete spellsByName[name];
@@ -206,6 +206,14 @@ parentPort?.on("message", async (data: { token: string, id: string, spells?: str
         itemsByName.clear();
         for (const item of (data.items ? JSON.parse(data.items) : []) as Item[]) {
             itemsByName.set(String(item.name || "").toLowerCase(), item);
+        }
+        return;
+    }
+    // The mount editor changed the mount list: replace the copy taken at startup.
+    if (data.mounts !== undefined) {
+        mountsByName.clear();
+        for (const mount of (data.mounts ? JSON.parse(data.mounts) : []) as Mount[]) {
+            mountsByName.set(String(mount.name || "").toLowerCase(), mount);
         }
         return;
     }
