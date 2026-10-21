@@ -1101,6 +1101,15 @@ const addCreatureTemplateColumns = async () => {
   ]);
 };
 
+/** Patrol pause settings. Added with continuous patrols; paths made before walk continuously. */
+const addPatrolPathColumns = async () => {
+  await addMissingColumns("creature_patrol_paths", [
+    { name: "pause_mode", type: "TEXT NOT NULL DEFAULT 'continuous'" },
+    { name: "pause_ms", type: "INTEGER NOT NULL DEFAULT 2000" },
+    { name: "end_pause_ms", type: "INTEGER NOT NULL DEFAULT 0" },
+  ]);
+};
+
 const createCreatureTables = async () => {
   log.info("Creating creature tables...");
   await query(`CREATE TABLE IF NOT EXISTS creature_templates (
@@ -1162,6 +1171,9 @@ const createCreatureTables = async () => {
     id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE NOT NULL,
     map TEXT NOT NULL,
     "loop" INTEGER NOT NULL DEFAULT 1,
+    pause_mode TEXT NOT NULL DEFAULT 'continuous',
+    pause_ms INTEGER NOT NULL DEFAULT 2000,
+    end_pause_ms INTEGER NOT NULL DEFAULT 0,
     points_json TEXT NOT NULL
   )`);
   await query(`CREATE TABLE IF NOT EXISTS creature_link_groups (
@@ -1380,6 +1392,7 @@ const setupDatabase = async () => {
   await createLootTables();
   await createCreatureTables();
   await addCreatureTemplateColumns();
+  await addPatrolPathColumns();
   await addInventorySlotColumns();
   await addItemWeaponColumns();
   await createPlayerHomeTable();

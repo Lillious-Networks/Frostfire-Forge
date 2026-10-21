@@ -105,10 +105,17 @@ export interface CreaturePatrolPoint {
   wait_ms: number;
 }
 
+/** "continuous" walks through points without stopping; "pause" stops pause_ms at each one. */
+export type CreaturePatrolPauseMode = "continuous" | "pause";
+
 export interface CreaturePatrolPath {
   id: number;
   map: string;
   loop: boolean;
+  pause_mode: CreaturePatrolPauseMode;
+  pause_ms: number;
+  /** Extra stop at the first and last point; 0 for none. */
+  end_pause_ms: number;
   points: CreaturePatrolPoint[];
 }
 

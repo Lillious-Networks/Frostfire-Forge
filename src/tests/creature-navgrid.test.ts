@@ -12,7 +12,7 @@ mock.module("../config/settings.json", () => ({
 
 const { NavGrid, NavGridCache, decodeCollisionRLE, rleChecksum, FOOT_H } = await import("../systems/creatures/navgrid");
 const { advance, directionFor, setDestination } = await import("../systems/creatures/movement");
-const { advancePatrolIndex, tickCreature } = await import("../systems/creatures/ai");
+const { advancePatrolIndex, patrolWaitMs, tickCreature } = await import("../systems/creatures/ai");
 const { normalizeSpawn, normalizeTemplate, normalizePatrolPath } = await import("../systems/creatures/repository");
 const { speedPxPerSec } = await import("../systems/creatures/constants");
 
@@ -244,6 +244,46 @@ describe("idle AI behaviours", () => {
     expect(c.x).toBeCloseTo(b.x, 5);
     expect(c.patrolIndex).toBe(0);
     expect(c.waitUntil).toBe(now + 1000);
+  });
+
+  const openPath = (extra: any = {}) =>
+    normalizePatrolPath({ id: 1, map: "main", loop: 0, points: [center(5, 0), center(7, 0), center(9, 0)].map((p) => ({ ...p, wait_ms: 0 })), ...extra });
+  const patrolSpawn = normalizeSpawn({ id: 1, template_id: 1, map: "main", movement_type: "patrol", patrol_path_id: 1 });
+
+  test("patrol paths walk continuously unless told to pause", () => {
+    expect(normalizePatrolPath({ id: 1, points_json: "[]" }).pause_mode).toBe("continuous");
+    const patrol = openPath();
+    const c = creature(center(5, 0).x, center(5, 0).y);
+    const indices = new Set<number>();
+    for (let now = 0; now < 4000; now += 100) {
+      tickCreature(c, baseCtx({ now, spawn: patrolSpawn, patrol }));
+      // never stands still, not even at the points it turns on
+      expect(c.move).not.toBeNull();
+      indices.add(c.patrolIndex);
+    }
+    expect([...indices].sort()).toEqual([0, 1, 2]);
+  });
+
+  test("patrol pauses at every point, or only at the ends", () => {
+    const pausing = openPath({ pause_mode: "pause", pause_ms: 1500, end_pause_ms: 4000 });
+    expect([0, 1, 2].map((i) => patrolWaitMs(pausing, i))).toEqual([4000, 1500, 4000]);
+    const endsOnly = openPath({ end_pause_ms: 3000 });
+    expect([0, 1, 2].map((i) => patrolWaitMs(endsOnly, i))).toEqual([3000, 0, 3000]);
+    // a point's own wait still counts when it is longer
+    endsOnly.points[1].wait_ms = 500;
+    expect(patrolWaitMs(endsOnly, 1)).toBe(500);
+
+    const c = creature(center(5, 0).x, center(5, 0).y);
+    let now = 0;
+    tickCreature(c, baseCtx({ now, spawn: patrolSpawn, patrol: pausing }));
+    expect(c.move).toBeNull();
+    expect(c.waitUntil).toBe(4000);
+    for (now = 4000; now < 8000; now += 100) {
+      tickCreature(c, baseCtx({ now, spawn: patrolSpawn, patrol: pausing }));
+      if (!c.move && c.x === center(7, 0).x) break;
+    }
+    expect(c.patrolIndex).toBe(2);
+    expect(c.waitUntil).toBe(now + 1500);
   });
 
   test("wander stays within radius of home and pauses between moves", () => {

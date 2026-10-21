@@ -6,6 +6,7 @@ import type {
   CreatureLinkGroup,
   CreatureMovementType,
   CreaturePatrolPath,
+  CreaturePatrolPauseMode,
   CreaturePatrolPoint,
   CreatureRank,
   CreatureSpawn,
@@ -30,6 +31,8 @@ const RANKS: CreatureRank[] = ["normal", "elite", "rare", "rare_elite", "boss"];
 const MOVEMENT_TYPES: CreatureMovementType[] = ["idle", "wander", "patrol"];
 const LAYER_POLICIES: LayerPolicy[] = ["per_layer", "shared"];
 const SPRITE_TYPES: CreatureSpriteType[] = ["animated", "static", "none"];
+export const PATROL_PAUSE_MODES: CreaturePatrolPauseMode[] = ["continuous", "pause"];
+export const DEFAULT_PATROL_PAUSE_MS = 2000;
 
 const num = (v: any, fallback: number): number => {
   const n = Number(v);
@@ -150,6 +153,9 @@ export function normalizePatrolPath(row: any): CreaturePatrolPath {
     id: num(row.id, 0),
     map: String(row.map ?? "").replaceAll(".json", ""),
     loop: bool(row.loop),
+    pause_mode: oneOf(row.pause_mode, PATROL_PAUSE_MODES, "continuous"),
+    pause_ms: Math.max(0, num(row.pause_ms, DEFAULT_PATROL_PAUSE_MS)),
+    end_pause_ms: Math.max(0, num(row.end_pause_ms, 0)),
     points,
   };
 }
@@ -188,7 +194,7 @@ const SPAWN_COLUMNS = [
   "wander_radius", "movement_type", "patrol_path_id", "link_group_id", "pool_id",
 ] as const;
 
-const PATH_COLUMNS = ["map", "loop", "points_json"] as const;
+const PATH_COLUMNS = ["map", "loop", "pause_mode", "pause_ms", "end_pause_ms", "points_json"] as const;
 const POOL_COLUMNS = ["max_active", "rare_chance_pct", "rare_template_id"] as const;
 
 /** Reserved words differ per engine; quote every column the same way. */
@@ -346,7 +352,7 @@ const repository = {
 
   async savePatrolPath(input: any): Promise<number> {
     const path = normalizePatrolPath(input);
-    return upsert("creature_patrol_paths", PATH_COLUMNS, [path.map, path.loop ? 1 : 0, JSON.stringify(path.points)], path.id || null);
+    return upsert("creature_patrol_paths", PATH_COLUMNS, [path.map, path.loop ? 1 : 0, path.pause_mode, path.pause_ms, path.end_pause_ms, JSON.stringify(path.points)], path.id || null);
   },
   async deletePatrolPath(id: number): Promise<void> {
     await write("UPDATE creature_spawns SET patrol_path_id = NULL WHERE patrol_path_id = ?", [id]);

@@ -212,9 +212,7 @@ export class NavGrid {
       if (!near) return null;
       goal = near;
     }
-    if (start.tx === goal.tx && start.ty === goal.ty) {
-      return this.isWalkable(to.x, to.y) ? [{ x: to.x, y: to.y }] : [this.anchorOfTile(goal.tx, goal.ty)];
-    }
+    if (start.tx === goal.tx && start.ty === goal.ty) return this.finishPath(from, to, start, goal, []);
 
     const w = this.width;
     const startIdx = start.ty * w + start.tx;
@@ -280,10 +278,29 @@ export class NavGrid {
       tiles.push(this.anchorOfTile(tx, (i - tx) / w));
     }
     tiles.reverse();
-    if (this.isWalkable(to.x, to.y) && this.tileOf(to).tx === goal.tx && this.tileOf(to).ty === goal.ty) {
-      tiles[tiles.length - 1] = { x: to.x, y: to.y };
-    }
-    return this.smooth(from, tiles);
+    return this.finishPath(from, to, start, goal, tiles);
+  }
+
+  /**
+   * Smoothed waypoints for a tile path. A* only proves the tiles under the
+   * footprint's centre are open, but an off-centre footprint covers up to 2x2
+   * tiles, so going straight from `from` to the first tile, or from the last
+   * tile to `to`, can clip a wall corner and leave the creature stuck. Passing
+   * through the start and goal tile centres never can (the footprint stays
+   * inside tiles it already covers), so they bracket the path and smoothing
+   * drops them wherever a straight line is clear.
+   */
+  protected finishPath(
+    from: Point,
+    to: Point,
+    start: { tx: number; ty: number },
+    goal: { tx: number; ty: number },
+    tiles: Point[]
+  ): Point[] {
+    const waypoints = [this.anchorOfTile(start.tx, start.ty), ...tiles];
+    const end = this.tileOf(to);
+    if (this.isWalkable(to.x, to.y) && end.tx === goal.tx && end.ty === goal.ty) waypoints.push({ x: to.x, y: to.y });
+    return this.smooth(from, waypoints);
   }
 
   /** String-pull: drop waypoints the footprint can skip in a straight line. */
@@ -380,9 +397,7 @@ export class WorldNavGrid extends NavGrid {
       if (!near) return null;
       goal = near;
     }
-    if (start.tx === goal.tx && start.ty === goal.ty) {
-      return this.isWalkable(to.x, to.y) ? [{ x: to.x, y: to.y }] : [this.anchorOfTile(goal.tx, goal.ty)];
-    }
+    if (start.tx === goal.tx && start.ty === goal.ty) return this.finishPath(from, to, start, goal, []);
 
     // the window: centred between the two ends, which must both lie inside it
     const w = WORLD_NAV_WINDOW;
@@ -456,10 +471,7 @@ export class WorldNavGrid extends NavGrid {
       tiles.push(this.anchorOfTile(lx + ox, (i - lx) / w + oy));
     }
     tiles.reverse();
-    if (this.isWalkable(to.x, to.y) && this.tileOf(to).tx === goal.tx && this.tileOf(to).ty === goal.ty) {
-      tiles[tiles.length - 1] = { x: to.x, y: to.y };
-    }
-    return this.smooth(from, tiles);
+    return this.finishPath(from, to, start, goal, tiles);
   }
 }
 

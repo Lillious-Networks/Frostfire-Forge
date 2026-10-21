@@ -9,7 +9,7 @@ import { serverFetch } from "../../modules/https_servers.ts";
 import lootTable from "../lootTable";
 import { yards } from "./constants";
 import type { NavGridCache } from "./navgrid";
-import repository from "./repository";
+import repository, { PATROL_PAUSE_MODES } from "./repository";
 import type { CreatureAbility, CreaturePatrolPath, CreatureSpawn, CreatureSpawnPool, CreatureTemplate } from "./types";
 
 export const EDITOR_PERMISSION = "tools.creature_editor";
@@ -336,6 +336,10 @@ export function validatePatrolPath(input: any, ctx: ValidationContext): string[]
     }
   }
   if (points.length < 2) errors.push("A patrol path needs at least two points.");
+  if (input?.pause_mode !== undefined && !PATROL_PAUSE_MODES.includes(input.pause_mode)) errors.push("Pause mode must be continuous or pause.");
+  const badMs = (v: any) => v !== undefined && (!Number.isInteger(num(v)) || num(v) < 0);
+  if (badMs(input?.pause_ms)) errors.push("Pause length must be a whole number of milliseconds, 0 or more.");
+  if (badMs(input?.end_pause_ms)) errors.push("End pause must be a whole number of milliseconds, 0 or more.");
   const grid = ctx.navGrids.get(map);
   points.forEach((p: any, i: number) => {
     if (!isInt(p?.x) || !isInt(p?.y)) errors.push(`Point ${i + 1} has an invalid position.`);

@@ -88,28 +88,55 @@ function tickPatrol(creature: CreatureInstance, grid: NavGrid, ctx: AIContext, p
 
   if (creature.move) {
     const result = advance(creature, grid, ctx.dtMs, place(ctx, creature));
-    if (result === "arrived") {
-      creature.waitUntil = ctx.now + points[creature.patrolIndex].wait_ms;
-      advancePatrolIndex(creature, patrol);
-    } else if (result === "stuck") {
+    if (result === "moving") return;
+    if (result === "stuck") {
+      // Re-planning from the same spot gives the same path, so retrying this
+      // point would freeze the patrol here; move on to the next one instead.
       creature.waitUntil = ctx.now + 1000;
+      advancePatrolIndex(creature, patrol);
+      return;
     }
+    if (reachedPatrolPoint(creature, patrol, ctx.now)) return;
+    // No stop here: head for the next point this same tick, so viewers never see it halt.
+  } else if (ctx.now < creature.waitUntil) {
     return;
   }
-  if (ctx.now < creature.waitUntil) return;
 
   // Skip points we are already standing on, and unreachable ones (try each once).
   for (let attempts = 0; attempts < points.length; attempts++) {
     const target = points[creature.patrolIndex];
     if (Math.hypot(target.x - creature.x, target.y - creature.y) <= AT_POINT_PX) {
-      creature.waitUntil = ctx.now + target.wait_ms;
-      advancePatrolIndex(creature, patrol);
-      return;
+      if (reachedPatrolPoint(creature, patrol, ctx.now)) return;
+      continue;
     }
     if (setDestination(creature, grid, target, walkSpeed(ctx), IDLE_PATH_MAX_NODES)) return;
     advancePatrolIndex(creature, patrol);
   }
   creature.waitUntil = ctx.now + 5000;
+}
+
+/**
+ * How long a patrol stops at point `index`: its own wait, the path's pause
+ * when it pauses at every point, and the end pause at the first and last point.
+ */
+export function patrolWaitMs(patrol: CreaturePatrolPath, index: number): number {
+  const point = patrol.points[index];
+  if (!point) return 0;
+  const atEnd = index === 0 || index === patrol.points.length - 1;
+  return Math.max(
+    point.wait_ms,
+    patrol.pause_mode === "pause" ? patrol.pause_ms : 0,
+    atEnd ? patrol.end_pause_ms : 0
+  );
+}
+
+/** Move on past the point just reached. True when the creature stops there for a while. */
+function reachedPatrolPoint(creature: CreatureInstance, patrol: CreaturePatrolPath, now: number): boolean {
+  const wait = patrolWaitMs(patrol, creature.patrolIndex);
+  advancePatrolIndex(creature, patrol);
+  if (wait <= 0) return false;
+  creature.waitUntil = now + wait;
+  return true;
 }
 
 /** Loop paths wrap; open paths walk back and forth. */
