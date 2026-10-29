@@ -24,7 +24,11 @@ for (const spell of spells) {
 }
 
 const authentication = {
-    async process(token: string, id: string): Promise<Authentication> {
+    /**
+     * Claims the session of the token's account for connection `id`, then reads the player's rows. `known`: the rows of
+     * that player were read already (loginprefetch.ts), so a token of that account reads nothing more.
+     */
+    async process(token: string, id: string, known?: string): Promise<Authentication> {
         try {
 
             const session = await player.setSessionId(token, id);
@@ -38,6 +42,22 @@ const authentication = {
             }
 
             const username = session as string;
+            if (known && known === username) {
+                return { authenticated: true, completed: true, prefetched: true, data: null, error: null };
+            }
+            return await authentication.load(username);
+        } catch (err) {
+            return {
+                authenticated: false,
+                completed: true,
+                error: err instanceof Error ? err.message : String(err)
+            } as Authentication;
+        }
+    },
+
+    /** The player's rows a login sends: no session is claimed (the caller has, or will). */
+    async load(username: string): Promise<Authentication> {
+        try {
             const playerData = await player.GetPlayerLoginData(username) as unknown as PlayerData;
 
             for (const slot in playerData.equipment) {
@@ -192,7 +212,7 @@ const authentication = {
     }
 }
 
-parentPort?.on("message", async (data: { token: string, id: string, spells?: string | null, items?: string | null, mounts?: string | null }) => {
+parentPort?.on("message", async (data: { token: string, id: string, known?: string, prefetch?: string, spells?: string | null, items?: string | null, mounts?: string | null }) => {
     // The spell editor changed the spell list: replace the copy taken at startup.
     if (data.spells !== undefined) {
         for (const name of Object.keys(spellsByName)) delete spellsByName[name];
@@ -217,6 +237,12 @@ parentPort?.on("message", async (data: { token: string, id: string, spells?: str
         }
         return;
     }
-    const result = await authentication.process(data.token, data.id);
+    // The rows of a player arriving by handoff, read before their AUTH (loginprefetch.ts).
+    if (data.prefetch !== undefined) {
+        const result = await authentication.load(data.prefetch);
+        parentPort?.postMessage({ ...result, prefetch: true, token: data.token, id: data.id });
+        return;
+    }
+    const result = await authentication.process(data.token, data.id, data.known);
     parentPort?.postMessage({ ...result, token: data.token, id: data.id });
 });

@@ -40,6 +40,8 @@ if (!INNER) {
     authentication_queue: new Set<string>(),
     authentication_session_queue: new Set<string>(),
     pendingAuthentications: new Map<string, unknown>(),
+    // No rows read ahead: every login here reads them itself.
+    loginPrefetch: { take: () => null },
     releaseDraggedBy: () => {},
     sendPacket: (_wt: unknown, packet: unknown) => { sent.push(packet); },
   };

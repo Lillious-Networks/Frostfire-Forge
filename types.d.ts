@@ -575,6 +575,8 @@ declare interface Authentication {
   completed: boolean;
   error: Nullable<string>;
   data: Nullable<PlayerData>;
+  /** The token was checked and the rows were read before it (socket/loginprefetch.ts): `data` is null. */
+  prefetched?: boolean;
 }
 
 declare interface PlayerData {

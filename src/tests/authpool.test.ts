@@ -308,7 +308,7 @@ test("the receiver and the pool use the dispatcher: one answer handler on the po
   expect(pool).not.toContain("getAuthWorker");
   expect(pool).toContain("new AuthDispatcher<Worker>(");
   expect(pool).toContain("authWorkerEnv(process.env)");
-  expect(session).toContain("authWorker.postMessage({ token, id: wt.data.id });");
+  expect(session).toContain("authWorker.postMessage({ token, id: wt.data.id, known: prefetched?.username });");
   // The refreshes go through the dispatcher, which keeps the copy for replacements.
   expect(pool.match(/pool\.refresh\(/g)?.length).toBe(3);
 });

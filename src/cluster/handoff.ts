@@ -150,6 +150,11 @@ export interface HandoffDeps {
    * the one it opened). Carries the node's address only: no ticket, nothing of the player.
    */
   prepare?(player: any, node: NodeAddress | null): void;
+  /**
+   * The old node's save of the player arriving with this ticket has landed (HANDOFF_SAVED): their rows may be read
+   * for the login now, before the client gets here (socket/loginprefetch.ts).
+   */
+  saved?(token: string, username: string): void;
   /** How long A waits for the HANDOFF answer: HANDOFF_ACK_MS unless a test sets it. */
   ackMs?: number;
 }
@@ -277,6 +282,7 @@ export class PlayerHandoff {
     this.undo.push(deps.calls.handle("HANDOFF", (body, from) => this.onHandoff(body, from)));
     this.undo.push(deps.calls.onCast("HANDOFF_ABORT", (body, from) => this.onAbort(body, from)));
     this.undo.push(deps.calls.onCast("HANDOFF_COMMIT", (body, from) => this.onCommit(body, from)));
+    this.undo.push(deps.calls.onCast("HANDOFF_SAVED", (body, from) => this.onSaved(body, from)));
   }
 
   /**
@@ -531,12 +537,22 @@ export class PlayerHandoff {
       if (!committed) log.warn(`Handoff of ${username} to ${target}: commit not sent, so the login there loads from the database`);
       this.departedAt.set(username, deps.now());
       session.tooBig.delete(username);
+      let saved = false;
       try {
         await deps.save(player);
+        saved = true;
       } catch (error) {
         log.error(`Handoff of ${username} to ${target}: save failed, so ${target} may load older stats: ${error}`);
       }
       mark("saved");
+      // The target may read the player's rows for the login now, while the SWITCH is on its way to the client.
+      if (saved) {
+        try {
+          deps.calls.cast(target, "HANDOFF_SAVED", { username, token });
+        } catch (error) {
+          log.debug(`Handoff of ${username} to ${target}: HANDOFF_SAVED not sent, so the login there reads the rows itself: ${error}`);
+        }
+      }
       // The save has landed: another writer may go on, and the new node reads the rows after it.
       await letGo();
       mark("unlocked");
@@ -763,6 +779,18 @@ export class PlayerHandoff {
     const token = typeof body?.token === "string" ? body.token : "";
     const arrival = this.arrivals.get(token);
     if (arrival && arrival.from === from && !arrival.committed) this.arrivals.delete(token);
+  }
+
+  private onSaved(body: any, from: string): void {
+    const deps = this.deps;
+    const token = typeof body?.token === "string" ? body.token : "";
+    const arrival = this.arrivals.get(token);
+    if (!deps?.saved || !arrival || arrival.from !== from) return;
+    try {
+      deps.saved(token, arrival.snapshot.username);
+    } catch (error) {
+      log.warn(`Handoff of ${arrival.snapshot.username} from ${from}: the rows were not read ahead of the login: ${error}`);
+    }
   }
 
   private onCommit(body: any, from: string): void {

@@ -18,7 +18,7 @@ import "../utility/validate_config.ts";
 import crypto from "crypto";
 import { packetManager, regenStatsFrames } from "./packet_manager.ts";
 import { packetTypes } from "./types.ts";
-import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady, teleportPlayerWrapper, removePlayerFromCleanupMaps, removeFromAuthenticationQueues, releaseDraggedBy, startArea, forceStopPlayerMovement, handoffRecheck, sendPacket } from "./receiver.ts";
+import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady, teleportPlayerWrapper, removePlayerFromCleanupMaps, removeFromAuthenticationQueues, releaseDraggedBy, startArea, forceStopPlayerMovement, handoffRecheck, sendPacket, loginPrefetch } from "./receiver.ts";
 import eventEmitter from "node:events";
 import { listener } from "../modules/event_bus.ts";
 import { Events, setPlayerPvp } from "../systems/events";
@@ -1026,6 +1026,7 @@ onLinksAttached((ctx) => {
       }
     },
     forward: (playerId, username, to) => forwardTable.addPlayer(playerId, username, to),
+    saved: (token, username) => loginPrefetch.start(token, username),
   });
   const previousCaster = setRemoteDotCaster(dotCredit);
   nodeAddressesLive = true;

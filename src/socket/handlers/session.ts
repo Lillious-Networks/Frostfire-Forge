@@ -6,7 +6,7 @@ import { Events } from "../../systems/events";
 import { listener } from "../../modules/event_bus";
 import { packetManager } from "../packet_manager";
 import { ticketAllows } from "../ticket";
-import { authWorker, authentication_queue, authentication_session_queue, pendingAuthentications, releaseDraggedBy, sendPacket } from "../receiver";
+import { authWorker, authentication_queue, authentication_session_queue, loginPrefetch, pendingAuthentications, releaseDraggedBy, sendPacket } from "../receiver";
 import type { PacketContext } from "./context";
 
 // Packet handlers moved from receiver.ts's packetReceiver switch (phase 6, Task 1). The case bodies are unchanged.
@@ -86,9 +86,11 @@ export async function handle(ctx: PacketContext): Promise<unknown> {
         authentication_queue.add(token);
         authentication_session_queue.add(wt.data.id);
 
-        pendingAuthentications.set(wt.data.id, { wt, token, language: parsedMessage?.language || "en" });
+        // A player arriving by handoff whose rows were read already (loginprefetch.ts): the worker only checks the token.
+        const prefetched = loginPrefetch.take(String(wt.data?.ticketToken ?? ""));
+        pendingAuthentications.set(wt.data.id, { wt, token, language: parsedMessage?.language || "en", prefetched: prefetched?.data });
 
-        authWorker.postMessage({ token, id: wt.data.id });
+        authWorker.postMessage({ token, id: wt.data.id, known: prefetched?.username });
 
         break;
       }

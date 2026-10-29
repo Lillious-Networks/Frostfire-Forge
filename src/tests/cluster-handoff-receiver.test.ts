@@ -2,6 +2,7 @@ import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import { databaseModule } from "./setup";
 import { receiverSource } from "./receiver-source";
 import { revivePlayer } from "../socket/revive";
+import { LoginPrefetch } from "../socket/loginprefetch";
 
 // Cells phase 6, Task 14: the arrival side of a player handoff (socket/arrival.ts) and its wiring in the receiver.
 // The receiver cannot be imported by a test (it imports the server, which starts it): its wiring is read from its
@@ -476,8 +477,10 @@ const failCode = [
 function makeLogin(complete: (result: any, arriving: any) => Promise<void>) {
   const seen = { sent: [] as any[], closed: [] as any[][], counts: [] as any[][], cleared: [] as any[] };
   let handler: ((result: any) => Promise<void>) | null = null;
-  compile(failCode, ["authWorker", "completeLogin", "log", "worlds", "player", "sendPacket", "packetManager"], "null")({
+  compile(failCode, ["authWorker", "completeLogin", "log", "worlds", "player", "sendPacket", "packetManager", "LoginPrefetch", "loginPrefetch"], "null")({
     authWorker: { on: (_event: string, fn: any) => { handler = fn; } },
+    LoginPrefetch,
+    loginPrefetch: new LoginPrefetch(() => {}),
     completeLogin: complete,
     log,
     worlds: { adjustPlayerCount: async (...call: any[]) => { seen.counts.push(call); return 1; } },

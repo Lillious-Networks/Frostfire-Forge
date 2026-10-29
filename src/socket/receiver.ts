@@ -12,6 +12,7 @@ import "../systems/permissions";
 import "../systems/tilesounds";
 import "../systems/mapcreate";
 import { getAuthPool } from "./authentication_pool.ts";
+import { LoginPrefetch } from "./loginprefetch.ts";
 import { listener } from "../modules/event_bus";
 import { Events, setPlayerPvp } from "../systems/events";
 import { afterTickFlush, batchVolume, collectGroupReceivers, collectReceiverEntries, encodeBatch, farUpdateEvery, indexMovers, MovementVolume, NEAR_TIER_DISTANCE, type EntryTally, MoverSnapshot, ReceiverDiff, ReceiverInfo } from "./movement_batch.ts";
@@ -21,7 +22,8 @@ import { requeueSpawnBatch, claimDespawnEntry, requeueDespawnEntry, setBounded, 
 export const authentication_queue = new Set<string>();
 export const authentication_session_queue = new Set<string>();
 
-export const pendingAuthentications = new Map<string, { wt: any; token: string; language: string }>();
+/** `prefetched`: the player's rows, read before the AUTH (loginprefetch.ts); the worker only checks the token. */
+export const pendingAuthentications = new Map<string, { wt: any; token: string; language: string; prefetched?: Promise<PlayerData | null> }>();
 
 // Track current target for target cycling
 export const currentTargetMap = new Map<string, string | null>();
@@ -3395,6 +3397,8 @@ async function switchLoginIfElsewhere(wt: any, sessionId: string, username: stri
 // The auth-worker pool, used as one worker: a login is posted to the worker with the fewest in flight, and the
 // answers of every worker, a replacement's too, arrive at the handler below (authdispatch.ts).
 export const authWorker = await getAuthPool();
+/** The rows of players arriving by handoff, read on the pool before their AUTH (started by server.ts's handoff deps). */
+export const loginPrefetch = new LoginPrefetch((job) => authWorker.postMessage(job));
 /**
  * A login by handoff between takeArrival and the player cache (cells phase 6). The arrival is spent once taken, so a
  * login that fails in that stretch is told to the client and its connection is closed: the client goes back to the
@@ -3432,6 +3436,7 @@ async function failArrival(arriving: ArrivingLogin, reason: string): Promise<voi
 }
 
 authWorker.on("message", (result: any) => {
+  if (LoginPrefetch.owns(result)) return loginPrefetch.answer(result);
   const arriving: ArrivingLogin = { wt: null, username: null, sessionId: null, countedMap: null };
   return completeLogin(result, arriving).catch((error) => {
     // Any login that is not an arrival in its first stretch fails as it always has.
@@ -3443,7 +3448,7 @@ authWorker.on("message", (result: any) => {
 // A worker that stopped with this login in flight may have claimed the account's session for the connection before
 // it did. The login fails (the answer that follows goes through completeLogin like any failed login), and the claim
 // is let go, as for a login that cannot go on (it only matches the session claimed for this connection).
-authWorker.on("lost", (job) => player.clearSessionId(job.id).catch((error) => log.error(`Session of connection ${job.id} not cleared after its login worker stopped: ${error}`)));
+authWorker.on("lost", (job) => LoginPrefetch.owns(job) ? undefined : player.clearSessionId(job.id).catch((error) => log.error(`Session of connection ${job.id} not cleared after its login worker stopped: ${error}`)));
 
 async function completeLogin(result: any, arriving: ArrivingLogin): Promise<void> {
   const status = result as Authentication;
@@ -3455,6 +3460,19 @@ async function completeLogin(result: any, arriving: ArrivingLogin): Promise<void
   const { wt, token, language } = pending;
   // The worker has answered: a handoff arrival's mark (the line is said at the player's first move).
   playerHandoff.landed(String(wt.data?.ticketToken ?? ""), "worker_done");
+
+  // The token is the arriving player's, and their rows were read once the old node had saved them. A read that failed
+  // is done now, as for any login: the job claims the session again, which this connection already holds.
+  if (status.prefetched) {
+    const data = await pending.prefetched;
+    if (pendingAuthentications.get(sessionId) !== pending) return;
+    if (!data) {
+      authWorker.postMessage({ token, id: sessionId });
+      return;
+    }
+    log.debug(`Login of ${data.username} by handoff: the rows read ahead of the AUTH were used`);
+    status.data = data;
+  }
 
   pendingAuthentications.delete(sessionId);
   authentication_queue.delete(token);
