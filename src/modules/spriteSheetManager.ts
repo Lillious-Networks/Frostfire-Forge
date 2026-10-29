@@ -6,20 +6,69 @@ const assetServerUrl = process.env.ASSET_SERVER_URL || 'http://localhost:8000';
 const sheetsByList = new WeakMap<object, Map<string, string>>();
 
 /**
+ * How long the sheets are kept without a write to the items being heard here. A write through this process's cache
+ * drops them at once; an edit made on another node (the Redis cache is shared) is only seen after this long.
+ */
+const SHEETS_TTL_MS = 5000;
+let held: { sheets: Map<string, string>; at: number } | null = null;
+let loading: Promise<Map<string, string>> | null = null;
+let version = 0;
+
+// Registered with whichever cache is current when the sheets are asked for (one listener, once per cache).
+let listeningTo: object | null = null;
+function listen(): void {
+  if (listeningTo === assetCache) return;
+  listeningTo = assetCache;
+  assetCache.onChange?.('items', () => {
+    version++;
+    held = null;
+    loading = null;
+  });
+}
+
+/** The sheets in memory, or null when they are to be read (the sprite packets of a spawn flush ask for this on every miss). */
+function heldSheets(): Map<string, string> | null {
+  listen();
+  return held && Date.now() - held.at < SHEETS_TTL_MS ? held.sheets : null;
+}
+
+/**
  * The sheet a worn item is drawn with: the one chosen for it in the item editor,
  * or the sheet named after it when none was.
  */
-async function equipmentSheets(): Promise<Map<string, string>> {
-  const items = ((await assetCache.get('items')) || []) as Item[];
-  let sheets = sheetsByList.get(items);
-  if (!sheets) {
-    sheets = new Map();
-    for (const item of items) {
-      if (item?.name && item.sprite_sheet) sheets.set(item.name.toLowerCase(), item.sprite_sheet);
+function equipmentSheets(): Promise<Map<string, string>> {
+  if (loading) return loading;
+  const seen = version;
+  // Started on a microtask, so `mine` is set before the read runs (and fails, say) and clears itself below.
+  const mine: Promise<Map<string, string>> = Promise.resolve().then(async () => {
+    try {
+      const items = ((await assetCache.get('items')) || []) as Item[];
+      let sheets = sheetsByList.get(items);
+      if (!sheets) {
+        sheets = new Map();
+        for (const item of items) {
+          if (item?.name && item.sprite_sheet) sheets.set(item.name.toLowerCase(), item.sprite_sheet);
+        }
+        sheetsByList.set(items, sheets);
+      }
+      // Not kept if the items were written while they were read: that read may be the old list.
+      if (seen === version) held = { sheets, at: Date.now() };
+      return sheets;
+    } finally {
+      if (loading === mine) loading = null;
     }
-    sheetsByList.set(items, sheets);
-  }
-  return sheets;
+  });
+  loading = mine;
+  return mine;
+}
+
+/**
+ * Identifies the item-to-sheet table the equipment sprites are drawn from right now: the same object for as long as
+ * the table is held and unchanged, null once it has expired or an item was written. A caller that keeps what it built
+ * from getPlayerSpriteSheetData holds it only while this still returns the object it read before the call.
+ */
+export function equipmentSheetsToken(): object | null {
+  return heldSheets();
 }
 
 export interface SpriteUrl {
@@ -56,7 +105,7 @@ export async function getPlayerSpriteSheetData(
     };
   }
 
-  const sheets = equipment ? await equipmentSheets() : null;
+  const sheets = equipment ? (heldSheets() ?? await equipmentSheets()) : null;
 
   // Helper function to generate sprite URLs for equipment (uses shared template).
   // `item` is the worn item's name; its sheet is the one chosen for it, else its own name.

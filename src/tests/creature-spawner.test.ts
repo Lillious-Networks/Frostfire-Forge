@@ -1,5 +1,6 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { databaseModule } from "./setup";
+import { resetEntityIds, useWorldIds } from "../cluster/entityids";
 
 mock.module("../controllers/sqldatabase", () => databaseModule({ default: async () => [] }));
 
@@ -13,7 +14,9 @@ mock.module("../config/settings.json", () => ({
 const { CreatureRegistry } = await import("../systems/creatures/registry");
 const { CreatureSpawner, computeMaxHealth, pickTemplateId, rollRespawnMs } = await import("../systems/creatures/spawner");
 const { normalizeSpawn, normalizeTemplate, normalizeSpawnPool, normalizePatrolPath } = await import("../systems/creatures/repository");
+const { default: log } = await import("../modules/logger");
 const { POOL_RETRY_MS } = await import("../systems/creatures/constants");
+const { AIState } = await import("../systems/creatures/types");
 const { createCombatState } = await import("../systems/creatures/threat");
 const { createAuras } = await import("../systems/creatures/auras");
 
@@ -285,6 +288,130 @@ describe("per-layer spawning", () => {
   });
 });
 
+describe("overflow layers fill only where they have players", () => {
+  // Players per layer and 4096 px block, as the layer manager counts them.
+  function occupiedSetup() {
+    const registry = new CreatureRegistry(64);
+    const players = new Map<string, number>();
+    const at = (layerId: string, x: number, y: number) => `${layerId}@${Math.floor(x / 4096)},${Math.floor(y / 4096)}`;
+    const despawned: number[] = [];
+    const spawner = new CreatureSpawner(
+      registry,
+      { onDespawn: (c) => despawned.push(c.id), playersInBlock: (layerId, x, y) => players.get(at(layerId, x, y)) ?? 0 },
+      () => 0,
+      1
+    );
+    spawner.load(
+      {
+        templates: new Map([[1, template()]]),
+        spawns: new Map([[1, spawn({ id: 1, layer_policy: "per_layer", x: 100, y: 200 })]]),
+        pools: new Map(),
+      },
+      1000
+    );
+    spawner.setLayers(new Map([["main", ["main:layer_1", "main:layer_2"]]]), 1000);
+    spawner.tick(1000);
+    return { registry, spawner, players, despawned, at };
+  }
+
+  test("layer 1 is filled everywhere; an overflow layer only once its block has a player", () => {
+    const { spawner, players, at } = occupiedSetup();
+    expect(spawner.getLiveInstanceId(1, "main:layer_1")).toBeDefined();
+    expect(spawner.getLiveInstanceId(1, "main:layer_2")).toBeUndefined();
+
+    // A layer_2 player in another block does not count.
+    players.set(at("main:layer_2", 5000, 200), 1);
+    spawner.tick(3000);
+    expect(spawner.getLiveInstanceId(1, "main:layer_2")).toBeUndefined();
+
+    players.set(at("main:layer_2", 100, 200), 1);
+    spawner.tick(5000);
+    expect(spawner.getLiveInstanceId(1, "main:layer_2")).toBeDefined();
+  });
+
+  test("an overflow copy goes after its block has been empty for 60 s and comes back with a player", () => {
+    const { registry, spawner, players, despawned, at } = occupiedSetup();
+    players.set(at("main:layer_2", 100, 200), 1);
+    spawner.tick(2000);
+    const first = spawner.getLiveInstanceId(1, "main:layer_2")!;
+    const base = spawner.getLiveInstanceId(1, "main:layer_1")!;
+    expect(first).toBeDefined();
+
+    players.delete(at("main:layer_2", 100, 200));
+    spawner.tick(3000); // seen empty
+    spawner.tick(3000 + 59_000);
+    expect(registry.get(first)).toBeDefined();
+    spawner.tick(3000 + 60_000);
+    expect(registry.get(first)).toBeUndefined();
+    expect(despawned).toContain(first);
+    // Layer 1 keeps its creature with no players at all.
+    expect(registry.get(base)).toBeDefined();
+    // The slot respawns after its normal roll (10 s here), not at once.
+    expect(spawner.getPendingAt(1, "main:layer_2")).toBe(3000 + 60_000 + 10_000);
+
+    // A player back before the roll is up does not bring it back early.
+    players.set(at("main:layer_2", 100, 200), 1);
+    spawner.tick(3000 + 65_000);
+    expect(spawner.getLiveInstanceId(1, "main:layer_2")).toBeUndefined();
+
+    // Due, but the block is empty again: it waits for a player.
+    players.delete(at("main:layer_2", 100, 200));
+    spawner.tick(3000 + 70_000);
+    spawner.tick(3000 + 73_000);
+    expect(spawner.getLiveInstanceId(1, "main:layer_2")).toBeUndefined();
+    players.set(at("main:layer_2", 100, 200), 1);
+    spawner.tick(3000 + 75_000);
+    const second = spawner.getLiveInstanceId(1, "main:layer_2");
+    expect(second).toBeDefined();
+    expect(second).not.toBe(first);
+  });
+
+  test("a corpse and a fighting creature in an empty block are left to their own timers", () => {
+    const { registry, spawner, players, at } = occupiedSetup();
+    // Two overflow layers' copies: one dies, one is in a fight.
+    spawner.setLayers(new Map([["main", ["main:layer_1", "main:layer_2", "main:layer_3"]]]), 1500);
+    players.set(at("main:layer_2", 100, 200), 1);
+    players.set(at("main:layer_3", 100, 200), 1);
+    spawner.tick(2000);
+    const corpse = spawner.getLiveInstanceId(1, "main:layer_2")!;
+    const fighter = spawner.getLiveInstanceId(1, "main:layer_3")!;
+    registry.get(corpse)!.state = AIState.DEAD;
+    registry.get(fighter)!.state = AIState.COMBAT;
+
+    players.clear();
+    spawner.tick(3000);
+    spawner.tick(3000 + 120_000);
+    expect(registry.get(corpse)).toBeDefined();
+    expect(registry.get(fighter)).toBeDefined();
+
+    // Once the fight is over the empty time starts again from then.
+    registry.get(fighter)!.state = AIState.IDLE;
+    spawner.tick(3000 + 121_000);
+    spawner.tick(3000 + 180_000);
+    expect(registry.get(fighter)).toBeDefined();
+    spawner.tick(3000 + 181_000);
+    expect(registry.get(fighter)).toBeUndefined();
+    expect(spawner.getPendingAt(1, "main:layer_3")).toBe(3000 + 181_000 + 10_000);
+    expect(registry.get(corpse)).toBeDefined();
+  });
+
+  test("a player coming back within 60 s keeps the overflow copy", () => {
+    const { registry, spawner, players, at } = occupiedSetup();
+    players.set(at("main:layer_2", 100, 200), 1);
+    spawner.tick(2000);
+    const id = spawner.getLiveInstanceId(1, "main:layer_2")!;
+    players.delete(at("main:layer_2", 100, 200));
+    spawner.tick(3000);
+    spawner.tick(40_000);
+    players.set(at("main:layer_2", 100, 200), 1);
+    spawner.tick(50_000);
+    players.delete(at("main:layer_2", 100, 200));
+    spawner.tick(70_000);
+    spawner.tick(100_000);
+    expect(registry.get(id)).toBeDefined();
+  });
+});
+
 describe("spawn burst spreading", () => {
   test("at most 100 spawn per tick; the rest follow on later ticks", () => {
     const spawns = Array.from({ length: 250 }, (_, i) => spawn({ id: i + 1, x: i * 40 }));
@@ -365,5 +492,106 @@ describe("editor data updates", () => {
     const fresh = registry.get(spawner.getLiveInstanceId(1)!)!;
     expect(fresh.id).not.toBe(old);
     expect(fresh.maxHealth).toBe(999);
+  });
+});
+
+describe("creature ids", () => {
+  afterEach(resetEntityIds);
+
+  test("are the world's entity ids, which are numbers", () => {
+    useWorldIds({ next: () => 900 } as any);
+    const { registry, spawner } = setup();
+    expect(spawner.getLiveInstanceId(1)).toBe(900);
+    expect(registry.get(900)?.id).toBe(900);
+  });
+
+  test("a spawn that cannot get an id is skipped and tried again later", () => {
+    let none = true;
+    useWorldIds({ next: () => { if (none) throw new Error("No world ids left"); return 5; } } as any);
+    const errors = spyOn(log, "error").mockImplementation(() => {});
+    try {
+      const { registry, spawner, events } = setup();
+      expect(registry.size).toBe(0);
+      expect(events).toEqual([]);
+      expect(spawner.getLiveInstanceId(1)).toBeUndefined();
+      expect(spawner.getPendingAt(1)).toBe(1000 + POOL_RETRY_MS);
+      expect(errors).toHaveBeenCalledTimes(1);
+      expect(errors.mock.calls[0]![0]).toContain("No world ids left");
+
+      none = false;
+      spawner.tick(1000 + POOL_RETRY_MS);
+      expect(spawner.getLiveInstanceId(1)).toBe(5);
+      expect(registry.size).toBe(1);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+});
+
+describe("cluster: spawn points in blocks other nodes own", () => {
+  // Block owners by "map|bx,by"; an absent block has no known owner.
+  function ownedSetup() {
+    const registry = new CreatureRegistry(64);
+    const owners = new Map<string, string>();
+    const ownerAt = (map: string, x: number, y: number) => owners.get(`${map}|${Math.floor(x / 4096)},${Math.floor(y / 4096)}`);
+    const spawner = new CreatureSpawner(
+      registry,
+      { spawnsHere: (map, x, y) => { const owner = ownerAt(map, x, y); return owner === undefined || owner === "b"; } },
+      () => 0,
+      1
+    );
+    owners.set("main|0,0", "b");
+    owners.set("main|1,0", "a");
+    const data = {
+      templates: new Map([[1, template()]]),
+      spawns: new Map([
+        [1, spawn({ id: 1, x: 100, y: 200 })], // this node's block
+        [2, spawn({ id: 2, x: 5000, y: 200 })], // node a's block
+        [3, spawn({ id: 3, x: 100, y: 5000 })], // no owner (the hook spawns there)
+      ]),
+      pools: new Map(),
+    };
+    spawner.load(data, 1000);
+    return { registry, spawner, owners, data };
+  }
+
+  test("a slot owned elsewhere is skipped and not counted; one owned here or by no one spawns", () => {
+    const { registry, spawner } = ownedSetup();
+    expect(spawner.getLiveInstanceId(1)).toBeDefined();
+    expect(spawner.getLiveInstanceId(3)).toBeDefined();
+    expect(spawner.getLiveInstanceId(2)).toBeUndefined();
+    expect(spawner.getPendingAt(2)).toBeUndefined();
+    expect(registry.size).toBe(2);
+    spawner.tick(60_000);
+    expect(spawner.getLiveInstanceId(2)).toBeUndefined();
+  });
+
+  test("a slot whose block becomes this node's is scheduled when the blocks change", () => {
+    const { spawner, owners } = ownedSetup();
+    owners.set("main|1,0", "b");
+    spawner.reviewOwnership(2000);
+    spawner.tick(2000);
+    expect(spawner.getLiveInstanceId(2)).toBeDefined();
+  });
+
+  test("a skipped slot whose spawn point an edit moves into this node's block spawns on that update", () => {
+    const { spawner, data } = ownedSetup();
+    const spawns = new Map(data.spawns);
+    spawns.set(2, spawn({ id: 2, x: 300, y: 200 }));
+    spawner.updateData({ ...data, spawns }, 2000);
+    expect(spawner.getLiveInstanceId(2)).toBeDefined();
+  });
+
+  test("a creature whose block another node takes is left alone; its respawn is skipped", () => {
+    const { registry, spawner, owners } = ownedSetup();
+    const id = spawner.getLiveInstanceId(3)!;
+    owners.set("main|0,1", "a");
+    spawner.reviewOwnership(2000);
+    spawner.tick(2000);
+    expect(registry.get(id)).toBeDefined();
+    spawner.despawn(id, 3000);
+    spawner.tick(3000 + 20_000);
+    expect(spawner.getLiveInstanceId(3)).toBeUndefined();
+    expect(spawner.getPendingAt(3)).toBeUndefined();
   });
 });

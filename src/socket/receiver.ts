@@ -1,44 +1,48 @@
 import { packetTypes } from "./types";
 import { packetManager } from "./packet_manager";
+import { forgetLook, lookSignature, noteLook } from "./looks";
 import { frameLimitFor } from "./framing";
-import { ticketAllows } from "./ticket";
-import { atomically } from "../services/batch";
+import { nodeTicket } from "./ticket";
+import { atomically, nothingWritten } from "../services/batch";
+import { deferredStep } from "../services/deferredstep";
 import log from "../modules/logger";
-import player, { clearMapCache, hasLineOfSight } from "../systems/player.ts";
-import permissions, { canGrant, outranks } from "../systems/permissions";
-import { mayEditTileSounds, readTileSoundChanges, saveTileSounds } from "../systems/tilesounds";
-import { mayCreateMaps, readCreateMap, requestCreateMap } from "../systems/mapcreate";
-import { getAuthWorker } from "./authentication_pool.ts";
+import player, { clearMapCache } from "../systems/player.ts";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../systems/permissions";
+import "../systems/tilesounds";
+import "../systems/mapcreate";
+import { getAuthPool } from "./authentication_pool.ts";
 import { listener } from "../modules/event_bus";
 import { Events, setPlayerPvp } from "../systems/events";
-import { collectReceiverEntries, encodeBatch, MoverSnapshot, ReceiverInfo } from "./movement_batch.ts";
+import { afterTickFlush, batchVolume, collectGroupReceivers, collectReceiverEntries, encodeBatch, farUpdateEvery, indexMovers, MovementVolume, NEAR_TIER_DISTANCE, type EntryTally, MoverSnapshot, ReceiverDiff, ReceiverInfo } from "./movement_batch.ts";
+import * as aoiReverse from "../services/aoiReverseIndex";
 import { queueLayerWorkerFlush, postToAllWorkers, setOnWorkerRetired } from "./movement_worker_pool.ts";
-import { claimBatchEntry, requeueSpawnBatch, claimDespawnEntry, requeueDespawnEntry } from "./batch_queue_utils.ts";
-const authentication_queue = new Set<string>();
-const authentication_session_queue = new Set<string>();
+import { requeueSpawnBatch, claimDespawnEntry, requeueDespawnEntry, setBounded, spawnsPerFlush, SPAWN_FLUSH_CONCURRENCY, flushSpawnQueue } from "./batch_queue_utils.ts";
+export const authentication_queue = new Set<string>();
+export const authentication_session_queue = new Set<string>();
 
-const pendingAuthentications = new Map<string, { wt: any; token: string; language: string }>();
+export const pendingAuthentications = new Map<string, { wt: any; token: string; language: string }>();
 
 // Track current target for target cycling
-const currentTargetMap = new Map<string, string | null>();
+export const currentTargetMap = new Map<string, string | null>();
 
 // Track who is being dragged by whom (draggedPlayerId -> adminId)
-const draggedPlayersMap = new Map<number, number>();
+export const draggedPlayersMap = new Map<number, number>();
 
 // Track active tile editors per map (mapName -> Set<playerId>)
-const chatRateLimit = new Map<number, number[]>();
+export const chatRateLimit = new Map<number, number[]>();
 
 /** Player-triggered NPC/quest packets share the chat-style rate limit bucket. */
 const questRateLimit = new Map<string, number[]>();
 const QUEST_RATE_MAX = 5;
 const QUEST_RATE_WINDOW = 3000;
 /** Must be within this distance (px) to talk to an NPC. Matches loot chests. */
-const NPC_INTERACT_RADIUS = 120;
+export const NPC_INTERACT_RADIUS = 120;
 
 registerExploreHooks();
 registerLevelUpHook();
 
-function isQuestRateLimited(id: string): boolean {
+export function isQuestRateLimited(id: string): boolean {
   const now = Date.now();
   const hits = questRateLimit.get(id) || [];
   const fresh = hits.filter((t) => now - t < QUEST_RATE_WINDOW);
@@ -52,7 +56,7 @@ const gatherRateLimit = new Map<string, number[]>();
 const GATHER_RATE_WINDOW = 2000;
 const GATHER_RATE_MAX = 10;
 
-function isGatherRateLimited(id: string): boolean {
+export function isGatherRateLimited(id: string): boolean {
   const now = Date.now();
   const fresh = (gatherRateLimit.get(id) || []).filter((t) => now - t < GATHER_RATE_WINDOW);
   fresh.push(now);
@@ -74,7 +78,7 @@ const guildEditTimes = new Map<number, Map<string, number>>();
 const GUILD_EDIT_INTERVAL = 1000;
 
 /** Whether this player may make a guild edit of this kind now. A repeat inside the second is dropped without a word. */
-function guildEditOk(wt: any, kind: string): boolean {
+export function guildEditOk(wt: any, kind: string): boolean {
   const id = Number(wt.data.id);
   const now = Date.now();
   let times = guildEditTimes.get(id);
@@ -90,7 +94,7 @@ function guildEditOk(wt: any, kind: string): boolean {
  * the members the chat gate lets it through to. `muted` says the line went
  * to nobody else.
  */
-async function chatHearing(sender: string, channel: "party" | "guild", message: string, members: string[]): Promise<Set<string> & { muted: boolean }> {
+export async function chatHearing(sender: string, channel: "party" | "guild", message: string, members: string[]): Promise<Set<string> & { muted: boolean }> {
   const me = sender.toLowerCase();
   const others = members.map((member) => String(member).toLowerCase()).filter((member) => member !== me);
   const reached = await chatAudience(sender, channel, message, others);
@@ -98,25 +102,19 @@ async function chatHearing(sender: string, channel: "party" | "guild", message: 
 }
 
 /** Every online member of the guild gets the guild as their rank may see it. */
-async function pushGuild(guildId: number | null | undefined): Promise<void> {
+export async function pushGuild(guildId: number | null | undefined): Promise<void> {
   if (!guildId) return;
   try {
     const members = await guilds.getGuildMembers(guildId);
     const guildName = await guilds.getGuildName(guildId);
-    const online: any[] = [];
+    const online: string[] = [];
     for (const member of members) {
-      const p = await onlineNamed(member);
-      if (p) online.push(p);
+      if (await isOnline(member)) online.push(member);
     }
     // Built once for all of them; only officer notes and each one's own rank differ.
-    const packets = await guilds.packetsFor(guildId, online.map((p) => p.username));
-    for (const p of online) {
-      p.guild_id = guildId;
-      p.guild = members;
-      p.guild_name = guildName;
-      playerCache.set(p.id, p);
-      const packet = packets.get(p.username);
-      if (packet) sendPacket(p.wt, packetManager.updateGuild(packet));
+    const packets = await guilds.packetsFor(guildId, online);
+    for (const member of online) {
+      await runOnPlayer(member, "guild-update", { guildId, members, guildName, packet: packets.get(member) ?? null });
     }
   } catch (error) {
     log.error(`The guild ${guildId} could not be sent to its members: ${error}`);
@@ -124,40 +122,255 @@ async function pushGuild(guildId: number | null | undefined): Promise<void> {
 }
 
 /** After a kick went through: the kicked player, when online, holds no guild and is told. */
-async function kickedFromGuild(actor: any, guildId: number, kickedUsername: string): Promise<void> {
-  const kickedPlayer = await onlineNamed(kickedUsername);
-  if (kickedPlayer) {
-    sendPacket(kickedPlayer.wt, packetManager.updateGuild({ members: [] }));
-    sendPacket(kickedPlayer.wt, packetManager.notify({ message: "You have been kicked from the guild" }));
-    kickedPlayer.guild_id = null;
-    kickedPlayer.guild = [];
-    kickedPlayer.guild_name = null;
-    playerCache.set(kickedPlayer.id, kickedPlayer);
-  }
+export async function kickedFromGuild(actor: any, guildId: number, kickedUsername: string): Promise<void> {
+  await runOnPlayer(kickedUsername, "guild-kicked");
   listener.emit(Events.GUILD_CHANGED, { type: "kick", guildId, guildName: actor.guild_name, playerUsername: actor.username, kickedUsername });
 }
 
+// What a party or guild change does to a member: their cached player is changed and their client told. Each runs on
+// the node that holds the member (cluster/deliver.ts), at once when that is this one.
+registerPlayerAction("guild-update", (p, { guildId, members, guildName, packet }) => {
+  p.guild_id = guildId;
+  p.guild = members;
+  p.guild_name = guildName;
+  playerCache.set(p.id, p);
+  if (packet) sendPacket(p.wt, packetManager.updateGuild(packet));
+});
+registerPlayerAction("guild-kicked", (p) => {
+  sendPacket(p.wt, packetManager.updateGuild({ members: [] }));
+  sendPacket(p.wt, packetManager.notify({ message: "You have been kicked from the guild" }));
+  p.guild_id = null;
+  p.guild = [];
+  p.guild_name = null;
+  playerCache.set(p.id, p);
+});
+/** The guild was disbanded: `notice` for everyone but the leader who did it. */
+registerPlayerAction("guild-disbanded", (p, { notice }) => {
+  sendPacket(p.wt, packetManager.updateGuild({ members: [] }));
+  if (notice) sendPacket(p.wt, packetManager.notify({ message: "The guild has been disbanded" }));
+  p.guild_id = null;
+  p.guild = [];
+  p.guild_name = null;
+  playerCache.set(p.id, p);
+  broadcastPlayerUpdate(p);
+});
+/** The member is in no party now (disbanded, kicked), and told why. */
+registerPlayerAction("party-cleared", (p, { message }) => {
+  sendPacket(p.wt, packetManager.updateParty({ members: [] }));
+  sendPacket(p.wt, packetManager.notify({ message }));
+  if (clusterEnabled()) clearParty(p);
+  else p.party = [];
+  playerCache.set(p.id, p);
+});
+/** The party's members as they now are, with a notice when there is one for this member. */
+registerPlayerAction("party-update", async (p, { members, notice }) => {
+  sendPacket(p.wt, packetManager.updateParty({ members }));
+  if (notice) sendPacket(p.wt, packetManager.notify({ message: notice }));
+  if (clusterEnabled()) {
+    await trackPacket(String(p.id), () => applyPartyMembers(p, Array.isArray(members) ? members : [], (username) => parties.getPartyId(username)));
+    cacheIfHeld(playerCache, p);
+  } else {
+    p.party = members;
+    playerCache.set(p.id, p);
+  }
+});
+/** An admin disconnected (/kick) or banned (/ban) the player: their session ends and their connection is closed. */
+registerPlayerAction("admin-kick", (p) => player.kick(p.username, p.wt));
+// Cluster mode: a player of another node inspected this node's player. The answer goes to the asker by name.
+/**
+ * Whether the player `asker` names is an admin, by their account and not by anything the bus carried; null when the
+ * name is no player online (nobody to answer, so nothing is sent). A failed look-up is no admin.
+ */
+async function inspectAskerAdmin(asker: unknown): Promise<boolean | null> {
+  if (typeof asker !== "string" || !asker) return null;
+  if (!(await isOnline(asker))) return null;
+  try {
+    return !!(await player.isAdmin(asker));
+  } catch (error) {
+    log.error(`The role of ${asker} could not be read for an inspect: ${error}`);
+    return false;
+  }
+}
+registerPlayerAction("cells-inspect", async (p, args) => {
+  const asker = args?.asker;
+  // The asker's own account says whether they are an admin: the asking node's word is not taken.
+  const admin = await inspectAskerAdmin(asker);
+  if (admin === null) return;
+  // A stealthed admin is not there to anyone but admins.
+  if (p.isStealth && !admin) return;
+  await deliverToPlayer(String(asker), packetManager.inspectPlayer(inspectPlayerData(p, !!admin)));
+});
+// Cluster mode: a player of a neighbouring node acts on a corpse, ground loot or a chest this node owns (spec §4).
+// `actor` is that player's mirror here, so the checks below run on where this node sees them.
+serveItems("LOOT_OPEN", (actor, body) => {
+  const opened = creatures.openCorpseFor(actor, Number(body.creatureId));
+  return typeof opened === "string" ? { ok: false, reason: opened } : { ok: true, items: opened.items, copper: opened.copper };
+});
+/** The most places on a corpse or in a chest, and the most names of what the bags hold, that a call from a neighbouring node is believed to carry. */
+const MAX_TAKE_INDICES = 64;
+const MAX_HELD_NAMES = 64;
+/** The most free slots a call may claim. */
+const MAX_FREE_SLOTS = 1000;
+/** The places a call asks to take: whole numbers from 0, each once, at most MAX_TAKE_INDICES. Null when it gives no list (it asks for all). */
+function takeIndices(raw: unknown): number[] | null {
+  if (!Array.isArray(raw)) return null;
+  const places = new Set<number>();
+  for (const value of raw) {
+    // A number, or the text of one: null, true and "" are not places (Number turns them into 0 and 1).
+    if (typeof value !== "number" && !(typeof value === "string" && value.trim() !== "")) continue;
+    const place = Number(value);
+    if (Number.isInteger(place) && place >= 0) places.add(place);
+    if (places.size >= MAX_TAKE_INDICES) break;
+  }
+  return [...places];
+}
+/**
+ * The room in a looter's bags as a call carried it, or null when it is not a room: free slots must be a whole
+ * number (NaN would make every item fit), and what the bags hold a list of names. Fewer than none free is none; a
+ * longer list of names than MAX_HELD_NAMES is cut, which only makes items need a slot.
+ */
+function bagRoomOf(raw: any): { free: number; held: string[] } | null {
+  if (!raw || typeof raw !== "object" || !Number.isInteger(raw.free) || !Array.isArray(raw.held)) return null;
+  const held = raw.held.filter((name: unknown) => typeof name === "string").slice(0, MAX_HELD_NAMES);
+  return { free: Math.min(Math.max(raw.free, 0), MAX_FREE_SLOTS), held };
+}
+serveItems("LOOT_TAKE", async (actor, body) => {
+  const room = bagRoomOf(body.room);
+  if (!room) return { ok: false, reason: "failed" };
+  const taken = await creatures.takeCorpseLootFor(actor, Number(body.creatureId), takeIndices(body.indices), room);
+  if (typeof taken === "string") return { ok: false, reason: taken };
+  return { ok: true, items: taken.taken, copper: taken.copper, empty: taken.empty, full: taken.full, remaining: taken.remaining };
+});
+serveItems("PICKUP_REQUEST", (actor, body) => {
+  const picked = loot.pickup(actor, String(body.lootId));
+  return picked.success && picked.item ? { ok: true, item: picked.item } : { ok: false, reason: picked.message };
+});
+serveItems("CHEST_OPEN", async (actor, body) => {
+  const chestId = String(body.chestId);
+  const chest = lootChest.getChest(chestId);
+  if (!chest) return { ok: false, reason: "Chest not found." };
+  if (bareMap(chest.map) !== bareMap(actor.location?.map)) return { ok: false, reason: "Chest is on a different map." };
+  const position = actor.location.position;
+  if (!lootChest.isWithinRange(chestId, position.x, position.y)) return { ok: false, reason: "You are too far from the chest." };
+  const opened = await lootChest.open(chestId, String(actor.id));
+  return opened ? { ok: true, items: opened.items } : { ok: false, reason: "Could not open chest." };
+});
+serveItems("CHEST_TAKE", async (actor, body) => {
+  const chestId = String(body.chestId);
+  const indices = takeIndices(body.indices);
+  // write = false: the items are marked taken here and written on the player's node.
+  const taken = indices
+    ? await lootChest.takeItems(chestId, String(actor.id), actor.username, indices, false)
+    : await lootChest.takeAllItems(chestId, String(actor.id), actor.username, false);
+  if (!taken) return { ok: false, reason: "Could not take items." };
+  return { ok: true, items: taken.taken, remaining: "remaining" in taken ? taken.remaining : [], allTaken: taken.allTaken };
+});
+/** The player logged in on another node: this old session is told and closed, and the disconnect path cleans up and saves it. */
+registerPlayerAction("displaced-login", (p) => {
+  if (p.wt?.readyState !== 1) return;
+  sendPacket(p.wt, packetManager.notify({ message: "You have been logged in from another location." }));
+  // drain: the notice may sit in the outbox behind a write in flight; a plain close would drop it (the close is still bounded).
+  p.wt.close(1000, "Logged in from another location", { drain: true });
+});
+
+// Cells phase 6: an admin's REVIVE, SUMMON or TELEPORT of a player on this node, sent from the admin's node (Task 15).
+// Each runs counted in flight, so a handoff that starts meanwhile waits for it, and none starts on a player whose
+// handoff is under way: what it changed could miss the snapshot. Every field the link brought is checked before it
+// is used (socket/arrival.ts); an action with a bad one is logged and dropped, and nobody is moved.
+
+const busyNote = (name: string) => packetManager.notify({ message: `${shownName(name)} is changing server node; try again` });
+
+/** A remote admin action that never throws back to the delivery: what fails is logged here. */
+function guardedAction(name: string, action: (target: any, args: any) => Promise<void>): (target: any, args: any) => Promise<void> {
+  return async (target, args) => {
+    try {
+      await action(target, args);
+    } catch (error) {
+      log.error(`The remote admin action "${name}" on ${target?.username} failed: ${error}`);
+    }
+  };
+}
+
+registerPlayerAction("cells-revive", guardedAction("cells-revive", (target, args) => trackPacket(String(target.id), async () => {
+  const by = remoteAdminOf(args);
+  if (by === null) {
+    log.warn(`A remote revive of ${target.username} was dropped: it names no admin`);
+    return;
+  }
+  if (target.handoff) {
+    void deliverToPlayer(by, busyNote(target.username));
+    return;
+  }
+  // The REVIVE command's body (src/socket/revive.ts): in place at full health, corpse, ghost and sickness cleared.
+  const revived = await revivePlayer(target, reviveDeps(), () => {
+    void deliverToPlayer(by, packetManager.notify({ message: `Revived ${shownName(target.username)}` }));
+  });
+  if (revived === "not-dead") {
+    void deliverToPlayer(by, packetManager.notify({ message: `${shownName(target.username)} is not dead` }));
+  }
+})));
+
+registerPlayerAction("cells-summon", guardedAction("cells-summon", (target, args) => trackPacket(String(target.id), async () => {
+  const move = adminMoveOf(args, ((await assetCache.get("maps")) || []) as MapData[]);
+  if (typeof move === "string") {
+    log.warn(`A remote summon of ${target.username} was dropped: it brought ${move}`);
+    return;
+  }
+  const { by, map, x, y } = move;
+  const teleport = move.why === "teleport";
+  if (target.handoff) {
+    void deliverToPlayer(by, busyNote(target.username));
+    return;
+  }
+  if (move.why === "summon" && target.isAdmin && !move.admins) {
+    void deliverToPlayer(by, packetManager.notify({ message: "You cannot summon other admins" }));
+    return;
+  }
+  // Told before the move: the move may switch the player to another node (a warp into another node's block is a
+  // handoff, transitionPlayerToMap), and the SWITCH closes this connection after what was sent before it.
+  if (target.wt) {
+    sendPacket(target.wt, packetManager.notify({
+      message: teleport ? `Teleported to ${shownName(by)}'s location` : "You have been summoned by an admin",
+    }));
+  }
+  await teleportPlayerWrapper(target, map, x, y);
+  if (!teleport) void deliverToPlayer(by, packetManager.notify({ message: `Summoned ${shownName(target.username)} to your location` }));
+})));
+
+registerPlayerAction("cells-teleport-to", guardedAction("cells-teleport-to", (target, args) => trackPacket(String(target.id), async () => {
+  const by = remoteAdminOf(args);
+  if (by === null) {
+    log.warn(`A remote teleport to ${target.username} was dropped: it names no admin`);
+    return;
+  }
+  if (target.handoff) {
+    void deliverToPlayer(by, busyNote(target.username));
+    return;
+  }
+  const pos = target.location?.position;
+  // The admin is moved by their own node (Deviation 21): the summon runs there with this player's point.
+  const sent = await runOnPlayer(by, "cells-summon", {
+    by: target.username, map: target.location.map, x: Math.round(Number(pos?.x) || 0), y: Math.round(Number(pos?.y) || 0),
+    why: "teleport", admins: reverseSummonAdmins(args),
+  });
+  if (!sent) log.debug(`Teleport of ${by} to ${target.username}: ${by} is no longer online`);
+})));
+
 /** Says why a guild action was refused. Answers whether it went through; `changed: false` on it is a save of what was there. */
-function guildDone(wt: any, result: GuildResult): result is Extract<GuildResult, { ok: true }> {
+export function guildDone(wt: any, result: GuildResult): result is Extract<GuildResult, { ok: true }> {
   if (result.ok) return true;
   sendPacket(wt, packetManager.notify({ message: refusalText[result.reason] }));
   return false;
 }
 
 /** A guild or officer line's listeners and its sender, who sees their own line even when their rank may not listen. */
-function withSender(listeners: string[], sender: string): string[] {
+export function withSender(listeners: string[], sender: string): string[] {
   const me = sender.toLowerCase();
   return listeners.some((name) => String(name).toLowerCase() === me) ? listeners : [...listeners, sender];
 }
 
-/** The online player named `username`, any case, or null. */
-async function onlineNamed(username: string): Promise<any> {
-  const session_id = await player.getSessionIdByUsername(username);
-  return (session_id && playerCache.get(session_id)) || null;
-}
-
 /** A line to the guild's officers: everyone whose rank may listen to officer chat. */
-async function officerChat(wt: any, currentPlayer: any, message: unknown): Promise<void> {
+export async function officerChat(wt: any, currentPlayer: any, message: unknown): Promise<void> {
   if (subscriptionLocked(wt, currentPlayer, "guild_chat")) return;
   if (!channelLineOk(wt, message)) return;
   const guildId = currentPlayer.guild_id;
@@ -174,9 +387,7 @@ async function officerChat(wt: any, currentPlayer: any, message: unknown): Promi
   const line = await chatLinksOf(message);
   for (const officer of withSender(officers, currentPlayer.username)) {
     if (!hearing.has(String(officer).toLowerCase())) continue;
-    const p = await onlineNamed(officer);
-    if (!p) continue;
-    sendPacket(p.wt, packetManager.officerChat({
+    await deliverToPlayer(officer, packetManager.officerChat({
       id: wt.data.id,
       message: line.message,
       ...(line.links.length > 0 ? { links: line.links } : {}),
@@ -187,27 +398,44 @@ async function officerChat(wt: any, currentPlayer: any, message: unknown): Promi
 }
 
 /**
- * An invitation (to a party, a guild or a friendship) reaches the one invited
+ * An invitation (to a party, a guild, a friendship or a trade) reaches the one invited
  * unless they ignore who sent it. The sender sees it as sent either way.
+ * Whether it could be sent: false when the one invited is not online (on any node).
  */
-async function sendInvitation(from: any, to: any, invitation: any): Promise<void> {
+async function sendInvitation(from: any, toUsername: string, invitation: any): Promise<boolean> {
   // An ignore list that cannot be read holds nothing back.
-  if (await ignores.blocks(to.username, from.username).catch(() => false)) return;
-  sendPacket(to.wt, packetManager.invitation(invitation));
+  if (await ignores.blocks(toUsername, from.username).catch(() => false)) return true;
+  return await deliverToPlayer(toUsername, packetManager.invitation(invitation));
+}
+
+/**
+ * A party, guild or friend invitation: kept for its answer (cluster/invitations.ts), wherever the
+ * one invited answers it, and sent. Whether it could be sent; one that could not is not kept.
+ */
+export async function offerInvitation(from: any, toUsername: string, invitation: { action: string; message: string; originator: string; authorization: string }): Promise<boolean> {
+  await invitations.add({
+    action: invitation.action,
+    originator: invitation.originator,
+    originatorName: from.username,
+    authorization: invitation.authorization,
+    target: toUsername,
+  });
+  if (await sendInvitation(from, toUsername, invitation)) return true;
+  await invitations.take(invitation.authorization);
+  return false;
 }
 
 /** What /ignore and /unignore answered, sent on: the message, the list when it changed, and both friends lists when a friendship ended. */
-function sendIgnoreAnswer(wt: any, answer: moderation.IgnoreAnswer): void {
+export async function sendIgnoreAnswer(wt: any, answer: moderation.IgnoreAnswer): Promise<void> {
   sendPacket(wt, packetManager.notify({ message: answer.message }));
   if (answer.ignored) sendPacket(wt, packetManager.updateIgnores({ ignored: answer.ignored }));
   if (!answer.unfriended) return;
   sendPacket(wt, packetManager.updateFriends({ friends: answer.unfriended.mine }));
-  const other = playerCache.getByUsername(answer.unfriended.target);
-  if (other?.wt) sendPacket(other.wt, packetManager.updateFriends({ friends: answer.unfriended.theirs }));
+  await deliverToPlayer(answer.unfriended.target, packetManager.updateFriends({ friends: answer.unfriended.theirs }));
 }
 
 /** Files a report from a player and answers them. The staff online who handle reports are told of one that was filed. */
-async function sendReport(wt: any, reporter: any, name: unknown, category: unknown, details: unknown): Promise<void> {
+export async function sendReport(wt: any, reporter: any, name: unknown, category: unknown, details: unknown): Promise<void> {
   const answer = await moderation.report(reporter, name, category, details);
   sendPacket(wt, packetManager.notify({ message: answer.message }));
   if (!answer.report) return;
@@ -217,52 +445,101 @@ async function sendReport(wt: any, reporter: any, name: unknown, category: unkno
   }
 }
 
-/** The player online under a name: who the trade rules ask about. */
-const traderNamed = (username: string) => playerCache.getByUsername(username);
-const shownName = (username: string) => username.charAt(0).toUpperCase() + username.slice(1);
+/**
+ * The player online under a name: who the trade rules ask about. The asked player of a trade held here
+ * may be on a neighbouring node, and is then read from their mirror (cluster/tradelink.ts).
+ */
+const traderNamed = (username: string) =>
+  playerCache.getByUsername(username) ?? (tradeLink.partnerPeer(username) ? mirrorByUsername(username) : undefined);
+export const shownName = (username: string) => username.charAt(0).toUpperCase() + username.slice(1);
+
+/**
+ * Whether a player is on their way to another node (a handoff has begun, or this node's connection of theirs was
+ * released): what they do here is lost or dangles there.
+ */
+const inHandoff = (player: any): boolean => !!(player?.handoff || player?.wt?.data?.handedOff);
+
+/**
+ * Whether a DoT's caster (an arrival's record, arrival.ts) is a player this node knows: one in the player cache, or
+ * the mirror of one on a neighbouring node, under that id and that name.
+ */
+function knownDotCaster(id: string, username: string): boolean {
+  const player = playerCache.get(id) ?? mirrorPlayers.get(id);
+  return !!player && typeof player.username === "string" && player.username.toLowerCase() === username.toLowerCase();
+}
 
 /**
  * Why `asker` cannot start a trade with `asked` now, in words for `asker`: the two may not trade,
  * or one of them already is. Null when they can.
  */
-function tradeRefusal(asker: any, asked: any): string | null {
+export function tradeRefusal(asker: any, asked: any): string | null {
+  // A player in a handoff is frozen (their packets are refused) and then released: a trade begun with them would
+  // dangle on this node (final review M2).
+  for (const player of [asker, asked]) {
+    if (player?.handoff || player?.wt?.data?.handedOff) return "That player is busy.";
+  }
   const reason = cannotTrade(asker, asked);
   if (reason) return reason;
   const unsubscribed = subscriptionRefusal(asker, "trade");
   if (unsubscribed) return unsubscribed;
-  if (trades.of(asker.username)) return "You are already trading.";
-  if (trades.of(asked.username)) return `${shownName(asked.username)} is already trading.`;
+  return busyRefusal(asker, asked);
+}
+
+/** Whether a player of this node is in a trade: one held here, or one held on a neighbouring node (cluster/tradelink.ts). */
+export function isTrading(username: string): boolean {
+  return trades.of(username) !== null || tradeLink.hostOf(username) !== null;
+}
+
+/** Why `asker` cannot start a trade with `asked` because one of them already trades, in words for `asker`. Null when neither does. */
+function busyRefusal(asker: any, asked: any): string | null {
+  if (isTrading(asker.username)) return "You are already trading.";
+  if (isTrading(asked.username)) return `${shownName(asked.username)} is already trading.`;
   return null;
 }
 
 /** True, once the player has been told, when a subscription lock keeps them from `id` (systems/subscriptions.ts). */
-function subscriptionLocked(wt: any, who: any, id: string): boolean {
+export function subscriptionLocked(wt: any, who: any, id: string): boolean {
   const message = subscriptionRefusal(who, id);
   if (!message) return false;
   sendPacket(wt, packetManager.notify({ message }));
   return true;
 }
 
-/** Sends each of a trade's players the trade as it stands for them. */
-async function sendTradeState(trade: Trade): Promise<void> {
-  const now = Date.now();
-  for (const name of trade.players) {
-    const online = playerCache.getByUsername(name);
-    if (online?.wt) sendPacket(online.wt, packetManager.tradeState(await trades.view(trade, name, now)));
-  }
+/** Sends one of a trade's players the trade as it stands for them: here, or through the node they are on. */
+async function sendTradeViewTo(trade: Trade, name: string, now = Date.now()): Promise<void> {
+  const online = playerCache.getByUsername(name);
+  if (online?.wt) sendPacket(online.wt, packetManager.tradeState(await trades.view(trade, name, now)));
+  else if (!online && tradeLink.partnerPeer(name)) tradeLink.sendState(name, await trades.view(trade, name, now));
 }
 
-/** Tells each of a trade's players that it ended, in the words meant for them. */
-function sendTradeClosed(trade: Trade, completed: boolean, messages: Record<string, string>): void {
+/** Sends each of a trade's players the trade as it stands for them. */
+export async function sendTradeState(trade: Trade): Promise<void> {
+  const now = Date.now();
+  for (const name of trade.players) await sendTradeViewTo(trade, name, now);
+}
+
+/**
+ * Tells each of a trade's players that it ended, in the words meant for them. A player of a neighbouring
+ * node is told through their node, which reads their bags and coins again when `reload` is set.
+ */
+function sendTradeClosed(trade: Trade, completed: boolean, messages: Record<string, string>, reload = false): void {
   for (const name of trade.players) {
     const online = playerCache.getByUsername(name);
     if (online?.wt) sendPacket(online.wt, packetManager.tradeClosed({ completed, message: messages[name] ?? "" }));
+    else if (!online && tradeLink.partnerPeer(name)) tradeLink.sendClosed(name, { completed, message: messages[name] ?? "", reload });
+    // The trade is over: a player of a neighbouring node is no longer a partner here.
+    tradeLink.dropPartner(name);
   }
 }
 
-/** After a player's items and coins changed together (a trade, a deal with a vendor): their bags and coins as they now are. */
-async function sendBelongingsOf(online: any): Promise<void> {
+/**
+ * After a player's items and coins changed together (a trade, a deal with a vendor): their bags and coins as they now are.
+ * `fromDatabase` when another node wrote the rows (the host of a trade across a border): the copies held here are let go
+ * first, so what is read and shown is what was written, and not a copy that a later write here would put back.
+ */
+export async function sendBelongingsOf(online: any, fromDatabase = false): Promise<void> {
   if (!online) return;
+  if (fromDatabase) await Promise.all([dropRows("inventory", online.username), dropRows("currency", online.username)]);
   online.inventory = await patchInventoryBagSlots(await inventory.get(online.username), online.username);
   online.currency = await currencySystem.get(online.username);
   playerCache.set(online.id, online);
@@ -277,13 +554,401 @@ async function sendBelongingsAfterTrade(trade: Trade): Promise<void> {
 }
 
 /**
+ * A player's offer in the trade held here: from their TRADE_OFFER, or from their node (TP_UPDATE).
+ * `tell` gives them a message.
+ */
+async function offerInTrade(username: string, raw: unknown, tell: (message: string) => void): Promise<void> {
+  const offered = await trades.offer(username, raw);
+  if (offered.ok && offered.changed) {
+    await sendTradeState(offered.trade);
+    return;
+  }
+  if (!offered.ok) tell(offered.message);
+  // Nothing changed: the player is sent the trade as it stands, which puts back what their window showed.
+  const standing = trades.of(username);
+  if (standing) await sendTradeViewTo(standing, username);
+}
+
+/** A player accepts the trade held here: from their TRADE_ACCEPT, or from their node (TP_UPDATE). */
+async function acceptTrade(username: string, tell: (message: string) => void): Promise<void> {
+  const accepted = await trades.accept(username, traderNamed);
+  if (accepted.state === "wait") {
+    tell(accepted.message);
+  } else if (accepted.state === "accepted") {
+    await sendTradeState(accepted.trade);
+  } else if (accepted.state === "failed") {
+    sendTradeClosed(accepted.trade, false, accepted.reasons);
+  } else if (accepted.state === "completed") {
+    const { trade, record } = accepted;
+    // The swap is made: whatever happens to the reload, the windows are closed and the event is told.
+    if (record) {
+      try {
+        await sendBelongingsAfterTrade(trade);
+      } catch (error) {
+        log.error(`The bags and coins of ${trade.players.join(" and ")} could not be read again after their trade: ${error}`);
+      }
+    }
+    const said = record ? "Trade complete." : "Nothing was traded.";
+    sendTradeClosed(trade, record !== null, Object.fromEntries(trade.players.map((name) => [name, said])), record !== null);
+    if (record) listener.emit(Events.TRADE_COMPLETED, { trade: record });
+  }
+}
+
+/** A player cancels the trade held here: from their TRADE_CANCEL, or from their node (TP_UPDATE). */
+function cancelTrade(username: string): void {
+  const cancelled = trades.cancel(username);
+  if (!cancelled) return;
+  const me = username.toLowerCase();
+  sendTradeClosed(cancelled, false, Object.fromEntries(cancelled.players.map((name) =>
+    [name, name === me ? "You cancelled the trade." : `${shownName(username)} cancelled the trade.`]
+  )));
+}
+
+/** Ends the trade held here of a player who left: both players are told they are gone. */
+function endTradeOf(username: string): void {
+  const ended = trades.cancel(username);
+  if (!ended) return;
+  const gone = `${shownName(username)} is no longer online.`;
+  sendTradeClosed(ended, false, Object.fromEntries(ended.players.map((name) => [name, gone])));
+}
+
+/**
+ * Host side (cluster/tradelink.ts): a player of a neighbouring node answered a trade invitation that a
+ * player of this node sent. These are INVITATION_RESPONSE's checks, against the mirror of the one who
+ * answered. Their node has already checked what only it knows: their subscription, and a trade of theirs
+ * held elsewhere.
+ */
+async function answerTradeHere(body: TradeAnswer, from: string): Promise<TradeReply> {
+  const inviter = playerCache.get(String(body?.askerId ?? ""));
+  if (!inviter || inviter.username.toLowerCase() !== String(body.asker).toLowerCase()) {
+    return { ok: false, reason: "Unable to process invitation - user not found or has disconnected" };
+  }
+  const notFound: TradeReply = { ok: false, reason: "Invitation not found or has already been processed" };
+  const partner = entityById(String(body.partnerId ?? ""));
+  // Only the node the one who answered is on speaks for them, and nobody who is a player of this node.
+  if (!partner?.remote || mirrorOwner(partner.id) !== from || String(partner.username).toLowerCase() !== String(body.partner).toLowerCase()) return notFound;
+  if (playerCache.getByUsername(partner.username)) return notFound;
+
+  const invite = inviter.invitations.find((inv: any) => inv.authorization === body.authorization);
+  if (!invite || invite.action !== "TRADE_REQUEST" || invite.originator !== String(inviter.id)) return notFound;
+  inviter.invitations = inviter.invitations.filter((inv: any) => inv.authorization !== body.authorization);
+  playerCache.set(inviter.id, inviter);
+
+  // Answered by someone it was not sent to: it is spent, and nothing comes of it.
+  if (invite.target !== String(partner.id)) return { ok: true };
+  if (!body.accepted) {
+    if (inviter.wt) sendPacket(inviter.wt, packetManager.notify({ message: `${shownName(partner.username)} declined your trade request` }));
+    return { ok: true };
+  }
+  // Things may have changed since it was asked: one walked off, or began another trade.
+  const refusal = cannotTrade(partner, inviter) ?? busyRefusal(partner, inviter);
+  const trade = refusal ?? trades.open(inviter, partner);
+  if (typeof trade === "string") return { ok: false, reason: trade };
+  tradeLink.setPartner(partner.username, from, body.stamp);
+  await sendTradeState(trade);
+  return { ok: true, opened: true };
+}
+
+/** Host side: what a player of a neighbouring node did to their trade held here (TP_UPDATE). */
+async function updateTradeHere(body: TradeUpdate): Promise<TradeReply> {
+  const told: string[] = [];
+  const tell = (message: string) => {
+    told.push(message);
+  };
+  try {
+    if (body.op === "offer") await offerInTrade(body.username, body.offer, tell);
+    else if (body.op === "accept") await acceptTrade(body.username, tell);
+    else if (body.op === "cancel") {
+      // A trade that is being swapped is not cancelled: its node is told, and waits for the end of it.
+      if (trades.of(body.username)?.settling) return { ok: false, settling: true };
+      cancelTrade(body.username);
+    } else if (body.op === "leave") endTradeOf(body.username);
+    else return { ok: false, reason: "That is not a trade action." };
+  } catch (error) {
+    // The link would only answer "failed" and say nothing here.
+    log.error(`The trade update "${body.op}" of ${body.username} from a neighbouring node failed: ${error}`);
+    return { ok: false, reason: "The trade could not be completed." };
+  }
+  return told.length > 0 ? { ok: false, reason: told.join(" ") } : { ok: true };
+}
+
+/** Partner side: the trade of a player of this node, as the node that holds it sent it (TP_STATE). */
+function showTradeFromHost(body: TradeStateCast): void {
+  const online = playerCache.getByUsername(body.username);
+  if (online?.wt) sendPacket(online.wt, packetManager.tradeState(body.state as TradeView));
+}
+
+/** Partner side: the trade of a player of this node ended (TP_CLOSED). After a swap, their bags and coins are read again. */
+async function closeTradeFromHost(body: TradeClosedCast): Promise<void> {
+  const online = playerCache.getByUsername(body.username);
+  if (!online) return;
+  // Their window is closed whether or not the reload worked.
+  try {
+    // The host wrote these rows on its node: the copies held here are dropped before they are read again.
+    if (body.reload) await sendBelongingsOf(online, true);
+  } catch (error) {
+    log.error(`The bags and coins of ${body.username} could not be read again after a trade: ${error}`);
+  }
+  if (online.wt) sendPacket(online.wt, packetManager.tradeClosed({ completed: body.completed, message: body.message }));
+}
+
+/**
+ * A player marked unsettled after a lost trade (cluster/tradesettle.ts) is shown their bags and coins again once the
+ * mark has run out: a swap the host finished in the meantime is then in what they see. Nothing is done for a player
+ * who is not marked. The player is looked up when the mark ends, since they may have left by then.
+ */
+function reloadWhenSettled(username: string): void {
+  if (tradeSettle.unsettledUntil(username) === null) return;
+  void settled(username)
+    .then(() => sendBelongingsOf(playerCache.getByUsername(username), true))
+    .catch((error) => log.error(`The bags and coins of ${username} could not be read again after their lost trade settled: ${error}`));
+}
+
+/**
+ * The link to another node went down with a trade across it (cluster/tradelink.ts, Task 10). Host: the trade held
+ * here ends, unless it is being swapped (trades.cancel leaves a settling trade: the swap's own database write is the
+ * truth). Partner: the window closes, and the bags and coins are read again from the database, now and once more
+ * after the mark that peerDown set has run out.
+ */
+async function loseTrade(body: TradeLost): Promise<void> {
+  if (body.role === "host") {
+    endTradeOf(body.username);
+    return;
+  }
+  const online = playerCache.getByUsername(body.username);
+  if (!online) return;
+  try {
+    await sendBelongingsOf(online, true);
+  } catch (error) {
+    log.error(`The bags and coins of ${body.username} could not be read again after a lost trade: ${error}`);
+  }
+  if (online.wt) sendPacket(online.wt, packetManager.tradeClosed({ completed: false, message: TRADE_UNREACHABLE }));
+  reloadWhenSettled(body.username);
+}
+
+// Cluster mode: trades between a player of this node and a player of a neighbouring node (cluster/tradelink.ts).
+tradeLink.setHandlers({ answer: answerTradeHere, update: updateTradeHere, state: showTradeFromHost, closed: closeTradeFromHost, lost: loseTrade });
+
+/**
+ * Ends one session on this node: closes only that row's connection, whose disconnect cleans up that row and saves it
+ * fenced on its owner epoch (the SAVE loop's refusal does the same). Never player.kick by username: that logs out
+ * whichever session the name has here now, which may be a newer one.
+ */
+function endSessionOf(row: any, why: string): void {
+  try {
+    row?.wt?.close?.(1000, why);
+  } catch (error) {
+    log.error(`Could not end the session of ${row?.username}: ${error}`);
+  }
+}
+
+// Cluster mode (cells phase 7): startCluster calls these. A login claimed here takes the owner epoch its saves are
+// fenced on (cluster/ownerepoch.ts); a fenced node sends its players away. Nothing calls them with the cluster off.
+useEngineHooks({
+  claimed: (p, entry, directory) => adoptOwnerEpoch(p, entry.epoch, {
+    directory,
+    kick: (refused) => {
+      // The refused epoch is below the one the database holds, so the save at disconnect writes nothing.
+      refused.ownerEpoch = entry.epoch;
+      endSessionOf(refused, "Logged in from another location");
+    },
+  }),
+  kick: (p) => endSessionOf(p, "Server is restarting"),
+});
+
+// Cells phase 6: the player handoff's trigger. Registered at load; it runs only while startCluster has the links
+// attached, so outside cluster mode handoffCtx stays null and no warp or tick looks at another node.
+
+/** How often the watch looks for players who crossed into another node's block. */
+export const HANDOFF_WATCH_MS = 250;
+
+/** The links of the running cluster while they are attached; null otherwise. */
+let handoffCtx: LinkContext | null = null;
+
+/**
+ * Whether the shared store is reachable (R12). Handoffs wait while it is not: the arrival and the ticket live there.
+ * A store without isUp, or a context that carries no store, counts as up.
+ */
+function storeUp(ctx: LinkContext | null): boolean {
+  return ctx?.store?.isUp?.() !== false;
+}
+
+/**
+ * The handoff blocks that need the receiver (cluster/handoffwatch.ts has the rest). No `settling` check is given:
+ * handoffBlocked asks this node's marks (cluster/tradesettle.ts) itself, and reports a player marked unsettled after
+ * a lost trade as "settling", not "trading".
+ */
+const handoffChecks: HandoffChecks = {
+  trading: (username) => isTrading(username),
+  dragged: draggedCheck(draggedPlayersMap),
+  pending: (username) => playerHandoff.pending(username),
+  coolingDown: (username) => playerHandoff.coolingDown(username),
+  linkUp: (peer) => (handoffCtx?.calls.isUp(peer) ?? false) && storeUp(handoffCtx),
+  dwellingFrom: (username, peer) => playerHandoff.dwellingFrom(username, peer),
+};
+
+/**
+ * Asked by a running handoff once the player is drained: why they may not go after all (a trade or a cast begun while
+ * the target's answer was awaited), or null. The handoff's own pending flag and the freeze are not a reason.
+ */
+export function handoffRecheck(player: any, target: string): string | null {
+  return handoffBlocked(player, target, { ...handoffChecks, pending: () => false, coolingDown: () => false }, { draining: true });
+}
+
+onLinksAttached((ctx) => {
+  handoffCtx = ctx;
+  const watch = setInterval(() => {
+    try {
+      const players = Object.values(playerCache.list()) as any[];
+      const picks = pickHandoffs(players, ctx.ownerAt, ctx.self, handoffChecks);
+      for (const { player: p, target } of picks) {
+        void playerHandoff.handOff(p, target).catch((error) => log.error(`Handoff of ${p.username} to ${target} failed: ${error}`));
+      }
+      prepareWalkers(players, picks, ctx.ownerAt, ctx.self, handoffChecks, walkOf, playerHandoff);
+    } catch (error) {
+      log.error(`Handoff watch: ${error}`);
+    }
+  }, HANDOFF_WATCH_MS);
+  (watch as any).unref?.();
+  return () => {
+    clearInterval(watch);
+    handoffCtx = null;
+  };
+});
+
+/**
+ * A player asks another to trade. The one asked may be a player of a neighbouring node: the trade is held
+ * here, on the asker's node, and the invitation reaches them wherever they are.
+ */
+export async function requestTrade(wt: any, asker: any, askedId: unknown): Promise<void> {
+  const asked = entityById(askedId as string);
+  const refusal = tradeRefusal(asker, asked);
+  if (refusal) {
+    sendPacket(wt, packetManager.notify({ message: refusal }));
+    return;
+  }
+
+  const invite_data = {
+    action: "TRADE_REQUEST",
+    message: `${shownName(asker.username)} wants to trade with you`,
+    originator: asker.id.toString(),
+    authorization: randomBytes(16).toString(),
+  };
+  // One request at a time: asking again, or someone else, takes back the one before.
+  asker.invitations = asker.invitations.filter((inv: any) => inv.action !== "TRADE_REQUEST");
+  asker.invitations.push({
+    action: invite_data.action,
+    originator: invite_data.originator,
+    authorization: invite_data.authorization,
+    // Who it was sent to: nobody else can answer it.
+    target: asked.id.toString(),
+  });
+  playerCache.set(asker.id, asker);
+
+  await sendInvitation(asker, asked.username, invite_data);
+  sendPacket(wt, packetManager.notify({ message: `Trade request sent to ${shownName(asked.username)}` }));
+}
+
+/**
+ * TRADE_OFFER, TRADE_ACCEPT and TRADE_CANCEL of a player: on the trade held here, or, when their trade is
+ * held on a neighbouring node (cluster/tradelink.ts), relayed to it.
+ */
+export async function tradeAction(wt: any, player: any, op: "offer" | "accept" | "cancel", offer?: unknown): Promise<void> {
+  if (tradeLink.hostOf(player.username)) {
+    // Each relay is a call to another node, and a failed one adds a cancel and a wait: a client cannot send them without
+    // limit. Over the limit it is not sent, and not dropped in silence either: the player is told, and their window is
+    // given the trade as its host last sent it, so it never shows an offer other than the one a swap would make (a
+    // dropped removal would leave the old offer there). The trade held here is not limited (no call).
+    if (isQuestRateLimited(`trade-relay:${player.id}`)) {
+      sendPacket(wt, packetManager.notify({ message: "You are doing that too fast. Try again in a moment." }));
+      const held = tradeLink.lastState(player.username);
+      if (held) sendPacket(wt, packetManager.tradeState(held as TradeView));
+      return;
+    }
+    await relayTradeUpdate(wt, player.username, op, offer);
+    return;
+  }
+  const tell = (message: string) => sendPacket(wt, packetManager.notify({ message }));
+  if (op === "offer") await offerInTrade(player.username, offer, tell);
+  else if (op === "accept") await acceptTrade(player.username, tell);
+  else cancelTrade(player.username);
+}
+
+/** Partner side: a player of this node acts on their trade held on a neighbouring node. What they are told comes back from it. */
+async function relayTradeUpdate(wt: any, username: string, op: TradeOp, offer?: unknown): Promise<void> {
+  // Read before the call: a lost trade is no longer held by then.
+  const peer = tradeLink.hostOf(username);
+  const reply = await tradeLink.sendUpdate(username, op, offer);
+  if (!reply || reply.ok) return;
+  // The end of the trade arrived while it was waited for: it was shown, and the bags were read again, as it came.
+  if (reply.closed) return;
+  if (reply.gone) {
+    // A swap that started there before the link failed may still commit (cluster/tradesettle.ts): the player's
+    // writes here wait for it, and their bags and coins are read again once it has had the time to end.
+    await unsettle(username, `their trade update "${op}" came back gone`, peer ?? "the node that held their trade");
+    reloadWhenSettled(username);
+    // Whatever became of the trade there (a swap may have been made before the link failed), the bags and coins shown are the database's.
+    try {
+      await sendBelongingsOf(playerCache.getByUsername(username), true);
+    } catch (error) {
+      log.error(`The bags and coins of ${username} could not be read again after their trade was lost: ${error}`);
+    }
+    sendPacket(wt, packetManager.tradeClosed({ completed: false, message: reply.reason ?? TRADE_UNREACHABLE }));
+  } else if (reply.reason) sendPacket(wt, packetManager.notify({ message: reply.reason }));
+}
+
+/**
+ * An answer to a trade request whose asker is not on this node: when they are a player of a neighbouring
+ * node, it is answered across (answerTradeAcross) and this is true. False when nobody mirrors the asker here.
+ */
+export async function answerTradeIfAcross(wt: any, answerer: any, originator: unknown, authorization: string, response: unknown): Promise<boolean> {
+  const across = entityById(originator as string);
+  if (!across?.remote || !answerer) return false;
+  // Each answer across is a call to another node: a client cannot send them without limit. Over the limit, it is dropped.
+  if (isQuestRateLimited(String(answerer.id))) return true;
+  await answerTradeAcross(wt, answerer, across, authorization, String(response).toUpperCase() === "ACCEPT");
+  return true;
+}
+
+/**
+ * Partner side: a player of this node answered a trade invitation from a player of a neighbouring node.
+ * That node holds the invitation, and holds the trade if one opens. What only this node knows is checked here first.
+ */
+async function answerTradeAcross(wt: any, answerer: any, inviter: any, authorization: string, accepted: boolean): Promise<void> {
+  const tell = (message: string) => {
+    sendPacket(wt, packetManager.notify({ message }));
+  };
+  if (accepted) {
+    const refusal = subscriptionRefusal(answerer, "trade") ?? (isTrading(answerer.username) ? "You are already trading." : null);
+    if (refusal) {
+      tell(refusal);
+      return;
+    }
+  }
+  const owner = mirrorOwner(inviter.id);
+  if (!owner) {
+    tell("Unable to process invitation - user not found or has disconnected");
+    return;
+  }
+  const reply = await tradeLink.sendAnswer(owner, {
+    asker: inviter.username,
+    askerId: String(inviter.id),
+    authorization: String(authorization),
+    partner: answerer.username,
+    partnerId: String(answerer.id),
+    accepted,
+  });
+  if (!reply.ok && reply.reason) tell(reply.reason);
+}
+
+/**
  * The NPC a vendor packet names, when the player may deal with it now. When they may not (it is no
  * vendor, they walked off, they died, they are trading with a player), they are told why and their
  * vendor window is closed.
  */
-async function vendorFor(wt: any, shopper: any, npcId: unknown): Promise<Npc | null> {
-  const npc = (((await assetCache.get("npcs")) || []) as Npc[]).find((held) => Number(held.id) === Number(npcId));
-  const reason = trades.of(shopper.username) ? "You cannot use a vendor while trading." : cannotShop(shopper, npc);
+export async function vendorFor(wt: any, shopper: any, npcId: unknown): Promise<Npc | null> {
+  const npc = (await readNpcList()).find((held) => Number(held.id) === Number(npcId));
+  const reason = isTrading(shopper.username) ? "You cannot use a vendor while trading." : cannotShop(shopper, npc);
   if (reason) {
     sendPacket(wt, packetManager.vendorClosed({ message: reason }));
     return null;
@@ -297,7 +962,7 @@ async function vendorFor(wt: any, shopper: any, npcId: unknown): Promise<Npc | n
  * written with its exact name and comes with the link's data. A line with no links is returned as
  * it is, with `links` empty.
  */
-async function chatLinksOf(text: string): Promise<{ message: string; links: ChatLink[] }> {
+export async function chatLinksOf(text: string): Promise<{ message: string; links: ChatLink[] }> {
   // Every channel caps a line at the chat cap before it gets here; one over it all the same is sent
   // as it is, with no links, instead of being scanned.
   if (typeof text !== "string" || text.length > MAX_CHAT_LENGTH || !text.includes("[")) return { message: text, links: [] };
@@ -310,7 +975,7 @@ async function chatLinksOf(text: string): Promise<{ message: string; links: Chat
  * What an NPC stocks, as the NPC editor sent it: the entries that name an item and a price. The
  * editor is told what was wrong with any that were left out.
  */
-async function vendorStockFrom(wt: any, sent: unknown): Promise<VendorItem[]> {
+export async function vendorStockFrom(wt: any, sent: unknown): Promise<VendorItem[]> {
   const names = (((await assetCache.get("items")) || []) as Item[]).map((item) => item.name);
   const read = readVendorItems(sent, names);
   if (read.errors.length > 0) sendPacket(wt, packetManager.notify({ message: `Vendor stock: ${read.errors.join(" ")}` }));
@@ -318,7 +983,7 @@ async function vendorStockFrom(wt: any, sent: unknown): Promise<VendorItem[]> {
 }
 
 /** Sends a player what a vendor stocks and what they can buy back: this opens their vendor window, or brings it up to date. */
-async function sendVendorStock(wt: any, shopper: any, npc: Npc): Promise<void> {
+export async function sendVendorStock(wt: any, shopper: any, npc: Npc): Promise<void> {
   sendPacket(wt, packetManager.vendorStock({
     npcId: Number(npc.id),
     name: npc.name || null,
@@ -328,7 +993,7 @@ async function sendVendorStock(wt: any, shopper: any, npc: Npc): Promise<void> {
 }
 
 /** What a deal with a vendor answered, sent on: the player's bags, coins and vendor window when it was made, and why not when it was not. */
-async function sendVendorAnswer(wt: any, shopper: any, npc: Npc, answer: VendorAnswer, event: string): Promise<void> {
+export async function sendVendorAnswer(wt: any, shopper: any, npc: Npc, answer: VendorAnswer, event: string): Promise<void> {
   if (!answer.ok) {
     sendPacket(wt, packetManager.notify({ message: answer.message }));
     return;
@@ -353,10 +1018,29 @@ function endTradeOfLeaver(event: { player?: any }): void {
   if (!username) return;
   // What they sold to vendors can no longer be bought back.
   vendors.forget(String(username));
-  const ended = trades.cancel(username);
-  if (!ended) return;
-  const gone = `${shownName(String(username))} is no longer online.`;
-  sendTradeClosed(ended, false, Object.fromEntries(ended.players.map((name) => [name, gone])));
+  // A trade held on a neighbouring node (cluster/tradelink.ts) is ended there. Its host is let go at once. A swap
+  // there may commit after the player left: when the trade showed an accept, the player sent an accept the host has
+  // not shown back yet (tradeLink.acceptSent), or the link to it is down, the player is marked unsettled before the
+  // leave goes out (the mark is set synchronously), so a write of their bags or coins here (a relog within the mark)
+  // waits for it. A leave that came back gone marks them too, or extends the mark from the reply. The mark runs out.
+  const peer = tradeLink.hostOf(String(username));
+  if (peer) {
+    const shown = tradeLink.lastState(String(username)) as Partial<TradeView> | null;
+    const accepted = shown?.accepted?.mine === true || shown?.accepted?.theirs === true;
+    const sent = !accepted && tradeLink.acceptSent(String(username));
+    const linkDown = !(handoffCtx?.calls.isUp(peer) ?? false);
+    const marked = accepted || sent || linkDown;
+    if (marked) {
+      const why = linkDown ? "they left their trade while the link to it was down"
+        : sent ? "they left their trade with an accept on its way" : "they left their trade after an accept";
+      void unsettle(String(username), why, peer)
+        .catch((error) => log.error(`The bags and coins of ${username} could not be marked unsettled: ${error}`));
+    }
+    void tradeLink.sendUpdate(String(username), "leave")
+      .then((reply) => (reply?.gone ? unsettle(String(username), "their leave from the trade came back gone", peer) : undefined))
+      .catch((error) => log.error(`The leave from the trade of ${username} failed: ${error}`));
+  }
+  endTradeOf(String(username));
 }
 listener.on(Events.PLAYER_DISCONNECT, endTradeOfLeaver);
 listener.on(Events.PLAYER_LOGOUT, endTradeOfLeaver);
@@ -406,7 +1090,7 @@ const castingHome = (player: any) => !!player?.casting && player.homeCastId !== 
  * or cancelling breaks the cast, and a broken cast starts no cooldown.
  */
 // (the one who casts is `caster`, not `player`: that name is the player system's in this file, which the cast saves through)
-async function castHome(caster: any, itemName: string): Promise<void> {
+export async function castHome(caster: any, itemName: string): Promise<void> {
   const wt = caster.wt;
   if (!wt) return;
   // Already casting: nothing happens, and nothing is said.
@@ -431,7 +1115,7 @@ async function castHome(caster: any, itemName: string): Promise<void> {
 
   globalStateRevision++;
   await sendPositionAnimation(wt, caster.location.position?.direction || "down", false, false, caster.mount_type || "unicorn", undefined, globalStateRevision, true);
-  broadcastCastToMap(filterPlayersByMap(caster.location.map), caster.id, packetManager.castSpell({ id: caster.id, spell: itemName, time: HOME_CAST_MS / 1000 }));
+  broadcastCastToAOI(caster, packetManager.castSpell({ id: caster.id, spell: itemName, time: HOME_CAST_MS / 1000 }));
   await new Promise((resolve) => setTimeout(resolve, HOME_CAST_MS));
 
   // Broken (they are no longer in this cast), or they left.
@@ -485,10 +1169,11 @@ const castingGather = (player: any) => !!player?.casting && player.gatherCastId 
  * goes into their bags. Players whose casts end within the same claim window get one winner, picked at random. A step,
  * any damage, a stun or dying breaks the cast, as a cast home is broken.
  */
-async function castGather(caster: any, nodeId: unknown): Promise<void> {
+export async function castGather(caster: any, nodeId: unknown): Promise<void> {
   const wt = caster.wt;
   if (!wt) return;
-  const started = await gathering.service.start(caster.id, nodeId);
+  // A node of a neighbouring node is checked there (GATHER_REQUEST); the cast still runs here.
+  const started = await gathering.startGather(caster.id, nodeId);
   if (!started.ok) {
     // Already casting: nothing happens, and nothing is said.
     if (started.reason !== GATHER_REASONS.casting)sendPacket(wt, packetManager.notify({ message: started.reason }));
@@ -510,7 +1195,7 @@ async function castGather(caster: any, nodeId: unknown): Promise<void> {
 
   globalStateRevision++;
   await sendPositionAnimation(wt, caster.location.position?.direction || "down", false, false, caster.mount_type || "unicorn", undefined, globalStateRevision, true);
-  broadcastCastToMap(filterPlayersByMap(caster.location.map), caster.id, packetManager.castSpell({ id: caster.id, spell: "Gathering", time: gathering.GATHER_CAST_MS / 1000 }));
+  broadcastCastToAOI(caster, packetManager.castSpell({ id: caster.id, spell: "Gathering", time: gathering.GATHER_CAST_MS / 1000 }));
   await new Promise((resolve) => setTimeout(resolve, gathering.GATHER_CAST_MS));
 
   const after = playerCache.get(caster.id);
@@ -532,7 +1217,7 @@ async function castGather(caster: any, nodeId: unknown): Promise<void> {
   globalStateRevision++;
   await sendPositionAnimation(live, here?.direction || "down", false, false, after.mount_type || "unicorn", undefined, globalStateRevision, false);
 
-  const outcome = await gathering.service.finish(after.id, started.node.id);
+  const outcome = await gathering.finishGather(after.id, started.node.id);
   if (!outcome.ok) {
     sendPacket(live, packetManager.notify({ message: outcome.reason }));
     return;
@@ -561,7 +1246,7 @@ listener.on(Events.PLAYER_DEBUFF_ADDED, (event: { target?: any; effectType?: str
 });
 
 /** Whether a player is fishing now: its cast is the one they are in (castFish). */
-const castingFish = (player: any) => !!player?.casting && player.fishCastId !== undefined && player.fishCastId === player.castId;
+export const castingFish = (player: any) => !!player?.casting && player.fishCastId !== undefined && player.fishCastId === player.castId;
 
 /**
  * The equipment a player is drawn with. A player who is fishing holds the rod they cast with, which is the weapon they
@@ -625,7 +1310,7 @@ async function releaseFishCastAfter(target: any, castId: number, ms: number): Pr
  * Ends a player's fishing, if they are fishing: the line is taken in, for everyone on the map. `holdMs` keeps the staff
  * in their hands that long while it comes in (a line reeled in by the player); a broken cast puts it away at once.
  */
-async function stopFishing(target: any, holdMs = 0): Promise<void> {
+export async function stopFishing(target: any, holdMs = 0): Promise<void> {
   const p = (target?.id && playerCache.get(target.id)) || target;
   if (!p?.id) return;
   const ended = fishing.endSession(p.id);
@@ -642,7 +1327,7 @@ async function stopFishing(target: any, holdMs = 0): Promise<void> {
  * turned to the water (USER REQUEST 2026-10-20): walking further than FISH_WALK_RANGE from where they cast, any
  * damage, a stun, dying or leaving the map takes the line in.
  */
-async function castFish(caster: any, data: unknown): Promise<void> {
+export async function castFish(caster: any, data: unknown): Promise<void> {
   const wt = caster.wt;
   if (!wt) return;
   const x = Math.round(Number((data as any)?.x)), y = Math.round(Number((data as any)?.y));
@@ -740,7 +1425,7 @@ function fishEscape(playerId: string, castId: number): void {
  * The player began reeling in the fish on the line (FISH_REEL): it no longer gets away for waiting, only if it is not
  * landed within HOOKED_MAX_MS.
  */
-function fishReel(playerId: string): void {
+export function fishReel(playerId: string): void {
   const session = fishing.session(playerId);
   if (!session || !session.bitAt || session.reeledAt) return;
   const castId = session.castId;
@@ -760,7 +1445,7 @@ function fishReel(playerId: string): void {
  * The client has reeled the fish in (FISH_LAND): it goes into the bags, and everyone on the map sees it pulled out of
  * the water. Taken only once the fish has been on the line MIN_REEL_MS: a land that comes sooner waits until then.
  */
-async function landFish(caster: any): Promise<void> {
+export async function landFish(caster: any): Promise<void> {
   const first = fishing.session(caster.id);
   if (!first || !first.bitAt) return;
   const castId = first.castId;
@@ -834,7 +1519,7 @@ async function sendMapMarkers(wt: any, map: unknown): Promise<void> {
     const name = String(map ?? "").replaceAll(".json", "");
     if (!wt || !name) return;
     const properties = await mapPropertiesOf(name);
-    const npcs = ((await assetCache.get("npcs")) || []) as Npc[];
+    const npcs = await readNpcList();
     // a world made of cave systems (the underworld): the warps between them are caves too
     const world: any = getWorldMap(name);
     const layout = Array.isArray(world?.map?.data?.sections)
@@ -850,16 +1535,16 @@ async function sendMapMarkers(wt: any, map: unknown): Promise<void> {
 /** What the loader read of a map: its warps, among others. */
 async function mapPropertiesOf(name: string): Promise<any> {
   return getWorldMap(name)?.properties
-    ?? (((await assetCache.get("mapProperties")) || []) as any[]).find((held) => String(held?.name ?? "").replaceAll(".json", "") === name);
+    ?? (((await readHeldList("mapProperties")) || []) as any[]).find((held) => String(held?.name ?? "").replaceAll(".json", "") === name);
 }
 
 /** Sends a player where the mailboxes of a map stand. */
-async function sendMailboxes(wt: any, map: string): Promise<void> {
+export async function sendMailboxes(wt: any, map: string): Promise<void> {
   sendPacket(wt, packetManager.mailboxes({ map, mailboxes: await mailboxesOf(map), iconUrl: getIconUrl("mailbox") || "" }));
 }
 
 /** What the mailbox editor is told of the world: the map its admin is on, where mailboxes stand, and which maps there are. */
-function mailboxEditorWorld(who: any): mailboxEditor.EditorWorld {
+export function mailboxEditorWorld(who: any): mailboxEditor.EditorWorld {
   return {
     here: standing(who).map.replaceAll(".json", ""),
     mailboxesOf: (map) => mailboxesOf(map),
@@ -881,7 +1566,7 @@ async function mailboxesOf(map: unknown): Promise<Mailbox[]> {
   const blocked = world
     ? (x: number, y: number) => world.collision.isSet(Math.floor(x / world.tileWidth), Math.floor(y / world.tileHeight)) === 1
     : undefined;
-  const npcs = ((await assetCache.get("npcs")) || []) as Npc[];
+  const npcs = await readNpcList();
   return mailboxesOn(name, npcs, (await mapPropertiesOf(name))?.warps, (other) => !!getWorldMap(other), blocked);
 }
 
@@ -893,7 +1578,7 @@ function standing(who: any): { map: string; x: number; y: number } {
 }
 
 /** Whether a player may use their mail now: alive and at a mailbox. When not, their mail window is closed and they are told why. */
-async function mayUseMail(wt: any, who: any): Promise<boolean> {
+export async function mayUseMail(wt: any, who: any): Promise<boolean> {
   const at = standing(who);
   const reason = who.isDead || who.isGhost
     ? "You cannot use a mailbox while dead."
@@ -904,21 +1589,31 @@ async function mayUseMail(wt: any, who: any): Promise<boolean> {
 }
 
 /** Sends a player their mail: this opens their mail window, or brings it up to date. */
-async function sendMailbox(wt: any, who: any): Promise<void> {
+export async function sendMailbox(wt: any, who: any): Promise<void> {
   sendPacket(wt, packetManager.mailInbox({ mail: await mail.inbox(who.username), postage: POSTAGE_COPPER, itemsMax: MAIL_ITEMS_MAX, subjectMax: SUBJECT_MAX, bodyMax: BODY_MAX }));
   await sendMailNotice(who);
 }
 
 /** Tells a player online how many of their mails are unread; `arrived`: and that new mail came. */
-async function sendMailNotice(who: any, arrived = false): Promise<void> {
+export async function sendMailNotice(who: any, arrived = false): Promise<void> {
   if (!who?.wt) return;
   const unread = await mail.unread(who.username);
   sendPacket(who.wt, packetManager.mailNotice({ unread }));
   if (arrived) sendPacket(who.wt, packetManager.notify({ message: "You have new mail." }));
 }
 
+/** As sendMailNotice, by name: the player may be online on another node in a cluster. */
+export async function sendMailNoticeTo(username: string | undefined, arrived = false): Promise<void> {
+  if (!username || !(await isOnline(username))) return;
+  const unread = await mail.unread(username);
+  await deliverToPlayer(username, [
+    ...packetManager.mailNotice({ unread }),
+    ...(arrived ? packetManager.notify({ message: "You have new mail." }) : []),
+  ]);
+}
+
 /** An innkeeper or a vendor was added, changed or removed: everyone online is sent what the map they are on marks again. */
-async function resendMapMarkers(): Promise<void> {
+export async function resendMapMarkers(): Promise<void> {
   for (const online of Object.values(playerCache.list()) as any[]) {
     if (online?.wt && online.location?.map) await sendMapMarkers(online.wt, online.location.map);
   }
@@ -932,7 +1627,7 @@ async function sendItemCooldowns(wt: any, username: string): Promise<void> {
   if (home > 0) sendPacket(wt, packetManager.itemCooldown({ kind: "home", remaining: home, total: HOME_COOLDOWN_MS }));
 }
 
-async function sendQuestMarkersFor(wt: any, username: string, map: string): Promise<void> {
+export async function sendQuestMarkersFor(wt: any, username: string, map: string): Promise<void> {
   try {
     const markers = await markersFor(username, String(map ?? "").replaceAll(".json", ""));
     sendPacket(wt, packetManager.questMarkers({ map: String(map ?? "").replaceAll(".json", ""), markers }));
@@ -951,9 +1646,9 @@ function questDefsForEntries(active: QuestLogEntry[], completed: number[]): Ques
   return defs;
 }
 
-const MAX_CHAT_LENGTH = 500;
+export const MAX_CHAT_LENGTH = 500;
 /** The longest command line read: a command is a name and a few arguments, or a chat line sent through /party, /guild or /whisper. */
-const MAX_COMMAND_LENGTH = MAX_CHAT_LENGTH + 100;
+export const MAX_COMMAND_LENGTH = MAX_CHAT_LENGTH + 100;
 /** One RSA-4096 block is 512 bytes; this leaves room and no more. */
 const MAX_CIPHERTEXT_BYTES = 1024;
 
@@ -961,7 +1656,7 @@ const MAX_CIPHERTEXT_BYTES = 1024;
  * The chat rate limit, one for every channel (say, party, guild, whisper): true
  * when the player may send another line now, which counts it. When not, they are told.
  */
-function chatRateOk(wt: any): boolean {
+export function chatRateOk(wt: any): boolean {
   const now = Date.now();
   const recent = (chatRateLimit.get(wt.data.id) || []).filter((t: number) => now - t < CHAT_RATE_WINDOW);
   if (recent.length >= CHAT_RATE_MAX) {
@@ -975,7 +1670,7 @@ function chatRateOk(wt: any): boolean {
 }
 
 /** A party, guild or whisper line: within the chat cap and the rate limit. When not, the player is told. */
-function channelLineOk(wt: any, message: unknown): message is string {
+export function channelLineOk(wt: any, message: unknown): message is string {
   if (typeof message !== "string" || !message) return false;
   if (message.length > MAX_CHAT_LENGTH) {
     sendPacket(wt, packetManager.notify({ message: `Message too long (max ${MAX_CHAT_LENGTH} characters).` }));
@@ -985,63 +1680,75 @@ function channelLineOk(wt: any, message: unknown): message is string {
 }
 
 /** Whether an encrypted chat or command line is what the client sends: a list of byte values, one RSA block long. */
-function isCiphertext(value: unknown): boolean {
+export function isCiphertext(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   const bytes = Object.values(value as Record<string, unknown>);
   return bytes.length > 0 && bytes.length <= MAX_CIPHERTEXT_BYTES && bytes.every((b) => Number.isInteger(b) && (b as number) >= 0 && (b as number) <= 255);
 }
-const CHAT_RATE_MAX = 5;
-const CHAT_RATE_WINDOW = 3000;
-const activeEditorsByMap = new Map<string, Set<number>>();
+export const CHAT_RATE_MAX = 5;
+export const CHAT_RATE_WINDOW = 3000;
+export const activeEditorsByMap = new Map<string, Set<number>>();
 
 // Track unsaved tile edits per map for syncing to new editors
-const editorEditHistory = new Map<string, Array<{ senderId: number; mapName: string; edits: any[] }>>();
+export const editorEditHistory = new Map<string, Array<{ senderId: number; mapName: string; edits: any[] }>>();
 
 import playerCache from "../services/playermanager.ts";
-import layerManager from "../services/layermanager";
+import layerManager, { blockOf, MAX_PLAYERS_PER_LAYER } from "../services/layermanager";
 import mapIndex from "../services/mapindex";
 import gameLoop from "../services/gameloop";
+import { BASE_TICK_MS, TICK_MS } from "../services/tickrate";
+// The warp preload scan (and NPC streaming with it) while a player walks: every 8th tick at 30 Hz, kept in time.
+export const WARP_SCAN_MS = 8 * BASE_TICK_MS;
 import assetCache from "../services/assetCache";
-import { refreshPlayer } from "../services/datacache";
+import { dropRows, refreshPlayer } from "../services/datacache";
 import cooldownManager from "../services/cooldownmanager";
 import effectManager from "../services/effectmanager";
-import { addCreatedMap, reloadMap } from "../modules/assetloader";
-import { checkWorldChanges, getWorldMap, refreshWorldMap } from "../modules/worldmaps";
-import { serverFetch } from "../modules/https_servers.ts";
-import language from "../systems/language";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../modules/assetloader";
+import { checkWorldChanges, getWorldMap } from "../modules/worldmaps";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../modules/https_servers.ts";
+import "../systems/language";
 import questDefinitions from "../systems/quests/definitions";
-import questLogApi from "../systems/quests/log";
-import { credit as creditObjective, trackRadiusPlayer } from "../systems/quests/objectives";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../systems/quests/log";
+import { trackRadiusPlayer } from "../systems/quests/objectives";
 import { markersFor } from "../systems/quests/markers";
-import * as questEditor from "../systems/quests/editor";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../systems/quests/editor";
+import "../systems/friends";
 import { registerExploreHooks } from "../systems/quests/objectives";
 import { registerLevelUpHook } from "../systems/quests/markers";
-import friends from "../systems/friends";
 import ignores from "../systems/ignores";
 import * as moderation from "../systems/moderation";
-import trades, { cannotTrade, type Trade } from "../systems/trades";
+import trades, { cannotTrade, type Trade, type TradeView } from "../systems/trades";
+import { TRADE_UNREACHABLE, tradeLink, type TradeAnswer, type TradeClosedCast, type TradeLost, type TradeOp, type TradeReply, type TradeStateCast, type TradeUpdate } from "../cluster/tradelink";
 import vendors, { cannotShop, hasRoomFor, readVendorItems, type VendorAnswer } from "../systems/vendors";
-import consumables, { CONSUMABLE_COOLDOWN_MS, isKept } from "../systems/consumables";
-import { resetCooldowns } from "../systems/cooldowns";
+import consumables, { CONSUMABLE_COOLDOWN_MS } from "../systems/consumables";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../systems/cooldowns";
 import { mapMarkers } from "../systems/mapmarkers";
 import mail, { atMailbox, mailboxesOn, BODY_MAX, MAIL_ITEMS_MAX, POSTAGE_COPPER, SUBJECT_MAX, type Mailbox } from "../systems/mail";
-import homes, { cannotSetHome, isInnkeeper, HOME_CAST_MS, HOME_COOLDOWN_MS } from "../systems/homes";
+import homes, { HOME_CAST_MS, HOME_COOLDOWN_MS } from "../systems/homes";
 import { audience as chatAudience } from "../systems/chatgate";
-import { canonicalLinks, findChatLinks, protectLinks, restoreLinks, MAX_ITEM_LINKS, type ChatLink } from "../systems/itemlinks";
+import { canonicalLinks, findChatLinks, MAX_ITEM_LINKS, type ChatLink } from "../systems/itemlinks";
 import { definitions as achievementDefinitions } from "../systems/achievements/store";
 import parties from "../systems/parties.ts";
 import guilds from "../systems/guild.ts";
 import { GuildPermission, refusalText, type GuildResult } from "../systems/guildranks";
 import spells from "../systems/spells";
-import equipment from "../systems/equipment.ts";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../systems/equipment.ts";
 import inventory from "../systems/inventory";
-import particles, { renameInList } from "../systems/particles";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../systems/particles";
 import worlds from "../systems/worlds";
-import npcSystem from "../systems/npcs";
-import { syncNpcChunks, preloadNpcsAt, forgetNpcStream } from "../systems/npcStreaming";
-import spellEffects, { registerSpellEffect, spellHasHostileEffects, cancelEffect, setStunsForPlayer, setSlowsForPlayer } from "../systems/spelleffects";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../systems/npcs";
+import { syncNpcChunks, forgetNpcStream, readNpcList, readHeldList } from "../systems/npcStreaming";
+import spellEffects, { registerSpellEffect, cancelEffect, setStunsForPlayer, setSlowsForPlayer } from "../systems/spelleffects";
 import dots from "../systems/dots";
-import { rollHeal, spellManaCost } from "../systems/spellmath";
+import { spellManaCost } from "../systems/spellmath";
 import creatures from "../systems/creatures";
 import gathering from "../systems/gathering";
 import { REASONS as GATHER_REASONS } from "../systems/gathering/service";
@@ -1051,48 +1758,90 @@ import { facingToward, fishingTool, rollCatch, toolsWords } from "../systems/fis
 import achievements from "../systems/achievements";
 import collectables from "../systems/collectables";
 import { projectileTravelMs } from "../systems/creatures/projectile";
-import * as itemEditor from "../systems/itemeditor";
-import * as mountEditor from "../systems/mounteditor";
-import * as spellEditor from "../systems/spelleditor";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../systems/itemeditor";
+import "../systems/mounteditor";
+import "../systems/spelleditor";
 import * as weatherEditor from "../systems/weathereditor";
-import * as classEditor from "../systems/classeditor";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../systems/classeditor";
 import * as mailboxEditor from "../systems/mailboxeditor";
 import classes from "../systems/classes";
 import * as weatherApi from "../systems/weatherapi";
 import * as tornadoes from "../systems/tornadoes";
-import * as lootEditor from "../systems/looteditor";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../systems/looteditor";
 import * as playerEditor from "../systems/playereditor";
 import * as controlPanel from "../systems/controlpanel";
-import { pickPlayerAt } from "../systems/playerpick";
-import { areaCastRefusal, areaSpellHarms, PVP_BODY, type PvpAllowed } from "../systems/pvpzone";
-import { listSpriteSheets, listIcons } from "../systems/creatures/editor";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../systems/playerpick";
+import { areaSpellHarms, PVP_BODY, type PvpAllowed } from "../systems/pvpzone";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../systems/creatures/editor";
 import { setCreatureEngineBridge } from "../systems/creatures/bridge";
 import { spellMissChance } from "../systems/creatures/combat";
-import { spawnZone, setPlayerDeathHandler, getZonesOnMap } from "../systems/groundaoe";
+import { setPlayerDeathHandler, resyncZonesFor } from "../systems/groundaoe";
 import bags from "../systems/bags";
 import currencySystem from "../systems/currency";
-import query, { drainQueries } from "../controllers/sqldatabase";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../controllers/sqldatabase";
 import loot from "../systems/loot";
 import lootChest from "../systems/lootChest";
-import lootTable, { normalizeDropChance } from "../systems/lootTable";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../systems/lootTable";
 import skeletons from "../systems/skeletons";
 import * as resurrection from "../systems/resurrection";
-const maps = await assetCache.get("maps");
-const worldsCache = await assetCache.get("worlds") as WorldData[];
-const mapPropertiesCache = await assetCache.get("mapProperties");
-const resolvedWeatherCache = new Map<string, { weather: string; weatherData: WeatherData | null }>();
-import { decryptPrivateKey, decryptRsa, _privateKey } from "../modules/cipher";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../modules/cipher";
+export const maps = await assetCache.get("maps");
+export const worldsCache = await assetCache.get("worlds") as WorldData[];
+export const mapPropertiesCache = await assetCache.get("mapProperties");
+export const resolvedWeatherCache = new Map<string, { weather: string; weatherData: WeatherData | null }>();
 
 import * as settings from "../config/settings.json";
 import AOI_CONFIG from "../config/aoi.json";
+import spatialGrid from "../services/spatialgrid";
 import { randomBytes } from "../modules/hash";
-import { saveMapChunks, saveMapProperties, applyChunksWithRebase } from "../modules/assetloader";
-import { getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getSpriteUrl, getMountSpriteUrl, getNpcSpriteLayers } from "../modules/spriteSheetManager";
-import { setLayerChangeHandler, initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, broadcastToAOIBestEffort, broadcastStatsUpdateToAOI, broadcastToAOIBestEffortAtPosition, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate, sendLoadPlayersChunked, cleanupKickedSession, aoiProf } from "./aoi";
-import { gracefulShutdown } from "./server.ts";
-import { realmWhitelist, isWhitelistEnabled, setWhitelistEnabled } from "../services/whitelist";
-import { refusal as subscriptionRefusal, setLock as setSubscriptionLock, isLockId as isSubscriptionLock, subscriptionState } from "../systems/subscriptions";
-const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
+import { equipmentSheetsToken, getPlayerSpriteSheetData, isSpriteSheetSystemAvailable, getIconUrl, getSpriteUrl, getMountSpriteUrl, getNpcSpriteLayers } from "../modules/spriteSheetManager";
+import { notePoseCall, notePoseSelf } from "./posestats";
+import { setLayerChangeHandler, initializePlayerAOI, updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, broadcastPoseToAOI, broadcastToAOIBestEffort, broadcastStatsUpdateToAOI, broadcastToAOIBestEffortAtPosition, broadcastCastToAOI, clearGroundPreviewForAOI, getPlayersNearPoint, handleMapChangeAOI, syncPartyLayers, queueSpawnPlayerPacket, broadcastPlayerUpdate, sendLoadPlayersChunked, cleanupKickedSession, findPlayersWithTargetInAOI, aoiProf, updateMirrorViewers } from "./aoi";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "./server.ts";
+import { realmWhitelist, isWhitelistEnabled } from "../services/whitelist";
+import { refusal as subscriptionRefusal } from "../systems/subscriptions";
+import { deliverToPlayer, isOnline, registerPlayerAction, runOnPlayer } from "../cluster/deliver";
+import { clusterEnabled, nodeId } from "../cluster/config";
+import { applyPartyMembers, cacheIfHeld, clearParty } from "./partystate";
+import { clusterBlocks, clusterNodes, clusterStore, useEngineHooks } from "../cluster/index";
+import { adoptOwnerEpoch } from "../cluster/ownerepoch";
+import { MAX_GRANT_ITEMS, grants } from "../cluster/grants";
+import { playerHandoff } from "../cluster/handoff";
+import { recoverLogin } from "../cluster/recovery";
+import { readSnapshot } from "../cluster/snapshots";
+import { handoffBlocked, pickHandoffs, prepareWalkers, type HandoffChecks } from "../cluster/handoffwatch";
+import { trackPacket } from "../cluster/inflight";
+import { onLinksAttached, type LinkContext } from "../cluster/linkhooks";
+import { forwardTable } from "../cluster/forwarding";
+import { settled, tradeSettle, unsettle } from "../cluster/tradesettle";
+import { arrivedPoseRevision } from "./posedgram";
+import { RESUME_WALK_RECOVER_MS, RESUME_WALK_WAIT_MS, doneWalkOf, waitFor, walkOf, resumeSelfSpawn, adminMoveOf, arrivalFields, arrivalMaps, arrivalLimits, arrivalMount, draggedCheck, handoffStateOf, playersToDespawn, remoteAdminOf, reverseSummonAdmins, seedArrival, warpTarget } from "./arrival";
+import { LiveNodeCache, routeLogin } from "../cluster/route";
+import { revivePlayer, type ReviveDeps } from "./revive";
+import { invitations } from "../cluster/invitations";
+import { ghosts } from "../cluster/ghosts";
+import { askOwner, itemOwner, serveItems } from "../cluster/remoteitems";
+import { grantWrittenBefore, recordGrantWrite } from "../systems/grantwrites";
+import { bagRoom, formatMoney, type LootError } from "../systems/creatures/kill";
+import type { CorpseItem } from "../systems/creatures/loot";
+import { bareMap, entityById, mirrorByUsername, mirrorOwner, mirrorPlayers, mirrorsNearPoint, mirrorsOnLayerNear, playerLayer } from "../cluster/mirrors";
+import { refusalOf, sendPlayerHit, setPlayerHitApplier, type PlayerHit } from "../cluster/playerhits";
+import { forgetVictim, recordAttack } from "../cluster/attackers";
+import type { EffectResult } from "../cluster/effects";
+// Keeps the startup load order: the handler modules, which import these, load at the first packet.
+import "../cluster/aoievent";
+import "../cluster/strip";
+import { playerGhostKind } from "../cluster/kinds/players";
+export const defaultMap = (settings as any).default_map?.replace(".json", "") || "main";
 /** The largest frame the server takes (webtransport.maxPayloadMB), and whether it is a benchmark server, which takes it from anyone. */
 const MAX_FRAME_BYTES = 1024 * 1024 * ((settings as any)?.webtransport?.maxPayloadMB || 1);
 const BENCHMARK_ENABLED = !!(settings as any)?.webtransport?.benchmarkenabled;
@@ -1102,7 +1851,7 @@ const useSpriteSheets = (settings as any).animation_system?.use_sprite_sheets ??
 // Resolve a spell's comma-separated particle names to full particle objects for projectile rendering
 // Pass the latest particle cache so editor updates are reflected immediately.
 
-function resolveSpellParticles(spell: SpellData, particleList: Particle[] | null): Particle[] | null {
+export function resolveSpellParticles(spell: SpellData, particleList: Particle[] | null): Particle[] | null {
   if (!spell?.particles || !particleList || particleList.length === 0) return null;
   const names = spell.particles.split(",").map((n) => n.trim()).filter(Boolean);
   if (names.length === 0) return null;
@@ -1155,16 +1904,16 @@ async function resolveWorldWeather(worldName: string): Promise<{ weather: string
  * word of /weather that needs no row of the weather table: without one it carries the thunderstorm's values. It is
  * never picked at random: a random world gets tornadoes by the rare chance every thunderstorm has.
  */
-const TORNADO = "tornado";
+export const TORNADO = "tornado";
 /** The name the client draws a weather by. */
 const lookOf = (weather: string) => (weather === TORNADO ? "thunderstorm" : weatherApi.shownAs(weather));
 /** A weather of the table picked at random for a "random" world (never "tornado"); null when there is none. */
-const randomPick = (all: WeatherData[] | null | undefined): WeatherData | null => {
+export const randomPick = (all: WeatherData[] | null | undefined): WeatherData | null => {
   const pool = (all || []).filter((w) => w.name !== TORNADO);
   return pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
 };
 /** A weather's row, a "tornado" without one taking the thunderstorm's. */
-const rowOf = (all: WeatherData[] | null | undefined, name: string): WeatherData | null =>
+export const rowOf = (all: WeatherData[] | null | undefined, name: string): WeatherData | null =>
   all?.find((w) => w.name === name) || (name === TORNADO ? all?.find((w) => w.name === "thunderstorm") || null : null);
 
 /**
@@ -1172,7 +1921,7 @@ const rowOf = (all: WeatherData[] | null | undefined, name: string): WeatherData
  * ("tornado weather is not causing a sandstorm in the desert biome"): a "tornado" is told as a thunderstorm, so its
  * values say `sandstorm: true` as well, and the client blows a sandstorm in the desert zones too, as harsh as its wind.
  */
-const weatherShown = async (weather: string, weatherData: WeatherData | null) => {
+export const weatherShown = async (weather: string, weatherData: WeatherData | null) => {
   const look = lookOf(weather);
   let data = weather === TORNADO && weatherData ? { ...weatherData, sandstorm: true, blizzard: true } : weatherData;
   // USER REQUEST 2026-10-19 ("make similar weather but for a blizzard in the snow biome"): the snow zones have their own
@@ -1219,8 +1968,12 @@ weatherEditor.setWeatherEditorBridge(weatherBridge);
 // A world on "weather_api" follows a real place (systems/weatherapi.ts): a
 // reading that differs from the last is shown at once on every such world.
 void weatherApi.startWeatherApi(async (row) => {
-  for (const world of await weatherBridge.worlds()) {
-    if (world.weather === weatherApi.WEATHER_API) weatherBridge.show(world.name, weatherApi.WEATHER_API, row);
+  try {
+    for (const world of await weatherBridge.worlds()) {
+      if (world.weather === weatherApi.WEATHER_API) weatherBridge.show(world.name, weatherApi.WEATHER_API, row);
+    }
+  } catch (error) {
+    log.error(`Weather API: the reading could not be shown: ${error}`);
   }
 }, (utcOffset) => {
   // The time of day is that place's too: everyone online is given the clock again when its shift from UTC is first
@@ -1241,18 +1994,31 @@ async function waitForSpritesReady() {
 
 export const spriteDataCacheReady = waitForSpritesReady();
 
-let restartScheduled: boolean;
-let restartTimers: ReturnType<typeof setTimeout>[];
-let shutdownStarted = false;
+/** A restart or shutdown that an admin started: the COMMAND handlers (handlers/commands.ts) write it, the receiver reads it. */
+export const restartState = {
+  scheduled: false,
+  timers: [] as ReturnType<typeof setTimeout>[],
+  shutdownStarted: false,
+};
 
 // Commands the control panel is running (runForControlPanel). The packet that
 // stands for one carries no chat text: its command and arguments are kept
 // here, already split. What the command tells the admin while it runs is
 // collected as the panel's answer.
-const panelCommands = new WeakMap<object, { name: string; args: string[] }>();
+export const panelCommands = new WeakMap<object, { name: string; args: string[] }>();
 const panelReplies = new Map<any, string[]>();
 
 let globalStateRevision: number = 0;
+
+/** A new revision for a state change that clients order by. Handler modules cannot write the `let` they import. */
+export function bumpStateRevision(): number {
+  return ++globalStateRevision;
+}
+
+/** The revision as it stands. */
+export function stateRevision(): number {
+  return globalStateRevision;
+}
 
 export const pluginHandlers = new Map<string, PluginHandlerFn>();
 
@@ -1301,11 +2067,11 @@ const DIRECTION_UNIT_OFFSETS: Record<string, { dx: number; dy: number }> = {
 
 // Direction validation for inbound MOVEXY; was an array literal rebuilt and
 // linearly scanned on every movement packet.
-const VALID_DIRECTIONS = new Set(Object.keys(DIRECTION_UNIT_OFFSETS));
+export const VALID_DIRECTIONS = new Set(Object.keys(DIRECTION_UNIT_OFFSETS));
 
 const directionOffsetCache = new Map<number, Record<string, { dx: number; dy: number }>>();
 
-function getDirectionOffsets(speed: number): Record<string, { dx: number; dy: number }> {
+export function getDirectionOffsets(speed: number): Record<string, { dx: number; dy: number }> {
   const cached = directionOffsetCache.get(speed);
   if (cached) return cached;
 
@@ -1344,7 +2110,7 @@ function getAverageFlushLatency(): number {
 
 const BASE_INVENTORY_SLOTS = 25;
 
-async function getBagBoundaries(username: string): Promise<number[]> {
+export async function getBagBoundaries(username: string): Promise<number[]> {
   const boundaries: number[] = [BASE_INVENTORY_SLOTS];
   const bagRow = await bags.get(username);
   if (bagRow) {
@@ -1361,7 +2127,7 @@ async function getBagBoundaries(username: string): Promise<number[]> {
   return boundaries;
 }
 
-function computeBagSlot(slot: number, boundaries?: number[]): number {
+export function computeBagSlot(slot: number, boundaries?: number[]): number {
   if (slot == null || slot < BASE_INVENTORY_SLOTS) return 0;
   if (!boundaries || boundaries.length <= 1) return 0;
   for (let i = 1; i < boundaries.length; i++) {
@@ -1370,7 +2136,7 @@ function computeBagSlot(slot: number, boundaries?: number[]): number {
   return 0;
 }
 
-async function patchInventoryBagSlots(inv: any[], username: string): Promise<any[]> {
+export async function patchInventoryBagSlots(inv: any[], username: string): Promise<any[]> {
   if (!Array.isArray(inv)) return inv;
   const boundaries = await getBagBoundaries(username);
   return inv.map((item: any) => ({
@@ -1379,7 +2145,7 @@ async function patchInventoryBagSlots(inv: any[], username: string): Promise<any
   }));
 }
 
-async function getInventorySlots(player: any): Promise<number> {
+export async function getInventorySlots(player: any): Promise<number> {
   let slots = BASE_INVENTORY_SLOTS;
   const username = player?.username || player?.equipment?.username;
   if (username) {
@@ -1427,8 +2193,8 @@ export function getEventLoopLagMs(): number {
 // Opt-in load diagnostics. `BENCHMARK_PROFILE=1` emits a one-line breakdown
 // every 5s of where the single JS thread's time is going at scale, so a load
 // test tells us the actual bottleneck instead of us guessing per run.
-const PROFILE = process.env.BENCHMARK_PROFILE === "1" || process.env.BENCHMARK_PROFILE === "true";
-const prof = {
+export const PROFILE = process.env.BENCHMARK_PROFILE === "1" || process.env.BENCHMARK_PROFILE === "true";
+export const prof = {
   moveCbCount: 0,
   collisionMs: 0,
   aoiUpdateCount: 0,
@@ -1487,13 +2253,6 @@ if (PROFILE) {
  * saturated server sheds movement cadence (fewer, larger updates) instead of
  * queueing work it can't drain.
  */
-// Datagrams sent by the most recent movement flush. Used to decide the flush
-// cadence: at low volume there's no reason to throttle (a fast flush makes
-// movement look smooth for the handful of players watching), but at high volume
-// each flush is ~1 datagram per active receiver and flushing at 60 Hz would
-// saturate the single native UDP send path (~9% loss + lag oscillation). So the
-// floor slides: 33ms (30 Hz) when the server is nearly idle, 50ms (20 Hz) once
-// there's real outbound volume.
 // Worlds changed on the asset server by something other than this server (the Tiled extension, another game server's
 // editor save) are taken in without a restart: new collision and no-pvp bits, warps and graveyards, and a new map
 // version, so players who load the map again get the new chunks. WORLD_SYNC_INTERVAL is in seconds; 0 turns it off.
@@ -1522,14 +2281,13 @@ if (PROFILE) {
   }
 }
 
-// Rolling count of movement datagrams sent, sampled every second into a rate.
-let movementDatagramsSent = 0;
-let movementDatagramRatePerSec = 0;
-setInterval(() => {
-  movementDatagramRatePerSec = movementDatagramRatePerSec * 0.5 + movementDatagramsSent * 0.5;
-  movementDatagramsSent = 0;
-}, 1000).unref();
-const HIGH_VOLUME_RATE = 8000; // datagrams/sec ~ a few hundred concurrent players
+// The movement volume sets the flush floor: none (a flush after every tick)
+// when the server is nearly idle, 50ms (20 Hz) once there's real outbound
+// volume (MovementVolume, movement_batch.ts). The interval is a back-off on the
+// flush that follows each tick (afterTickFlush), not a timer.
+const movementVolume = new MovementVolume();
+let movementHighVolume = false;
+setInterval(() => { movementHighVolume = movementVolume.sample(); }, 1000).unref();
 
 function getAdaptiveBatchInterval(): number {
   const avgLatency = getAverageFlushLatency();
@@ -1541,7 +2299,7 @@ function getAdaptiveBatchInterval(): number {
   if (lag > 60) return 100;  // ~10 Hz
   if (lag > 30) return 66;   // ~15 Hz
 
-  const floor = movementDatagramRatePerSec >= HIGH_VOLUME_RATE ? 50 : 33;
+  const floor = movementHighVolume ? 50 : 0;
 
   // Loop is healthy; pace off flush latency, but never below the sliding floor.
   if (avgLatency < 15) {
@@ -1557,13 +2315,21 @@ function getAdaptiveBatchInterval(): number {
   }
 }
 
-async function flushMovementBatches() {
+/** One movement flush, `backoffMs` (0: none) after the last at most: see afterTickFlush. */
+async function flushMovementBatches(backoffMs: number = 0) {
   const startTime = Date.now();
+  movementVolume.flushed();
   const _profStart = PROFILE ? performance.now() : 0;
 
   const avgLatency = getAverageFlushLatency();
 
   let skippedDueToLoad = 0;
+
+  // One tick per flush cycle, shared by every layer group in it, so a far
+  // mover's every-Nth-tick slot lines up for all the receivers that see it.
+  const movementTick = flushTick++;
+  // How many flushes a far mover waits, at the spacing the flushes are running at (one a tick, or the back-off's).
+  const farEvery = farUpdateEvery(Math.max(TICK_MS, backoffMs));
 
   // Queue management based on latency
   const MAX_BATCH_QUEUE_SIZE = avgLatency > 40 ? 800 : (avgLatency > 25 ? 1200 : 2000);
@@ -1581,17 +2347,20 @@ async function flushMovementBatches() {
     if (playerMovements.size === 0) continue;
 
     const allPlayers = playerCache.list();
-    const groupPlayerIds = groupKey.includes(":layer_")
-      ? layerManager.getPlayersInLayer(groupKey)
-      : mapIndex.getPlayersOnMap(groupKey);
 
-    // Iterate the group's id set directly against the live player cache. The
-    // previous code copied every player in the group into a throwaway
-    // `mapPlayers` object on every flush, even when only a few were moving.
+    // Only players who can see at least one mover need a batch: the movers
+    // themselves (their own echo) and everyone who has a mover in their AOI.
+    // Walking the whole layer instead made every flush cost O(layer), and one
+    // layer can hold thousands of players on a big map.
+    const groupReceiverIds = collectGroupReceivers(playerMovements.keys(), aoiReverse.getViewers);
+
+    // Look receivers up directly in the live player cache. The previous code
+    // copied every player in the group into a throwaway `mapPlayers` object on
+    // every flush, even when only a few were moving.
     const receiverSets = new Map<string, Set<string>>();
-    const changedSets: Array<{ playerId: string; add: string[]; remove: string[] }> = [];
+    const changedSets: ReceiverDiff[] = [];
 
-    for (const playerId of groupPlayerIds) {
+    for (const playerId of groupReceiverIds) {
       const player = allPlayers[playerId];
       if (!player || !player.aoi) continue;
 
@@ -1633,7 +2402,8 @@ async function flushMovementBatches() {
 
     const movers: MoverSnapshot[] = [];
     for (const [movingPlayerId, movementData] of playerMovements.entries()) {
-      const movingPlayer = allPlayers[movingPlayerId];
+      // A mirror (cluster mode) moves for the viewers here like a local walker; it is not in the cache.
+      const movingPlayer = allPlayers[movingPlayerId] ?? entityById(movingPlayerId);
       if (!movingPlayer || !movingPlayer.aoi) continue;
       movers.push({
         id: movingPlayerId,
@@ -1643,6 +2413,7 @@ async function flushMovementBatches() {
         stealth: !!(movementData.isStealth || movingPlayer.isStealth),
         vanished: !!movingPlayer.isVanished,
         party: movingPlayer.party || [],
+        final: !!movementData.f,
       });
     }
 
@@ -1660,20 +2431,32 @@ async function flushMovementBatches() {
     const startIndex = flushOffset % Math.max(receiverArray.length, 1);
 
     // Layers above this size offload batch encoding to a per-layer worker
-    // thread (keeps the main event loop free at high player counts).
-    const useWorker = receiverArray.length > 20;
+    // thread (keeps the main event loop free at high player counts). Decided
+    // by the layer's size, not by how many receivers this flush happens to
+    // visit: that changes every flush and made a layer flip between the worker
+    // and the inline path.
+    const useWorker = (layerManager.getLayerInfo(groupKey)?.playerCount ?? receiverArray.length) > 20;
 
-    let workerDiffs: Array<{ playerId: string; add: string[]; remove: string[] }> = [];
+    let workerDiffs: ReceiverDiff[] = [];
     if (useWorker) {
       if (!workerLayerSynced.has(groupKey)) {
         // First flush for this layer's worker: send a full snapshot of the
         // layer's receiver sets so the worker mirror starts correct.
         // Iterate the group's members and look each up, rather than scanning
         // the whole global receiverSetCache (O(all players)) to filter it down.
-        for (const playerId of groupPlayerIds) {
+        // This needs every member, not just this flush's receivers: a member
+        // skipped now keeps an unchanged cache entry, so the worker would never
+        // be sent its set otherwise. It runs once per worker engagement only.
+        // Snapshot entries replace the worker's set, and receivers outside the
+        // layer (a viewer that is not a member) are included too.
+        const snapshotIds = new Set<string>(
+          groupKey.includes(":layer_") ? layerManager.getPlayersInLayer(groupKey) : mapIndex.getPlayersOnMap(groupKey)
+        );
+        for (const playerId of receiverSets.keys()) snapshotIds.add(playerId);
+        for (const playerId of snapshotIds) {
           const cachedEntry = receiverSetCache.get(playerId);
           if (cachedEntry) {
-            workerDiffs.push({ playerId, add: [...cachedEntry.receivers], remove: [] });
+            workerDiffs.push({ playerId, add: [...cachedEntry.receivers], remove: [], replace: true });
           }
         }
         workerLayerSynced.add(groupKey);
@@ -1715,24 +2498,26 @@ async function flushMovementBatches() {
         y: receiver.location?.position?.y ?? 0,
         isAdmin: !!receiver.isAdmin,
         username: receiver.username || "",
+        targetId: receiver.selectedPlayerId != null ? String(receiver.selectedPlayerId) : undefined,
         seq: movementProbeSeqs.get(receiverId) ?? 0,
+        selfId: receiverId,
       };
     }
 
     if (PROFILE) prof.flushReceivers += selectedReceiverIds.length;
 
     if (selectedReceiverIds.length > 0) {
-      const movementTick = flushTick++;
-
       if (useWorker) {
         const allPlayersRef = allPlayers;
         queueLayerWorkerFlush(groupKey, {
           tick: movementTick,
+          farEvery,
           movers,
           receiverIds: selectedReceiverIds,
           receiverInfo,
           diffs: workerDiffs,
-          onBatches: (batches, updatedSeqs) => {
+          onBatches: (batches, updatedSeqs, volume) => {
+            movementVolume.add(volume ?? 0);
             if (updatedSeqs) {
               for (const [receiverId, seq] of Object.entries(updatedSeqs)) {
                 movementProbeSeqs.set(receiverId, seq);
@@ -1742,21 +2527,26 @@ async function flushMovementBatches() {
               const receiver = allPlayersRef[batch.receiverId];
               if (!receiver?.wt || receiver.wt.readyState !== 1) continue;
 
-              const data = batch.data;
-              const parts: Uint8Array[] = [];
-              for (let i = 0; i < batch.offsets.length - 1; i++) {
-                const start = batch.offsets[i];
-                const end = batch.offsets[i + 1];
-                parts.push(new Uint8Array(data.buffer, data.byteOffset + start, end - start));
+              // One receiver's failing send must not cost everyone after it
+              // their batch.
+              try {
+                const data = batch.data;
+                const parts: Uint8Array[] = [];
+                for (let i = 0; i < batch.offsets.length - 1; i++) {
+                  const start = batch.offsets[i];
+                  const end = batch.offsets[i + 1];
+                  parts.push(new Uint8Array(data.buffer, data.byteOffset + start, end - start));
+                }
+                if (parts.length === 1) {
+                  receiver.wt.send(parts[0]);
+                } else if (parts.length > 1) {
+                  receiver.wt.sendMovementBatch(parts);
+                }
+                if (PROFILE) prof.datagramsSent += parts.length;
+                sentCount++;
+              } catch (error: any) {
+                log.debug(`Movement batch send to ${batch.receiverId} failed: ${error?.message || error}`);
               }
-              if (parts.length === 1) {
-                receiver.wt.send(parts[0]);
-              } else if (parts.length > 1) {
-                receiver.wt.sendMovementBatch(parts);
-              }
-              movementDatagramsSent += parts.length;
-              if (PROFILE) prof.datagramsSent += parts.length;
-              sentCount++;
             }
           },
         });
@@ -1765,30 +2555,38 @@ async function flushMovementBatches() {
         // the sync flag so the next worker engagement starts with a full sync.
         workerLayerSynced.delete(groupKey);
 
+        const moverIndex = indexMovers(movers);
         for (const receiverId of selectedReceiverIds) {
           const receiver = allPlayers[receiverId];
           if (!receiver?.wt || receiver.wt.readyState !== 1) continue;
 
-          const entries = collectReceiverEntries(selectedSets.get(receiverId)!, movers, receiverInfo[receiverId], movementTick);
-          if (entries.length === 0) continue;
+          // One receiver's failing send must not cost everyone after it
+          // their batch.
+          try {
+            const tally: EntryTally = { full: 0, far: 0 };
+            const entries = collectReceiverEntries(selectedSets.get(receiverId)!, movers, receiverInfo[receiverId], movementTick, NEAR_TIER_DISTANCE, farEvery, moverIndex, tally);
+            movementVolume.add(batchVolume(tally));
+            if (entries.length === 0) continue;
 
-          const receiverProbeSeq = movementProbeSeqs.get(receiverId) ?? 0;
-          const { data, offsets } = encodeBatch(entries, { seq: receiverProbeSeq, serverSendTime: Date.now() });
-          movementProbeSeqs.set(receiverId, receiverProbeSeq + (offsets.length - 1));
-          const parts: Uint8Array[] = [];
-          for (let i = 0; i < offsets.length - 1; i++) {
-            const start = offsets[i];
-            const end = offsets[i + 1];
-            parts.push(new Uint8Array(data.buffer, data.byteOffset + start, end - start));
+            const receiverProbeSeq = movementProbeSeqs.get(receiverId) ?? 0;
+            const { data, offsets } = encodeBatch(entries, { seq: receiverProbeSeq, serverSendTime: Date.now() });
+            movementProbeSeqs.set(receiverId, receiverProbeSeq + (offsets.length - 1));
+            const parts: Uint8Array[] = [];
+            for (let i = 0; i < offsets.length - 1; i++) {
+              const start = offsets[i];
+              const end = offsets[i + 1];
+              parts.push(new Uint8Array(data.buffer, data.byteOffset + start, end - start));
+            }
+            if (parts.length === 1) {
+              receiver.wt.send(parts[0]);
+            } else if (parts.length > 1) {
+              receiver.wt.sendMovementBatch(parts);
+            }
+            if (PROFILE) prof.datagramsSent += parts.length;
+            sentCount++;
+          } catch (error: any) {
+            log.debug(`Movement batch send to ${receiverId} failed: ${error?.message || error}`);
           }
-          if (parts.length === 1) {
-            receiver.wt.send(parts[0]);
-          } else if (parts.length > 1) {
-            receiver.wt.sendMovementBatch(parts);
-          }
-          movementDatagramsSent += parts.length;
-          if (PROFILE) prof.datagramsSent += parts.length;
-          sentCount++;
         }
       }
     }
@@ -1817,10 +2615,14 @@ export const spawnBatchQueue = new Map<string, Map<string, any>>();
 // Sprite/animation payload caches live at module scope: spawn data for a given
 // player+animation is identical across receivers and flushes, so rebuilding it
 // per flush was pure repeated work during churn.
+// Keyed by player, pose and equipment revision. A local player's entries go when the player does (the cleanup
+// below); a mirror's, and the poses a long session has left behind, do not, so the oldest are dropped past this many
+// (an entry dropped is built again on its next miss).
+const SPRITE_CACHE_MAX = 5000;
 const spriteDataCache = new Map<string, any>();
 const animationDataCache = new Map<string, any>();
 
-function queueSpawnForReceivers(spawnedPlayer: any, receivers: any[], spriteData: any = null) {
+export function queueSpawnForReceivers(spawnedPlayer: any, receivers: any[], spriteData: any = null) {
   // Build the snapshot ONCE per call - the same player object is identical for
   // every receiver, and rebuilding it per receiver was O(N^2) work per wave.
   const spawnData = queueSpawnPlayerPacket(spawnedPlayer);
@@ -1843,33 +2645,22 @@ async function flushSpawnBatches() {
   // flush: every receiver sees the same snapshots, so each player's deep
   // sprite-laden object is stringified once instead of once per receiver.
   const spawnJsonCache = new Map<string, string>();
-  const animJsonCache = new Map<string, string>();
+  const animJsonCache = new Map<string, { json: string; signature: string }>();
 
   // Snapshot the receiver list up front: receivers that log in mid-flush are
-  // picked up by the next flush 50ms later.
-  for (const receivingPlayerId of Array.from(spawnBatchQueue.keys())) {
-    // Claim (detach) the entry BEFORE the first await below. Spawns queued by
-    // a player logging in while this flush is awaiting sprite data land in a
-    // fresh entry instead of the snapshot being processed; holding the live
-    // reference and deleting/clearing it afterwards silently dropped those
-    // arrivals, leaving the new player permanently invisible to this receiver
-    // (no spawn -> the client ignores all later movement/stats for them).
-    const claimed = claimBatchEntry(spawnBatchQueue, receivingPlayerId);
-    if (!claimed || claimed.size === 0) {
-      continue;
-    }
-
-    try {
-      await flushOneSpawnBatch(receivingPlayerId, claimed, allPlayers, spawnJsonCache, animJsonCache);
-    } catch (error) {
-      // Never lose a claimed batch to an exception (bad sprite data, a
-      // mid-flush disconnect mutating player state, ...): restore everything
-      // we claimed so the next flush retries. The old live-reference code was
-      // accidentally immune here (the entry stayed queued); the claim
-      // protocol must restore explicitly.
-      requeueSpawnBatch(spawnBatchQueue, receivingPlayerId, claimed);
-    }
-  }
+  // picked up by the next flush 50ms later. Several receivers are flushed at once: one waits for its own
+  // sprite data, not for the receivers ahead of it. A receiver's spawns still go out in its own order (each is
+  // one task), and the receivers share nothing but the JSON caches, whose entries are the same for all.
+  //
+  // flushSpawnQueue claims each entry BEFORE the first await (spawns queued by a player logging in mid-flush land
+  // in a fresh entry, never in the snapshot being processed), puts a claimed batch back if its flush throws, and
+  // stops starting receivers once SPAWN_FLUSH_BUDGET_MS of the pass is used: the rest wait for the next flush. A
+  // receiver already started finishes its batch.
+  await flushSpawnQueue(
+    spawnBatchQueue,
+    (receivingPlayerId, claimed) => flushOneSpawnBatch(receivingPlayerId, claimed, allPlayers, spawnJsonCache, animJsonCache),
+    SPAWN_FLUSH_CONCURRENCY
+  );
 }
 
 async function flushOneSpawnBatch(
@@ -1877,7 +2668,7 @@ async function flushOneSpawnBatch(
   claimed: Map<string, any>,
   allPlayers: Record<string, any>,
   spawnJsonCache: Map<string, string>,
-  animJsonCache: Map<string, string>
+  animJsonCache: Map<string, { json: string; signature: string }>
 ): Promise<void> {
   const receivingPlayer = allPlayers[receivingPlayerId];
 
@@ -1900,13 +2691,15 @@ async function flushOneSpawnBatch(
   }
 
   if (spawnsForThisPlayer.length > 0) {
-    const MAX_SPAWNS_PER_FLUSH = 10;
-    const batchToSend = spawnsForThisPlayer.slice(0, MAX_SPAWNS_PER_FLUSH);
-    const remaining = spawnsForThisPlayer.slice(MAX_SPAWNS_PER_FLUSH);
+    // 10 a flush, and 50 while the receiver has a long queue behind it (a login wave), so the queue drains.
+    const maxSpawns = spawnsPerFlush(spawnsForThisPlayer.length);
+    const batchToSend = spawnsForThisPlayer.slice(0, maxSpawns);
+    const remaining = spawnsForThisPlayer.slice(maxSpawns);
 
     const playersWithSprites = await Promise.all(
       batchToSend.map(async (queuedPlayer) => {
-        const fullPlayer = allPlayers[queuedPlayer.id];
+        // A mirror (cluster mode) is drawn from its record: it is not in the cache.
+        const fullPlayer = allPlayers[queuedPlayer.id] ?? entityById(queuedPlayer.id);
         if (!fullPlayer) {
           return { ...queuedPlayer, spriteData: null };
         }
@@ -1923,7 +2716,7 @@ async function flushOneSpawnBatch(
         let playerSpriteData = spriteDataCache.get(spriteCacheKey);
         if (playerSpriteData === undefined) {
           playerSpriteData = await getPlayerSpriteSheetData(animationName, fullPlayer.equipment || null);
-          spriteDataCache.set(spriteCacheKey, playerSpriteData);
+          setBounded(spriteDataCache, spriteCacheKey, playerSpriteData, SPRITE_CACHE_MAX);
         }
 
         const mountSpriteForBatch = fullPlayer.mount_type ? getMountSpriteUrl(fullPlayer.mount_type) : null;
@@ -1963,6 +2756,9 @@ async function flushOneSpawnBatch(
       return json;
     });
 
+    // The viewer's client builds these players anew: what it held of them before no longer counts (socket/looks.ts).
+    for (const spawnData of playersWithSprites) forgetLook(receivingPlayer.wt, spawnData.id);
+
     const SPAWN_CHUNK_SIZE = 8;
     for (let i = 0; i < playerJsonParts.length; i += SPAWN_CHUNK_SIZE) {
       sendPacket(receivingPlayer.wt, packetManager.loadPlayersJson(
@@ -1972,7 +2768,7 @@ async function flushOneSpawnBatch(
     }
 
     const animationPromises = playersWithSprites.map(async (spawnData) => {
-      const spawnedPlayer = allPlayers[spawnData.id];
+      const spawnedPlayer = allPlayers[spawnData.id] ?? entityById(spawnData.id);
       if (!spawnedPlayer) {
         return null;
       }
@@ -1985,13 +2781,13 @@ async function flushOneSpawnBatch(
         spawnedPlayer.casting || false
       );
 
-      const fullPlayer = allPlayers[spawnData.id];
+      const fullPlayer = spawnedPlayer;
       const equipRev = fullPlayer?.equipmentRevision || 0;
       const animCacheKey = `${spawnData.id}:${animationName}:${equipRev}`;
       let animData = animationDataCache.get(animCacheKey);
       if (animData === undefined) {
         animData = await getAnimationData(animationName, spawnData.id);
-        animationDataCache.set(animCacheKey, animData);
+        setBounded(animationDataCache, animCacheKey, animData, SPRITE_CACHE_MAX);
       }
       return animData;
     });
@@ -1999,16 +2795,21 @@ async function flushOneSpawnBatch(
     const animationDataArray = (await Promise.all(animationPromises)).filter(a => a !== null);
 
     if (animationDataArray.length > 0) {
-      const animJsonParts = animationDataArray.map((animData) => {
+      // The json is cached per player for the flush and may come from an earlier receiver's data: the look is
+      // signed from the data that was serialised, so the record is what the packet holds.
+      const animEntries = animationDataArray.map((animData) => {
         const key = String(animData.id);
-        let json = animJsonCache.get(key);
-        if (json === undefined) {
-          json = JSON.stringify(animData);
-          animJsonCache.set(key, json);
+        let entry = animJsonCache.get(key);
+        if (entry === undefined) {
+          entry = { json: JSON.stringify(animData), signature: lookSignature(animData) };
+          animJsonCache.set(key, entry);
         }
-        return json;
+        return { id: key, entry };
       });
-      sendPacket(receivingPlayer.wt, packetManager.batchSpriteSheetAnimationJson(animJsonParts));
+      const queued = sendPacketQueued(receivingPlayer.wt, packetManager.batchSpriteSheetAnimationJson(animEntries.map((e) => e.entry.json)));
+      // The sheets this viewer now holds: later pose changes of these players can go out as the pose alone.
+      // Nothing is recorded for a packet the transport dropped.
+      if (queued) for (const { id, entry } of animEntries) noteLook(receivingPlayer.wt, id, entry.signature);
     }
 
     // Re-queue remaining spawns for the next flush, merged with anything
@@ -2051,6 +2852,7 @@ function flushDespawnBatches() {
     if (despawnsArray.length > 0) {
 
       const despawnData = despawnsArray.map(playerId => ({ id: playerId, reason: "disconnect" }));
+      for (const playerId of despawnsArray) forgetLook(receivingPlayer.wt, playerId);
       sendPacket(receivingPlayer.wt, packetManager.batchDisconnectPlayer(despawnData));
     }
 
@@ -2060,23 +2862,18 @@ function flushDespawnBatches() {
   }
 }
 
-// Movement runs on its own timer, decoupled from spawn/despawn. A spawn burst
-// (sprite data, JSON stringify) previously sat in the same await chain ahead of
-// the next movement flush, so a login wave would stutter everyone's movement.
-// The two flush families touch disjoint queues and disjoint state.
-
-let movementFlushTimer: ReturnType<typeof setTimeout> | null = null;
-
-async function scheduleMovementFlush() {
-  try {
-    await flushMovementBatches();
-  } catch (error) {
-    // Silently ignore batch flush errors
-  } finally {
-    if (movementFlushTimer) clearTimeout(movementFlushTimer);
-    movementFlushTimer = setTimeout(scheduleMovementFlush, getAdaptiveBatchInterval());
-  }
-}
+// Movement is flushed by the game loop, decoupled from spawn/despawn. A spawn
+// burst (sprite data, JSON stringify) previously sat in the same await chain
+// ahead of the next movement flush, so a login wave would stutter everyone's
+// movement. The two flush families touch disjoint queues and disjoint state.
+//
+// The batches go out right after the tick that produced them: one flush per
+// tick, at any TICK_RATE (it used to be a timer of its own, which drifted
+// against the ticks: a tick's steps waited up to a flush interval, or two
+// ticks' steps went in one flush). The adaptive back-off only skips a flush
+// when ticks run late, the flush is slow or overloaded, or outbound volume is
+// high (getAdaptiveBatchInterval); a flush still running skips the next.
+const flushMovementAfterTick = afterTickFlush(flushMovementBatches, getAdaptiveBatchInterval);
 
 // Spawn and despawn are less latency-critical and much heavier per flush, so
 // they run on a fixed, slower cadence.
@@ -2112,10 +2909,14 @@ async function scheduleSpawnFlush() {
   }
 }
 
-movementFlushTimer = setTimeout(scheduleMovementFlush, getAdaptiveBatchInterval());
+gameLoop.addAfterTickHook(flushMovementAfterTick);
 spawnFlushTimer = setTimeout(scheduleSpawnFlush, SPAWN_FLUSH_INTERVAL);
 
-function constructMapMetadata(
+// Cluster mode: players on neighbouring nodes near a border, mirrored here and sent to viewers through the
+// same queues as local players. Registering does nothing until startCluster attaches the ghost layer.
+ghosts.register(playerGhostKind({ queueMove: queueRemoteMovement, spawnQueue: spawnBatchQueue, despawnQueue: despawnBatchQueue }));
+
+export function constructMapMetadata(
   mapName: string,
   spawnX: number,
   spawnY: number,
@@ -2175,14 +2976,14 @@ function constructMapMetadata(
  * Whether a map is the inside of a building: it says so with the Tiled map property "interior" (the houses' rooms
  * have it). No mount is ridden there.
  */
-function isInteriorMap(mapName: string): boolean {
+export function isInteriorMap(mapName: string): boolean {
   const name = String(mapName ?? "").replace(".json", "");
   const map = (maps as MapData[]).find((m: MapData) => m.name === `${name}.json` || m.name === name);
   const properties = (map?.data as any)?.properties;
   return Array.isArray(properties) && properties.some((p: any) => p?.name === "interior" && p.value === true);
 }
 
-async function transitionPlayerToMap(
+export async function transitionPlayerToMap(
   player: any,
   newMapName: string,
   newPosition: { x: number; y: number; direction?: string },
@@ -2190,6 +2991,32 @@ async function transitionPlayerToMap(
   spawnBatchQueue: Map<string, Map<string, any>>,
   despawnBatchQueue: Map<string, Set<string>>
 ): Promise<void> {
+  // Cells phase 6: a warp whose destination another node owns hands the player to that node, with a full map load
+  // there (Deviation 26). The location is set to the destination first, so the snapshot and the new node's owner
+  // check read it; saveHandedOff (Task 13) counts the player off the old map through handoffFromMap. A refused or
+  // busy handoff puts the player back, and the warp happens here as before; the watch then hands them on once
+  // nothing blocks it. handOff answers and does not throw (Task 6); the finally puts the player back all the same.
+  const owner = warpTarget(handoffCtx, newMapName, newPosition.x, newPosition.y);
+  if (owner && player.wt && handoffBlocked(player, owner, handoffChecks) === null) {
+    const before = player.location;
+    player.handoffFromMap = before?.map;
+    player.location = {
+      map: bareMap(newMapName),
+      position: { x: newPosition.x, y: newPosition.y, direction: newPosition.direction || before?.position?.direction || "down", moving: false },
+    };
+    let result: string = "refused";
+    try {
+      result = await playerHandoff.handOff(player, owner, { fullLoad: true });
+    } finally {
+      if (result !== "switched" && result !== "gone") {
+        player.location = before;
+        delete player.handoffFromMap;
+      }
+    }
+    if (result === "switched" || result === "gone") return;
+    log.debug(`Warp of ${player.username} into ${owner}'s block: handoff ${result}, warped here instead`);
+  }
+
   loot.cancelCleanup(player.username);
 
   // Mounts stay outside: whoever rides into a building gets off at the door. Done before the move, so the players
@@ -2423,6 +3250,12 @@ export function clearPlayerTarget(playerId: string) {
  * longer see them, so clear both server-side target state and notify clients.
  */
 export function clearTargetOnMapChange(playerId: string) {
+  // The AOI keeps a selected player visible past the visibility cap; that
+  // selection ends with the map. (A stale selection of the mover held by
+  // someone else is harmless: it only counts while in range on one layer.)
+  const moving = playerCache.get(playerId);
+  if (moving) moving.selectedPlayerId = null;
+
   if (currentTargetMap.has(playerId)) {
     currentTargetMap.delete(playerId);
     const mover = playerCache.get(playerId);
@@ -2435,6 +3268,7 @@ export function clearTargetOnMapChange(playerId: string) {
     if (targetedId === playerId) {
       currentTargetMap.delete(observerId);
       const observer = playerCache.get(observerId);
+      if (observer) observer.selectedPlayerId = null;
       if (observer?.wt && observer.wt.readyState === 1) {
         sendPacket(observer.wt, packetManager.selectPlayer({ id: observerId, data: null }));
       }
@@ -2491,9 +3325,9 @@ export function removeFromAuthenticationQueues(sessionId: string, token: string)
 }
 
 /** Streams the NPCs round a player's position now (after a jump within the map: teleports, editor go-to). */
-async function resyncNpcChunks(playerObj: any, wt: any): Promise<void> {
+export async function resyncNpcChunks(playerObj: any, wt: any): Promise<void> {
   try {
-    const packets = await syncNpcChunks(playerObj);
+    const packets = await syncNpcChunks(playerObj, false, true);
     if (packets.length) sendPacket(wt, packets);
   } catch (e) {
     log.warn(`Failed to stream NPCs after a teleport: ${e}`);
@@ -2503,6 +3337,13 @@ async function resyncNpcChunks(playerObj: any, wt: any): Promise<void> {
 export async function teleportPlayerWrapper(playerObj: any, mapName: string, x: number, y: number): Promise<void> {
   const wt = playerObj.wt;
   if (!wt) return;
+  // A move outside a packet (a plugin's teleportPlayer) must not run for a player whose snapshot is taken or who was
+  // released: it would warp them here while the new node keeps the first point (final review M1). The packet-driven
+  // paths refuse a handoff inside trackPacket before they get here.
+  if (CELLS_ON && inHandoff(playerObj)) {
+    log.info(`Teleport of ${playerObj.username} to ${mapName} (${x}, ${y}) skipped: the player is changing server node`);
+    return;
+  }
   await transitionPlayerToMap(
     playerObj,
     mapName.replace(".json", ""),
@@ -2513,8 +3354,98 @@ export async function teleportPlayerWrapper(playerObj: any, mapName: string, x: 
   );
 }
 
-const authWorker = await getAuthWorker();
-authWorker.on("message", async (result: any) => {
+// Cluster mode: every login asks which node owns its spawn block (cluster/route.ts), so the live nodes are read at
+// most once a second.
+const liveNodes = new LiveNodeCache(async () => (await clusterNodes()?.live()) ?? []);
+
+/**
+ * Cluster mode: a login whose spawn block another live node owns is handed to that node (SWITCH, with a ticket this
+ * node signs for it) and its connection closed. True when it was; false to log in here.
+ */
+async function switchLoginIfElsewhere(wt: any, sessionId: string, username: string, spawn: { map: string; x: number; y: number }): Promise<boolean> {
+  const blocks = clusterEnabled() ? clusterBlocks() : null;
+  if (!blocks) return false;
+  const secret = process.env.GATEWAY_GAME_SERVER_SECRET;
+  if (!secret) return false;
+  let route;
+  try {
+    route = routeLogin(spawn, blocks, await liveNodes.get(), nodeId());
+  } catch (error) {
+    log.error(`Could not tell which node ${username} belongs on, so they log in here: ${error}`);
+    return false;
+  }
+  if (route === "here") return false;
+  const target = route.switchTo;
+  // A login another node has already handed over is not handed on again: two nodes whose tables disagree (blocks that
+  // move, phase 7) would pass it back and forth. It plays here until they agree.
+  if (wt.data?.switched) {
+    log.warn(`Login of ${username} was handed here by another node, but ${target.nodeId} owns ${spawn.map} at ${spawn.x},${spawn.y}: it plays here`);
+    return false;
+  }
+  // The account was marked online here by the authentication: it never got into the game here, so it is not (as for a
+  // login with no character). The next node then claims the session as for a fresh login.
+  await player.clearSessionId(sessionId).catch((e) => log.error(`Session of ${username} not cleared: ${e}`));
+  const ticket = nodeTicket(secret, String(wt.data?.ticketOrigin ?? ""), String(wt.data?.ticketAccount ?? ""), target.nodeId);
+  log.debug(`Login of ${username} goes to node ${target.nodeId}, which owns ${spawn.map} at ${spawn.x},${spawn.y}`);
+  // The SWITCH must arrive before the close: without it the client takes the close for a lost connection and reconnects here.
+  await wt.sendThenClose(packetManager.switchNode(target, ticket), 1000, "switch");
+  return true;
+}
+
+// The auth-worker pool, used as one worker: a login is posted to the worker with the fewest in flight, and the
+// answers of every worker, a replacement's too, arrive at the handler below (authdispatch.ts).
+export const authWorker = await getAuthPool();
+/**
+ * A login by handoff between takeArrival and the player cache (cells phase 6). The arrival is spent once taken, so a
+ * login that fails in that stretch is told to the client and its connection is closed: the client goes back to the
+ * start page at once, and its next login reads the database, instead of waiting for the idle close. `username` is set while the stretch runs.
+ */
+interface ArrivingLogin {
+  wt: any;
+  username: string | null;
+  sessionId: string | null;
+  /** The map whose world count the login raised, lowered again when it fails. */
+  countedMap: string | null;
+}
+
+/** Ends an arrival that could not be completed. It never throws. */
+async function failArrival(arriving: ArrivingLogin, reason: string): Promise<void> {
+  const { wt, username } = arriving;
+  arriving.username = null;
+  log.error(`The arrival of ${username} by handoff could not be completed, and they are sent to log in again: ${reason}`);
+  if (arriving.countedMap) {
+    await Promise.resolve()
+      .then(() => worlds.adjustPlayerCount(arriving.countedMap!, -1))
+      .catch((error) => log.error(`[WorldsFetchError] Failed to update world player count: ${error}`));
+  }
+  if (arriving.sessionId) {
+    await Promise.resolve()
+      .then(() => player.clearSessionId(arriving.sessionId!))
+      .catch((error) => log.error(`Session of ${username} not cleared: ${error}`));
+  }
+  try {
+    sendPacket(wt, packetManager.loginFailed());
+    wt.close(1008, "The move to this server could not be completed");
+  } catch (error) {
+    log.error(`The connection of ${username} could not be closed after their arrival failed: ${error}`);
+  }
+}
+
+authWorker.on("message", (result: any) => {
+  const arriving: ArrivingLogin = { wt: null, username: null, sessionId: null, countedMap: null };
+  return completeLogin(result, arriving).catch((error) => {
+    // Any login that is not an arrival in its first stretch fails as it always has.
+    if (arriving.username === null) throw error;
+    return failArrival(arriving, String(error?.stack ?? error));
+  });
+});
+
+// A worker that stopped with this login in flight may have claimed the account's session for the connection before
+// it did. The login fails (the answer that follows goes through completeLogin like any failed login), and the claim
+// is let go, as for a login that cannot go on (it only matches the session claimed for this connection).
+authWorker.on("lost", (job) => player.clearSessionId(job.id).catch((error) => log.error(`Session of connection ${job.id} not cleared after its login worker stopped: ${error}`)));
+
+async function completeLogin(result: any, arriving: ArrivingLogin): Promise<void> {
   const status = result as Authentication;
   const sessionId = result.id;
 
@@ -2522,6 +3453,8 @@ authWorker.on("message", async (result: any) => {
   if (!pending) return;
 
   const { wt, token, language } = pending;
+  // The worker has answered: a handoff arrival's mark (the line is said at the player's first move).
+  playerHandoff.landed(String(wt.data?.ticketToken ?? ""), "worker_done");
 
   pendingAuthentications.delete(sessionId);
   authentication_queue.delete(token);
@@ -2568,18 +3501,26 @@ authWorker.on("message", async (result: any) => {
       return;
     }
 
-    const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
+    // Cells phase 6: a connection that opened with a handoff ticket brings the player from the old node. takeArrival
+    // answers once, and only after the old node committed; any other login is a normal one from the database
+    // (Deviation 5). The snapshot is the truth for where the player stands and what they carry beside the rows. The
+    // name is the one the database gave for the account the ticket names (session.ts refuses a token that is not the
+    // ticket's account), never a name the client sent. A session of this account still here is kicked just below,
+    // as for any second login.
+    const arrival = clusterEnabled()
+      ? playerHandoff.takeArrival(String(wt.data?.ticketToken ?? ""), playerData.username, String(wt.data.id))
+      : null;
+    if (arrival) Object.assign(arriving, { wt, username: playerData.username, sessionId });
+    // The first MOVEXY of this connection says the new node's line of marks (handlers/movement.ts).
+    if (arrival) wt.data.handoffLanding = true;
+    const arrivalState = arrival
+      ? handoffStateOf(arrival.snapshot.state, arrivalLimits((await assetCache.get("spells")) as SpellData[] | null), playerData.username, {
+        caster: knownDotCaster,
+        maps: await arrivalMaps(arrival.snapshot.state, maps as MapData[] | null, () => assetCache.get("maps") as Promise<MapData[] | null>),
+      })
+      : null;
 
-    if (!playerData.isAdmin && playerData.isNoclip) {
-      player.toggleNoclip(playerData.username).catch(err =>
-        log.error(`Failed to toggle noclip: ${err}`)
-      );
-    }
-    if (!playerData.isAdmin && playerData.isStealth) {
-      player.toggleStealth(playerData.username).catch(err =>
-        log.error(`Failed to toggle stealth: ${err}`)
-      );
-    }
+    const assetServerUrl = process.env.ASSET_SERVER_URL || "http://localhost:8081";
 
     // Kick any existing session for this username (duplicate login prevention)
     const newUsername = playerData.username.toLowerCase();
@@ -2588,7 +3529,7 @@ authWorker.on("message", async (result: any) => {
         log.info(`Kicking existing session for ${playerData.username} (duplicate login)`);
 
         if (p.wt && p.wt.readyState === 1) {
-          p.wt.send(packetManager.notify({
+          sendPacket(p.wt, packetManager.notify({
             message: "You have been logged in from another location."
           }));
         }
@@ -2615,17 +3556,33 @@ authWorker.on("message", async (result: any) => {
             // are disconnected" client-side and blanks the bystander's screen,
             // swallowing the replacement session's spawn that follows.
             if (other.location?.map === map && other.id !== p.id && other.wt?.readyState === 1) {
-              other.wt.send(packetManager.despawnPlayer(p.id, "disconnect"));
+              forgetLook(other.wt, p.id);
+              sendPacket(other.wt, packetManager.despawnPlayer(p.id, "disconnect"));
             }
           }
         }
 
         if (p.wt && p.wt.readyState === 1) {
-          p.wt.close(1000, "Logged in from another location");
+          p.wt.close(1000, "Logged in from another location", { drain: true });
         }
         playerCache.remove(p.id);
         forgetNpcStream(p.id);
         break;
+      }
+    }
+
+    // Cells phase 7: a login from the database after a crash plays from the last snapshot when it is newer than the
+    // last save (cluster/recovery.ts). It runs before the player is cached, because the cache's add claims the owner
+    // epoch (cluster/presence.ts) and the stamp must be the one from before the claim. It runs before the spawn point
+    // is worked out, so the routing below routes on the recovered point.
+    if (clusterEnabled() && !arrival && !Number(playerData.isDead) && !playerData.isGuest) {
+      const store = clusterStore();
+      if (store) {
+        await recoverLogin(playerData, {
+          stamp: (username) => player.saveStamp(username),
+          snapshot: (username) => readSnapshot(store, username),
+          knownMap: (map) => mapPropertiesCache.some((m: any) => m.name === `${map}.json`),
+        });
       }
     }
 
@@ -2658,11 +3615,22 @@ authWorker.on("message", async (result: any) => {
       };
     }
 
+    // The row cache may still hold the old node's last save (Deviation 22): the snapshot's point is used.
+    if (arrival) {
+      spawnLocation = {
+        map: `${arrival.snapshot.map}.json`,
+        x: arrival.snapshot.x,
+        y: arrival.snapshot.y,
+        direction: arrival.snapshot.direction || "down",
+      };
+    }
+
     // Dead players never resume at a spawn point: a corpse awaiting release
     // resumes at the corpse, a ghost resumes where it logged out. Both stay
-    // at 0 HP/stamina until revived.
-    const loginDeadState = Number(playerData.isDead) || 0;
-    if (loginDeadState === 1 && playerData.corpse?.map) {
+    // at 0 HP/stamina until revived. An arrival brings its own state and stays
+    // at the snapshot's point.
+    const loginDeadState = arrivalState ? arrivalState.deadState : Number(playerData.isDead) || 0;
+    if (!arrival && loginDeadState === 1 && playerData.corpse?.map) {
       spawnLocation = {
         map: `${playerData.corpse.map}.json`,
         x: playerData.corpse.x,
@@ -2675,6 +3643,39 @@ authWorker.on("message", async (result: any) => {
       playerData.stats.stamina = 0;
     }
 
+    const savedMap = maps.find((m: MapData) => m.name === spawnLocation.map);
+    const map = savedMap || maps.find((m: MapData) => m.name === `${defaultMap}.json`);
+    // The client keeps its world only when it arrives on a map this node has (a map gone here is a full load at the
+    // default map, as for any login).
+    const resume = !!arrival?.resume && !!savedMap;
+    if (map) {
+      // A saved map that no longer exists (removed from the asset server) falls
+      // back to the default map. Its coordinates mean nothing there, so the
+      // player starts at the default map's spawn point instead.
+      if (!savedMap) {
+        spawnLocation.x = default_map_spawnpoint.x;
+        spawnLocation.y = default_map_spawnpoint.y;
+        spawnLocation.direction = default_map_spawnpoint.direction;
+      }
+      spawnLocation.map = map.name;
+
+      // Cluster mode: the spawn point is final. A login whose spawn block another node owns goes there, before anything
+      // of it is done or kept here (the noclip/stealth reset, the auth event, the player cache, the world count, packets).
+      // An arrival is never switched on: this node accepted it for this point, and a second switch could loop.
+      if (!arrival && (await switchLoginIfElsewhere(wt, sessionId, playerData.username, spawnLocation))) return;
+    }
+
+    if (!playerData.isAdmin && playerData.isNoclip) {
+      player.toggleNoclip(playerData.username).catch(err =>
+        log.error(`Failed to toggle noclip: ${err}`)
+      );
+    }
+    if (!playerData.isAdmin && playerData.isStealth) {
+      player.toggleStealth(playerData.username).catch(err =>
+        log.error(`Failed to toggle stealth: ${err}`)
+      );
+    }
+
     listener.emit(Events.PLAYER_AUTH_COMPLETE, { username: playerData.username, spawnLocation, playerData });
 
     // Who the player ignores, for the menus and the list their client shows. Chat is held back here, not there.
@@ -2682,19 +3683,11 @@ authWorker.on("message", async (result: any) => {
       .then((ignored) => sendPacket(wt, packetManager.updateIgnores({ ignored })))
       .catch((error) => log.error(`The ignore list of ${playerData.username} could not be sent: ${error}`));
 
-    const savedMap = maps.find((m: MapData) => m.name === spawnLocation.map);
-    const map = savedMap || maps.find((m: MapData) => m.name === `${defaultMap}.json`);
-    if (!map) return;
-
-    // A saved map that no longer exists (removed from the asset server) falls
-    // back to the default map. Its coordinates mean nothing there, so the
-    // player starts at the default map's spawn point instead.
-    if (!savedMap) {
-      spawnLocation.x = default_map_spawnpoint.x;
-      spawnLocation.y = default_map_spawnpoint.y;
-      spawnLocation.direction = default_map_spawnpoint.direction;
+    if (!map) {
+      // No map to put an arrival on: it is told, rather than left on the loading screen.
+      if (arriving.username !== null) await failArrival(arriving, `there is no map ${spawnLocation.map} and no default map`);
+      return;
     }
-    spawnLocation.map = map.name;
 
     const questActive: QuestLogEntry[] = Array.isArray(playerData.questlog?.active) ? playerData.questlog.active : [];
     const questCompleted: number[] = Array.isArray(playerData.questlog?.completed) ? playerData.questlog.completed : [];
@@ -2715,6 +3708,7 @@ authWorker.on("message", async (result: any) => {
 
     if (world) {
       const worldPlayerCount = await worlds.adjustPlayerCount(spawnLocation.map, 1);
+      if (arriving.username !== null) arriving.countedMap = spawnLocation.map;
       if (worldPlayerCount !== null) {
         // log.info(
         //   `World: ${world.name} now has ${worldPlayerCount} players. (player_join)`
@@ -2732,7 +3726,12 @@ authWorker.on("message", async (result: any) => {
 
     // What the caches hold of this player is read again: the gateway, or an
     // admin's edit on another server, may have written it since they left.
-    await refreshPlayer(playerData.username);
+    // A handoff's login (resume) skips it: the rows the auth worker has just read are the ones the old node saved before
+    // the SWITCH, and the row caches are the cluster's one shared copy, written through by every writer.
+    if (!resume) await refreshPlayer(playerData.username);
+    // A settle mark taken from another node at this login (Task 20b): the bags are shown again when it runs out.
+    reloadWhenSettled(playerData.username);
+    if (arrival) playerHandoff.landed(String(wt.data?.ticketToken ?? ""), "rows_done");
 
     // The spells of the character's class up to its level that it does not know: a new character's first ones, and
     // any a class was given after the character passed its level.
@@ -2750,6 +3749,17 @@ authWorker.on("message", async (result: any) => {
     const limitedFriends = Array.isArray(playerData.friends) ? playerData.friends.slice(0, 100) : [];
     const limitedCollectables = Array.isArray(playerData.collectables) ? playerData.collectables.slice(0, 50) : [];
     const limitedLearnedSpells = Array.isArray(playerData.learnedSpells) ? playerData.learnedSpells.slice(0, 100) : (playerData.learnedSpells || []);
+
+    // Seeded first: the add below reads the cooldowns and lockout, and the restore after the first AOI pass reads the
+    // effects and the sickness.
+    if (arrivalState) seedArrival(playerData.username, arrivalState);
+    const fields = arrivalState
+      ? arrivalFields(arrivalState)
+      : { pvp: false, last_attack: null as number | null, mounted: false, mount_type: null as string | null };
+    // The mount is checked here as the MOUNT packet checks it: owned, alive, not inside a building.
+    const mount = arrivalState
+      ? arrivalMount(fields, limitedCollectables, loginDeadState, isInteriorMap(spawnLocation.map))
+      : { mounted: false, mount_type: null as string | null };
 
     playerCache.add(wt.data.id, {
       username: playerData.username,
@@ -2775,8 +3785,8 @@ authWorker.on("message", async (result: any) => {
       attackDelay: 0,
       lastMovementPacket: null,
       permissions: typeof playerData.permissions === "string" ? (playerData.permissions as string).split(",") : playerData.permissions || [],
-      pvp: false,
-      last_attack: null,
+      pvp: fields.pvp,
+      last_attack: fields.last_attack,
       invitations: [],
       party_id: playerData.party_id ? Number(playerData.party_id) : null,
       party: playerData.party || null,
@@ -2789,8 +3799,8 @@ authWorker.on("message", async (result: any) => {
       characterClass: playerData.characterClass ?? null,
       created: performance.now(),
       lastUpdated: performance.now(),
-      mounted: false,
-      mount_type: null,
+      mounted: mount.mounted,
+      mount_type: mount.mount_type,
       collectables: limitedCollectables,
       spellCooldowns: cooldownManager.getActiveCooldowns(playerData.username),
       casting: false,
@@ -2805,13 +3815,15 @@ authWorker.on("message", async (result: any) => {
       // stuck walking (an older direction packet's deferred registration landing
       // after a newer "abort").
       _moveSeq: 0,
+      // The pose revision (socket/posedgram.ts) counts on from the old node's, so a handed-off player never sends a lower one.
+      poseRev: arrival ? arrivedPoseRevision(arrival.snapshot.state) : 0,
       spellLockoutUntil: cooldownManager.getLockout(playerData.username),
       slowPercent: 0,
       slowMultiplier: 1,
       isVanished: false,
       isDead: loginDeadState === 1,
       isGhost: loginDeadState === 2,
-      corpse: loginDeadState !== 0 ? playerData.corpse || null : null,
+      corpse: loginDeadState === 0 ? null : arrivalState ? arrivalState.corpse : playerData.corpse || null,
       reviveOffered: false,
       learnedSpells: limitedLearnedSpells,
       inventory: limitedInventory,
@@ -2822,15 +3834,33 @@ authWorker.on("message", async (result: any) => {
     // Logged in: as large a packet as a player sends, or as the tools need for one who uses them.
     wt.setFrameLimit?.(frameLimitFor(playerCache.get(wt.data.id), MAX_FRAME_BYTES, BENCHMARK_ENABLED));
     wt.markLoggedIn?.();
+    if (arrival) playerHandoff.landed(String(wt.data?.ticketToken ?? ""), "cached");
 
     const _pcache = playerCache.get(wt.data.id);
-    if (!_pcache) return;
+    if (!_pcache) {
+      if (arriving.username !== null) await failArrival(arriving, "the player cache did not take them");
+      return;
+    }
+    // The player is in the cache: from here a failure is cleaned up by the disconnect, as for any login.
+    arriving.username = null;
+
+    // The mirror of this player that this node held (from the old node) gives way to the player, with no despawn to
+    // its viewers.
+    if (arrival) ghosts.dropMirror("player", arrival.snapshot.id);
+    // Any login here, a handoff's or a fresh one: calls for this player run here from now on, not where a forward
+    // left from an earlier handoff away from this node would send them (Task 8).
+    if (clusterEnabled()) forwardTable.forgetPlayer(String(_pcache.id), playerData.username);
 
     // Send initial packets immediately - stats sync and effect restoration follow asynchronously
     await initializePlayerAOI(_pcache);
     playerCache.set(_pcache.id, _pcache);
     mapIndex.addPlayer(_pcache.id, _pcache.location.map);
     loot.cancelCleanup(_pcache.username);
+    if (resume) {
+      // The client shows these creatures already: the next refresh sends only what differs (Deviation 15).
+      const layerId = _pcache.aoi?.layerId ?? layerManager.getPlayerLayer(String(_pcache.id)) ?? null;
+      creatures.sync.adopt(String(_pcache.id), _pcache.location.map, layerId, arrival!.snapshot.creatureIds);
+    }
 
     // Where the player is placed, not the stored position: they differ for a new character (stored at 0,0, placed at
     // the world's spawn), a corpse, or a map that is gone. The client loads the chunks round this point and puts its
@@ -2843,13 +3873,39 @@ authWorker.on("message", async (result: any) => {
       maps,
       mapPropertiesCache
     );
-    sendPacket(wt, packetManager.loadMap(mapMetadata));
+    // The resumed walk's start, so the spawn below is built after the walk has begun (it reads `moving` and the pose).
+    let resumedWalk: Promise<void> | null = null;
+    if (resume) {
+      // The client keeps its world (Task 12): it is told where it stands, and the spawns that follow are deduped by id.
+      sendPacket(wt, packetManager.handoffDone({
+        map: _pcache.location.map,
+        x: _pcache.location.position.x,
+        y: _pcache.location.position.y,
+        direction: _pcache.location.position.direction,
+        // The walk about to be resumed below, not the facing (a cast keeps the facing while the player walks another way).
+        walk: doneWalkOf(arrivalState?.walk, _pcache),
+      }));
+      // The player was walking when handed off: they walk on from the committed position, as if the client had just
+      // sent the move. A different direction or a stop from the client after this wins as usual.
+      if (arrivalState?.walk) {
+        // (movement.ts undoes a stray stop of the superseded mover for this long, for this arrival only)
+        wt.data.walkRecoverUntil = Date.now() + RESUME_WALK_RECOVER_MS;
+        resumedWalk = resumeArrivalWalk(wt, arrivalState.walk);
+      }
+    } else {
+      sendPacket(wt, packetManager.loadMap(mapMetadata));
+    }
+    if (arrival) playerHandoff.landed(String(wt.data?.ticketToken ?? ""), "done_sent");
 
     // Anchor the client's clock once. It advances time locally from here, so
     // this is not re-pushed on the server tick.
     sendPacket(wt, packetManager.serverTime(weatherApi.utcOffsetSeconds()));
 
-    setTimeout(async () => {
+    setTimeout(deferredStep(`The spawn of ${playerData.username}`, async () => {
+
+      // A resumed walk has begun (moving set, its pose sent) before the spawn is built: it never fails (it logs).
+      // (Bounded: a walk that hangs must not hold the spawn back.)
+      if (resumedWalk) await waitFor(resumedWalk, RESUME_WALK_WAIT_MS);
 
       const currentPlayer = playerCache.get(wt.data.id);
       if (!currentPlayer) return;
@@ -2865,7 +3921,21 @@ authWorker.on("message", async (result: any) => {
 
       await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
 
-      const animationName = getAnimationNameForDirection(position?.direction || "down", false, false, undefined, false);
+      if (resume && arrival) {
+        // Mirrors join a newcomer's AOI at their own next update. Those the client already shows join now, so they
+        // are not despawned below and spawned again a moment later.
+        for (const id of arrival.snapshot.playerIds) {
+          const mirror = mirrorPlayers.get(String(id));
+          if (mirror) updateMirrorViewers(mirror, spawnBatchQueue, despawnBatchQueue);
+        }
+        const gone = playersToDespawn(arrival.snapshot.playerIds, currentPlayer.aoi?.playersInAOI ?? new Set<string>(), String(currentPlayer.id));
+        for (const id of gone) forgetLook(wt, id);
+        if (gone.length > 0) sendPacket(wt, gone.flatMap((id) => packetManager.despawnPlayer(id, "distance")));
+      }
+
+      // A resumed arrival has walked on since the snapshot: the spawn shows the walk, the mount and the point as they are now.
+      const resumed = resume ? resumeSelfSpawn(currentPlayer, getAnimationNameForDirection, gameLoop.isPlayerMoving(currentPlayer.id)) : null;
+      const animationName = resumed ? resumed.animationName : getAnimationNameForDirection(position?.direction || "down", false, false, undefined, false);
       const selfSpriteData = await getPlayerSpriteSheetData(animationName, _pcache?.equipment || null);
 
       let spriteDataForSelf = null;
@@ -2892,9 +3962,9 @@ authWorker.on("message", async (result: any) => {
         userid: playerData.id,
         location: {
           map: spawnLocation.map,
-          x: spawnLocation.x || 0,
-          y: spawnLocation.y || 0,
-          direction: spawnLocation.direction,
+          x: resumed ? resumed.x : spawnLocation.x || 0,
+          y: resumed ? resumed.y : spawnLocation.y || 0,
+          direction: resumed ? resumed.direction : spawnLocation.direction,
         },
         username: playerData.username,
         isAdmin: playerData.isAdmin,
@@ -2941,7 +4011,7 @@ authWorker.on("message", async (result: any) => {
         let playerSpriteData = spriteDataCache.get(spriteCacheKey);
         if (playerSpriteData === undefined) {
           playerSpriteData = await getPlayerSpriteSheetData(animationName, p.equipment || null);
-          spriteDataCache.set(spriteCacheKey, playerSpriteData);
+          setBounded(spriteDataCache, spriteCacheKey, playerSpriteData, SPRITE_CACHE_MAX);
         }
 
         const mountSprite = p.mount_type ? getMountSpriteUrl(p.mount_type) : null;
@@ -3041,7 +4111,12 @@ authWorker.on("message", async (result: any) => {
         }
       }
 
-      if (position?.direction) {
+      if (resume) {
+        // The pose as it is now, from the live record: the stored point's direction (a "down" default) and an idle
+        // pose would replace the walk the arrival is in, and nothing sends the walk again until a key changes.
+        const poseNow = resumeSelfSpawn(currentPlayer, getAnimationNameForDirection, gameLoop.isPlayerMoving(currentPlayer.id));
+        if (poseNow) await sendAnimationTo(wt, poseNow.animationName, wt.data.id);
+      } else if (position?.direction) {
         await sendAnimationTo(
           wt,
           getAnimationNameForDirection(position.direction, false, false, undefined, false),
@@ -3051,22 +4126,8 @@ authWorker.on("message", async (result: any) => {
 
       // Effects and other-player animations are handled by flushSpawnBatches
 
-      // Send active ground AoE zones on this map to the newly connected player
-      const activeZones = getZonesOnMap(currentPlayer.location.map);
-      for (const zone of activeZones) {
-        sendPacket(wt, packetManager.groundAoeSpawn({
-          id: zone.id,
-          spell: zone.spellName,
-          casterId: zone.casterId,
-          x: zone.position.x,
-          y: zone.position.y,
-          radius: zone.radius,
-          duration: Math.max(0, Math.ceil((zone.expiresAt - Date.now()) / 1000)),
-          damageType: zone.damageType,
-          particles: zone.particles,
-          casterUsername: zone.casterUsername,
-        }));
-      }
+      // Send the newly connected player the ground AoE zones near them on their layer
+      resyncZonesFor(currentPlayer, true);
 
       // Restore persisted effects from previous session
       const effectUsername = playerData.username?.toLowerCase();
@@ -3113,26 +4174,21 @@ authWorker.on("message", async (result: any) => {
         effectManager.clearAll(effectUsername);
       }
 
-    });
+    }, () => {
+      // The client never got its spawn: closing the connection runs the normal disconnect clean-up, and it logs in again.
+      try { wt.close(1011, "The spawn could not be finished"); } catch {}
+    }));
     // Defer secondary loads with a delay so the game loop can process between player spawns
-    setTimeout(async () => {
+    setTimeout(deferredStep(`The friends, NPCs and loot sent to ${playerData.username} after their spawn`, async () => {
 
       const currentPlayerData = playerCache.get(wt.data.id);
       if (currentPlayerData) {
-        const allPlayers = playerCache.list();
-        const usernameIndex = new Map<string, any>();
-        for (const player of Object.values(allPlayers)) {
-          if (player.wt && player.username) {
-            usernameIndex.set(player.username.toLowerCase(), player);
-          }
-        }
         const newPlayerFriends = currentPlayerData.friends || [];
         for (const friendUsername of newPlayerFriends) {
-          const onlineFriend = usernameIndex.get(friendUsername.toLowerCase());
-          if (onlineFriend) {
-            sendPacket(onlineFriend.wt, packetManager.updateOnlineStatus({ online: true, username: currentPlayerData.username }));
-            sendPacket(currentPlayerData.wt, packetManager.updateOnlineStatus({ online: true, username: onlineFriend.username }));
-          }
+          // Online here (with a live connection) or, in a cluster, on another node: only then is the friend told, and told back.
+          if (!(await deliverToPlayer(friendUsername, packetManager.updateOnlineStatus({ online: true, username: currentPlayerData.username })))) continue;
+          const shownFriend = playerCache.getByUsername(friendUsername)?.username ?? friendUsername;
+          sendPacket(currentPlayerData.wt, packetManager.updateOnlineStatus({ online: true, username: shownFriend }));
         }
       }
 
@@ -3168,7 +4224,7 @@ authWorker.on("message", async (result: any) => {
           sendPacket(p.wt, packetManager.playerGhost({ id: relogPlayer.id, ghost: true }));
         });
       }
-    }, 200);
+    }), 200);
 
     // Build cooldown data to include with CLIENTCONFIG so the client can display
     // partially-expired cooldown overlays on reconnect.
@@ -3277,7 +4333,34 @@ authWorker.on("message", async (result: any) => {
       log.warn(`The mail of ${playerData.username} could not be looked at: ${error}`);
     }
   }
-});
+}
+
+/** The handler modules, loaded at the first packet (they import this module). */
+let handlerRoutes: typeof import("./handlers/index") | null = null;
+
+/**
+ * A resumed handoff arrival goes on walking: the MOVEXY handler is run for the direction they walked in, so the mover
+ * is registered the same way a move from the client registers it. Counted in flight, like a packet of theirs.
+ */
+async function resumeArrivalWalk(wt: any, direction: string): Promise<void> {
+  try {
+    const handler = (handlerRoutes ??= await import("./handlers/index")).route("MOVEXY");
+    const currentPlayer = playerCache.get(wt.data.id) || null;
+    if (!handler || !currentPlayer || wt.readyState !== 1) return;
+    await trackPacket(String(wt.data.id), () => handler.handle({
+      server: undefined, wt, message: "", parsedMessage: { type: "MOVEXY", data: direction } as unknown as Packet, data: direction, type: "MOVEXY", currentPlayer,
+      resolveNpcParticles: async (npc: Npc) => npc, resolveNpcForClient: async (npc: Npc) => npc,
+    }));
+  } catch (error) {
+    log.warn(`The walk of an arrival was not resumed: ${error}`);
+  }
+}
+
+/**
+ * Whether this process runs as a cluster node, read once at load: the packet path checks it on every packet, and a
+ * single node must pay nothing for the handoff's freeze and in-flight count. CLUSTER does not change while running.
+ */
+const CELLS_ON = clusterEnabled();
 
 export default async function packetReceiver(
   server: any,
@@ -3312,6 +4395,11 @@ export default async function packetReceiver(
 
     const currentPlayer = playerCache.get(wt.data.id) || null;
 
+    // Cells phase 6: a player being handed to another node is frozen (Task 6 sets handoff; the release marks the
+    // connection). What they send now is dropped; the keepalive still answers until the SWITCH closes the connection.
+    // CELLS_ON is read once at load, so a single node looks at nothing more per packet.
+    if (CELLS_ON && (wt.data?.handedOff || currentPlayer?.handoff) && type !== "PING" && type !== "PONG") return;
+
     for (const interceptor of packetInterceptors) {
       if (interceptor(type, data, wt, currentPlayer)) {
         return;
@@ -3320,7 +4408,9 @@ export default async function packetReceiver(
 
     const pluginHandler = pluginHandlers.get(type);
     if (pluginHandler) {
-      await pluginHandler(wt, currentPlayer, data, sendPacket);
+      // Counted in flight, so a handoff's drain waits for it (cluster/inflight.ts). A single node calls it directly.
+      if (CELLS_ON) await trackPacket(String(wt.data?.id ?? ""), () => pluginHandler(wt, currentPlayer, data, sendPacket));
+      else await pluginHandler(wt, currentPlayer, data, sendPacket);
       return;
     }
 
@@ -3342,9862 +4432,90 @@ export default async function packetReceiver(
       return { ...withParticles, spriteLayers: getNpcSpriteLayers(npc) };
     }
 
-    switch (type) {
-      case "BENCHMARK": {
-        (data as any)["returned_timestamp"] = Date.now();
-        sendPacket(wt, packetManager.benchmark(data));
-        break;
-      }
-      case "PING": {
-        sendPacket(wt, packetManager.ping(data));
-        break;
-      }
-      case "PONG": {
-        sendPacket(wt, packetManager.pong(data));
-        break;
-      }
-      case "LOGIN": {
-        sendPacket(wt, packetManager.login(wt));
-        break;
-      }
-      case "AUTH": {
-        const token = data?.toString() as string;
-
-        if (!token) {
-          sendPacket(wt, packetManager.loginFailed());
-          wt.close(1008, "Invalid token");
-          break;
-        }
-
-        // The connection ticket was issued for one account: a ticket fetched
-        // for one account (or for none) logs in no other.
-        if (!ticketAllows(wt.data?.ticketAccount, token)) {
-          log.debug(`Login refused on connection ${wt.data?.id}: the token is not the one its ticket was issued for`);
-          sendPacket(wt, packetManager.loginFailed());
-          wt.close(1008, "Invalid token");
-          break;
-        }
-
-        if (authentication_queue.has(token)) {
-          sendPacket(wt, packetManager.loginFailed());
-          wt.close(1008, "Authentication already in progress");
-          break;
-        }
-
-        if (authentication_session_queue.has(wt.data.id)) {
-          sendPacket(wt, packetManager.loginFailed());
-          wt.close(1008, "Session authentication already in progress");
-          break;
-        }
-
-        authentication_queue.add(token);
-        authentication_session_queue.add(wt.data.id);
-
-        pendingAuthentications.set(wt.data.id, { wt, token, language: parsedMessage?.language || "en" });
-
-        authWorker.postMessage({ token, id: wt.data.id });
-
-        break;
-      }
-
-      case "LOGOUT": {
-        if (!currentPlayer) return;
-        player.setLocation(
-          currentPlayer.id,
-          currentPlayer.location.map,
-          currentPlayer.location.position
-        );
-        player.logout(currentPlayer.id);
-        listener.emit(Events.PLAYER_LOGOUT, { player: currentPlayer });
-        // Close the connection so the onDisconnect handler fires and does the
-        // full in-memory cleanup (despawn, remove from cache, update friends, etc.)
-        if (wt.readyState === 1) {
-          wt.close(1000, "Player logout");
-        }
-        break;
-      }
-      case "DISCONNECT": {
-        if (!currentPlayer) return;
-        player.setLocation(
-          currentPlayer.id,
-          currentPlayer.location.map,
-          currentPlayer.location.position
-        );
-        player.clearSessionId(currentPlayer.id);
-
-        // If this admin was dragging any players, release them
-        releaseDraggedBy(currentPlayer.id);
-
-        break;
-      }
-      case "MOVEXY": {
-        if (!currentPlayer) return;
-
-        // MOVEXY is dispatched fire-and-forget (PROCESS_IMMEDIATELY, no await in
-        // server.ts) so multiple handlers for one connection interleave across
-        // their await points. Stamp this invocation with a monotonic generation;
-        // a newer MOVEXY bumps past it, marking any suspended older handler stale
-        // so it won't (re)register the player as moving after a later "abort".
-        const moveSeq = ++currentPlayer._moveSeq;
-
-        await player.preloadMapCollision(currentPlayer.location.map);
-
-        const baseSpeed = 6;
-        const mountSpeedMultiplier = 1.35;
-
-        const direction = data.toString().toLowerCase();
-
-        if (direction === "abort") {
-          // The key was let go: the next warp walked into is meant (see _warpHold below).
-          currentPlayer._warpHold = undefined;
-          await forceStopPlayerMovement(currentPlayer);
-          return;
-        }
-
-        // Corpses awaiting release cannot move. Ghosts can (mounted speed),
-        // except during the release cinematic's pending teleport window.
-        if (currentPlayer.isDead || currentPlayer.ghostTeleportPending) {
-          await forceStopPlayerMovement(currentPlayer);
-          return;
-        }
-
-        // A newer MOVEXY (another direction, or an "abort") arrived while this
-        // handler was awaiting above - it is now authoritative. Drop this one.
-        if (currentPlayer._moveSeq !== moveSeq) {
-          return;
-        }
-
-        if (currentPlayer.casting && currentPlayer.interruptableSpell) {
-          await interruptPlayerCast(currentPlayer);
-        }
-
-        if (!VALID_DIRECTIONS.has(direction)) return;
-
-        // Turning is new input too: a warp may take the player again.
-        if (currentPlayer._warpHold && currentPlayer._warpHold !== direction) currentPlayer._warpHold = undefined;
-
-        // Stunned players cannot move. stunnedUntil is an epoch timestamp
-        // (Date.now()-based), so it must be compared against Date.now().
-        if (currentPlayer.stunnedUntil && currentPlayer.stunnedUntil > Date.now()) {
-          return;
-        }
-
-        // Mid-cast (a can_move spell; the rest were interrupted above) the key
-        // changes where the caster walks, not where they face: they stay turned
-        // toward the target until restoreWalkingFacing runs at cast end. A cast
-        // on self has no target to face, so the caster turns as usual.
-        const facing = currentPlayer.casting && !currentPlayer.castOnSelf
-          ? currentPlayer.location.position.direction || direction
-          : direction;
-        currentPlayer.location.position.direction = facing || "down";
-        currentPlayer.moving = true;
-
-        // Track direction changes for smooth transitions
-        if (!currentPlayer._movementState) {
-          currentPlayer._movementState = {
-            currentDirection: direction,
-            targetDirection: direction,
-            directionChangeTime: 0,
-          };
-        } else {
-          currentPlayer._movementState.targetDirection = direction;
-          currentPlayer._movementState.directionChangeTime = Date.now();
-        }
-
-        globalStateRevision++;
-        await sendPositionAnimation(
-          wt,
-          currentPlayer.location.position.direction,
-          true,
-          currentPlayer.mounted,
-          currentPlayer.mount_type || "unicorn",
-          undefined,
-          globalStateRevision,
-          currentPlayer.casting || false
-        );
-
-        const wasAlreadyMoving = gameLoop.isPlayerMoving(currentPlayer.id);
-
-        const movePlayer = async () => {
-
-          if (!wt || wt.readyState !== 1) {
-            gameLoop.unregisterMovingPlayer(currentPlayer.id);
-            return;
-          }
-
-          // A newer MOVEXY superseded the packet that registered this callback
-          // (e.g. an "abort" that raced past this handler). Stop rather than
-          // keep stepping - the client believes it has stopped.
-          if (currentPlayer._moveSeq !== moveSeq) {
-            await forceStopPlayerMovement(currentPlayer);
-            return;
-          }
-
-          // Safety net: if a stun landed mid-movement and the stun handler's
-          // force-stop somehow didn't unregister us, halt here rather than
-          // waiting for a client ABORT that may never arrive.
-          if (spellEffects.isStunned(currentPlayer)) {
-            await forceStopPlayerMovement(currentPlayer);
-            return;
-          }
-
-          const tempPosition = { ...currentPlayer.location.position };
-          const playerHeight = 40;
-          const playerWidth = 24;
-
-          const speed = (currentPlayer.mounted || currentPlayer.isGhost ? baseSpeed * mountSpeedMultiplier : baseSpeed) * (currentPlayer.slowMultiplier || 1);
-
-          // Offsets are derived from a shared static unit table (see
-          // DIRECTION_UNIT_OFFSETS) rather than rebuilding a 9-object literal
-          // on every tick of every moving player.
-          const directionOffsets = getDirectionOffsets(speed);
-
-          // Handle direction transitions smoothly
-          let activeDirection = direction;
-          if (currentPlayer._movementState) {
-            const timeSinceDirectionChange = Date.now() - currentPlayer._movementState.directionChangeTime;
-            const DIRECTION_TRANSITION_TIME = 50; // ms to blend direction changes
-
-            if (timeSinceDirectionChange < DIRECTION_TRANSITION_TIME &&
-                currentPlayer._movementState.currentDirection !== currentPlayer._movementState.targetDirection) {
-              // During transition: blend between old and new direction
-              const transitionProgress = Math.min(1, timeSinceDirectionChange / DIRECTION_TRANSITION_TIME);
-
-              const oldOffset = directionOffsets[currentPlayer._movementState.currentDirection] || directionOffsets.down;
-              const newOffset = directionOffsets[currentPlayer._movementState.targetDirection] || directionOffsets.down;
-
-              // Smoothly interpolate between old and new direction offsets
-              const blendedOffset = {
-                dx: oldOffset.dx + (newOffset.dx - oldOffset.dx) * transitionProgress,
-                dy: oldOffset.dy + (newOffset.dy - oldOffset.dy) * transitionProgress,
-              };
-
-              tempPosition.x = tempPosition.x + blendedOffset.dx;
-              tempPosition.y = tempPosition.y + blendedOffset.dy;
-            } else {
-              // Direction transition complete, use target direction
-              if (currentPlayer._movementState.currentDirection !== currentPlayer._movementState.targetDirection) {
-                currentPlayer._movementState.currentDirection = currentPlayer._movementState.targetDirection;
-              }
-              activeDirection = currentPlayer._movementState.currentDirection;
-              const offset = directionOffsets[activeDirection];
-              if (offset) {
-                tempPosition.x = tempPosition.x + offset.dx;
-                tempPosition.y = tempPosition.y + offset.dy;
-              }
-            }
-          } else {
-            const offset = directionOffsets[direction];
-            if (offset) {
-              tempPosition.x = tempPosition.x + offset.dx;
-              tempPosition.y = tempPosition.y + offset.dy;
-            }
-          }
-
-          // Round for collision detection only
-          const _profCollStart = PROFILE ? performance.now() : 0;
-          const checkAt = (x: number, y: number) => player.checkCollisionSync(
-            currentPlayer.location.map,
-            {
-              x: Math.round(x),
-              y: Math.round(y),
-              direction,
-            },
-            {
-              width: playerWidth,
-              height: playerHeight,
-            }
-          );
-          let collision = checkAt(tempPosition.x, tempPosition.y);
-
-          // A diagonal step into a wall only loses the blocked axis: the player slides along
-          // the open one (e.g. moving upright under a wall keeps going right) instead of stopping.
-          const startX = currentPlayer.location.position.x;
-          const startY = currentPlayer.location.position.y;
-          if (
-            collision?.reason === "tile_collision" &&
-            Math.round(tempPosition.x) !== startX &&
-            Math.round(tempPosition.y) !== startY
-          ) {
-            for (const slide of [{ x: tempPosition.x, y: startY }, { x: startX, y: tempPosition.y }]) {
-              const slideCollision = checkAt(slide.x, slide.y);
-              if (slideCollision?.reason !== "tile_collision") {
-                tempPosition.x = slide.x;
-                tempPosition.y = slide.y;
-                collision = slideCollision;
-                break;
-              }
-            }
-          }
-          if (PROFILE) prof.collisionMs += performance.now() - _profCollStart;
-
-          const isColliding = collision?.value === true;
-
-          if (PROFILE && isColliding && !currentPlayer.isNoclip) {
-            prof.collisionBlocks++;
-            prof.collisionReasons[collision?.reason || "unknown"] =
-              (prof.collisionReasons[collision?.reason || "unknown"] || 0) + 1;
-          }
-
-          if (!isColliding || currentPlayer.isNoclip) {
-            currentPlayer.location.position.x = Math.round(tempPosition.x);
-            currentPlayer.location.position.y = Math.round(tempPosition.y);
-            checkGhostReviveProximity(currentPlayer);
-          }
-
-          if (isColliding && !currentPlayer.isNoclip) {
-            gameLoop.unregisterMovingPlayer(currentPlayer.id);
-            currentPlayer.moving = false;
-            // Clean up movement state on collision
-            if (currentPlayer._movementState) {
-              currentPlayer._movementState = undefined;
-            }
-
-            globalStateRevision++;
-            await sendPositionAnimation(
-              wt,
-              currentPlayer.location.position.direction || direction,
-              false,
-              currentPlayer.mounted,
-              currentPlayer.mount_type || "unicorn",
-              undefined,
-              globalStateRevision,
-              currentPlayer.casting || false
-            );
-
-            const reason = collision?.reason;
-
-            if (reason === "tile_collision" && collision?.tile) {
-              sendPacket(wt, packetManager.collisionDebug({
-                tileX: collision.tile.x,
-                tileY: collision.tile.y
-              }));
-            }
-
-            if (reason === "warp_collision" && collision?.warp) {
-              // Corpses and ghosts cannot use warps.
-              if (currentPlayer.isDead || currentPlayer.isGhost) {
-                return;
-              }
-              // Players in combat cannot use warps (admin summons bypass this path entirely)
-              if (currentPlayer.pvp) {
-                const nowTs = performance.now();
-                if (!currentPlayer.lastCombatWarpNotify || nowTs - currentPlayer.lastCombatWarpNotify > 2000) {
-                  currentPlayer.lastCombatWarpNotify = nowTs;
-            sendPacket(
-              wt,
-              packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer))
-            );
-                }
-                return;
-              }
-              const warp = collision.warp as {
-                map: string;
-                x: number;
-                y: number;
-              };
-
-              // A warp sets its traveller down in front of the way back (a house's door, its room's door; a
-              // cave's shaft, its mine door). Someone still holding the key they came in on would walk straight
-              // back through. So the way they were walking does not take them through a warp again until they
-              // let go of the key or turn (cleared at the top of this handler): until then a warp is a wall.
-              if (currentPlayer._warpHold === direction) {
-                return;
-              }
-
-              for (const interceptor of warpInterceptors) {
-                if (await interceptor(warp, wt, currentPlayer, sendPacket)) {
-                  return;
-                }
-              }
-
-              currentPlayer._warpHold = direction;
-
-              const currentMap = currentPlayer.location.map;
-
-              // Saved as standing where the warp leads, or the warp is not taken. A row the database did not
-              // change is not a refusal by itself: the account may already be saved there (see arriveAt). Read as
-              // one, it left a player who came back inside by their home item unable to walk out the door.
-              const arrived = await player.arriveAt(
-                currentPlayer.id,
-                warp.map.replace(".json", ""),
-                {
-                  x: warp.x || 0,
-                  y: warp.y || 0,
-                  direction: currentPlayer.location.position?.direction || "down",
-                }
-              );
-
-              if (arrived) {
-                const newMap = warp.map.replace(".json", "");
-                const newPosition = {
-                  x: warp.x || 0,
-                  y: warp.y || 0
-                };
-
-                if (currentMap !== warp.map) {
-                  await transitionPlayerToMap(currentPlayer, newMap, newPosition, wt, spawnBatchQueue, despawnBatchQueue);
-                } else {
-                  await handleMapChangeAOI(currentPlayer, newMap, newPosition, spawnBatchQueue, despawnBatchQueue);
-
-                  currentPlayer.location.position.direction = currentPlayer.location.position?.direction || "down";
-
-                  globalStateRevision++;
-
-                  const movementData = {
-                    i: wt.data.id,
-                    d: {
-                      x: Number(currentPlayer.location.position.x),
-                      y: Number(currentPlayer.location.position.y),
-                      dr: currentPlayer.location.position.direction
-                    },
-                    r: globalStateRevision,
-                    s: currentPlayer.isStealth ? 1 : 0
-                  };
-                  sendPacket(wt, packetManager.moveXY(movementData));
-                }
-              }
-            }
-
-            return;
-          }
-
-          globalStateRevision++;
-
-          // Check for nearby warps and preload their destination maps.
-          // Throttled: a player moves at most ~8px per tick and the trigger
-          // radius is 100px, so scanning every warp on the map (plus a linear
-          // mapPropertiesCache lookup and a Set allocation) on EVERY tick of
-          // EVERY moving player was wasted work. Every 8th tick still leaves
-          // ~35px of slack before the radius could be crossed unnoticed.
-          currentPlayer._warpScanTick = (currentPlayer._warpScanTick || 0) + 1;
-          const shouldScanWarps = currentPlayer._warpScanTick % 8 === 0;
-
-          const mapNameWithJson = shouldScanWarps
-            ? (currentPlayer.location.map.endsWith('.json')
-              ? currentPlayer.location.map
-              : `${currentPlayer.location.map}.json`)
-            : null;
-          const playerMapProperties = shouldScanWarps
-            ? mapPropertiesCache.find((m: any) => m.name === mapNameWithJson)
-            : null;
-          if (playerMapProperties?.warps && Array.isArray(playerMapProperties.warps)) {
-            const WARP_PRELOAD_DISTANCE = 100; // pixels
-            const now = performance.now();
-            const preloadedDestinations = new Set<string>();
-
-            const warpPreloadDistanceSq = WARP_PRELOAD_DISTANCE * WARP_PRELOAD_DISTANCE;
-
-            for (const warp of playerMapProperties.warps) {
-              const warpX = warp.position?.x || warp.x;
-              const warpY = warp.position?.y || warp.y;
-              // Squared compare: Math.hypot is markedly slower and the actual
-              // distance is never used, only the threshold test.
-              const warpDx = currentPlayer.location.position.x - warpX;
-              const warpDy = currentPlayer.location.position.y - warpY;
-              const distanceSq = warpDx * warpDx + warpDy * warpDy;
-
-              if (distanceSq < warpPreloadDistanceSq) {
-                const destMapName = warp.map.replace(".json", "");
-
-                if (!currentPlayer._warpPreloadTimes) {
-                  currentPlayer._warpPreloadTimes = {};
-                }
-
-                // Skip if already preloaded
-                if (currentPlayer._warpPreloadTimes[destMapName]) {
-                  continue;
-                }
-
-                // Skip if already preloaded in this movement frame
-                if (preloadedDestinations.has(destMapName)) {
-                  continue;
-                }
-
-                // Mark as preloaded immediately to prevent re-preloading
-                currentPlayer._warpPreloadTimes[destMapName] = now;
-                preloadedDestinations.add(destMapName);
-
-                try {
-                  // Find the destination map
-                  const destMap = maps.find((m: MapData) =>
-                    m.name === (warp.map.endsWith('.json') ? warp.map : `${warp.map}.json`)
-                  );
-
-                  if (destMap) {
-                    // Calculate chunks around the warp destination
-                    const tilewidth = destMap.data?.tilewidth || 32;
-                    const tileheight = destMap.data?.tileheight || 32;
-                    const CHUNK_SIZE_CONFIG: { [key: number]: number } = {
-                      16: 64,
-                      32: 32,
-                      64: 16,
-                    };
-                    const CHUNK_SIZE = CHUNK_SIZE_CONFIG[tilewidth] || 32;
-                    const chunkPixelSize = CHUNK_SIZE * tilewidth;
-
-                    const chunksX = Math.ceil((destMap.data?.width || 0) / CHUNK_SIZE);
-                    const chunksY = Math.ceil((destMap.data?.height || 0) / CHUNK_SIZE);
-
-                    // Clamp warp position to valid chunk range
-                    let spawnChunkX = Math.floor(warpX / chunkPixelSize);
-                    let spawnChunkY = Math.floor(warpY / chunkPixelSize);
-                    spawnChunkX = Math.max(0, Math.min(spawnChunkX, Math.max(0, chunksX - 1)));
-                    spawnChunkY = Math.max(0, Math.min(spawnChunkY, Math.max(0, chunksY - 1)));
-
-                    const viewportWidth = 1920; // Standard viewport
-                    const viewportHeight = 1080;
-                    const padding = chunkPixelSize;
-
-                    const chunksNeededX = Math.ceil(
-                      (viewportWidth + padding * 2) / chunkPixelSize / 2
-                    );
-                    const chunksNeededY = Math.ceil(
-                      (viewportHeight + padding * 2) / chunkPixelSize / 2
-                    );
-
-                    const chunksToPreload: Array<{ x: number; y: number; data?: any }> = [];
-                    for (let dy = -chunksNeededY; dy <= chunksNeededY; dy++) {
-                      for (let dx = -chunksNeededX; dx <= chunksNeededX; dx++) {
-                        const chunkX = spawnChunkX + dx;
-                        const chunkY = spawnChunkY + dy;
-                        if (chunkX >= 0 && chunkY >= 0 && chunkX < chunksX && chunkY < chunksY) {
-                          chunksToPreload.push({ x: chunkX, y: chunkY });
-                        }
-                      }
-                    }
-
-                    // and the NPCs round the arrival point (warp.x / warp.y), held by the client for that map
-                    if (Number.isFinite(Number(warp.x)) && Number.isFinite(Number(warp.y))) {
-                      const npcPreload = await preloadNpcsAt(currentPlayer, destMapName, Number(warp.x), Number(warp.y));
-                      if (npcPreload.length) sendPacket(wt, npcPreload);
-                    }
-
-                    if (chunksToPreload.length > 0) {
-                      sendPacket(
-                        wt,
-                        packetManager.preloadMapChunks({
-                          mapName: destMapName,
-                          chunks: chunksToPreload,
-                          tilewidth: tilewidth,
-                          tileheight: tileheight,
-                          chunkSize: CHUNK_SIZE,
-                          width: destMap.data?.width || 0,
-                          height: destMap.data?.height || 0,
-                          tilesets: destMap.data?.tilesets || [],
-                        })
-                      );
-                    }
-                  }
-                } catch (err) {
-                  log.warn(`Failed to preload warp chunks: ${err}`);
-                }
-              }
-            }
-          }
-
-          // NPCs follow the map chunks round the player (npcStreaming); only does work when the player's chunk changed
-          if (shouldScanWarps) {
-            const npcPackets = await syncNpcChunks(currentPlayer);
-            if (npcPackets.length) sendPacket(wt, npcPackets);
-          }
-
-          const aoiUpdateCounter = gameLoop.getAOIUpdateCounter(currentPlayer.id);
-          if (aoiUpdateCounter % 10 === 0 && shouldUpdateAOI(currentPlayer)) {
-            // NOTE: timing lives inside updatePlayerAOI (see [profile:aoi]).
-            // Wrapping the await here would charge this callback for every
-            // other mover's work that runs while it's suspended.
-            if (PROFILE) prof.aoiUpdateCount++;
-            await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
-          }
-
-          const movementData = {
-            i: wt.data.id,
-            d: {
-              x: Number(currentPlayer.location.position.x),
-              y: Number(currentPlayer.location.position.y),
-              dr: currentPlayer.location.position.direction
-            },
-            r: globalStateRevision,
-            s: currentPlayer.isStealth ? 1 : 0
-          };
-
-          if (wt.readyState === 1) {
-            // Direct self-echo, every tick, as a datagram (binary moveXY, 0x02).
-            // It is the client's only source for its own position - it ignores
-            // its entry in the batches below. A lost echo is just a skipped
-            // step: the client interpolates across it using the send time
-            // each packet carries, and drops any that arrive out of order.
-            // Other players learn about this mover via the batched flush below.
-            sendPacket(wt, packetManager.moveXY(movementData));
-
-            const layerId = currentPlayer.aoi?.layerId || layerManager.getPlayerLayer(currentPlayer.id);
-            const groupKey = layerId || currentPlayer.location.map;
-            if (!movementBatchQueue.has(groupKey)) {
-              movementBatchQueue.set(groupKey, new Map());
-            }
-            movementBatchQueue.get(groupKey)!.set(currentPlayer.id, movementData);
-          }
-
-          if (PROFILE) prof.moveCbCount++;
-        };
-
-        // Final staleness check: if an "abort" (or newer direction) landed while
-        // we were building the callback, that newer handler owns the movement
-        // state now - don't (re)register from this stale one.
-        if (currentPlayer._moveSeq !== moveSeq) {
-          break;
-        }
-
-        gameLoop.registerMovingPlayer(currentPlayer.id, movePlayer);
-
-        if (!wasAlreadyMoving) {
-          await movePlayer();
-        }
-        break;
-      }
-      case "TELEPORTXY": {
-        if (!currentPlayer?.isAdmin) return;
-        const prevDirection = currentPlayer.location.position?.direction;
-        currentPlayer.location.position = data;
-        currentPlayer.location.position.direction =
-          (data as any).direction || prevDirection || "down";
-
-        currentPlayer.location.position.x = Math.round(
-          Number(currentPlayer.location.position.x)
-        );
-        currentPlayer.location.position.y = Math.round(
-          Number(currentPlayer.location.position.y)
-        );
-        globalStateRevision++;
-
-        if (shouldUpdateAOI(currentPlayer)) {
-          await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
-        }
-
-        const movementData = {
-          i: wt.data.id,
-          d: {
-            x: Number(currentPlayer.location.position.x),
-            y: Number(currentPlayer.location.position.y),
-            dr: currentPlayer.location.position.direction
-          },
-          r: globalStateRevision,
-          s: currentPlayer.isStealth ? 1 : 0
-        };
-        broadcastToAOI(currentPlayer, packetManager.moveXY(movementData), true);
-        // a teleport skips the walk that would stream in the NPCs round the new spot (npcStreaming)
-        await resyncNpcChunks(currentPlayer, wt);
-        break;
-      }
-      case "CHAT": {
-        if (!currentPlayer) return;
-        // Corpses cannot talk. Ghost speech comes out as spirit-tongue
-        // (except admins, who speak normally). Applied after decryption below.
-        if (currentPlayer.isDead) return;
-        const ghostSpeak = currentPlayer.isGhost && !currentPlayer.isAdmin;
-        if (currentPlayer.isGuest) {
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: "Please create an account to use that feature.",
-            })
-          );
-          return;
-        }
-        if (subscriptionLocked(wt, currentPlayer, "chat")) return;
-        const messageData = data as any;
-        const message = messageData?.message;
-        const mode = messageData?.mode;
-
-        // A line is text, or in decrypt mode the bytes of one RSA block: anything
-        // else (an array of text, a huge object) would skip the length cap.
-        if (message != null && (mode === "decrypt" ? !isCiphertext(message) : typeof message !== "string")) return;
-        if (typeof message === "string" && message.length > MAX_CHAT_LENGTH) {
-          sendPacket(wt, packetManager.notify({ message: `Message too long (max ${MAX_CHAT_LENGTH} characters).` }));
-          return;
-        }
-
-        const now = Date.now();
-        const timestamps = chatRateLimit.get(wt.data.id) || [];
-        const recent = timestamps.filter((t) => now - t < CHAT_RATE_WINDOW);
-        if (recent.length >= CHAT_RATE_MAX) {
-          sendPacket(wt, packetManager.notify({ message: "You are sending messages too fast." }));
-          return;
-        }
-        recent.push(now);
-        chatRateLimit.set(wt.data.id, recent);
-
-        const sendMessageToPlayer = (playerWs: any, message: string, links: ChatLink[] = []) => {
-          const chatData = {
-            id: wt.data.id,
-            message,
-            username: currentPlayer.username,
-            ...(links.length > 0 ? { links } : {}),
-          };
-          sendPacket(playerWs, packetManager.chat(chatData));
-        };
-
-        if (message == null) {
-          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-          playersInMap.forEach((player) => {
-            sendMessageToPlayer(player.wt, "");
-          });
-          return;
-        }
-
-        let decryptedMessage;
-        if (mode && mode == "decrypt") {
-          const encryptedMessage = Buffer.from(
-            Object.values(message) as number[]
-          );
-          const privateKey = _privateKey;
-          if (!privateKey) return;
-          const decryptedPrivateKey = decryptPrivateKey(
-            privateKey,
-            process.env.RSA_PASSPHRASE || ""
-          ).toString();
-          decryptedMessage =
-            decryptRsa(encryptedMessage, decryptedPrivateKey) || "";
-          if (typeof decryptedMessage !== "string" || decryptedMessage.length > MAX_CHAT_LENGTH) return;
-        } else {
-          decryptedMessage = message;
-        }
-
-        // Ghosts (non-admin) speak only in spirit-tongue: random short
-        // O-words, deliberately unrelated to the real message's length.
-        if (ghostSpeak) {
-          decryptedMessage = generateGhostSpeak();
-        }
-
-        // Item links come from the text actually sent: a ghost's spirit-tongue has none.
-        const linked = ghostSpeak
-          ? { message: decryptedMessage as string, links: [] as ChatLink[] }
-          : await chatLinksOf(decryptedMessage as string);
-        const sentMessage = linked.message;
-        const sentLinks = linked.links;
-
-        sendMessageToPlayer(wt, sentMessage, sentLinks);
-
-        const cache = playerCache.list();
-        let playersInMap = Object.values(cache).filter(
-          (p) =>
-            p.location.map === currentPlayer.location.map && p.id !== wt.data.id
-        );
-
-        if (currentPlayer.isStealth) {
-
-          playersInMap = playersInMap.filter((p) => p.isAdmin);
-        }
-
-        // A muted player's line stops here, shown to them alone, and a player
-        // who ignores them is left out. Neither is told.
-        const said = await chatAudience(currentPlayer.username, "say", decryptedMessage as string, playersInMap.map((p) => p.username));
-        if (said.muted) return;
-        const hearing = new Set(said.recipients);
-        playersInMap = playersInMap.filter((p) => hearing.has(p.username));
-
-        listener.emit(Events.PLAYER_CHAT, { player: currentPlayer, message: decryptedMessage || data?.toString(), mapName: currentPlayer.location.map });
-
-        if (playersInMap.length === 0) return;
-
-        const translations: Record<string, string> = {};
-        // Link tokens go through the translator as placeholders and are put back after, so a link
-        // is never translated; a translation that lost one is dropped for the line as sent.
-        const protectedLine = protectLinks(sentMessage, sentLinks);
-
-        playersInMap.forEach(async (player) => {
-          if (!translations[player.language]) {
-
-            // A translator that throws must not cost the recipient the line: they get it as sent,
-            // links included (this runs once per language, so it logs once per language).
-            let line = sentMessage;
-            if (player.language !== currentPlayer.language) {
-              try {
-                line = sentLinks.length === 0
-                  ? await language.translate(sentMessage, player.language) ?? sentMessage
-                  : restoreLinks(await language.translate(protectedLine.text, player.language), protectedLine.held) ?? sentMessage;
-              } catch (error) {
-                log.warn(`Chat translation to ${player.language} failed, sending the line untranslated: ${error}`);
-              }
-            }
-            translations[player.language] = line;
-          }
-
-          const chatData = {
-            id: wt.data.id,
-            message: translations[player.language],
-            username: currentPlayer.username,
-            ...(sentLinks.length > 0 ? { links: sentLinks } : {}),
-          };
-
-          sendPacket(player.wt, packetManager.chat(chatData));
-        });
-        break;
-      }
-      case "TYPING": {
-        if (!currentPlayer || currentPlayer?.isGuest) return;
-        if (currentPlayer.isDead || currentPlayer.isGhost) return;
-        const typingData = {
-          id: wt.data.id,
-        };
-        let playersInMap = filterPlayersByMap(currentPlayer.location.map);
-        if (currentPlayer.isStealth) {
-          playersInMap = playersInMap.filter((p) => p.isAdmin);
-        }
-        playersInMap.forEach((player) => {
-          sendPacketBestEffort(player.wt, packetManager.typing(typingData));
-        });
-        break;
-      }
-      case "EDITOR_TILE_EDIT": {
-        // Relay live tile edits from one admin/editor to other admins editing the
-        // same map so concurrent editors stay in sync (no save-time clobbering).
-        if (!currentPlayer || !currentPlayer.isAdmin) return;
-        const editData = data as any;
-        if (!editData || !Array.isArray(editData.edits)) return;
-
-        const mapName = editData.mapName;
-        if (mapName) {
-          // Store in history so new editors can sync unsaved work
-          if (!editorEditHistory.has(mapName)) {
-            editorEditHistory.set(mapName, []);
-          }
-          editorEditHistory.get(mapName)!.push({ senderId: wt.data.id, mapName, edits: editData.edits });
-        }
-
-        const targets = filterPlayersByMap(currentPlayer.location.map).filter(
-          (p) => p.isAdmin && p.id !== wt.data.id && p.wt?.readyState === 1
-        );
-        if (targets.length === 0) break;
-        const relay = { senderId: wt.data.id, mapName: editData.mapName, edits: editData.edits };
-        targets.forEach((player) => {
-          sendPacket(player.wt, packetManager.editorTileEdit(relay));
-        });
-        break;
-      }
-      case "EDITOR_LAYER_LOCK": {
-        // Relay layer lock/unlock changes to other admins on the same map.
-        if (!currentPlayer || !currentPlayer.isAdmin) return;
-        const lockData = data as any;
-        if (!lockData || lockData.mapName !== currentPlayer.location.map) return;
-        const targets = filterPlayersByMap(currentPlayer.location.map).filter(
-          (p) => p.isAdmin && p.id !== wt.data.id && p.wt?.readyState === 1
-        );
-        if (targets.length === 0) break;
-        const relay = { mapName: lockData.mapName, layerName: lockData.layerName, locked: lockData.locked };
-        targets.forEach((player) => {
-          sendPacket(player.wt, packetManager.editorLayerLock(relay));
-        });
-        break;
-      }
-      case "EDITOR_OPEN": {
-        if (!currentPlayer) return;
-        const mapName = currentPlayer.location.map;
-        // Live sync between editors is for admins. Anyone else who may open the editor (tools.tile_editor) still
-        // has to be answered: their editor waits for this before it opens, and waited for good without it.
-        if (!currentPlayer.isAdmin) {
-          sendPacket(wt, packetManager.editorSyncReady({ mapName }));
-          break;
-        }
-        if (!activeEditorsByMap.has(mapName)) {
-          activeEditorsByMap.set(mapName, new Set());
-        }
-        activeEditorsByMap.get(mapName)!.add(wt.data.id);
-
-        // Replay all unsaved edits as one batch.
-        const history = editorEditHistory.get(mapName);
-        if (history && history.length > 0) {
-          const allEdits: any[] = [];
-          for (const entry of history) {
-            if (!Array.isArray(entry.edits)) continue;
-            for (const edit of entry.edits) {
-              allEdits.push(edit);
-            }
-          }
-          if (allEdits.length > 0) {
-            sendPacket(wt, packetManager.editorTileEdit({ mapName, edits: allEdits }));
-          }
-        }
-
-        sendPacket(wt, packetManager.editorSyncReady({ mapName }));
-        break;
-      }
-      case "EDITOR_CLOSE": {
-        if (!currentPlayer || !currentPlayer.isAdmin) return;
-        // Every map this connection edits, not only the one the player is on: an editor that closes because its
-        // player walked through a warp says so once the player is already on the next map, and the map it was
-        // editing would keep them as an editor, and its unsaved edits, until they left the game.
-        for (const [mapName, editors] of activeEditorsByMap.entries()) {
-          if (!editors.delete(wt.data.id)) continue;
-          if (editors.size === 0) {
-            activeEditorsByMap.delete(mapName);
-            // No editors left on this map - clear unsaved edit history
-            editorEditHistory.delete(mapName);
-          }
-        }
-        break;
-      }
-      case "CLIENTCONFIG": {
-        if (!currentPlayer) return;
-        await player.setConfig(wt.data.id, data);
-        break;
-      }
-      case "SELECTPLAYER": {
-        if (!currentPlayer) return;
-        const location = data as unknown as LocationData;
-        const cache = playerCache.list();
-
-        const players = Object.values(cache).filter(
-          (p) => p.location.map === currentPlayer.location.map
-        );
-
-        // Taps from touch devices get a wider pick area: a fingertip is far
-        // less precise than a cursor. Where players overlap under the click,
-        // the one the client draws on top wins; otherwise the nearest.
-        const pickRange = (data as any)?.touch === true ? 49 : 35;
-        const pickX = Math.floor(Number(location.x));
-        const pickY = Math.floor(Number(location.y));
-        // Corpses cannot be targeted (despawned for observers). Ghosts can be
-        // targeted and interacted with, except while their graveyard teleport
-        // is still pending (not rendered anywhere yet). Stealthed players are
-        // drawn for admins only. None of them can be the one on top.
-        const shown = players.filter(
-          (p) => !p.isDead && !(p.isGhost && p.ghostTeleportPending) && !(p.isStealth && !currentPlayer.isAdmin)
-        );
-        const selectedPlayer: any = pickPlayerAt(shown, pickX, pickY, pickRange, currentPlayer.id);
-
-        if (!selectedPlayer) {
-          // Clicking only a corpse or a hidden player clears the selection.
-          if (pickPlayerAt(players, pickX, pickY, pickRange, currentPlayer.id)) {
-            sendPacket(wt, packetManager.selectPlayer({ id: wt.data.id, data: null }));
-          }
-          break;
-        }
-        const selectPlayerData = {
-          id: selectedPlayer.id,
-          username: selectedPlayer.username,
-          stats: selectedPlayer.stats,
-        };
-        sendPacket(wt, packetManager.selectPlayer(selectPlayerData));
-        break;
-      }
-      case "TARGETCLOSEST": {
-        if (!currentPlayer) return;
-
-        // Tab-target reach = AOI radius: you can target anyone you can actually
-        // see rendered, even if no spell can reach them. Spell range is enforced
-        // separately at cast time ("Target is out of range"), so a wider select
-        // range never lets you hit something you couldn't before.
-        const TARGETING_RANGE = (AOI_CONFIG as any).DEFAULT_RADIUS ?? 1000;
-        const CONE_ANGLE = 90; // 90 degree cone (45 degrees on each side of facing direction)
-
-        const _tcT0 = PROFILE ? performance.now() : 0;
-
-        // Get all players on the same map
-        const playersInRange = filterPlayersByDistance(
-          wt,
-          TARGETING_RANGE,
-          currentPlayer.location.map
-        ).filter((p) => !p.isStealth && !p.isDead && !(p.isGhost && p.ghostTeleportPending) && p.id !== currentPlayer.id);
-
-        const _tcT1 = PROFILE ? performance.now() : 0;
-
-        // Find next player target using cone-based directional targeting with cycling
-        const currentTargetId = currentTargetMap.get(currentPlayer.id) || null;
-        const nextPlayer = player.getNextTargetInCone(
-          currentPlayer,
-          playersInRange,
-          TARGETING_RANGE,
-          currentTargetId,
-          CONE_ANGLE
-        );
-
-        const _tcT2 = PROFILE ? performance.now() : 0;
-
-        // Closest creature in the facing cone, cycling like players do.
-        const creatureCandidates = creatures.coneTargets(currentPlayer, TARGETING_RANGE, CONE_ANGLE);
-        let nextCreature: { id: number; distance: number } | null = null;
-        if (creatureCandidates.length > 0) {
-          const currentTargetId = currentTargetMap.get(currentPlayer.id) || null;
-          const currentIndex = creatureCandidates.findIndex((c) => `c:${c.id}` === currentTargetId);
-          nextCreature = currentIndex === -1 || currentIndex === creatureCandidates.length - 1
-            ? creatureCandidates[0]
-            : creatureCandidates[currentIndex + 1];
-        }
-
-        // Pick whichever is closer: the next player or the next creature.
-        let targetToSelect: any = null;
-        if (nextPlayer && nextCreature) {
-          const playerPos = nextPlayer?.location?.position as any;
-          const playerDistance = Math.hypot(currentPlayer.location.position.x - playerPos.x, currentPlayer.location.position.y - playerPos.y);
-          targetToSelect = playerDistance < nextCreature.distance ? nextPlayer : nextCreature;
-        } else {
-          targetToSelect = nextPlayer || nextCreature;
-        }
-        if (targetToSelect) {
-          // Update current target for cycling
-          currentTargetMap.set(currentPlayer.id, targetToSelect.stats ? targetToSelect.id : `c:${targetToSelect.id}`);
-
-          if (targetToSelect.stats) {
-            // It's a player
-            const selectPlayerData = {
-              id: targetToSelect.id || null,
-              username: targetToSelect.username || null,
-              stats: targetToSelect.stats || null,
-            };
-            sendPacket(wt, packetManager.selectPlayer(selectPlayerData));
-          } else {
-            sendPacket(wt, packetManager.creatureTargeted({ id: targetToSelect.id }));
-          }
-        }
-        if (PROFILE) {
-          const now = performance.now();
-          prof.tcFilterMs += _tcT1 - _tcT0;
-          prof.tcConeMs += _tcT2 - _tcT1;
-          prof.tcCreatureMs += now - _tcT2;
-          prof.tcCount++;
-        }
-        break;
-      }
-      case "INSPECTPLAYER": {
-        if (currentPlayer) {
-          const targetId = (data as any)?.id;
-
-          const found = targetId
-            ? playerCache.get(targetId)
-            : currentPlayer;
-          // A stealthed admin is not there to anyone but admins.
-          const targetPlayer = found && found !== currentPlayer && found.isStealth && !currentPlayer.isAdmin ? null : found;
-
-          if (targetPlayer) {
-            // Their whole inventory to themselves and to admins. Anyone else gets only the rows of
-            // what they wear, which is all the inspect window draws (each slot's icon and tooltip).
-            const whole = targetPlayer === currentPlayer || targetPlayer.id === currentPlayer.id || currentPlayer.isAdmin;
-            const worn = new Set(Object.values(targetPlayer.equipment || {}).filter(Boolean).map((name: any) => String(name)));
-            const inspectPlayerData = {
-              id: targetPlayer.id,
-              stats: targetPlayer.stats,
-              username: targetPlayer.username,
-              equipment: targetPlayer.equipment || {},
-              inventory: whole ? (targetPlayer.inventory || []) : (targetPlayer.inventory || []).filter((row: any) => worn.has(String(row?.name))),
-            };
-            sendPacket(wt, packetManager.inspectPlayer(inspectPlayerData));
-          }
-        }
-        break;
-      }
-      case "NOCLIP": {
-        if (!currentPlayer?.isAdmin) return;
-        const isNoclip = await player.toggleNoclip(currentPlayer.username);
-        currentPlayer.isNoclip = isNoclip;
-        const noclipData = {
-          id: wt.data.id,
-          isNoclip: currentPlayer.isNoclip,
-        };
-        sendPacket(wt, packetManager.noclip(noclipData));
-        break;
-      }
-      case "STEALTH": {
-        if (!currentPlayer?.isAdmin) return;
-        const isStealth = await player.toggleStealth(currentPlayer.username);
-        currentPlayer.isStealth = isStealth;
-        const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-        const stealthData = {
-          id: wt.data.id,
-          isStealth: currentPlayer.isStealth,
-        };
-        sendPacket(wt, packetManager.stealth(stealthData));
-        playersInMap.forEach((player) => {
-          const stealthData = {
-            id: wt.data.id,
-            isStealth: currentPlayer.isStealth,
-          };
-          sendPacket(player.wt, packetManager.stealth(stealthData));
-        });
-        if (isStealth) {
-          // When stealthing, despawn from other players (admins can still see stealthed players)
-          playersInMap.forEach((player) => {
-            if (player.id === currentPlayer.id) return;
-            if (player.isAdmin) return;
-            sendPacket(player.wt, packetManager.despawnPlayer(currentPlayer.id as string));
-          });
-        } else if (!isStealth) {
-          globalStateRevision++;
-          // Spawn the admin to all other players using the same spawn packet format
-          // First fetch sprite data asynchronously
-          const animationName = getAnimationNameForDirection(
-            currentPlayer.location.position?.direction || "down",
-            !!currentPlayer.moving,
-            !!currentPlayer.mounted,
-            currentPlayer.mount_type,
-            !!currentPlayer.casting
-          );
-          const playerSpriteData = await getPlayerSpriteSheetData(animationName, currentPlayer.equipment || null);
-          const mountSpriteForBatch = currentPlayer.mount_type ? getMountSpriteUrl(currentPlayer.mount_type) : null;
-
-          let spriteData = null;
-          if (playerSpriteData?.bodySprite || playerSpriteData?.headSprite || mountSpriteForBatch) {
-            spriteData = {
-              mountSprite: mountSpriteForBatch,
-              bodySprite: playerSpriteData.bodySprite || null,
-              headSprite: playerSpriteData.headSprite || null,
-              armorHelmetSprite: playerSpriteData.armorHelmetSprite || null,
-              armorShoulderguardsSprite: playerSpriteData.armorShoulderguardsSprite || null,
-              armorNeckSprite: playerSpriteData.armorNeckSprite || null,
-              armorHandsSprite: playerSpriteData.armorHandsSprite || null,
-              armorChestSprite: playerSpriteData.armorChestSprite || null,
-              armorFeetSprite: playerSpriteData.armorFeetSprite || null,
-              armorLegsSprite: playerSpriteData.armorLegsSprite || null,
-              armorWeaponSprite: playerSpriteData.armorWeaponSprite || null,
-              animationState: playerSpriteData.animationState,
-            };
-          }
-
-          const nonAdminPlayers = playersInMap.filter((player) => {
-            if (player.id === currentPlayer.id) return false;
-            if (player.isAdmin) return false;
-            return true;
-          });
-
-          queueSpawnForReceivers(currentPlayer, nonAdminPlayers, spriteData);
-
-          for (const player of nonAdminPlayers) {
-            const moveXYData = {
-              i: wt.data.id,
-              d: {
-                x: Number(currentPlayer.location.position.x),
-                y: Number(currentPlayer.location.position.y),
-                dr: currentPlayer.location.position.direction
-              },
-              r: globalStateRevision,
-              s: currentPlayer.isStealth ? 1 : 0
-            };
-
-            if (currentPlayer.location.position?.direction) {
-              sendPacket(player.wt, packetManager.moveXY(moveXYData));
-            }
-          }
-        }
-        listener.emit(Events.PLAYER_STEALTH_CHANGE, { player: currentPlayer, isStealth: currentPlayer.isStealth });
-        break;
-      }
-      case "DRAG_PLAYER_START": {
-        // Check for admin.drag or admin.* permission
-        if (!currentPlayer || !Array.isArray(currentPlayer.permissions)) {
-          sendPacket(wt, packetManager.notify({ message: "Permissions not loaded" }));
-          break;
-        }
-
-        const hasPermission = currentPlayer.permissions.some(
-          (p: string) => p === "admin.drag" || p === "admin.*"
-        );
-
-        if (!hasPermission) {
-          break;
-        }
-
-        const targetPlayerId = (data as any)?.id;
-        if (!targetPlayerId) break;
-
-        const targetPlayer = playerCache.get(targetPlayerId);
-        if (!targetPlayer) break;
-
-        // Track that this player is being dragged
-        draggedPlayersMap.set(targetPlayerId, wt.data.id);
-
-        // Send confirmation to admin that drag started
-        const dragStartData = {
-          id: targetPlayerId,
-          adminId: wt.data.id,
-        };
-        sendPacket(wt, packetManager.dragPlayerStart(dragStartData));
-
-        // Notify all players on the map that drag started
-        const playersInMap = filterPlayersByMap(targetPlayer.location.map);
-        playersInMap.forEach((p) => {
-          if (p.wt && p.wt.readyState === 1) {
-            sendPacket(p.wt, packetManager.dragPlayerStart(dragStartData));
-          }
-        });
-        break;
-      }
-      case "DRAG_PLAYER_STOP": {
-        // Check for admin.drag or admin.* permission
-        if (!currentPlayer || !Array.isArray(currentPlayer.permissions)) break;
-
-        const hasPermission = currentPlayer.permissions.some(
-          (p: string) => p === "admin.drag" || p === "admin.*"
-        );
-
-        if (!hasPermission) break;
-
-        const targetPlayerId = (data as any)?.id;
-        if (!targetPlayerId) break;
-
-        const targetPlayer = playerCache.get(targetPlayerId);
-        if (!targetPlayer) break;
-
-        // Remove tracking that this player was being dragged
-        draggedPlayersMap.delete(targetPlayerId);
-
-        // Send confirmation to admin that drag stopped
-        const dragStopData = {
-          id: targetPlayerId,
-          adminId: wt.data.id,
-        };
-        sendPacket(wt, packetManager.dragPlayerStop(dragStopData));
-
-        // Notify all players on the map that drag stopped
-        const playersInMap = filterPlayersByMap(targetPlayer.location.map);
-        playersInMap.forEach((p) => {
-          if (p.wt && p.wt.readyState === 1) {
-            sendPacket(p.wt, packetManager.dragPlayerStop(dragStopData));
-          }
-        });
-
-        // Save where they were put down. Once, here: the updates while they
-        // are carried arrive twenty a second.
-        try {
-          await player.setLocation(targetPlayer.id, targetPlayer.location.map, targetPlayer.location.position);
-        } catch (e) {
-          log.error(`Failed to set location for dragged player: ${e}`);
-        }
-        break;
-      }
-      case "DRAG_UPDATE": {
-        // Check for admin.drag or admin.* permission
-        if (!currentPlayer || !Array.isArray(currentPlayer.permissions)) break;
-
-        const hasPermission = currentPlayer.permissions.some(
-          (p: string) => p === "admin.drag" || p === "admin.*"
-        );
-
-        if (!hasPermission) break;
-
-        const targetPlayerId = (data as any)?.id;
-        const newX = (data as any)?.x;
-        const newY = (data as any)?.y;
-
-        if (targetPlayerId === undefined || newX === undefined || newY === undefined) break;
-
-        const targetPlayer = playerCache.get(targetPlayerId);
-        if (!targetPlayer) break;
-
-        // Update target player position without collision check (admin drag bypasses collision)
-        targetPlayer.location.position.x = newX;
-        targetPlayer.location.position.y = newY;
-
-        // Update AOI boundaries for the dragged player to handle visibility changes.
-        // The queues are what deliver the spawns: without them a player dragged
-        // out of someone's range and back was marked visible but never re-sent,
-        // so they stayed invisible (to the dragging admin included).
-        await updatePlayerAOI(targetPlayer, spawnBatchQueue, despawnBatchQueue);
-
-        // Broadcast position update to all players in AOI
-        globalStateRevision++;
-        const moveXYData = {
-          i: targetPlayerId,
-          d: {
-            x: Number(newX),
-            y: Number(newY),
-            dr: targetPlayer.location.position.direction,
-          },
-          r: globalStateRevision,
-          s: targetPlayer.isStealth ? 1 : 0,
-        };
-
-        broadcastToAOI(targetPlayer, packetManager.moveXY(moveXYData), true);
-        break;
-      }
-      case "SAVE_HOTBAR": {
-        if (!currentPlayer) return;
-        await player.saveHotBarConfig(currentPlayer.username, data as any);
-        break;
-      }
-      case "SAVE_INVENTORY_CONFIG": {
-        if (!currentPlayer) return;
-        await player.saveInventoryConfig(currentPlayer.username, data as any);
-        break;
-      }
-      case "CREATURE_ATTACK": {
-        if (!currentPlayer) return;
-        const creatureId = (data as any)?.id;
-        if (creatureId === null || creatureId === undefined) {
-          creatures.stopAutoAttack(currentPlayer);
-          break;
-        }
-        if (currentPlayer.isDead || currentPlayer.isGhost || currentPlayer.isGuest) return;
-        if (subscriptionLocked(wt, currentPlayer, "combat")) {
-          creatures.stopAutoAttack(currentPlayer);
-          return;
-        }
-        const creature = creatures.getCreature(Number(creatureId));
-        if (!creature || !creatures.isTargetableBy(currentPlayer, creature)) {
-          sendPacket(wt, packetManager.creatureAttackStopped(Number(creatureId)));
-          break;
-        }
-        if (creatures.startAutoAttack(currentPlayer, creature.id)) {
-          sendPacket(wt, packetManager.creatureAttackStopped(creature.id));
-        }
-        break;
-      }
-      case "CREATURE_EDITOR_LIST":
-      case "CREATURE_EDITOR_CLOSE":
-      case "CREATURE_EDITOR_SAVE_TEMPLATE":
-      case "CREATURE_EDITOR_DELETE_TEMPLATE":
-      case "CREATURE_EDITOR_SAVE_ABILITY":
-      case "CREATURE_EDITOR_DELETE_ABILITY":
-      case "CREATURE_EDITOR_SAVE_ABILITIES":
-      case "CREATURE_EDITOR_SAVE_SPAWN":
-      case "CREATURE_EDITOR_DELETE_SPAWN":
-      case "CREATURE_EDITOR_SAVE_PATH":
-      case "CREATURE_EDITOR_DELETE_PATH":
-      case "CREATURE_EDITOR_SAVE_LINKGROUP":
-      case "CREATURE_EDITOR_DELETE_LINKGROUP":
-      case "CREATURE_EDITOR_SAVE_POOL":
-      case "CREATURE_EDITOR_DELETE_POOL":
-      case "CREATURE_EDITOR_ACTION": {
-        if (!currentPlayer) return;
-        // Permission is re-checked on every editor packet, not just on /ce.
-        if (!creatures.canUseEditor(currentPlayer)) {
-          sendPacket(wt, packetManager.notify({ message: "You don't have permission to use the creature editor." }));
-          break;
-        }
-        const result = await creatures.handleEditorPacket(currentPlayer, type, data);
-        if (result.kind === "data") {
-          sendPacket(wt, packetManager.creatureEditorData(result.data));
-          break;
-        }
-        if (result.kind === "goto" && result.goto) {
-          const destMap = String(result.goto.map).replace(".json", "");
-          const currentMap = String(currentPlayer.location?.map ?? "").replace(".json", "");
-          if (destMap === currentMap) {
-            // Already on that map: move there like an admin teleport, without
-            // reloading the map (a reload wipes everything the client shows).
-            const direction = currentPlayer.location.position?.direction || "down";
-            currentPlayer.location.position = {
-              ...currentPlayer.location.position,
-              x: Math.round(Number(result.goto.x)),
-              y: Math.round(Number(result.goto.y)),
-              direction,
-            };
-            globalStateRevision++;
-            if (shouldUpdateAOI(currentPlayer)) {
-              await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
-            }
-            broadcastToAOI(currentPlayer, packetManager.moveXY({
-              i: wt.data.id,
-              d: { x: currentPlayer.location.position.x, y: currentPlayer.location.position.y, dr: direction },
-              r: globalStateRevision,
-              s: currentPlayer.isStealth ? 1 : 0,
-            }), true);
-            await resyncNpcChunks(currentPlayer, wt);
-          } else {
-            await teleportPlayerWrapper(currentPlayer, result.goto.map, result.goto.x, result.goto.y);
-          }
-          sendPacket(wt, packetManager.creatureEditorResult({ ok: true, errors: [], action: type }));
-          break;
-        }
-        if (result.kind === "result") {
-          sendPacket(wt, packetManager.creatureEditorResult({ ok: result.ok, errors: result.errors, id: result.id, action: type }));
-          if (result.ok) {
-            const updated = packetManager.creatureEditorUpdated({ by: currentPlayer.username });
-            for (const viewerId of creatures.editorViewerIds()) {
-              if (viewerId === currentPlayer.id) continue;
-              const viewer = playerCache.get(viewerId);
-              if (viewer?.wt) sendPacket(viewer.wt, updated);
-            }
-          }
-        }
-        break;
-      }
-      case "ITEM_EDITOR_LIST":
-      case "ITEM_EDITOR_SEARCH":
-      case "ITEM_EDITOR_SAVE":
-      case "ITEM_EDITOR_DELETE": {
-        if (!currentPlayer) return;
-        // Permission is re-checked on every editor packet, not just on /ie.
-        if (!itemEditor.canUseEditor(currentPlayer)) {
-          sendPacket(wt, packetManager.notify({ message: "You don't have permission to use the item editor." }));
-          break;
-        }
-        const result = await itemEditor.handleEditorPacket(type, data);
-        if (result.kind === "data") {
-          sendPacket(wt, packetManager.itemEditorData(result.data));
-          break;
-        }
-        if (result.kind === "search") {
-          sendPacket(wt, packetManager.itemEditorResults(result.data));
-          break;
-        }
-        sendPacket(wt, packetManager.itemEditorResult({ ok: result.ok, errors: result.errors, name: result.name, action: type }));
-        if (result.ok) {
-          // Items are cached per process; tell every other editor to reload.
-          const updated = packetManager.itemEditorUpdated({ by: currentPlayer.username });
-          for (const other of Object.values(playerCache.list()) as any[]) {
-            if (!other?.wt || other.id === currentPlayer.id) continue;
-            if (itemEditor.canUseEditor(other)) sendPacket(other.wt, updated);
-          }
-        }
-        break;
-      }
-      case "MOUNT_EDITOR_LIST":
-      case "MOUNT_EDITOR_SAVE":
-      case "MOUNT_EDITOR_DELETE": {
-        if (!currentPlayer) return;
-        // The handler checks permission first, on every one of these, not just on /mounteditor.
-        const result = await mountEditor.handleEditorPacket(currentPlayer, type, data);
-        if (result.kind === "data") {
-          sendPacket(wt, packetManager.mountEditorData(result.data));
-          break;
-        }
-        if (result.denied) sendPacket(wt, packetManager.notify({ message: mountEditor.DENIED }));
-        sendPacket(wt, packetManager.mountEditorResult({ ok: result.ok, errors: result.errors, fields: result.fields, name: result.name, action: type, data: result.data }));
-        if (result.changed) {
-          // Mounts are cached per process; tell every other editor to reload.
-          const updated = packetManager.mountEditorUpdated({ by: currentPlayer.username });
-          for (const other of Object.values(playerCache.list()) as any[]) {
-            if (!other?.wt || other.id === currentPlayer.id) continue;
-            if (mountEditor.canUseEditor(other)) sendPacket(other.wt, updated);
-          }
-        }
-        break;
-      }
-      case "SPELL_EDITOR_LIST":
-      case "SPELL_EDITOR_SEARCH":
-      case "SPELL_EDITOR_SAVE":
-      case "SPELL_EDITOR_DELETE":
-      case "SPELL_EDITOR_LEARN": {
-        if (!currentPlayer) return;
-        // The handler checks permission first, against the database, on every one of these.
-        const result = await spellEditor.handleEditorPacket(currentPlayer, type, data);
-        if (result.kind === "data") {
-          sendPacket(wt, packetManager.spellEditorData(result.data));
-          break;
-        }
-        if (result.kind === "search") {
-          sendPacket(wt, packetManager.spellEditorResults(result.data));
-          break;
-        }
-        if (result.denied) sendPacket(wt, packetManager.notify({ message: spellEditor.DENIED }));
-        sendPacket(wt, packetManager.spellEditorResult({
-          ok: result.ok, errors: result.errors, fields: result.fields, name: result.name, action: type,
-        }));
-        if (result.ok && result.changed) {
-          // Spells are cached per process; tell every other editor to reload.
-          const updated = packetManager.spellEditorUpdated({ by: currentPlayer.username });
-          for (const other of Object.values(playerCache.list()) as any[]) {
-            if (!other?.wt || other.id === currentPlayer.id) continue;
-            if (spellEditor.mayHaveEditorOpen(other)) sendPacket(other.wt, updated);
-          }
-        }
-        break;
-      }
-      case "WEATHER_EDITOR_LIST":
-      case "WEATHER_EDITOR_SAVE":
-      case "WEATHER_EDITOR_DELETE": {
-        if (!currentPlayer) return;
-        // The handler checks permission first, on every one of these. A change is shown by it to the players
-        // of each world that shows that weather, and its answer carries the weathers as they then stand.
-        const result = await weatherEditor.handleEditorPacket(currentPlayer, type, data);
-        if (result.kind === "data") {
-          sendPacket(wt, packetManager.weatherEditorData(result.data));
-          break;
-        }
-        if (result.denied) sendPacket(wt, packetManager.notify({ message: weatherEditor.DENIED }));
-        sendPacket(wt, packetManager.weatherEditorResult({
-          ok: result.ok, errors: result.errors, fields: result.fields, name: result.name, notes: result.notes, action: type, data: result.data,
-        }));
-        if (result.changed) {
-          // Tell every other open editor to ask for the weathers again.
-          const updated = packetManager.weatherEditorUpdated({ by: currentPlayer.username });
-          for (const other of Object.values(playerCache.list()) as any[]) {
-            if (!other?.wt || other.id === currentPlayer.id) continue;
-            if (weatherEditor.mayHaveEditorOpen(other)) sendPacket(other.wt, updated);
-          }
-        }
-        break;
-      }
-      case "CLASS_EDITOR_LIST":
-      case "CLASS_EDITOR_SAVE":
-      case "CLASS_EDITOR_DELETE": {
-        if (!currentPlayer) return;
-        // The handler checks permission first, on every one of these; its answer carries the classes as they stand.
-        const result = await classEditor.handleEditorPacket(currentPlayer, type, data);
-        if (result.kind === "data") {
-          sendPacket(wt, packetManager.classEditorData(result.data));
-          break;
-        }
-        if (result.denied) sendPacket(wt, packetManager.notify({ message: classEditor.DENIED }));
-        sendPacket(wt, packetManager.classEditorResult({
-          ok: result.ok, errors: result.errors, fields: result.fields, name: result.name, notes: result.notes, action: type, data: result.data,
-        }));
-        if (result.changed) {
-          // Tell every other open editor to ask for the classes again.
-          const updated = packetManager.classEditorUpdated({ by: currentPlayer.username });
-          for (const other of Object.values(playerCache.list()) as any[]) {
-            if (!other?.wt || other.id === currentPlayer.id) continue;
-            if (classEditor.mayHaveEditorOpen(other)) sendPacket(other.wt, updated);
-          }
-        }
-        break;
-      }
-      case "LOOT_EDITOR_CREATE_TABLE":
-      case "LOOT_EDITOR_DELETE_TABLE":
-      case "LOOT_EDITOR_ADD_ITEM":
-      case "LOOT_EDITOR_REMOVE_ITEM":
-      case "LOOT_EDITOR_UPDATE_ITEM": {
-        if (!currentPlayer) return;
-        // The handler checks permission first, on every one of these, and its
-        // answer says whether the change was made and how the tables now stand.
-        const result = await lootEditor.handleEditorPacket(currentPlayer, type, data);
-        sendPacket(wt, packetManager.lootEditorResult({ ...result, action: type }));
-        break;
-      }
-      case "PLAYER_EDITOR_LOAD":
-      case "PLAYER_EDITOR_SEARCH":
-      case "PLAYER_EDITOR_ACTION": {
-        if (!currentPlayer) return;
-        // The handler checks permission first, against the database, on every one of these.
-        const result = await playerEditor.handleEditorPacket(currentPlayer, type, data);
-        if (result.kind === "data") {
-          sendPacket(wt, packetManager.playerEditorData(result.data));
-          break;
-        }
-        if (result.kind === "search") {
-          sendPacket(wt, packetManager.playerEditorResults(result.data));
-          break;
-        }
-        if (result.denied) sendPacket(wt, packetManager.notify({ message: playerEditor.DENIED }));
-        sendPacket(wt, packetManager.playerEditorResult({ ok: result.ok, errors: result.errors, action: result.action, snapshot: result.snapshot }));
-        break;
-      }
-      case "CONTROL_PANEL_LOAD":
-      case "CONTROL_PANEL_QUERY":
-      case "CONTROL_PANEL_ACTION": {
-        if (!currentPlayer) return;
-        // The handler checks who is asking first, on every one of these. An
-        // action is one of the admin commands: it is run by this receiver.
-        const result = await controlPanel.handlePanelPacket(currentPlayer, type, data, (run) => runForControlPanel(wt, run));
-        if (result.kind === "data") {
-          sendPacket(wt, packetManager.controlPanelData(result.data));
-          break;
-        }
-        if (result.kind === "results") {
-          sendPacket(wt, packetManager.controlPanelResults(result.data));
-          break;
-        }
-        sendPacket(wt, packetManager.controlPanelResult(result.data));
-        break;
-      }
-      case "CREATURE_DEBUG_SUBSCRIBE": {
-        if (!currentPlayer) return;
-        if (!creatures.canUseEditor(currentPlayer)) return;
-        creatures.setDebugSubscription(currentPlayer.id, !!(data as any)?.on);
-        break;
-      }
-      case "CREATURE_LOOT":
-      case "CREATURE_LOOT_TAKE": {
-        if (!currentPlayer) return;
-        if (currentPlayer.isDead || currentPlayer.isGhost || currentPlayer.isGuest) return;
-        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
-        const creatureId = Number((data as any)?.id);
-        if (!Number.isFinite(creatureId)) return;
-        const lootErrors: Record<string, string> = {
-          not_found: "Corpse not found.",
-          too_far: "You are too far away to loot that.",
-          not_allowed: "You don't have permission to loot that corpse.",
-          empty: "There is nothing to loot.",
-          failed: "Could not take the loot. Try again.",
-          full: "Your bags are full.",
-        };
-        if (type === "CREATURE_LOOT") {
-          const opened = creatures.openCorpseFor(currentPlayer, creatureId);
-          if (typeof opened === "string") {
-            sendPacket(wt, packetManager.notify({ message: lootErrors[opened] }));
-            break;
-          }
-          sendPacket(wt, packetManager.creatureLootContents({ id: creatureId, items: opened.items, copper: opened.copper }));
-          break;
-        }
-        const rawIndices = (data as any)?.indices;
-        const indices = Array.isArray(rawIndices) ? rawIndices.map(Number).filter(Number.isFinite) : null;
-        const result = await creatures.takeCorpseLootFor(currentPlayer, creatureId, indices);
-        if (typeof result === "string") {
-          sendPacket(wt, packetManager.notify({ message: lootErrors[result] }));
-          break;
-        }
-        if (result.taken.length > 0) {
-          currentPlayer.inventory = await inventory.get(currentPlayer.username);
-          playerCache.set(currentPlayer.id, currentPlayer);
-          sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
-        }
-        if (result.full) sendPacket(wt, packetManager.notify({ message: lootErrors.full }));
-        // The loot window shows what is left, or closes when nothing is.
-        sendPacket(wt, packetManager.creatureLootContents({ id: creatureId, items: result.remaining, copper: 0 }));
-        break;
-      }
-      case "HOTBAR": {
-        if (!currentPlayer) return;
-        // Corpses and ghosts cannot cast.
-        if (currentPlayer.isDead || currentPlayer.isGhost) return;
-        // GM stealth is non-interactive: an invisible admin casting would hit
-        // things (AoE, ground zones, projectiles) while nothing can see or fight
-        // back, and the visuals would give the admin away anyway.
-        if (currentPlayer.isStealth) return;
-        if (currentPlayer.isGuest) {
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: "Please create an account to use that feature.",
-            })
-          );
-          return;
-        }
-        if (subscriptionLocked(wt, currentPlayer, "combat")) return;
-
-
-        const casting = playerCache.get(currentPlayer.id)?.casting;
-        if (casting) {
-          return;
-        }
-
-        const freshPlayerForDelay = playerCache.get(currentPlayer.id);
-        const lastCastTime = freshPlayerForDelay?.lastCastTime || 0;
-        const timeSinceLastCast = performance.now() - lastCastTime;
-        const globalCastDelay = 500;
-        if (timeSinceLastCast < globalCastDelay) {
-          return;
-        }
-
-        // Spell lockout (e.g. from an interrupt): all casting is blocked until it expires
-        const spellLockoutUntil = freshPlayerForDelay?.spellLockoutUntil || 0;
-        if (spellLockoutUntil > performance.now()) {
-          return;
-        }
-
-        // Stunned players cannot cast. stunnedUntil is an epoch timestamp
-        // (Date.now()-based), so it must be compared against Date.now().
-        if (freshPlayerForDelay?.stunnedUntil && freshPlayerForDelay.stunnedUntil > Date.now()) {
-          return;
-        }
-
-        const spell_identifier = (data as any).spell;
-        let targetId = (data as any).target?.id;
-        log.debug(`[ATTACK] Spell cast request - spell=${spell_identifier}, targetId=${targetId}`);
-
-        const spell = await spells.find(spell_identifier);
-        const spell_id = spell?.id;
-        if (!spell || !spell_id) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "Invalid spell selected." })
-          );
-          break;
-        }
-
-        if (!spell_identifier) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "No spell selected." })
-          );
-          break;
-        }
-
-        if (!currentPlayer.learnedSpells?.[spell.name]) {
-          sendPacket(wt, packetManager.notify({ message: "You have not learned this spell." }));
-          return;
-        }
-
-        if ((data as any).creature === true) {
-          // As in WoW: a friendly spell (a heal, or harmless effects only) cast
-          // with an enemy selected lands on the caster instead of failing.
-          const creatureSpellValue = Number(spell.damage) || 0;
-          const friendlySpell = creatureSpellValue < 0 ||
-            (creatureSpellValue === 0 && Array.isArray(spell.effects) && spell.effects.length > 0 && !spellHasHostileEffects(spell));
-          // An AoE centred on the caster (Flamestrike-style) ignores the
-          // selection: the normal cast hits every player and creature around
-          // the caster, so the selected creature is not needed.
-          const casterCentredAoe = (Number(spell.aoe_radius) || 0) > 0 && spell.ground_aoe !== 1;
-          if (!friendlySpell && !casterCentredAoe) {
-            await castSpellOnCreature(wt, currentPlayer, spell, Number(targetId));
-            return;
-          }
-          targetId = currentPlayer.id;
-        }
-
-        log.debug(`[ATTACK] Looking for target ID: ${targetId}`);
-        let target = null;
-
-        target = playerCache.get(targetId);
-        if (target) {
-          log.debug(`[ATTACK] Found target as player: ${target.username}`);
-        } else if (targetId) {
-          log.debug(`[ATTACK] Player target not found in cache: ${targetId}`);
-        }
-
-        if (!target && !targetId) {
-          // Only default to self if no target was specified
-          target = currentPlayer;
-          log.debug(`[ATTACK] No target specified, defaulting to self`);
-        }
-
-        // Ghosts cannot be targeted or damaged.
-        if (target && target.isGhost) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "You cannot attack ghosts." })
-          );
-          return;
-        }
-
-        // AoE spells don't need a valid target - they hit everything around the caster
-        const isAoeSpell = spell?.aoe_radius && spell.aoe_radius > 0;
-        const isGroundAoe = spell?.ground_aoe === 1 && (data as any).groundX !== undefined && (data as any).groundY !== undefined;
-
-        if (!isAoeSpell && !isGroundAoe && !target?.id) {
-          log.debug(`[ATTACK] Player ${currentPlayer.username} attempted attack with invalid target: ${targetId}`);
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "Target not found." })
-          );
-          return;
-        }
-
-        // Only guests check applies to players, not entities
-        if (target.isGuest) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "You cannot attack guests." })
-          );
-          return;
-        }
-
-        // A harmful spell with no target (an area around the caster, or one
-        // placed on the ground) answers to the no-PvP zones as a targeted one
-        // does through player.canAttack. Asked here, before the cooldown is
-        // read: nothing may wait between that read and the cooldown being set.
-        const pvpAllowed: PvpAllowed = (position) => player.isInPvPZone(currentPlayer.location.map, position as PositionData, PVP_BODY);
-        if ((isAoeSpell || isGroundAoe) && ((spell?.damage ?? 0) > 0 || spellHasHostileEffects(spell))) {
-          const aim = isGroundAoe ? { x: Number((data as any).groundX), y: Number((data as any).groundY) } : null;
-          const refused = await areaCastRefusal(currentPlayer.location.position, aim, pvpAllowed);
-          if (refused) {
-            // Told only when it is where they aimed that is wrong. A cast refused because the caster stands in a
-            // no-PvP area says nothing (USER REQUEST 2026-10-06: "Remove the 'you are not in a pvp area' notification").
-            if (refused === "aim") sendPacket(wt, packetManager.notify({ message: "You cannot cast that into a no-PvP area" }));
-            listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "nopvp" } as any);
-            return;
-          }
-        }
-
-        // These are re-evaluated later if the target changes (auto-self-cast)
-        let isSelf = (target.id === currentPlayer.id) || (currentPlayer.username === target.username);
-
-        const freshPlayerForCooldown = playerCache.get(currentPlayer.id);
-        if (!freshPlayerForCooldown) return;
-        freshPlayerForCooldown.spellCooldowns = freshPlayerForCooldown.spellCooldowns || {};
-        const spellCooldownEnd = freshPlayerForCooldown.spellCooldowns[spell_id] || 0;
-        if (spellCooldownEnd > performance?.now()) {
-          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "cooldown" } as any);
-          return;
-        }
-
-        const spell_range = spell.range || 100;
-        const spell_damage = spell?.damage;
-        const spell_mana = spell?.mana || 0;
-        const hasEffects = Array.isArray(spell?.effects) && spell.effects.length > 0;
-        const spellIsHostileEffect = spellHasHostileEffects(spell);
-        const playerLevel = currentPlayer.stats.level || 1;
-
-        if (currentPlayer.isVanished && spell_damage <= 0 && !spellIsHostileEffect) {
-          const hasVanishEffect = Array.isArray(spell?.effects) && spell.effects.some((e: SpellEffect) => e.type === "vanish");
-          if (!hasVanishEffect) {
-            sendPacket(wt, packetManager.notify({ message: "You cannot cast beneficial spells while vanished." }));
-            listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "vanished" } as any);
-            return;
-          }
-        }
-
-        currentPlayer.interruptableSpell = !spell?.can_move || false;
-
-        // A stand-still spell pressed while moving simply does nothing: it
-        // never started, so there is no cast to interrupt and nothing to show.
-        if (!spell?.can_move && currentPlayer.moving) {
-
-          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "moving" } as any);
-          return;
-        }
-
-        const freshPlayerForMana = playerCache.get(currentPlayer.id);
-        if (!freshPlayerForMana) return;
-
-        // WoW-style: a percentage of base stamina (level only, not gear).
-        const actualManaCost = spellManaCost(spell_mana, freshPlayerForMana.stats);
-        if ((freshPlayerForMana.stats.stamina || 0) < actualManaCost) {
-          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "mana" } as any);
-          return;
-        }
-
-        if (!spell_damage && !hasEffects) {
-          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "no_effects" } as any);
-          return;
-        }
-
-        // ATOMIC: Set cooldown immediately to prevent race condition with mana deduction
-        // This must happen before any other async operations
-        // Only apply spell cooldown (not cast_time) for faster feel
-        freshPlayerForMana.spellCooldowns = freshPlayerForMana.spellCooldowns || {};
-        const spellCooldownTime = spell.cooldown * 1000;
-        freshPlayerForMana.spellCooldowns[spell_id] = performance.now() + spellCooldownTime;
-        cooldownManager.setCooldown(freshPlayerForMana.username, spell_id, performance.now() + spellCooldownTime);
-        freshPlayerForMana.lastCastTime = performance.now();
-        freshPlayerForMana.castingSpellId = spell_id;
-
-        playerCache.set(freshPlayerForMana.id, freshPlayerForMana);
-
-        currentPlayer.stats = freshPlayerForMana.stats;
-        currentPlayer.lastCastTime = freshPlayerForMana.lastCastTime;
-        currentPlayer.spellCooldowns = freshPlayerForMana.spellCooldowns;
-
-        if (currentPlayer.isVanished && (spell_damage > 0 || spellIsHostileEffect)) {
-          const vanishId = spellEffects.getVanishedEffectId(currentPlayer);
-          if (vanishId) {
-            cancelEffect(currentPlayer, vanishId);
-            spellEffects.broadcastEffectsUpdate(currentPlayer);
-          }
-        }
-        currentPlayer.lastCastTime = freshPlayerForMana.lastCastTime;
-        currentPlayer.spellCooldowns = freshPlayerForMana.spellCooldowns;
-
-        // --- AoE branch: cast on self, hit everything around the caster ---
-        if (isAoeSpell && !isGroundAoe) {
-          currentPlayer.casting = true;
-          currentPlayer.castOnSelf = true;
-          currentPlayer.castId = (currentPlayer.castId || 0) + 1;
-          playerCache.set(currentPlayer.id, currentPlayer);
-          const thisAoeCastId = currentPlayer.castId;
-          const aoeSpellStartTime = performance.now();
-
-          if (currentPlayer.mounted) {
-            currentPlayer.mounted = false;
-            playerCache.set(currentPlayer.id, currentPlayer);
-          }
-
-          globalStateRevision++;
-          await sendPositionAnimation(wt, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, true);
-
-          const aoePlayersInMap = filterPlayersByMap(currentPlayer.location.map);
-          broadcastCastToMap(
-            aoePlayersInMap,
-            currentPlayer.id,
-            packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: spell.cast_time })
-          );
-
-          await new Promise((resolve) => setTimeout(resolve, spell.cast_time * 1000));
-
-          const aoeCheckPlayer = playerCache.get(currentPlayer.id);
-          if (aoeCheckPlayer && aoeCheckPlayer.castId !== thisAoeCastId) return;
-
-          const aoeUpdatedPlayer = playerCache.get(currentPlayer.id);
-          if (aoeUpdatedPlayer && aoeUpdatedPlayer.manualSpellCancel && aoeUpdatedPlayer.manualSpellCancel >= aoeSpellStartTime) {
-            if (aoeUpdatedPlayer.spellCooldowns) {
-              delete aoeUpdatedPlayer.spellCooldowns[spell_id];
-              cooldownManager.deleteCooldown(aoeUpdatedPlayer.username, spell_id);
-            }
-            delete aoeUpdatedPlayer.manualSpellCancel;
-            aoeUpdatedPlayer.casting = false;
-            playerCache.set(aoeUpdatedPlayer.id, aoeUpdatedPlayer);
-            currentPlayer.spellCooldowns = aoeUpdatedPlayer.spellCooldowns;
-            currentPlayer.manualSpellCancel = undefined;
-            currentPlayer.casting = false;
-            return;
-          }
-
-          if (!spell.can_move && !playerCache.get(currentPlayer.id)?.casting) {
-            const resetPlayer = playerCache.get(currentPlayer.id);
-            if (resetPlayer && resetPlayer.spellCooldowns) {
-              delete resetPlayer.spellCooldowns[spell_id];
-              playerCache.set(resetPlayer.id, resetPlayer);
-            }
-            return;
-          }
-
-          currentPlayer.casting = false;
-          currentPlayer.mounted = false;
-          playerCache.set(currentPlayer.id, currentPlayer);
-
-          globalStateRevision++;
-          await sendPositionAnimation(wt, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, false);
-
-          // Mana deduction
-          const aoeManaCheck = playerCache.get(currentPlayer.id);
-          if (!aoeManaCheck || (aoeManaCheck.stats.stamina || 0) < actualManaCost) {
-            if (aoeManaCheck && aoeManaCheck.spellCooldowns) {
-              delete aoeManaCheck.spellCooldowns[spell_id];
-              cooldownManager.deleteCooldown(aoeManaCheck.username, spell_id);
-              playerCache.set(aoeManaCheck.id, aoeManaCheck);
-            }
-            return;
-          }
-          currentPlayer.stats.stamina = aoeManaCheck.stats.stamina;
-          currentPlayer.stats.stamina -= actualManaCost;
-          if (currentPlayer.stats.stamina < 0) currentPlayer.stats.stamina = 0;
-
-          // AoE splash from caster position
-          const aoeX = currentPlayer.location.position.x;
-          const aoeY = currentPlayer.location.position.y;
-          const aoeRadius = spell.aoe_radius!;
-
-          // Send a projectile packet from caster to self as a visual indicator
-          aoePlayersInMap.forEach((p) => {
-            sendPacketBestEffort(p.wt, packetManager.projectile({
-              id: currentPlayer.id, time: 0.3, target_id: currentPlayer.id,
-              spell: spell.name, icon: getIconUrl(spell.icon), entity: false
-            }));
-          });
-
-          const splashTargets: Array<{ target: any }> = [];
-          const aoeIsHeal = spell_damage < 0;
-          for (const p of aoePlayersInMap) {
-            if (p.id === currentPlayer.id && !aoeIsHeal) continue;
-            if (p.isGuest) continue;
-            // Ghosts cannot be damaged or healed.
-            if (p.isGhost) continue;
-            // An admin in stealth is out of the game for everyone else: no spell touches them
-            // (player.canAttack refuses one as a target).
-            if (p.isStealth) continue;
-            const inParty = currentPlayer?.party?.includes(p?.username) || false;
-            if (aoeIsHeal) {
-              // Healing AoE: only hit self and party members
-              if (p.id !== currentPlayer.id && !inParty) continue;
-            } else {
-              // Damage AoE: skip self and party members
-              if (p.id === currentPlayer.id || inParty) continue;
-            }
-            const pPos = p.location?.position;
-            if (!pPos) continue;
-            const dist = Math.sqrt((pPos.x - aoeX) ** 2 + (pPos.y - aoeY) ** 2);
-            if (dist > aoeRadius) continue;
-            // Nobody in a no-PvP zone is harmed, nor anyone when the caster walked into one during the cast.
-            if (!aoeIsHeal && !(await areaSpellHarms(currentPlayer.location.position, pPos, pvpAllowed))) continue;
-            splashTargets.push({ target: p });
-          }
-
-          // Creatures don't receive healing AoE
-          if (!aoeIsHeal) splashCreatures(currentPlayer, spell, aoeX, aoeY, aoeRadius, null);
-
-          const attackerDamageBonus = currentPlayer.stats.stat_damage || 0;
-          for (const splash of splashTargets) {
-            const st = splash.target;
-            // Heals: WoW-style roll (negative = healing); damage: level roll + damage stat.
-            let splashDmg = spell_damage < 0
-              ? -rollHeal(spell_damage, currentPlayer.stats, spell.cast_time).amount
-              : Math.floor(Math.random() * ((playerLevel - 1) * 3 + 1)) + spell_damage + (playerLevel - 1) * 2 + attackerDamageBonus;
-            if (spell_damage === 0) splashDmg = 0;
-
-            if (splashDmg > 0) {
-              const av = st.stats?.stat_avoidance || 0;
-              if (Math.random() * 100 < av) splashDmg = 0;
-              if (splashDmg > 0) {
-                const ar = st.stats?.stat_armor || 0;
-                splashDmg = Math.floor(splashDmg * (1 - Math.min(ar, 75) / 100));
-              }
-            }
-
-            {
-              let toHealth = splashDmg;
-              if (splashDmg > 0) {
-                const ab = spellEffects.consumeBarrier(st, splashDmg);
-                toHealth = splashDmg - ab;
-                if (ab > 0) spellEffects.broadcastEffectsUpdate(st);
-              }
-              st.stats.health = Math.round(st.stats.health - toHealth);
-              if (st.stats.health > st.stats.total_max_health) {
-                st.stats.health = st.stats.total_max_health;
-              }
-              listener.emit(Events.PLAYER_DAMAGED, { attacker: currentPlayer, target: st, damage: splashDmg, isCrit: false });
-
-              if (st.stats.health <= 0) {
-                await handlePlayerDeath(st, currentPlayer, { damage: splashDmg, isCrit: false });
-              } else {
-                if (!(spell_damage > 0 && splashDmg === 0)) {
-                await spellEffects.applySpellEffects(spell, currentPlayer, st,
-                  (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.wt, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
-                  (pp: any) => spellEffects.broadcastEffectsUpdate(pp)
-                );
-                }
-                if (spell_damage !== 0) {
-                broadcastStatsUpdateToAOI(
-                  st,
-                  currentPlayer,
-                  packetManager.updateStats({ id: wt.data.id, target: st.id, stats: st.stats, isCrit: false, damage: splashDmg })
-                );
-                }
-              }
-
-              setPlayerPvp(currentPlayer, true);
-              setPlayerPvp(st, true);
-              st.last_attack = performance.now();
-
-              if (spell_damage > 0 && st.isVanished) {
-                const vId = spellEffects.getVanishedEffectId(st);
-                if (vId) {
-                  cancelEffect(st, vId);
-                  spellEffects.broadcastEffectsUpdate(st);
-                }
-              }
-            }
-          }
-
-          if (currentPlayer.isVanished) {
-            const cvId = spellEffects.getVanishedEffectId(currentPlayer);
-            if (cvId) {
-              cancelEffect(currentPlayer, cvId);
-              spellEffects.broadcastEffectsUpdate(currentPlayer);
-            }
-          }
-
-          // Sync caster stats
-          const syncedStats = await player.synchronizeStats(currentPlayer.username);
-          if (syncedStats) currentPlayer.stats = syncedStats;
-          playerCache.set(currentPlayer.id, currentPlayer);
-          broadcastToAOIBestEffort(currentPlayer, packetManager.updateStats({ id: currentPlayer.id, target: currentPlayer.id, stats: currentPlayer.stats }));
-
-          currentPlayer.last_attack = performance.now();
-          listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target: currentPlayer, isEntityTarget: false });
-          break;
-        }
-
-        // --- Ground-targeted AoE branch: click-to-place, with optional lingering zone ---
-        if (isGroundAoe) {
-          const groundX = Number((data as any).groundX);
-          const groundY = Number((data as any).groundY);
-
-          // Validate range
-          const casterPos = currentPlayer.location.position;
-          const casterX = typeof casterPos === 'string' ? Number(casterPos.split(',')[0]) : casterPos.x;
-          const casterY = typeof casterPos === 'string' ? Number(casterPos.split(',')[1]) : casterPos.y;
-          const distToTarget = Math.sqrt((groundX - casterX) ** 2 + (groundY - casterY) ** 2);
-          const maxRange = spell.range || 100;
-          if (distToTarget > maxRange) {
-            if (freshPlayerForMana.spellCooldowns) {
-              delete freshPlayerForMana.spellCooldowns[spell_id];
-              cooldownManager.deleteCooldown(freshPlayerForMana.username, spell_id);
-            }
-            playerCache.set(freshPlayerForMana.id, freshPlayerForMana);
-            currentPlayer.spellCooldowns = freshPlayerForMana.spellCooldowns;
-            return;
-          }
-
-          currentPlayer.casting = true;
-          currentPlayer.castOnSelf = false;
-          currentPlayer.castId = (currentPlayer.castId || 0) + 1;
-          playerCache.set(currentPlayer.id, currentPlayer);
-          const thisGroundCastId = currentPlayer.castId;
-          const groundCastStartTime = performance.now();
-
-          if (currentPlayer.mounted) {
-            currentPlayer.mounted = false;
-            playerCache.set(currentPlayer.id, currentPlayer);
-          }
-
-          const groundAoERadius = spell.aoe_radius || 0;
-          const groundDuration = spell.ground_duration || 0;
-
-          globalStateRevision++;
-          await sendPositionAnimation(wt, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, true);
-
-          const groundPlayersInMap = filterPlayersByMap(currentPlayer.location.map);
-          broadcastCastToMap(
-            groundPlayersInMap,
-            currentPlayer.id,
-            packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: spell.cast_time, groundX, groundY, groundRadius: groundAoERadius })
-          );
-          broadcastCastToMap(
-            groundPlayersInMap,
-            currentPlayer.id,
-            packetManager.groundAoeCasting({ id: currentPlayer.id, spell: spell.name, casterId: currentPlayer.id, x: groundX, y: groundY, radius: groundAoERadius, castTime: spell.cast_time })
-          );
-
-          await new Promise((resolve) => setTimeout(resolve, spell.cast_time * 1000));
-
-          const groundCheckPlayer = playerCache.get(currentPlayer.id);
-          if (groundCheckPlayer && groundCheckPlayer.castId !== thisGroundCastId) return;
-
-          const groundUpdatedPlayer = playerCache.get(currentPlayer.id);
-          if (groundUpdatedPlayer && groundUpdatedPlayer.manualSpellCancel && groundUpdatedPlayer.manualSpellCancel >= groundCastStartTime) {
-            // Cancel: clear preview
-            groundPlayersInMap.forEach((p) => {
-              sendPacket(p.wt, packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" }));
-            });
-            if (groundUpdatedPlayer.spellCooldowns) {
-              delete groundUpdatedPlayer.spellCooldowns[spell_id];
-              cooldownManager.deleteCooldown(groundUpdatedPlayer.username, spell_id);
-            }
-            delete groundUpdatedPlayer.manualSpellCancel;
-            groundUpdatedPlayer.casting = false;
-            playerCache.set(groundUpdatedPlayer.id, groundUpdatedPlayer);
-            currentPlayer.spellCooldowns = groundUpdatedPlayer.spellCooldowns;
-            currentPlayer.manualSpellCancel = undefined;
-            currentPlayer.casting = false;
-            return;
-          }
-
-          if (!spell.can_move && !playerCache.get(currentPlayer.id)?.casting) {
-            groundPlayersInMap.forEach((p) => {
-              sendPacket(p.wt, packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" }));
-            });
-            const resetPlayer = playerCache.get(currentPlayer.id);
-            if (resetPlayer && resetPlayer.spellCooldowns) {
-              delete resetPlayer.spellCooldowns[spell_id];
-              playerCache.set(resetPlayer.id, resetPlayer);
-            }
-            return;
-          }
-
-          // Clear casting preview
-          groundPlayersInMap.forEach((p) => {
-            sendPacket(p.wt, packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" }));
-          });
-
-          currentPlayer.casting = false;
-          currentPlayer.mounted = false;
-          playerCache.set(currentPlayer.id, currentPlayer);
-
-          globalStateRevision++;
-          await sendPositionAnimation(wt, currentPlayer.location.position?.direction || "down", currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, false);
-
-          // Mana deduction
-          const groundManaCheck = playerCache.get(currentPlayer.id);
-          if (!groundManaCheck || (groundManaCheck.stats.stamina || 0) < actualManaCost) {
-            if (groundManaCheck && groundManaCheck.spellCooldowns) {
-              delete groundManaCheck.spellCooldowns[spell_id];
-              cooldownManager.deleteCooldown(groundManaCheck.username, spell_id);
-              playerCache.set(groundManaCheck.id, groundManaCheck);
-            }
-            return;
-          }
-          currentPlayer.stats.stamina = groundManaCheck.stats.stamina;
-          currentPlayer.stats.stamina -= actualManaCost;
-          if (currentPlayer.stats.stamina < 0) currentPlayer.stats.stamina = 0;
-
-          const isHeal = spell_damage < 0;
-          const isThrown = spell?.is_thrown === 1;
-          const resolvedParticles = spell.particles
-            ? (typeof spell.particles === 'string'
-              ? spell.particles.split(',').map((s: string) => s.trim()).filter(Boolean)
-              : [])
-            : [];
-
-          if (isThrown) {
-            const casterPos = currentPlayer.location.position;
-            const cx = typeof casterPos === 'string' ? Number(casterPos.split(',')[0]) : casterPos.x;
-            const cy = typeof casterPos === 'string' ? Number(casterPos.split(',')[1]) : casterPos.y;
-            const throwDist = Math.sqrt((groundX - cx) ** 2 + (groundY - cy) ** 2);
-            const throwSpeed = 350;
-            const travelTime = Math.max(0.4, Math.min(throwDist / throwSpeed, 2.5));
-
-            groundPlayersInMap.forEach((p) => {
-              sendPacketBestEffort(p.wt, packetManager.projectile({
-                id: currentPlayer.id,
-                time: travelTime,
-                target_id: currentPlayer.id,
-                spell: spell.name,
-                icon: getIconUrl(spell.icon),
-                entity: false,
-                isThrown: true,
-                targetX: groundX,
-                targetY: groundY,
-                particles: resolvedParticles.length > 0 ? resolvedParticles : undefined,
-              }));
-            });
-
-            await new Promise((resolve) => setTimeout(resolve, travelTime * 1000));
-
-            const thrownCheckPlayer = playerCache.get(currentPlayer.id);
-            if (thrownCheckPlayer && thrownCheckPlayer.castId !== thisGroundCastId) return;
-          }
-
-          if (groundDuration > 0) {
-            // Lingering zone
-            spawnZone({
-              spellId: spell_id,
-              spellName: spell.name,
-              casterId: currentPlayer.id,
-              casterUsername: currentPlayer.username,
-              mapName: currentPlayer.location.map,
-              position: { x: groundX, y: groundY },
-              radius: groundAoERadius,
-              duration: groundDuration,
-              tickInterval: 1,
-              damagePerTick: spell_damage,
-              damageType: isHeal ? "heal" : "damage",
-              particles: resolvedParticles.length > 0 ? resolvedParticles : null,
-              effects: Array.isArray(spell.effects) ? spell.effects : null,
-              spell,
-            });
-          } else {
-            // Instant burst at ground position (no lingering)
-            const splashTargets: Array<{ target: any }> = [];
-            for (const p of groundPlayersInMap) {
-              if (p.isGuest) continue;
-              // An admin in stealth is out of the game for everyone else: no spell touches them.
-              if (p.isStealth) continue;
-              const inParty = currentPlayer?.party?.includes(p.username) || false;
-              if (isHeal) {
-                if (p.id !== currentPlayer.id && !inParty) continue;
-              } else {
-                if (p.id === currentPlayer.id || inParty) continue;
-              }
-              const pPos = p.location?.position;
-              if (!pPos) continue;
-              const dist = Math.sqrt((pPos.x - groundX) ** 2 + (pPos.y - groundY) ** 2);
-              if (dist > groundAoERadius) continue;
-              // Nobody in a no-PvP zone is harmed, nor anyone when the caster walked into one during the cast.
-              if (!isHeal && !(await areaSpellHarms(currentPlayer.location.position, pPos, pvpAllowed))) continue;
-              splashTargets.push({ target: p });
-            }
-
-            if (!isHeal) splashCreatures(currentPlayer, spell, groundX, groundY, groundAoERadius, null);
-
-            const attackerDamageBonus = currentPlayer.stats.stat_damage || 0;
-            for (const splash of splashTargets) {
-              const st = splash.target;
-              // Heals: WoW-style roll (negative = healing); damage: level roll + damage stat.
-              let splashDmg = spell_damage < 0
-                ? -rollHeal(spell_damage, currentPlayer.stats, spell.cast_time).amount
-                : Math.floor(Math.random() * ((playerLevel - 1) * 3 + 1)) + spell_damage + (playerLevel - 1) * 2 + attackerDamageBonus;
-              if (spell_damage === 0) splashDmg = 0;
-
-              if (splashDmg > 0) {
-                const av = st.stats?.stat_avoidance || 0;
-                if (Math.random() * 100 < av) splashDmg = 0;
-                if (splashDmg > 0) {
-                  const ar = st.stats?.stat_armor || 0;
-                  splashDmg = Math.floor(splashDmg * (1 - Math.min(ar, 75) / 100));
-                }
-              }
-
-              {
-                let toHealth = splashDmg;
-                if (splashDmg > 0) {
-                  const ab = spellEffects.consumeBarrier(st, splashDmg);
-                  toHealth = splashDmg - ab;
-                  if (ab > 0) spellEffects.broadcastEffectsUpdate(st);
-                }
-                st.stats.health = Math.round(st.stats.health - toHealth);
-                if (st.stats.health > st.stats.total_max_health) {
-                  st.stats.health = st.stats.total_max_health;
-                }
-                listener.emit(Events.PLAYER_DAMAGED, { attacker: currentPlayer, target: st, damage: splashDmg, isCrit: false });
-
-                if (st.stats.health <= 0) {
-                  await handlePlayerDeath(st, currentPlayer, { damage: splashDmg, isCrit: false });
-                } else {
-                  if (!(spell_damage > 0 && splashDmg === 0)) {
-                    await spellEffects.applySpellEffects(spell, currentPlayer, st,
-                      (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.wt, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
-                      (pp: any) => spellEffects.broadcastEffectsUpdate(pp)
-                    );
-                  }
-                  if (spell_damage !== 0) {
-                    broadcastStatsUpdateToAOI(
-                      st,
-                      currentPlayer,
-                      packetManager.updateStats({ id: wt.data.id, target: st.id, stats: st.stats, isCrit: false, damage: splashDmg })
-                    );
-                  }
-                }
-
-                setPlayerPvp(currentPlayer, true);
-                setPlayerPvp(st, true);
-                st.last_attack = performance.now();
-
-                if (splashDmg > 0 && st.isVanished) {
-                  const vId = spellEffects.getVanishedEffectId(st);
-                  if (vId) {
-                    cancelEffect(st, vId);
-                    spellEffects.broadcastEffectsUpdate(st);
-                  }
-                }
-              }
-            }
-
-            if (currentPlayer.isVanished) {
-              const cvId = spellEffects.getVanishedEffectId(currentPlayer);
-              if (cvId) {
-                cancelEffect(currentPlayer, cvId);
-                spellEffects.broadcastEffectsUpdate(currentPlayer);
-              }
-            }
-
-            // Visual projectile from caster to ground position
-            groundPlayersInMap.forEach((p) => {
-              sendPacketBestEffort(p.wt, packetManager.projectile({
-                id: currentPlayer.id, time: 0.3, target_id: currentPlayer.id,
-                spell: spell.name, icon: getIconUrl(spell.icon), entity: false
-              }));
-            });
-          }
-
-          // Sync caster stats
-          const syncedStats = await player.synchronizeStats(currentPlayer.username);
-          if (syncedStats) currentPlayer.stats = syncedStats;
-          playerCache.set(currentPlayer.id, currentPlayer);
-          broadcastToAOIBestEffort(currentPlayer, packetManager.updateStats({ id: currentPlayer.id, target: currentPlayer.id, stats: currentPlayer.stats }));
-
-          currentPlayer.last_attack = performance.now();
-          listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target: currentPlayer, isEntityTarget: false });
-          break;
-        }
-
-        const isInParty = currentPlayer?.party?.includes(target?.username) || null;
-
-        if (isInParty && (spell_damage > 0 || spellIsHostileEffect)) {
-          if (isSelf) return;
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: "You cannot attack your party members",
-            })
-          );
-          return;
-        }
-
-        if ((spell_damage < 0 || (spell_damage === 0 && hasEffects && !spellIsHostileEffect)) && target.id !== currentPlayer.id && !isInParty) {
-          target = currentPlayer;
-          isSelf = true;
-        }
-
-        const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-
-        const playersInAttackRange = filterPlayersByDistance(
-          wt,
-          spell_range,
-          currentPlayer.location.map
-        );
-
-        log.debug(`[ATTACK] Identified target as player. username=${target.username}`);
-
-        // Casting at someone behind you turns you to face them (WoW) rather
-        // than failing the facing check below.
-        if (target.id !== currentPlayer.id && target.location?.position) {
-          faceToward(currentPlayer, Number(target.location.position.x), Number(target.location.position.y));
-        }
-
-        const canAttack: any = await player.canAttack(currentPlayer, target,
-          {
-            width: 24,
-            height: 40,
-          },
-          spell_range,
-          spell_damage > 0 || spellIsHostileEffect
-        );
-        log.debug(`[ATTACK] canAttack result: ${JSON.stringify(canAttack)}`);
-
-        const targetX = target.location?.position?.x || 0;
-        const targetY = target.location?.position?.y || 0;
-
-        const distance = Math.sqrt(
-          Math.pow(currentPlayer.location.position.x - targetX, 2) +
-          Math.pow(currentPlayer.location.position.y - targetY, 2)
-        );
-
-        isSelf = (target.id === currentPlayer.id) || (currentPlayer.username === target.username);
-        
-        // Prevent self-targeting for damaging/hostile spells, but allow self-targeting for healing/buff spells and AoE
-        if (isSelf && (spell_damage > 0 || spellIsHostileEffect) && !isAoeSpell) return;
-
-        if (!canAttack?.value) {
-          // (a cast refused for a no-PvP area says nothing: see the area casts above)
-          if (canAttack?.reason == "path_blocked") {
-            sendPacket(
-              wt,
-              packetManager.notify({ message: "Target is not in line of sight" })
-            );
-          }
-          if (canAttack?.reason == "range") {
-            sendPacket(
-              wt,
-              packetManager.notify({ message: "Target is out of range" })
-            );
-          }
-          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: canAttack?.reason || "unknown" } as any);
-          return;
-        } else if (!playersInAttackRange.includes(target)) {
-          return;
-        }
-
-        const isChargeSpell = spell?.charge_distance && spell.charge_distance > 0;
-        const isTeleportBehind = spell?.teleport_behind === 1;
-        if (isChargeSpell && !isSelf) {
-          const cPos = currentPlayer.location.position;
-          const cx = typeof cPos === 'string' ? Number(cPos.split(',')[0]) : cPos.x;
-          const cy = typeof cPos === 'string' ? Number(cPos.split(',')[1]) : cPos.y;
-          const tPos = target.location.position;
-          const tx = typeof tPos === 'string' ? Number(tPos.split(',')[0]) : tPos.x;
-          const ty = typeof tPos === 'string' ? Number(tPos.split(',')[1]) : tPos.y;
-          const dist = Math.sqrt((tx - cx) ** 2 + (ty - cy) ** 2);
-          const chargeDist = Math.min(spell.charge_distance ?? 0, Math.max(0, dist - 40));
-          const ratio = dist > 0 ? chargeDist / dist : 0;
-          const landX = Math.round(cx + (tx - cx) * ratio);
-          const landY = Math.round(cy + (ty - cy) * ratio);
-
-          const losCharge = await hasLineOfSight(cx, cy, landX, landY, currentPlayer.location.map, (spell.charge_distance ?? 0) + 50);
-          if (!losCharge) {
-            sendPacket(wt, packetManager.notify({ message: "Cannot charge - path blocked." }));
-            if (currentPlayer.spellCooldowns) {
-              delete currentPlayer.spellCooldowns[spell_id];
-            }
-            return;
-          }
-
-          const newDir = directionToward(landX, landY, tx, ty);
-
-          currentPlayer.location.position.x = landX;
-          currentPlayer.location.position.y = landY;
-          currentPlayer.location.position.direction = newDir;
-          currentPlayer.moving = false;
-          playerCache.set(currentPlayer.id, currentPlayer);
-
-          globalStateRevision++;
-          if (shouldUpdateAOI(currentPlayer)) {
-            await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
-          }
-          const chargeMoveData = {
-            i: wt.data.id,
-            d: { x: landX, y: landY, dr: newDir },
-            r: globalStateRevision,
-            s: currentPlayer.isStealth ? 1 : 0,
-          };
-          broadcastToAOI(currentPlayer, packetManager.moveXY(chargeMoveData), true);
-
-          await sendPositionAnimation(wt, newDir, false, false, "", undefined, globalStateRevision, false);
-
-          broadcastCastToMap(
-            playersInMap,
-            currentPlayer.id,
-            packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: 0 })
-          );
-
-          currentPlayer.last_attack = performance.now();
-          if (currentPlayer.isVanished) {
-            const vId = spellEffects.getVanishedEffectId(currentPlayer);
-            if (vId) {
-              cancelEffect(currentPlayer, vId);
-              spellEffects.broadcastEffectsUpdate(currentPlayer);
-            }
-          }
-          listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target, isEntityTarget: false });
-
-          if (Array.isArray(spell.effects) && spell.effects.length > 0) {
-            await spellEffects.applySpellEffects(spell, currentPlayer, target,
-              (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.wt, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
-              (pp: any) => spellEffects.broadcastEffectsUpdate(pp)
-            );
-          }
-
-          setPlayerPvp(currentPlayer, true);
-          setPlayerPvp(target, true);
-          target.last_attack = performance.now();
-          break;
-        }
-
-        if (isTeleportBehind && !isSelf) {
-          const tPos = target.location.position;
-          const tx = typeof tPos === 'string' ? Number(tPos.split(',')[0]) : tPos.x;
-          const ty = typeof tPos === 'string' ? Number(tPos.split(',')[1]) : tPos.y;
-          const tDir = typeof tPos === 'string' ? 'down' : (tPos.direction || 'down');
-
-          const dirOffsets: Record<string, { dx: number; dy: number; face: string }> = {
-            right:     { dx: -40, dy: 0,   face: 'right' },
-            downright: { dx: -28, dy: -28, face: 'downright' },
-            down:      { dx: 0,   dy: -40, face: 'down' },
-            downleft:  { dx: 28,  dy: -28, face: 'downleft' },
-            left:      { dx: 40,  dy: 0,   face: 'left' },
-            upleft:    { dx: 28,  dy: 28,  face: 'upleft' },
-            up:        { dx: 0,   dy: 40,  face: 'up' },
-            upright:   { dx: -28, dy: 28,  face: 'upright' },
-          };
-          const offset = dirOffsets[tDir] || dirOffsets['down'];
-          const landX = Math.round(tx + offset.dx);
-          const landY = Math.round(ty + offset.dy);
-
-          const losBehind = await hasLineOfSight(tx, ty, landX, landY, currentPlayer.location.map, 60);
-          if (!losBehind) {
-            sendPacket(wt, packetManager.notify({ message: "Cannot teleport behind target - path blocked." }));
-            if (currentPlayer.spellCooldowns) {
-              delete currentPlayer.spellCooldowns[spell_id];
-            }
-            return;
-          }
-
-          currentPlayer.location.position.x = landX;
-          currentPlayer.location.position.y = landY;
-          currentPlayer.location.position.direction = offset.face;
-          currentPlayer.moving = false;
-          playerCache.set(currentPlayer.id, currentPlayer);
-
-          globalStateRevision++;
-          if (shouldUpdateAOI(currentPlayer)) {
-            await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
-          }
-          const tpMoveData = {
-            i: wt.data.id,
-            d: { x: landX, y: landY, dr: offset.face },
-            r: globalStateRevision,
-            s: currentPlayer.isStealth ? 1 : 0,
-          };
-          broadcastToAOI(currentPlayer, packetManager.moveXY(tpMoveData), true);
-
-          await sendPositionAnimation(wt, offset.face, false, false, "", undefined, globalStateRevision, false);
-
-          broadcastCastToMap(
-            playersInMap,
-            currentPlayer.id,
-            packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: 0 })
-          );
-
-          currentPlayer.last_attack = performance.now();
-          if (currentPlayer.isVanished) {
-            const vId = spellEffects.getVanishedEffectId(currentPlayer);
-            if (vId) {
-              cancelEffect(currentPlayer, vId);
-              spellEffects.broadcastEffectsUpdate(currentPlayer);
-            }
-          }
-          listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target, isEntityTarget: false });
-
-          if (Array.isArray(spell.effects) && spell.effects.length > 0) {
-            await spellEffects.applySpellEffects(spell, currentPlayer, target,
-              (pp: any) => { const pls = filterPlayersByMap(pp.location.map); pls.forEach((pl: any) => sendPacket(pl.wt, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats }))); },
-              (pp: any) => spellEffects.broadcastEffectsUpdate(pp)
-            );
-          }
-
-          setPlayerPvp(currentPlayer, true);
-          setPlayerPvp(target, true);
-          target.last_attack = performance.now();
-          break;
-        }
-
-        let delay = 0;
-        if (target.id !== currentPlayer.id && spell_damage >= 0) {
-          const maxTravelTime = 500;
-          const speedMultiplier = 1000;
-
-          const calculatedDelay = (distance / speedMultiplier) * 1000;
-
-          delay = Math.min(calculatedDelay, maxTravelTime);
-        }
-
-        currentPlayer.casting = true;
-        currentPlayer.castOnSelf = isSelf;
-        currentPlayer.castId = (currentPlayer.castId || 0) + 1;
-        playerCache.set(currentPlayer.id, currentPlayer);
-        const thisCastId = currentPlayer.castId;
-        const spellStartTime = performance.now();
-
-        // Dismount player if they're mounted
-        if (currentPlayer.mounted) {
-          currentPlayer.mounted = false;
-          playerCache.set(currentPlayer.id, currentPlayer);
-        }
-
-        globalStateRevision++;
-        await sendPositionAnimation(
-          wt,
-          currentPlayer.location.position?.direction || "down",
-          currentPlayer.moving || false,
-          false,
-          currentPlayer.mount_type || "unicorn",
-          undefined,
-          globalStateRevision,
-          true
-        );
-
-        broadcastCastToMap(
-          playersInMap,
-          currentPlayer.id,
-          packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: spell.cast_time })
-        );
-        await new Promise((resolve) => setTimeout(resolve, spell.cast_time * 1000));
-
-        // Abort if this cast was superseded by a new cast (e.g. interrupted then recast)
-        const castCheckPlayer = playerCache.get(currentPlayer.id);
-        if (castCheckPlayer && castCheckPlayer.castId !== thisCastId) {
-          return;
-        }
-
-        // Check if spell was manually cancelled via ESC during cast time
-        const updatedPlayer = playerCache.get(currentPlayer.id);
-        if (updatedPlayer && updatedPlayer.manualSpellCancel && updatedPlayer.manualSpellCancel >= spellStartTime) {
-          // Spell was cancelled during cast time, abort execution
-          // Clear the manual cancel flag so next cast is allowed
-          if (updatedPlayer.spellCooldowns) {
-            delete updatedPlayer.spellCooldowns[spell_id];
-            cooldownManager.deleteCooldown(updatedPlayer.username, spell_id);
-          }
-          delete updatedPlayer.manualSpellCancel;
-          updatedPlayer.casting = false;
-          playerCache.set(updatedPlayer.id, updatedPlayer);
-          // Sync back to currentPlayer so wt.data stays current
-          currentPlayer.spellCooldowns = updatedPlayer.spellCooldowns;
-          currentPlayer.manualSpellCancel = undefined;
-          currentPlayer.casting = false;
-          await resumeWalkingFacing(wt, updatedPlayer);
-          return;
-        }
-
-        if (!spell.can_move && !playerCache.get(currentPlayer.id)?.casting) {
-
-          const resetPlayer = playerCache.get(currentPlayer.id);
-          if (resetPlayer && resetPlayer.spellCooldowns) {
-            delete resetPlayer.spellCooldowns[spell_id];
-            cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
-            playerCache.set(resetPlayer.id, resetPlayer);
-          }
-          return;
-        }
-        currentPlayer.casting = false;
-        // After cast, mounted should always be false (player was dismounted at start of cast)
-        currentPlayer.mounted = false;
-        playerCache.set(currentPlayer.id, currentPlayer);
-
-        // The target may have moved behind the caster during the cast: face
-        // them again so the completion check below does not fail on facing.
-        const targetNow = playerCache.get(target.id) ?? target;
-        if (!isSelf && targetNow.location?.position) {
-          faceToward(currentPlayer, Number(targetNow.location.position.x), Number(targetNow.location.position.y));
-        }
-
-        globalStateRevision++;
-        await sendPositionAnimation(
-          wt,
-          currentPlayer.location.position?.direction || "down",
-          currentPlayer.moving || false,
-          false,
-          currentPlayer.mount_type || "unicorn",
-          undefined,
-          globalStateRevision,
-          false
-        );
-
-        let canAttack2: any = { value: true };
-
-        if (spell.cast_time > 0) {
-          canAttack2 = await player.canAttack(currentPlayer, target,
-            {
-              width: 24,
-              height: 40,
-            },
-            spell_range,
-            spell_damage > 0 || spellIsHostileEffect
-          );
-        }
-
-        // Facing only mattered for the check above; walk the way you are walking.
-        await resumeWalkingFacing(wt, currentPlayer);
-
-        if (canAttack2?.reason == "nopvp") {
-          broadcastCastToMap(
-            playersInMap,
-            currentPlayer.id,
-            packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
-          );
-
-          const resetPlayer = playerCache.get(currentPlayer.id);
-          if (resetPlayer && resetPlayer.spellCooldowns) {
-            delete resetPlayer.spellCooldowns[spell_id];
-            cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
-            playerCache.set(resetPlayer.id, resetPlayer);
-          }
-          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "nopvp" } as any);
-          return;
-        }
-
-        if (canAttack2?.reason == "path_blocked") {
-          broadcastCastToMap(
-            playersInMap,
-            currentPlayer.id,
-            packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
-          );
-
-          const resetPlayer = playerCache.get(currentPlayer.id);
-          if (resetPlayer && resetPlayer.spellCooldowns) {
-            delete resetPlayer.spellCooldowns[spell_id];
-            cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
-            playerCache.set(resetPlayer.id, resetPlayer);
-          }
-          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "path_blocked" } as any);
-          return;
-        }
-
-        if (canAttack2?.reason == "range") {
-          broadcastCastToMap(
-            playersInMap,
-            currentPlayer.id,
-            packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
-          );
-
-          const resetPlayer = playerCache.get(currentPlayer.id);
-          if (resetPlayer && resetPlayer.spellCooldowns) {
-            delete resetPlayer.spellCooldowns[spell_id];
-            cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
-            playerCache.set(resetPlayer.id, resetPlayer);
-          }
-          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "range" } as any);
-          return;
-        }
-
-        if (canAttack2?.reason == "direction") {
-          broadcastCastToMap(
-            playersInMap,
-            currentPlayer.id,
-            packetManager.castSpell({ id: currentPlayer.id, spell: 'failed', time: 1 })
-          );
-
-          const resetPlayer = playerCache.get(currentPlayer.id);
-          if (resetPlayer && resetPlayer.spellCooldowns) {
-            delete resetPlayer.spellCooldowns[spell_id];
-            cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
-            playerCache.set(resetPlayer.id, resetPlayer);
-          }
-          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "direction" } as any);
-          return;
-        }
-
-        // If canAttack validation failed for any other reason, abort
-        if (!canAttack2?.value) {
-          const resetPlayer = playerCache.get(currentPlayer.id);
-          if (resetPlayer && resetPlayer.spellCooldowns) {
-            delete resetPlayer.spellCooldowns[spell_id];
-            cooldownManager.deleteCooldown(resetPlayer.username, spell_id);
-            playerCache.set(resetPlayer.id, resetPlayer);
-          }
-          listener.emit(Events.SPELL_FAILED, { player: currentPlayer, target, spellName: spell.name, reason: "unknown" } as any);
-          return;
-        }
-
-        if (target.id !== currentPlayer.id) {
-          const liveParticleCache = await assetCache.get("particles") as Particle[] | null;
-          const resolvedParticles = resolveSpellParticles(spell, liveParticleCache);
-          playersInMap.forEach((player) => {
-            sendPacketBestEffort(
-              player.wt,
-              packetManager.projectile({
-                id: currentPlayer.id,
-                time: delay / 1000,
-                target_id: target.id,
-                spell: spell.name,
-                icon: getIconUrl(spell.icon),
-                entity: false,
-                particles: resolvedParticles,
-              })
-            );
-          });
-        }
-        await new Promise((resolve) => setTimeout(resolve, delay));
-
-        const attackerDamageBonus = currentPlayer.stats.stat_damage || 0;
-        let finalDamage: number;
-        let isCrit: boolean;
-        if (spell_damage < 0) {
-          // WoW-style heal: level roll + cast-time share of the damage stat,
-          // 150% on a crit. Negative = healing.
-          const heal = rollHeal(spell_damage, currentPlayer.stats, spell.cast_time);
-          finalDamage = -heal.amount;
-          isCrit = heal.isCrit;
-        } else {
-          const baseDamage = Math.floor(Math.random() * ((playerLevel - 1) * 3 + 1)) + spell_damage + (playerLevel - 1) * 2 + attackerDamageBonus;
-          const critDamage = currentPlayer.stats.stat_critical_damage || 0;
-          isCrit = Math.random() * 100 < (currentPlayer.stats.stat_critical_chance || 0);
-          finalDamage = isCrit ? Math.floor(baseDamage * (1 + critDamage / 100)) : baseDamage;
-        }
-
-        // Utility/effect-only spells (base damage 0) never deal damage and skip avoidance/armor
-        if (spell_damage === 0) finalDamage = 0;
-
-        log.debug(`[ATTACK] Damage calculation: spell=${spell_damage}, bonus=${attackerDamageBonus}, crit=${isCrit}, final=${finalDamage}`);
-
-        if (finalDamage > 0) {
-          const targetAvoidance = target.stats?.stat_avoidance || 0;
-          const avoidanceRoll = Math.random() * 100;
-          if (avoidanceRoll < targetAvoidance) {
-            finalDamage = 0;
-          }
-
-          if (finalDamage > 0) {
-            const targetArmor = target.stats?.stat_armor || 0;
-            const armorReduction = Math.min(targetArmor, 75) / 100;
-            finalDamage = Math.floor(finalDamage * (1 - armorReduction));
-          }
-        }
-
-        const finalManaCheck = playerCache.get(currentPlayer.id);
-        if (!finalManaCheck || (finalManaCheck.stats.stamina || 0) < actualManaCost) {
-
-          if (finalManaCheck && finalManaCheck.spellCooldowns) {
-            delete finalManaCheck.spellCooldowns[spell_id];
-            cooldownManager.deleteCooldown(finalManaCheck.username, spell_id);
-            playerCache.set(finalManaCheck.id, finalManaCheck);
-          }
-          return;
-        }
-
-        currentPlayer.stats.stamina = finalManaCheck.stats.stamina;
-        currentPlayer.stats.stamina -= actualManaCost;
-
-        if (currentPlayer.stats.stamina < 0) {
-          currentPlayer.stats.stamina = 0;
-        }
-
-        {
-          // Apply damage to player target
-          // Add if negative damage (healing) to current health, subtract positive damage
-          // Positive damage is first absorbed by absorbtion, remainder hits health
-          // Corpses awaiting release can neither be damaged further nor healed;
-          // only the release + revive flow changes their state.
-          if (target.isDead) {
-            return;
-          }
-          let damageToHealth = finalDamage;
-          if (finalDamage > 0) {
-            const absorbed = spellEffects.consumeBarrier(target, finalDamage);
-            damageToHealth = finalDamage - absorbed;
-            if (absorbed > 0) {
-              spellEffects.broadcastEffectsUpdate(target);
-            }
-          }
-          target.stats.health = Math.round(target.stats.health - damageToHealth);
-          if (finalDamage < 0) {
-            listener.emit(Events.PLAYER_HEALED, { caster: currentPlayer, target, amount: Math.abs(finalDamage), source: spell.name } as any);
-          }
-          listener.emit(Events.PLAYER_DAMAGED, { attacker: currentPlayer, target, damage: finalDamage, isCrit });
-
-          playerCache.set(currentPlayer.id, currentPlayer);
-
-          if (target.stats.health > target.stats.total_max_health) {
-            target.stats.health = target.stats.total_max_health;
-          }
-
-          if (target.stats.health <= 0) {
-
-          await handlePlayerDeath(target, currentPlayer, { damage: finalDamage, isCrit });
-        } else {
-
-          const broadcastStats = (p: any) => {
-            const pls = filterPlayersByMap(p.location.map).filter((pl: any) => {
-              if (pl.id === p.id) return true;
-              if (p.isVanished && !pl.isAdmin && !pl.party?.includes(p.username)) return false;
-              return true;
-            });
-            pls.forEach((pl: any) =>
-              sendPacket(pl.wt, packetManager.updateStats({ id: p.id, target: p.id, stats: p.stats }))
-            );
-            sendStatsToPartyMembers(p.username, p.id, p.stats);
-          };
-          const broadcastEffects = (p: any) => {
-            spellEffects.broadcastEffectsUpdate(p);
-          };
-          // If the attack was dodged (spell deals damage but 0 got through), skip effects
-          let effectResult: any = {};
-          if (!(spell_damage > 0 && finalDamage === 0)) {
-            effectResult = await spellEffects.applySpellEffects(spell, currentPlayer, target, broadcastStats, broadcastEffects);
-          }
-
-          // Vanish despawn - must happen in receiver, same pattern as admin stealth
-          if (Array.isArray(spell.effects) && spell.effects.some((e: SpellEffect) => e.type === "vanish") && target.isVanished) {
-            playersInMap.forEach((player) => {
-              if (player.id === target.id) return;
-              if (player.isAdmin) return;
-              if (player.party?.includes(target.username)) return;
-              sendPacket(player.wt, packetManager.despawnPlayer(target.id));
-            });
-          }
-
-          // Utility spells (damage=0) don't show damage numbers
-          if (spell_damage !== 0) {
-          broadcastStatsUpdateToAOI(
-            target,
-            currentPlayer,
-            packetManager.updateStats({
-              id: wt.data.id,
-              target: target.id,
-              stats: target.stats,
-              isCrit: isCrit,
-              damage: finalDamage,
-              absorb: effectResult.absorb || 0,
-            })
-          );
-          }
-
-          // Always send caster's stats (mana change)
-          broadcastToAOIBestEffort(
-            currentPlayer,
-            packetManager.updateStats({
-              id: currentPlayer.id,
-              target: currentPlayer.id,
-              stats: currentPlayer.stats,
-            })
-          );
-
-          sendStatsToPartyMembers(target.username, target.id, target.stats);
-          sendStatsToPartyMembers(currentPlayer.username, currentPlayer.id, currentPlayer.stats);
-        }
-        }
-
-        // Update attacker stats regardless of target type
-        playerCache.set(currentPlayer.id, currentPlayer);
-
-        // Is not in the targets party and is not self, then set PvP flag on both
-        if (!isInParty && !isSelf) {
-          setPlayerPvp(currentPlayer, true);
-          setPlayerPvp(target, true);
-        }
-
-        currentPlayer.last_attack = performance.now();
-        target.last_attack = performance.now();
-
-        // Attacking breaks vanish (but not DoT ticks - this is a direct cast)
-        if (currentPlayer.isVanished && !isSelf && !isInParty) {
-          const vanishId = spellEffects.getVanishedEffectId(currentPlayer);
-          if (vanishId) {
-            cancelEffect(currentPlayer, vanishId);
-            spellEffects.broadcastEffectsUpdate(currentPlayer);
-          }
-        }
-        listener.emit(Events.SPELL_CAST, { player: currentPlayer, spellName: spell.name, target, isEntityTarget: false });
-
-        // AoE splash: apply damage and effects to all valid targets within aoe_radius
-        // of the primary target (excluding the primary target itself).
-        const aoeRadius = spell?.aoe_radius;
-        if (aoeRadius && aoeRadius > 0) {
-          const splashTargets: Array<{ target: any; distance: number }> = [];
-
-          // Collect nearby players
-          const allMapPlayers = filterPlayersByMap(currentPlayer.location.map);
-          for (const p of allMapPlayers) {
-            if (p.id === target.id) continue;
-            if (p.isGuest) continue;
-            // Ghosts cannot be damaged or healed.
-            if (p.isGhost) continue;
-            // An admin in stealth is out of the game for everyone else: no spell touches them.
-            if (p.isStealth) continue;
-            if (isInParty && currentPlayer?.party?.includes(p?.username)) continue;
-            const pPos = p.location?.position;
-            if (!pPos) continue;
-            const dist = Math.sqrt((pPos.x - targetX) ** 2 + (pPos.y - targetY) ** 2);
-            if (dist > aoeRadius) continue;
-            // The target passed player.canAttack; the players beside it are asked the same about no-PvP zones.
-            if ((spell_damage > 0 || spellIsHostileEffect) && !(await areaSpellHarms(currentPlayer.location.position, pPos, pvpAllowed))) continue;
-            splashTargets.push({ target: p, distance: dist });
-          }
-
-          // Creatures near the target take the splash too.
-          splashCreatures(currentPlayer, spell, targetX, targetY, aoeRadius, null);
-
-          for (const splash of splashTargets) {
-            const splashTarget = splash.target;
-
-            // AoE damage: independent roll per target (same formula as primary)
-            // Heals: WoW-style roll (negative = healing); damage: level roll + damage stat.
-            let splashDmg = spell_damage < 0
-              ? -rollHeal(spell_damage, currentPlayer.stats, spell.cast_time).amount
-              : Math.floor(Math.random() * ((playerLevel - 1) * 3 + 1)) + spell_damage + (playerLevel - 1) * 2 + attackerDamageBonus;
-            if (spell_damage === 0) splashDmg = 0;
-
-            if (splashDmg > 0) {
-              const splashAvoid = splashTarget.stats?.stat_avoidance || 0;
-              if (Math.random() * 100 < splashAvoid) splashDmg = 0;
-              if (splashDmg > 0) {
-                const splashArmor = splashTarget.stats?.stat_armor || 0;
-                splashDmg = Math.floor(splashDmg * (1 - Math.min(splashArmor, 75) / 100));
-              }
-            }
-
-            {
-              let splashToHealth = splashDmg;
-              if (splashDmg > 0) {
-                const absorbed = spellEffects.consumeBarrier(splashTarget, splashDmg);
-                splashToHealth = splashDmg - absorbed;
-                if (absorbed > 0) spellEffects.broadcastEffectsUpdate(splashTarget);
-              }
-              splashTarget.stats.health = Math.round(splashTarget.stats.health - splashToHealth);
-              listener.emit(Events.PLAYER_DAMAGED, { attacker: currentPlayer, target: splashTarget, damage: splashDmg, isCrit: false });
-
-              if (splashTarget.stats.health <= 0) {
-                await handlePlayerDeath(splashTarget, currentPlayer, { damage: splashDmg, isCrit: false });
-              } else {
-                await spellEffects.applySpellEffects(spell, currentPlayer, splashTarget,
-                  (p: any) => {
-                    const pls = filterPlayersByMap(p.location.map);
-                    pls.forEach((pl: any) => sendPacket(pl.wt, packetManager.updateStats({ id: p.id, target: p.id, stats: p.stats })));
-                  },
-                  (p: any) => spellEffects.broadcastEffectsUpdate(p)
-                );
-
-                broadcastStatsUpdateToAOI(
-                  splashTarget,
-                  currentPlayer,
-                  packetManager.updateStats({
-                    id: wt.data.id,
-                    target: splashTarget.id,
-                    stats: splashTarget.stats,
-                    isCrit: false,
-                    damage: splashDmg,
-                  })
-                );
-              }
-
-              if (!isInParty) {
-                setPlayerPvp(currentPlayer, true);
-                setPlayerPvp(splashTarget, true);
-                splashTarget.last_attack = performance.now();
-              }
-            }
-          }
-        }
-
-        break;
-      }
-      case "CANCEL_SPELL": {
-        if (!currentPlayer) return;
-
-        // Only process if actually casting
-        if (!currentPlayer.casting) return;
-
-        // Treat ESC cancel as spell interruption
-        const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-        broadcastCastToMap(
-          playersInMap,
-          currentPlayer.id,
-          packetManager.castSpell({ id: currentPlayer.id, spell: 'interrupted', time: 1 })
-        );
-        playersInMap.forEach((player) => {
-          sendPacket(
-            player.wt,
-            packetManager.groundAoeDespawn({ id: currentPlayer.id + "_casting" })
-          );
-        });
-
-        globalStateRevision++;
-        await sendPositionAnimation(
-          wt,
-          currentPlayer.location.position?.direction || "down",
-          currentPlayer.moving || false,
-          currentPlayer.mounted,
-          currentPlayer.mount_type || "unicorn",
-          undefined,
-          globalStateRevision,
-          false
-        );
-
-        // Mark this as a manual cancel (not a movement interrupt)
-        // Don't set lastInterruptTime to allow immediate recast
-        currentPlayer.casting = false;
-        currentPlayer.castId = (currentPlayer.castId || 0) + 1;
-        currentPlayer.manualSpellCancel = performance.now();
-
-        if (currentPlayer.castingSpellId && currentPlayer.spellCooldowns) {
-          delete currentPlayer.spellCooldowns[currentPlayer.castingSpellId];
-          cooldownManager.deleteCooldown(currentPlayer.username, currentPlayer.castingSpellId);
-          currentPlayer.castingSpellId = undefined;
-        }
-
-        // Also update in playerCache so spell execution can detect it
-        const cachedPlayer = playerCache.get(currentPlayer.id);
-        if (cachedPlayer) {
-          cachedPlayer.casting = false;
-          cachedPlayer.castId = currentPlayer.castId;
-          cachedPlayer.manualSpellCancel = performance.now();
-          if (cachedPlayer.castingSpellId && cachedPlayer.spellCooldowns) {
-            delete cachedPlayer.spellCooldowns[cachedPlayer.castingSpellId];
-            cachedPlayer.castingSpellId = undefined;
-          }
-          playerCache.set(cachedPlayer.id, cachedPlayer);
-        }
-
-        log.debug(`[SPELL] Player ${currentPlayer.username} cancelled spell via ESC`);
-        listener.emit(Events.SPELL_INTERRUPTED, { player: currentPlayer });
-        break;
-      }
-      case "CANCEL_EFFECT": {
-        if (!currentPlayer) return;
-        const effectId = (data as any)?.id;
-        if (!effectId) return;
-        const removed = spellEffects.cancelEffect(currentPlayer, effectId);
-        if (removed) {
-          spellEffects.broadcastEffectsUpdate(currentPlayer);
-          broadcastToAOIBestEffort(
-            currentPlayer,
-            packetManager.updateStats({ id: currentPlayer.id, target: currentPlayer.id, stats: currentPlayer.stats })
-          );
-        }
-        break;
-      }
-      case "NPC_INTERACT": {
-        if (!currentPlayer) return;
-        if (currentPlayer.isDead || currentPlayer.isGhost) return;
-        if (isQuestRateLimited(`npc:${wt.data.id}`)) return;
-        const npcId = Number((data as any)?.npcId ?? (data as any)?.id);
-        if (!Number.isFinite(npcId)) return;
-        const npcsData = ((await assetCache.get("npcs")) || []) as Npc[];
-        const npc = npcsData.find((n) => Number(n.id) === npcId);
-        if (!npc || npc.hidden) return;
-        const playerMap = String(currentPlayer.location.map ?? "").replaceAll(".json", "");
-        if (String(npc.map ?? "").replaceAll(".json", "") !== playerMap) return;
-        const pos = currentPlayer.location.position;
-        if (!pos) return;
-        const dist = Math.hypot(Number(pos.x) - Number(npc.position.x), Number(pos.y) - Number(npc.position.y));
-        if (dist > NPC_INTERACT_RADIUS) {
-          sendPacket(wt, packetManager.questError({ code: "too_far", message: "You are too far from that NPC." }));
-          break;
-        }
-        // Talk objectives credit on interaction, before the offer list is built.
-        try {
-          const talkUpdates = await creditObjective(currentPlayer.username, "talk", String(npcId), 1);
-          if (talkUpdates.length > 0) {
-            const byQuest = new Map<number, ObjectiveUpdate[]>();
-            for (const u of talkUpdates) {
-              const list = byQuest.get(u.questId) || [];
-              list.push(u);
-              byQuest.set(u.questId, list);
-            }
-            for (const [questId, questUpdates] of byQuest) {
-              sendPacket(wt, packetManager.questProgress({ questId, updates: questUpdates }));
-            }
-            await sendQuestMarkersFor(wt, currentPlayer.username, playerMap);
-          }
-        } catch {
-          // Talk credit is best-effort.
-        }
-        const offers = await questLogApi.offersFor(currentPlayer.username, npcId);
-        // Locked quests (level-gated, prerequisite-locked) are hidden from
-        // the player, so they must not count toward the skip-the-menu
-        // decision: one visible quest opens its frame directly.
-        const visibleOffers = offers.filter(
-          (o) => !(o.marker === "available_future" && (o.reason === "level_too_low" || o.reason === "missing_prerequisite"))
-        );
-        // An NPC with something in stock is a vendor. With no quest to talk about, talking to it opens
-        // its goods; with quests, they are listed and the goods are one more line under them.
-        const sells = vendors.isVendor(npc);
-        // An innkeeper's inn can be made the player's home: a line of its own, so talking to one always lists what it offers.
-        const keepsInn = isInnkeeper(npc);
-        if (visibleOffers.length === 0) {
-          if (sells && !keepsInn) {
-            const vendor = await vendorFor(wt, currentPlayer, npcId);
-            if (vendor) await sendVendorStock(wt, currentPlayer, vendor);
-            break;
-          }
-          sendPacket(
-            wt,
-            packetManager.npcGossip({ npcId, name: npc.name || null, gossipText: npc.dialog || null, quests: [], vendor: sells, innkeeper: keepsInn })
-          );
-          break;
-        }
-        if (visibleOffers.length === 1 && !sells && !keepsInn) {
-          const offer = visibleOffers[0]!;
-          const quest = questDefinitions.find(offer.questId);
-          if (!quest) break;
-          if (offer.action === "offer") {
-            const eligibility = await questLogApi.eligibility(currentPlayer.username, quest.id);
-            sendPacket(
-              wt,
-              packetManager.questOffer({ npcId, quest, canAccept: eligibility === "available", reason: eligibility })
-            );
-          } else if (offer.action === "incomplete") {
-            const cached = questLogApi.getCachedLog(currentPlayer.username);
-            const entry = cached?.active.find((e) => e.quest_id === quest.id);
-            const progress: ObjectiveUpdate[] = (quest.objectives || []).map((o) => ({
-              questId: quest.id,
-              objectiveId: o.id,
-              type: o.type,
-              target: o.target,
-              count: Math.min(Number(entry?.progress[o.id]) || 0, o.required_count),
-              required: o.required_count,
-              questReady: false,
-            }));
-            sendPacket(wt, packetManager.questIncomplete({ npcId, quest, progress }));
-          } else {
-            sendPacket(wt, packetManager.questTurnInOffer({ npcId, quest }));
-          }
-          break;
-        }
-        sendPacket(
-          wt,
-          packetManager.npcGossip({ npcId, name: npc.name || null, gossipText: npc.dialog || null, quests: offers, vendor: sells, innkeeper: keepsInn })
-        );
-        break;
-      }
-      case "VENDOR_OPEN": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "vendor")) return;
-        if (isQuestRateLimited(`npc:${wt.data.id}`)) return;
-        const vendor = await vendorFor(wt, currentPlayer, (data as any)?.npcId);
-        if (vendor) await sendVendorStock(wt, currentPlayer, vendor);
-        break;
-      }
-      case "VENDOR_BUY": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "vendor")) return;
-        const vendor = await vendorFor(wt, currentPlayer, (data as any)?.npcId);
-        if (!vendor) break;
-        const bought = await vendors.buy(currentPlayer.username, vendor, String((data as any)?.item ?? ""), (data as any)?.quantity ?? 1);
-        await sendVendorAnswer(wt, currentPlayer, vendor, bought, Events.VENDOR_BUY);
-        break;
-      }
-      case "VENDOR_SELL": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "vendor")) return;
-        const vendor = await vendorFor(wt, currentPlayer, (data as any)?.npcId);
-        if (!vendor) break;
-        // No amount is all of it that is spare.
-        const sold = await vendors.sell(currentPlayer.username, String((data as any)?.item ?? ""), (data as any)?.quantity ?? undefined);
-        await sendVendorAnswer(wt, currentPlayer, vendor, sold, Events.VENDOR_SELL);
-        break;
-      }
-      case "VENDOR_BUYBACK": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "vendor")) return;
-        const vendor = await vendorFor(wt, currentPlayer, (data as any)?.npcId);
-        if (!vendor) break;
-        const returned = await vendors.buyback(currentPlayer.username, (data as any)?.index);
-        await sendVendorAnswer(wt, currentPlayer, vendor, returned, Events.VENDOR_BUY);
-        break;
-      }
-      case "USE_ITEM": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "use_item")) return;
-        // The stats the server holds are the ones a use restores.
-        const user = playerCache.get(currentPlayer.id) || currentPlayer;
-        const used = await consumables.use(user, (data as any)?.item, { trading: !!trades.of(currentPlayer.username) });
-        if (!used.ok) {
-          sendPacket(wt, packetManager.notify({ message: used.message }));
-          break;
-        }
-        if (used.kind === "home") {
-          await castHome(currentPlayer, used.item);
-          break;
-        }
-        currentPlayer.stats = user.stats;
-        playerCache.set(user.id, user);
-        await sendBelongingsOf(user);
-        // Shown to everyone near as a heal is, when it healed.
-        const healed = used.health > 0 ? { isCrit: false, damage: -used.health } : {};
-        broadcastToAOIBestEffort(user, packetManager.updateStats({ id: user.id, target: user.id, stats: user.stats, ...healed }));
-        sendStatsToPartyMembers(user.username, user.id, user.stats);
-        sendPacket(wt, packetManager.itemCooldown({ kind: "consumable", remaining: used.cooldown, total: CONSUMABLE_COOLDOWN_MS }));
-        if (used.health > 0) listener.emit(Events.PLAYER_HEALED, { caster: user, target: user, amount: used.health, source: used.item } as any);
-        listener.emit(Events.ITEM_USED, { player: user, item: used.item, health: used.health, stamina: used.stamina, home: null });
-        break;
-      }
-      case "SET_HOME": {
-        if (!currentPlayer) return;
-        if (isQuestRateLimited(`npc:${wt.data.id}`)) return;
-        const npcId = Number((data as any)?.npcId);
-        const innkeeper = (((await assetCache.get("npcs")) || []) as Npc[]).find((held) => Number(held.id) === npcId);
-        const reason = cannotSetHome(currentPlayer, innkeeper);
-        if (reason) {
-          sendPacket(wt, packetManager.notify({ message: reason }));
-          break;
-        }
-        try {
-          await homes.set(currentPlayer, innkeeper!);
-        } catch (error) {
-          log.error(`The home of ${currentPlayer.username} could not be set: ${error}`);
-          sendPacket(wt, packetManager.notify({ message: "Your home could not be set. Nothing changed." }));
-          break;
-        }
-        sendPacket(wt, packetManager.notify({ message: "You have updated your home location" }));
-        listener.emit(Events.HOME_SET, { player: currentPlayer, npcId, inn: innkeeper!.name || null });
-        break;
-      }
-      case "QUEST_SELECT": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "quests")) return;
-        if (isQuestRateLimited(`qs:${wt.data.id}`)) return;
-        const npcId = Number((data as any)?.npcId);
-        const questId = Number((data as any)?.questId);
-        if (!Number.isFinite(npcId) || !Number.isFinite(questId)) return;
-        const npcsData = ((await assetCache.get("npcs")) || []) as Npc[];
-        const npc = npcsData.find((n) => Number(n.id) === npcId);
-        if (!npc || npc.hidden) return;
-        const playerMap = String(currentPlayer.location.map ?? "").replaceAll(".json", "");
-        if (String(npc.map ?? "").replaceAll(".json", "") !== playerMap) return;
-        const pos = currentPlayer.location.position;
-        if (!pos) return;
-        if (Math.hypot(Number(pos.x) - Number(npc.position.x), Number(pos.y) - Number(npc.position.y)) > NPC_INTERACT_RADIUS) {
-          sendPacket(wt, packetManager.questError({ code: "too_far", message: "You are too far from that NPC." }));
-          break;
-        }
-        const offers = await questLogApi.offersFor(currentPlayer.username, npcId);
-        const offer = offers.find((o) => o.questId === questId);
-        if (!offer) return;
-        const quest = questDefinitions.find(questId);
-        if (!quest) return;
-        if (offer.action === "offer") {
-          const eligibility = await questLogApi.eligibility(currentPlayer.username, quest.id);
-          sendPacket(
-            wt,
-            packetManager.questOffer({ npcId, quest, canAccept: eligibility === "available", reason: eligibility })
-          );
-        } else if (offer.action === "incomplete") {
-          const cached = questLogApi.getCachedLog(currentPlayer.username);
-          const entry = cached?.active.find((e) => e.quest_id === quest.id);
-          const progress: ObjectiveUpdate[] = (quest.objectives || []).map((o) => ({
-            questId: quest.id,
-            objectiveId: o.id,
-            type: o.type,
-            target: o.target,
-            count: Math.min(Number(entry?.progress[o.id]) || 0, o.required_count),
-            required: o.required_count,
-            questReady: false,
-          }));
-          sendPacket(wt, packetManager.questIncomplete({ npcId, quest, progress }));
-        } else {
-          sendPacket(wt, packetManager.questTurnInOffer({ npcId, quest }));
-        }
-        break;
-      }
-      case "QUEST_ACCEPT": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "quests")) return;
-        if (isQuestRateLimited(`qa:${wt.data.id}`)) return;
-        const npcId = Number((data as any)?.npcId);
-        const questId = Number((data as any)?.questId);
-        if (!Number.isFinite(npcId) || !Number.isFinite(questId)) return;
-        // Never trust a client-supplied quest id without checking range.
-        const npcsData = ((await assetCache.get("npcs")) || []) as Npc[];
-        const npc = npcsData.find((n) => Number(n.id) === npcId);
-        if (!npc) return;
-        const playerMap = String(currentPlayer.location.map ?? "").replaceAll(".json", "");
-        if (String(npc.map ?? "").replaceAll(".json", "") !== playerMap) return;
-        const pos = currentPlayer.location.position;
-        if (!pos) return;
-        if (Math.hypot(Number(pos.x) - Number(npc.position.x), Number(pos.y) - Number(npc.position.y)) > NPC_INTERACT_RADIUS) {
-          sendPacket(wt, packetManager.questError({ code: "too_far", message: "You are too far from that NPC." }));
-          break;
-        }
-        const result = await questLogApi.accept(currentPlayer.username, questId, npcId);
-        if (!result.ok || !result.entry || !result.quest) {
-          sendPacket(wt, packetManager.questError({ code: result.code || "ineligible", message: result.error || "You cannot accept that quest." }));
-          break;
-        }
-        sendPacket(wt, packetManager.questLogEntry({ entry: result.entry, quest: result.quest }));
-        // The accept backfill may have credited collect/explore immediately.
-        const backfilled: ObjectiveUpdate[] = (result.quest.objectives || [])
-          .filter((o) => (Number(result.entry!.progress[o.id]) || 0) > 0)
-          .map((o) => ({
-            questId: result.quest!.id,
-            objectiveId: o.id,
-            type: o.type,
-            target: o.target,
-            count: Number(result.entry!.progress[o.id]) || 0,
-            required: o.required_count,
-            questReady: result.entry!.state === "ready",
-          }));
-        if (backfilled.length > 0) {
-          sendPacket(wt, packetManager.questProgress({ questId: result.quest.id, updates: backfilled }));
-        }
-        await sendQuestMarkersFor(wt, currentPlayer.username, currentPlayer.location.map);
-        break;
-      }
-      case "QUEST_DECLINE": {
-        // Closes the frame client-side. No state change; exists so packet
-        // interceptors and plugins can observe it.
-        break;
-      }
-      case "QUEST_ABANDON": {
-        if (!currentPlayer) return;
-        if (isQuestRateLimited(`qab:${wt.data.id}`)) return;
-        const questId = Number((data as any)?.questId);
-        if (!Number.isFinite(questId)) return;
-        const cached = questLogApi.getCachedLog(currentPlayer.username);
-        const entry = cached?.active.find((e) => e.quest_id === questId);
-        if (!entry) {
-          sendPacket(wt, packetManager.questError({ code: "not_active", message: "That quest is not in your log." }));
-          break;
-        }
-        const quest = questDefinitions.find(questId);
-        await questLogApi.abandon(currentPlayer.username, questId);
-        // Still in the log: the abandon could not be written, so the quest is not gone.
-        if (questLogApi.getCachedLog(currentPlayer.username)?.active.some((e) => e.quest_id === questId)) {
-          sendPacket(wt, packetManager.questError({ code: "db_error", message: "Could not abandon the quest." }));
-          break;
-        }
-        if (quest) {
-          sendPacket(wt, packetManager.questLogEntry({ entry: null, quest, removed: true }));
-        }
-        await sendQuestMarkersFor(wt, currentPlayer.username, currentPlayer.location.map);
-        break;
-      }
-      case "QUEST_TURN_IN": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "quests")) return;
-        if (isQuestRateLimited(`qt:${wt.data.id}`)) return;
-        const npcId = Number((data as any)?.npcId);
-        const questId = Number((data as any)?.questId);
-        const rewardChoiceIndex = (data as any)?.rewardChoiceIndex;
-        if (!Number.isFinite(npcId) || !Number.isFinite(questId)) return;
-        // Range check before anything else; never trust client-supplied ids.
-        const npcsData = ((await assetCache.get("npcs")) || []) as Npc[];
-        const npc = npcsData.find((n) => Number(n.id) === npcId);
-        if (!npc) return;
-        const playerMap = String(currentPlayer.location.map ?? "").replaceAll(".json", "");
-        if (String(npc.map ?? "").replaceAll(".json", "") !== playerMap) return;
-        const pos = currentPlayer.location.position;
-        if (!pos) return;
-        if (Math.hypot(Number(pos.x) - Number(npc.position.x), Number(pos.y) - Number(npc.position.y)) > NPC_INTERACT_RADIUS) {
-          sendPacket(wt, packetManager.questError({ code: "too_far", message: "You are too far from that NPC." }));
-          break;
-        }
-        const result = await questLogApi.turnIn(currentPlayer.username, questId, npcId, rewardChoiceIndex);
-        if (!result.ok) {
-          sendPacket(
-            wt,
-            packetManager.questError({ code: result.code || "turnin_failed", message: result.error || "Could not turn in that quest." })
-          );
-          break;
-        }
-        const quest = questDefinitions.find(questId);
-        if (quest) {
-          sendPacket(wt, packetManager.questLogEntry({ entry: null, quest, removed: true }));
-        }
-        sendPacket(
-          wt,
-          packetManager.questCompleted({
-            questId: result.questId!,
-            xp: result.xp || 0,
-            copper: result.copper || 0,
-            items: result.items || [],
-            nextQuestId: result.nextQuestId ?? null,
-          })
-        );
-        // Sync the client with the granted rewards.
-        try {
-          currentPlayer.inventory = await patchInventoryBagSlots(await inventory.get(currentPlayer.username), currentPlayer.username);
-          playerCache.set(currentPlayer.id, currentPlayer);
-          sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
-        } catch {
-          // Best-effort.
-        }
-        try {
-          const balance = await currencySystem.get(currentPlayer.username);
-          currentPlayer.currency = balance;
-          playerCache.set(currentPlayer.id, currentPlayer);
-          sendPacket(wt, packetManager.currency(balance));
-        } catch {
-          // Best-effort.
-        }
-        try {
-          // Merge the fresh XP first: synchronizeStats rebuilds from the
-          // in-memory copy and would otherwise wipe the just-granted
-          // xp/level back to their pre-turn-in values (same pattern as the
-          // creature-kill XP path).
-          const levelBefore = Number(currentPlayer.stats?.level) || 1;
-          const xpResult = result.xpResult;
-          if (xpResult) {
-            currentPlayer.stats.xp = xpResult.xp;
-            currentPlayer.stats.max_xp = xpResult.max_xp;
-            currentPlayer.stats.level = xpResult.level;
-          }
-          const leveled = !!xpResult && xpResult.level > levelBefore;
-          if (leveled) {
-            currentPlayer.stats.max_health = player.getMaxHealthForLevel(xpResult!.level);
-            currentPlayer.stats.max_stamina = player.getMaxStaminaForLevel(xpResult!.level);
-            const synced = await player.synchronizeStats(currentPlayer.username);
-            if (synced) currentPlayer.stats = synced;
-            currentPlayer.stats.health = currentPlayer.stats.total_max_health ?? currentPlayer.stats.max_health;
-            currentPlayer.stats.stamina = currentPlayer.stats.total_max_stamina ?? currentPlayer.stats.max_stamina;
-          } else {
-            const syncedStats = await player.synchronizeStats(currentPlayer.username);
-            if (syncedStats) currentPlayer.stats = syncedStats;
-          }
-          playerCache.set(currentPlayer.id, currentPlayer);
-          // XP bar: UPDATESTATS handlers only merge health/mana, so push the
-          // dedicated XP packet too.
-          if (xpResult) {
-            sendPacket(
-              wt,
-              packetManager.updateXp({ id: currentPlayer.id, xp: xpResult.xp, level: xpResult.level, max_xp: xpResult.max_xp })
-            );
-          }
-          const statsPacket = packetManager.updateStats({ id: currentPlayer.id, target: currentPlayer.id, stats: currentPlayer.stats });
-          if (leveled) {
-            broadcastToAOI(currentPlayer, statsPacket);
-            listener.emit(Events.PLAYER_LEVEL_UP, { player: currentPlayer, level: xpResult!.level });
-          } else {
-            sendPacket(wt, statsPacket);
-          }
-        } catch {
-          // Best-effort.
-        }
-        await sendQuestMarkersFor(wt, currentPlayer.username, currentPlayer.location.map);
-        break;
-      }
-      case "TOGGLE_QUEST_EDITOR":
-      case "QUEST_EDITOR_DATA":
-      case "QUEST_EDITOR_SEARCH":
-      case "QUEST_EDITOR_SAVE":
-      case "QUEST_EDITOR_DELETE": {
-        if (!currentPlayer) return;
-        if (!questEditor.canUseEditor(currentPlayer)) {
-          sendPacket(wt, packetManager.notify({ message: "You do not have permission to use the quest editor." }));
-          break;
-        }
-        const outcome = await questEditor.handleEditorPacket(type, data);
-        if (outcome.kind === "data") {
-          sendPacket(wt, packetManager.questEditorData(outcome.data));
-        } else if (outcome.kind === "search") {
-          sendPacket(wt, packetManager.questEditorResults(outcome.data));
-        } else {
-          sendPacket(wt, packetManager.questEditorResult({ ok: outcome.ok, errors: outcome.errors, id: outcome.id }));
-          if (outcome.ok && (type === "QUEST_EDITOR_SAVE" || type === "QUEST_EDITOR_DELETE")) {
-            const viewers = Object.values(playerCache.list() as Record<string, any>).filter(
-              (p) => p?.wt?.readyState === 1 && questEditor.canUseEditor(p)
-            );
-            for (const viewer of viewers) {
-              if (viewer.id !== wt.data.id) {
-                sendPacket(viewer.wt, packetManager.questEditorUpdated({ by: currentPlayer.username }));
-              }
-            }
-          }
-        }
-        break;
-      }
-      case "QUEST_EDITOR_CLOSE": {
-        break;
-      }
-      case "STOPTYPING": {
-        if (!currentPlayer || currentPlayer.isGuest) return;
-        let playersInMap = filterPlayersByMap(currentPlayer.location.map);
-        const stopTypingData = {
-          id: wt.data.id,
-        };
-        if (currentPlayer.isStealth) {
-          playersInMap = playersInMap.filter((p) => p.isAdmin);
-        }
-        playersInMap.forEach((player) => {
-          sendPacketBestEffort(player.wt, packetManager.stopTyping(stopTypingData));
-        });
-        break;
-      }
-      case "CREATE_MAP": {
-        // The map editor's New map (systems/mapcreate.ts): made blank on the asset server, taken in here, then the
-        // admin who asked is warped onto it (where /warp would put them: a world's spawn, a map's middle)
-        if (!currentPlayer) return;
-        const refuse = (message: string) => {
-          sendPacket(wt, packetManager.notify({ message }));
-          sendPacket(wt, packetManager.createMapFailed({ message }));
-        };
-        const userPermissions = await permissions.get(currentPlayer.username) as string;
-        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
-        if (!mayCreateMaps(perms)) {
-          refuse("You do not have permission to create maps.");
-          return;
-        }
-        const read = readCreateMap(data);
-        if ("error" in read) {
-          refuse(read.error);
-          return;
-        }
-        const request = read.request;
-        if ((maps as any[]).some((m: MapData) => m.name === `${request.name}.json`)) {
-          refuse(`A map named ${request.name} already exists.`);
-          return;
-        }
-        try {
-          const made = await requestCreateMap(request);
-          await addCreatedMap(request.name, made.kind, made.data);
-          log.info(`Map ${request.name} created by ${currentPlayer.username} (${request.kind}, ${request.width} x ${request.height} tiles${request.infinite ? ", infinite" : ""})`);
-        } catch (error: any) {
-          log.error(`Error creating map ${request.name}: ${error.message}`);
-          refuse(`Error creating the map: ${error.message}`);
-          return;
-        }
-        const props = mapPropertiesCache.find((m: any) => m.name === `${request.name}.json`);
-        const arrival = {
-          x: props?.spawn ? props.spawn.x : props ? (props.width * props.tileWidth) / 2 : 0,
-          y: props?.spawn ? props.spawn.y : props ? (props.height * props.tileHeight) / 2 : 0,
-          direction: currentPlayer.location.position?.direction || "down",
-        };
-        const moved = await player.setLocation(currentPlayer.id, request.name, arrival);
-        if (moved && typeof moved === "object" && "affectedRows" in moved && ((moved as { affectedRows: number | null; count?: number }).affectedRows ?? (moved as { count?: number }).count) != 0) {
-          await transitionPlayerToMap(currentPlayer, request.name, arrival, wt, spawnBatchQueue, despawnBatchQueue);
-          sendPacket(wt, packetManager.notify({ message: `Map ${request.name} created.` }));
-        } else {
-          refuse(`Map ${request.name} was created, but you could not be moved there. Use /warp ${request.name}.`);
-        }
-        break;
-      }
-      case "SAVE_TILE_SOUNDS": {
-        // The map editor's Sounds tab (systems/tilesounds.ts): kept on the asset server, then sent to everyone online
-        if (!currentPlayer) return;
-        const userPermissions = await permissions.get(currentPlayer.username) as string;
-        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
-        if (!mayEditTileSounds(perms)) {
-          sendPacket(wt, packetManager.notify({ message: "You do not have permission to change tile sounds." }));
-          return;
-        }
-        const read = readTileSoundChanges(data);
-        if ("error" in read) {
-          sendPacket(wt, packetManager.notify({ message: read.error }));
-          return;
-        }
-        try {
-          const tilesets = await saveTileSounds(read.changes);
-          log.info(`Tile sounds saved by ${currentPlayer.username}: ${read.changes.reduce((n, c) => n + c.ids.length, 0)} tiles`);
-          for (const online of Object.values(playerCache.list()) as any[]) {
-            if (online?.wt) sendPacket(online.wt, packetManager.tileSounds({ tilesets }));
-          }
-        } catch (error: any) {
-          log.error(`Error saving tile sounds: ${error.message}`);
-          sendPacket(wt, packetManager.notify({ message: `Error saving tile sounds: ${error.message}` }));
-        }
-        break;
-      }
-      case "SAVE_TILE_FOOTPRINTS": {
-        // The map editor's Footprints tab (systems/footprints.ts): kept in tile_footprints, then sent to everyone online
-        if (!currentPlayer) return;
-        const userPermissions = await permissions.get(currentPlayer.username) as string;
-        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
-        if (!footprints.mayEditFootprints(perms)) {
-          sendPacket(wt, packetManager.notify({ message: "You do not have permission to change tile footprints." }));
-          return;
-        }
-        const read = footprints.readFootprintChanges(data);
-        if ("error" in read) {
-          sendPacket(wt, packetManager.notify({ message: read.error }));
-          return;
-        }
-        try {
-          const tilesets = await footprints.saveFootprints(read.changes);
-          log.info(`Tile footprints saved by ${currentPlayer.username}: ${read.changes.reduce((n, c) => n + c.ids.length, 0)} tiles`);
-          for (const online of Object.values(playerCache.list()) as any[]) {
-            if (online?.wt) sendPacket(online.wt, packetManager.tileFootprints({ tilesets }));
-          }
-        } catch (error: any) {
-          log.error(`Error saving tile footprints: ${error.message}`);
-          sendPacket(wt, packetManager.notify({ message: `Error saving tile footprints: ${error.message}` }));
-        }
-        break;
-      }
-      case "SAVE_MAP": {
-        if (!currentPlayer) return;
-
-        const userPermissions = await permissions.get(currentPlayer.username) as string;
-        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
-        const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
-
-        if (!hasPermission) {
-          sendPacket(wt, packetManager.notify({
-            message: 'You do not have permission to save map changes.'
-          }));
-          return;
-        }
-
-        const saveData = data as unknown as { mapName: string, chunks: any[], graveyards?: any, warps?: any };
-
-        // A world (modules/worldmaps.ts) holds no tiles here: the asset server writes the edited chunks into the
-        // world's packs, then this server fetches the new collision and no-pvp bits. Its size is fixed, and its
-        // warps and graveyards come from the map generator.
-        if (typeof saveData?.mapName === "string" && getWorldMap(saveData.mapName)) {
-          const worldName = saveData.mapName.replace(".json", "");
-          try {
-            // As for any map, a list of graveyards or warps is saved only when it holds something
-            const hasChunks = Array.isArray(saveData.chunks) && saveData.chunks.length > 0;
-            const graveyards = Array.isArray(saveData.graveyards) && saveData.graveyards.length > 0 ? saveData.graveyards : undefined;
-            const warps = Array.isArray(saveData.warps) && saveData.warps.length > 0 ? saveData.warps : undefined;
-            if (!hasChunks && !graveyards && !warps) {
-              sendPacket(wt, packetManager.notify({ message: 'Nothing to save.' }));
-              break;
-            }
-            log.info(`World save requested by ${currentPlayer.username} for ${worldName}, ${hasChunks ? saveData.chunks.length : 0} chunks modified`);
-            const assetServerUrl = process.env.ASSET_SERVER_INTERNAL_URL || process.env.ASSET_SERVER_URL || "http://localhost:8081";
-            const post = async (route: string, body: Record<string, unknown>) => {
-              const response = await serverFetch(`${assetServerUrl}${route}`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ ...body, mapName: worldName, serverId: process.env.SERVER_ID || "game-server", authKey: process.env.ASSET_SERVER_AUTH_KEY || process.env.GATEWAY_AUTH_KEY })
-              });
-              const result = await response.json().catch(() => ({ error: response.statusText })) as any;
-              if (!response.ok || !result?.success) throw new Error(result?.error || `the asset server answered ${response.status}`);
-              return result;
-            };
-            let changed: { chunkX: number; chunkY: number }[] = [];
-            if (hasChunks) {
-              const result = await post("/save-map-chunks", { chunks: saveData.chunks });
-              changed = Array.isArray(result.changed) ? result.changed : [];
-            }
-            if (graveyards || warps) {
-              await post("/save-map-properties", { graveyards, warps });
-              // held here as for any map; movement reads the warps from its own cache, cleared below
-              const propsList = await assetCache.get("mapProperties");
-              const props = propsList?.find((m: any) => m.name === `${worldName}.json`);
-              const world = getWorldMap(worldName);
-              for (const target of [props, world?.properties]) {
-                if (!target) continue;
-                if (graveyards) target.graveyards = graveyards;
-                if (warps) target.warps = warps;
-              }
-              if (propsList) await assetCache.add("mapProperties", propsList);
-              clearMapCache(worldName);
-            }
-            if (changed.length > 0) fishing.forgetMap(worldName);
-            if (changed.length > 0 || graveyards || warps) await refreshWorldMap(worldName);
-
-            sendPacket(wt, packetManager.notify({
-              message: `Map saved successfully! ${changed.length} chunks updated.`
-            }));
-            // The saver already shows its edits: the others on the map fetch the changed chunks again
-            if (changed.length > 0) {
-              filterPlayersByMap(currentPlayer.location.map)
-                .filter((p) => p.id !== wt.data.id)
-                .forEach((player) => {
-                  sendPacket(player.wt, packetManager.updateChunks({ chunks: changed }));
-                });
-            }
-          } catch (error: any) {
-            log.error(`Error saving world ${worldName}: ${error.message}`);
-            sendPacket(wt, packetManager.notify({
-              message: `Error saving map changes: ${error.message}`
-            }));
-          }
-          editorEditHistory.delete(saveData.mapName);
-          break;
-        }
-
-        try {
-          log.info(`Map save requested by ${currentPlayer.username} for map: ${saveData.mapName}, ${saveData.chunks.length} chunks modified`);
-
-          // Forward chunks to asset server via HTTP
-          const assetServerUrl = process.env.ASSET_SERVER_INTERNAL_URL || process.env.ASSET_SERVER_URL || "http://localhost:8081";
-          const authKey = process.env.ASSET_SERVER_AUTH_KEY || process.env.GATEWAY_AUTH_KEY;
-
-          const response = await serverFetch(`${assetServerUrl}/save-map-chunks`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              mapName: saveData.mapName,
-              chunks: saveData.chunks,
-              bounds: (saveData as any).bounds,
-              authKey: authKey
-            })
-          });
-
-          if (!response.ok) {
-            const errorData = await response.json().catch(() => ({ error: response.statusText }));
-            throw new Error(errorData.error || `Failed to save chunks to asset server: ${response.status}`);
-          }
-
-          log.info(`Map chunks saved to asset server: ${saveData.mapName}`);
-
-          // Also sync graveyards and warps to asset server if present
-          if (saveData.graveyards || saveData.warps) {
-            try {
-              const syncResponse = await serverFetch(`${assetServerUrl}/save-map-properties`, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                  mapName: saveData.mapName,
-                  graveyards: saveData.graveyards,
-                  warps: saveData.warps,
-                  authKey: authKey
-                })
-              });
-
-              if (!syncResponse.ok) {
-                const syncErrorData = await syncResponse.json().catch(() => ({ error: syncResponse.statusText }));
-                log.warn(`Failed to sync graveyards/warps to asset server: ${syncErrorData.error || syncResponse.status}`);
-              } else {
-                log.info(`Map graveyards/warps synced to asset server: ${saveData.mapName}`);
-              }
-            } catch (syncError) {
-              log.warn(`Error syncing graveyards/warps to asset server: ${syncError}`);
-            }
-          }
-
-          // Save graveyards and warps to mapProperties
-          if (saveData.graveyards !== undefined || saveData.warps !== undefined) {
-            const mapPropertiesCache = await assetCache.get("mapProperties");
-            const mapPropsIndex = mapPropertiesCache.findIndex((m: any) => m.name === `${saveData.mapName.replace('.json', '')}.json`);
-
-            if (mapPropsIndex !== -1) {
-              if (saveData.graveyards !== undefined) {
-                mapPropertiesCache[mapPropsIndex].graveyards = saveData.graveyards;
-              }
-              if (saveData.warps !== undefined) {
-                mapPropertiesCache[mapPropsIndex].warps = saveData.warps;
-              }
-
-              try {
-                await assetCache.add("mapProperties", mapPropertiesCache);
-              } catch (propError) {
-                log.warn(`Failed to update mapProperties for ${saveData.mapName}: ${propError}`);
-              }
-            }
-          }
-
-          // Update local cache with the changes AND save to disk
-          const cachedMaps = (await assetCache.get("maps")) as MapData[];
-          const mapIndex = cachedMaps.findIndex((m: any) => m.name === saveData.mapName);
-          let rebaseResult: { shiftX: number; shiftY: number; width: number; height: number } | null = null;
-
-          if (mapIndex !== -1) {
-            // Update actual map layers with chunk data (growing / re-basing the
-            // origin for infinite-map expansion; empty expansion is trimmed away).
-            const mapData = cachedMaps[mapIndex].data;
-            rebaseResult = applyChunksWithRebase(mapData, saveData.chunks, (saveData as any).bounds);
-
-            // Update graveyards and warps in the map data
-            if (saveData.graveyards !== undefined) {
-              cachedMaps[mapIndex].data.graveyards = saveData.graveyards;
-            }
-            if (saveData.warps !== undefined) {
-              cachedMaps[mapIndex].data.warps = saveData.warps;
-            }
-
-            assetCache.add("maps", cachedMaps);
-
-            // Save graveyards and warps properties and reload the map
-            if (saveData.graveyards !== undefined || saveData.warps !== undefined) {
-              try {
-                log.debug(`[SAVE_MAP] Graveyards: ${saveData.graveyards ? `${saveData.graveyards.length} items` : 'undefined'}`);
-                log.debug(`[SAVE_MAP] Warps: ${saveData.warps ? `${saveData.warps.length} items` : 'undefined'}`);
-
-                // Only call saveMapProperties if there's actual data to save
-                if ((saveData.graveyards && saveData.graveyards.length > 0) || (saveData.warps && saveData.warps.length > 0)) {
-                  await saveMapProperties(saveData.mapName, saveData.graveyards, saveData.warps);
-
-                  // Reload the map to refresh mapProperties cache
-                  const { reloadMap: reloadMapFunc } = await import("../modules/assetloader");
-                  const reloadedMap = await reloadMapFunc(saveData.mapName);
-
-                  // Update the cached maps with the reloaded map
-                  const updatedMaps = cachedMaps;
-                  const mapIdx = updatedMaps.findIndex((m: any) => m.name === saveData.mapName);
-                  if (mapIdx !== -1) {
-                    updatedMaps[mapIdx] = reloadedMap;
-                    assetCache.add("maps", updatedMaps);
-                  }
-                } else {
-                  log.debug(`[SAVE_MAP] No graveyards or warps to save`);
-                }
-              } catch (propError) {
-                log.warn(`Failed to save/reload map properties: ${propError}`);
-              }
-            }
-
-          }
-
-          // Save chunks to disk locally so reloadMap reads fresh file
-          try {
-            await saveMapChunks(saveData.mapName, saveData.chunks, (saveData as any).bounds);
-          } catch (diskError) {
-            log.warn(`Failed to save chunks to disk locally: ${diskError}`);
-          }
-
-          // Refresh collision cache since collision layer may have been updated
-          try {
-            const { reloadMap } = await import("../modules/assetloader");
-            await reloadMap(saveData.mapName);
-            log.info(`Collision cache refreshed for ${saveData.mapName}`);
-            clearMapCache(saveData.mapName);
-          } catch (reloadError) {
-            log.warn(`Failed to reload map collision cache: ${reloadError}`);
-          }
-
-          sendPacket(wt, packetManager.notify({
-            message: `Map saved successfully! ${saveData.chunks.length} chunks updated.`
-          }));
-
-          // Propagate the save to everyone on the map. Bounds (incl. trimmed empty
-          // expansion) go to ALL players so the saver's view shrinks too; chunk
-          // refreshes go only to OTHER players.
-          const onMapPlayers = filterPlayersByMap(currentPlayer.location.map);
-          const updatedMapData = cachedMaps[mapIndex]?.data;
-          // Use the SERVER-computed shift (empty expansion is trimmed away, so the
-          // real shift may be 0 even if the client claimed a negative expansion) and
-          // the persisted dims (what a reload will show), so live matches reload.
-          const shiftTilesX = rebaseResult?.shiftX ?? 0;
-          const shiftTilesY = rebaseResult?.shiftY ?? 0;
-          const newMapWidth = updatedMapData?.width ?? rebaseResult?.width;
-          const newMapHeight = updatedMapData?.height ?? rebaseResult?.height;
-          const tw = updatedMapData?.tilewidth || 32;
-          const th = updatedMapData?.tileheight || 32;
-          const shiftPxX = shiftTilesX * tw;
-          const shiftPxY = shiftTilesY * th;
-
-          if (shiftTilesX > 0 || shiftTilesY > 0) {
-            // Left/up expansion re-based the origin to (0,0). Shift every on-map
-            // player's authoritative position and fully re-sync each client.
-            for (const p of onMapPlayers) {
-              if (p.location?.position) {
-                p.location.position.x = (Number(p.location.position.x) || 0) + shiftPxX;
-                p.location.position.y = (Number(p.location.position.y) || 0) + shiftPxY;
-                playerCache.set(p.id, p);
-              }
-            }
-            const rebasePayload = { shiftX: shiftPxX, shiftY: shiftPxY, width: newMapWidth, height: newMapHeight };
-            onMapPlayers.forEach((player) => {
-              sendPacket(player.wt, packetManager.mapRebase(rebasePayload));
-            });
-          } else {
-            // No re-base (grew or trimmed): update EVERYONE's bounds (shiftX/Y = 0 is
-            // a bounds-only update that drops trimmed-away chunks without re-fetching),
-            // and refresh the saved chunks for OTHER players only.
-            const boundsPayload = { shiftX: 0, shiftY: 0, width: newMapWidth, height: newMapHeight };
-            onMapPlayers.forEach((player) => {
-              sendPacket(player.wt, packetManager.mapRebase(boundsPayload));
-            });
-            const chunkCoords = saveData.chunks.map((chunk: any) => ({
-              chunkX: chunk.chunkX,
-              chunkY: chunk.chunkY
-            }));
-            onMapPlayers
-              .filter((p) => p.id !== wt.data.id)
-              .forEach((player) => {
-                sendPacket(player.wt, packetManager.updateChunks({ chunks: chunkCoords }));
-              });
-          }
-        } catch (error: any) {
-          log.error(`Error saving map: ${error.message}`);
-          sendPacket(wt, packetManager.notify({
-            message: 'Error saving map changes.'
-          }));
-        }
-
-        // Clear edit history for this map now that it's saved
-        if (saveData.mapName) {
-          editorEditHistory.delete(saveData.mapName);
-        }
-
-        break;
-      }
-      case "SAVE_PARTICLE": {
-        if (!currentPlayer) return;
-
-        const userPermissions = await permissions.get(currentPlayer.username) as string;
-        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
-        const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
-
-        if (!hasPermission) {
-          sendPacket(wt, packetManager.notify({
-            message: 'You do not have permission to save particles.'
-          }));
-          return;
-        }
-
-        try {
-          const particleData = data as unknown as Particle;
-
-          // Check if particle already exists
-          const existingParticles = await particles.list();
-          const particleExists = existingParticles.some(p => p.name === particleData.name);
-
-          if (particleExists) {
-            await particles.update(particleData);
-            log.info(`Particle updated by ${currentPlayer.username}: ${particleData.name}`);
-          } else {
-            await particles.add(particleData);
-            log.info(`Particle added by ${currentPlayer.username}: ${particleData.name}`);
-          }
-
-          // Reload particles cache from database to ensure consistency
-          const updatedParticles = await particles.list();
-          const updatedParticleData = updatedParticles.find(p => p.name === particleData.name);
-
-          // Broadcast particle update to all connected players
-          if (updatedParticleData) {
-            const updatePacket = packetManager.particleUpdated(updatedParticleData);
-            const allPlayers = playerCache.list();
-            for (const playerId in allPlayers) {
-              const player = allPlayers[playerId];
-              if (player.wt && player.wt.readyState === 1) { // readyState 1 = OPEN
-                sendPacket(player.wt, updatePacket);
-              }
-            }
-          }
-
-          sendPacket(wt, packetManager.notify({
-            message: 'Particle saved successfully'
-          }));
-        } catch (error: any) {
-          log.error(`Error saving particle: ${error.message}`);
-          sendPacket(wt, packetManager.notify({
-            message: 'Error saving particle.'
-          }));
-        }
-        break;
-      }
-      case "DELETE_PARTICLE": {
-        if (!currentPlayer) return;
-
-        const userPermissions = await permissions.get(currentPlayer.username) as string;
-        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
-        const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
-
-        if (!hasPermission) {
-          sendPacket(wt, packetManager.notify({
-            message: 'You do not have permission to delete particles.'
-          }));
-          return;
-        }
-
-        try {
-          const { name } = data as unknown as { name: string };
-          await particles.remove({ name } as any);
-          log.info(`Particle deleted by ${currentPlayer.username}: ${name}`);
-
-          sendPacket(wt, packetManager.notify({
-            message: 'Particle deleted successfully'
-          }));
-        } catch (error: any) {
-          log.error(`Error deleting particle: ${error.message}`);
-          sendPacket(wt, packetManager.notify({
-            message: 'Error deleting particle.'
-          }));
-        }
-        break;
-      }
-      // Renames a particle and every NPC / spell / mount reference to it (particles.rename), and the in-memory lists
-      // of the maps' particle NPCs (their map files still name the old particle until edited)
-      case "RENAME_PARTICLE": {
-        if (!currentPlayer) return;
-
-        const userPermissions = await permissions.get(currentPlayer.username) as string;
-        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
-        if (!perms.includes('server.admin') && !perms.includes('server.*')) {
-          sendPacket(wt, packetManager.notify({ message: 'You do not have permission to rename particles.' }));
-          return;
-        }
-
-        try {
-          const { from, to } = data as unknown as { from: string; to: string };
-          const oldName = String(from ?? "").trim(), newName = String(to ?? "").trim();
-          if (!oldName || !newName || newName.length > 255 || newName.includes(",")) {
-            sendPacket(wt, packetManager.notify({ message: 'Invalid particle name.' }));
-            return;
-          }
-          if (oldName === newName) return;
-          const existing = await particles.list();
-          if (!existing.some((p) => p.name === oldName)) {
-            sendPacket(wt, packetManager.notify({ message: `Particle ${oldName} not found.` }));
-            return;
-          }
-          if (existing.some((p) => p.name === newName)) {
-            sendPacket(wt, packetManager.notify({ message: `A particle named ${newName} already exists.` }));
-            return;
-          }
-
-          const counts = await particles.rename(oldName, newName);
-          let mapRefs = 0;
-          for (const n of npcSystem.getMapNpcs()) {
-            if (typeof n.particles === "string" && (n.particles as string).split(",").some((x) => x.trim() === oldName)) {
-              (n as any).particles = renameInList(n.particles as string, oldName, newName);
-              mapRefs++;
-            }
-          }
-          await assetCache.set("npcs", await npcSystem.list());
-          for (const key of ["spells", "mounts"]) {
-            const list = (await assetCache.get(key)) as any[] | null;
-            if (!Array.isArray(list)) continue;
-            for (const row of list) if (typeof row?.particles === "string") row.particles = renameInList(row.particles, oldName, newName);
-            await assetCache.set(key, list);
-          }
-          log.info(`Particle renamed by ${currentPlayer.username}: ${oldName} -> ${newName} (npcs ${counts.npcs}, spells ${counts.spells}, mounts ${counts.mounts}, map objects ${mapRefs})`);
-
-          const parts = [`Renamed ${oldName} to ${newName}`];
-          const refs = counts.npcs + counts.spells + counts.mounts;
-          if (refs) parts.push(`updated ${refs} NPC/spell/mount reference(s)`);
-          if (mapRefs) parts.push(`${mapRefs} map object(s) still say ${oldName} in their map file: rename it there too`);
-          sendPacket(wt, packetManager.notify({ message: parts.join("; ") }));
-        } catch (error: any) {
-          log.error(`Error renaming particle: ${error.message}`);
-          sendPacket(wt, packetManager.notify({ message: 'Error renaming particle.' }));
-        }
-        break;
-      }
-      case "LIST_PARTICLES": {
-        if (!currentPlayer) return;
-        // Only the particle editor and the NPC editor ask for this, and /pe and /ne open them for those they let through.
-        if (!currentPlayer.permissions?.some((p: string) => p === "tools.particle_editor" || p === "tools.npc_editor" || p === "tools.*")) return;
-
-        try {
-          const particleList = await particles.list();
-          sendPacket(wt, packetManager.custom({
-            type: "PARTICLE_LIST",
-            data: particleList
-          }));
-        } catch (error: any) {
-          log.error(`Error listing particles: ${error.message}`);
-          sendPacket(wt, packetManager.notify({
-            message: 'Error loading particles.'
-          }));
-        }
-        break;
-      }
-      case "LIST_NPCS": {
-        if (!currentPlayer) return;
-        // The NPC editor's list (scripts, stock, quest links): for those who may save NPCs, as SAVE_NPC.
-        if (!currentPlayer.permissions.some((p: string) => p === "server.admin" || p === "server.*")) {
-          sendPacket(wt, packetManager.notify({ message: "You do not have permission to edit NPCs." }));
-          return;
-        }
-
-        try {
-          const allNpcs = await assetCache.get("npcs") as Npc[];
-          const mapName = currentPlayer.location.map;
-          // map-placed particle NPCs are edited in the map (Particles layer), not here
-          const npcsInMap = (allNpcs || []).filter((npc: Npc) => npc.map === mapName && !npcSystem.isMapNpc(npc));
-          // Resolve particles to include all particle data (including time fields)
-          const resolvedNpcs = await Promise.all(npcsInMap.map(resolveNpcForClient));
-          // Quest links for the NPC editor's given/ended pickers.
-          for (const npc of resolvedNpcs) {
-            const npcId = Number((npc as any).id);
-            if (Number.isFinite(npcId)) {
-              (npc as any).questsGiven = questDefinitions.questsGivenBy(npcId);
-              (npc as any).questsEnded = questDefinitions.questsEndedBy(npcId);
-            }
-          }
-          const questCatalog = questDefinitions.getCachedQuestsSync().map((q) => ({ id: q.id, name: q.name }));
-          // Sprite data for the appearance tab, same feed as the creature editor.
-          const [spriteSheets, icons] = await Promise.all([listSpriteSheets(), listIcons()]);
-          // The items there are, for picking what a vendor stocks.
-          const items = (((await assetCache.get("items")) || []) as Item[])
-            .map((item) => ({ name: item.name, icon: item.icon ?? null, quality: item.quality, sell_price: item.sell_price ?? 1, buy_price: item.buy_price ?? 0 }));
-
-          sendPacket(wt, packetManager.npcList(resolvedNpcs, questCatalog, { spriteSheets, icons, items }));
-        } catch (error: any) {
-          log.error(`Error listing NPCs: ${error.message}`);
-          sendPacket(wt, packetManager.notify({ message: "Error loading NPCs." }));
-        }
-        break;
-      }
-      case "ADD_NPC": {
-        if (!currentPlayer) return;
-
-        if (
-          !currentPlayer.permissions.some(
-            (p: string) => p === "server.admin" || p === "server.*"
-          )
-        ) {
-          sendPacket(wt, packetManager.notify({ message: "You do not have permission to add NPCs." }));
-          return;
-        }
-
-        try {
-          const mapName = currentPlayer.location.map;
-          const clientData = data as any;
-          const newNpc: Npc = {
-            id: null,
-            last_updated: null,
-            map: mapName,
-            name: clientData?.name ?? null,
-            position: {
-              x: clientData?.position?.x ?? currentPlayer.location.position.x,
-              y: clientData?.position?.y ?? currentPlayer.location.position.y,
-              direction: clientData?.position?.direction ?? "down",
-            },
-            hidden: clientData?.hidden ?? false,
-            script: clientData?.script ?? null,
-            dialog: clientData?.dialog ?? null,
-            gossip: clientData?.gossip ?? null,
-            particles: clientData?.particles ?? [],
-            quest_giver: clientData?.quest_giver === true || clientData?.quest_giver === 1,
-            sprite_type: clientData?.sprite_type ?? 'animated',
-            sprite_body: clientData?.sprite_body ?? null,
-            sprite_head: clientData?.sprite_head ?? null,
-            sprite_helmet: clientData?.sprite_helmet ?? null,
-            sprite_shoulderguards: clientData?.sprite_shoulderguards ?? null,
-            sprite_neck: clientData?.sprite_neck ?? null,
-            sprite_hands: clientData?.sprite_hands ?? null,
-            sprite_chest: clientData?.sprite_chest ?? null,
-            sprite_feet: clientData?.sprite_feet ?? null,
-            sprite_legs: clientData?.sprite_legs ?? null,
-            sprite_weapon: clientData?.sprite_weapon ?? null,
-            vendor_items: await vendorStockFrom(wt, clientData?.vendor_items),
-            innkeeper: clientData?.innkeeper === true || clientData?.innkeeper === 1,
-            sound_npc: clientData?.sound_npc === true || clientData?.sound_npc === 1,
-            sound: typeof clientData?.sound === "string" ? clientData.sound : null,
-            sound_radius: Number(clientData?.sound_radius) || 0,
-          };
-
-          await npcSystem.add(newNpc);
-          const updatedNpcs = await npcSystem.list();
-          await assetCache.set("npcs", updatedNpcs);
-          if (newNpc.innkeeper || vendors.isVendor(newNpc)) void resendMapMarkers();
-
-          const createdNpc = updatedNpcs
-            .filter((n: Npc) => n.map === mapName)
-            .sort((a: Npc, b: Npc) => (b.id ?? 0) - (a.id ?? 0))[0];
-
-          // Quest links arrive as questsGiven / questsEnded arrays.
-          if (createdNpc?.id) {
-            const given: number[] = Array.isArray(clientData?.questsGiven) ? clientData.questsGiven : [];
-            const ended: number[] = Array.isArray(clientData?.questsEnded) ? clientData.questsEnded : [];
-            try {
-              await query("DELETE FROM npc_quests WHERE npc_id = ?", [createdNpc.id]);
-              for (const qid of [...new Set([...given.map(Number), ...ended.map(Number)])]) {
-                if (!Number.isFinite(qid)) continue;
-                if (given.map(Number).includes(qid)) {
-                  await query("INSERT INTO npc_quests (npc_id, quest_id, `role`) VALUES (?, ?, 'giver')", [createdNpc.id, qid]);
-                }
-                if (ended.map(Number).includes(qid)) {
-                  await query("INSERT INTO npc_quests (npc_id, quest_id, `role`) VALUES (?, ?, 'ender')", [createdNpc.id, qid]);
-                }
-              }
-              await questDefinitions.reload();
-            } catch {
-              // Quest links are best-effort on NPC create. Some may have been
-              // written: the links held are read again, so they are what the
-              // database has.
-              await questDefinitions.reload().catch(() => {});
-            }
-          }
-
-          if (createdNpc) {
-            const resolvedNpc = await resolveNpcForClient(createdNpc);
-            const updatePacket = packetManager.npcUpdated(resolvedNpc);
-            const playersInMap = filterPlayersByMap(mapName);
-            for (const p of playersInMap) {
-              if (p.wt && p.wt.readyState === 1) {
-                sendPacket(p.wt, updatePacket);
-              }
-            }
-          }
-
-          log.info(`NPC added by ${currentPlayer.username} on map ${mapName}`);
-        } catch (error: any) {
-          log.error(`Error adding NPC: ${error.message}`);
-          sendPacket(wt, packetManager.notify({ message: "Error adding NPC." }));
-        }
-        break;
-      }
-      case "SAVE_NPC": {
-        if (!currentPlayer) return;
-
-        if (
-          !currentPlayer.permissions.some(
-            (p: string) => p === "server.admin" || p === "server.*"
-          )
-        ) {
-          sendPacket(wt, packetManager.notify({ message: "You do not have permission to save NPCs." }));
-          return;
-        }
-
-        try {
-          const npcData = data as unknown as Npc;
-          if (!npcData?.id) {
-            sendPacket(wt, packetManager.notify({ message: "Invalid NPC data." }));
-            return;
-          }
-
-          // What the NPC stocks is checked against the items there are. An editor that sends no
-          // stock at all (one from before vendors) leaves what the NPC has.
-          npcData.vendor_items = npcData.vendor_items === undefined
-            ? (((await assetCache.get("npcs")) || []) as Npc[]).find((held) => Number(held.id) === Number(npcData.id))?.vendor_items ?? []
-            : await vendorStockFrom(wt, npcData.vendor_items);
-          // Whether it keeps an inn, the same way: an editor that does not say leaves it as it is.
-          npcData.innkeeper = npcData.innkeeper === undefined
-            ? (((await assetCache.get("npcs")) || []) as Npc[]).find((held) => Number(held.id) === Number(npcData.id))?.innkeeper === true
-            : npcData.innkeeper === true || (npcData.innkeeper as unknown) === 1;
-          // Its sound, the same way: an editor from before sound NPCs leaves what the NPC plays.
-          if (npcData.sound_npc === undefined) {
-            const held = (((await assetCache.get("npcs")) || []) as Npc[]).find((n) => Number(n.id) === Number(npcData.id));
-            npcData.sound_npc = held?.sound_npc === true;
-            npcData.sound = held?.sound ?? null;
-            npcData.sound_radius = held?.sound_radius ?? 0;
-          } else {
-            npcData.sound_npc = npcData.sound_npc === true || (npcData.sound_npc as unknown) === 1;
-            npcData.sound = typeof npcData.sound === "string" ? npcData.sound : null;
-          }
-
-          await npcSystem.update(npcData);
-          const updatedNpcs = await npcSystem.list();
-          await assetCache.set("npcs", updatedNpcs);
-
-          // Quest links arrive as questsGiven / questsEnded arrays.
-          try {
-            const given: number[] = Array.isArray((npcData as any)?.questsGiven) ? (npcData as any).questsGiven : [];
-            const ended: number[] = Array.isArray((npcData as any)?.questsEnded) ? (npcData as any).questsEnded : [];
-            if ((npcData as any)?.questsGiven !== undefined || (npcData as any)?.questsEnded !== undefined) {
-              await query("DELETE FROM npc_quests WHERE npc_id = ?", [npcData.id]);
-              for (const qid of [...new Set([...given.map(Number), ...ended.map(Number)])]) {
-                if (!Number.isFinite(qid)) continue;
-                if (given.map(Number).includes(qid)) {
-                  await query("INSERT INTO npc_quests (npc_id, quest_id, `role`) VALUES (?, ?, 'giver')", [npcData.id, qid]);
-                }
-                if (ended.map(Number).includes(qid)) {
-                  await query("INSERT INTO npc_quests (npc_id, quest_id, `role`) VALUES (?, ?, 'ender')", [npcData.id, qid]);
-                }
-              }
-              await questDefinitions.reload();
-            }
-          } catch {
-            // Quest links are best-effort on NPC save. Some may have been
-            // written: the links held are read again, so they are what the
-            // database has.
-            await questDefinitions.reload().catch(() => {});
-          }
-
-          const updatedNpc = updatedNpcs.find((n: Npc) => n.id === npcData.id);
-          if (updatedNpc) {
-            const resolvedNpc = await resolveNpcForClient(updatedNpc);
-            const updatePacket = packetManager.npcUpdated(resolvedNpc);
-            const playersInMap = filterPlayersByMap(resolvedNpc.map);
-            for (const p of playersInMap) {
-              if (p.wt && p.wt.readyState === 1) {
-                sendPacket(p.wt, updatePacket);
-              }
-            }
-          }
-
-          // It may have become an innkeeper or a vendor, or stopped being one.
-          void resendMapMarkers();
-          sendPacket(wt, packetManager.notify({ message: "NPC saved successfully." }));
-          log.info(`NPC ${npcData.id} saved by ${currentPlayer.username}`);
-        } catch (error: any) {
-          log.error(`Error saving NPC: ${error.message}`);
-          sendPacket(wt, packetManager.notify({ message: "Error saving NPC." }));
-        }
-        break;
-      }
-      case "MOVE_NPC": {
-        if (!currentPlayer) return;
-
-        if (
-          !currentPlayer.permissions.some(
-            (p: string) => p === "server.admin" || p === "server.*"
-          )
-        ) {
-          sendPacket(wt, packetManager.notify({ message: "You do not have permission to move NPCs." }));
-          return;
-        }
-
-        try {
-          const { id, position } = data as unknown as { id: number; position: { x: number; y: number } };
-          if (!id || !position) {
-            sendPacket(wt, packetManager.notify({ message: "Invalid NPC move data." }));
-            return;
-          }
-
-          const allNpcs = await assetCache.get("npcs") as Npc[];
-          const existingNpc = (allNpcs || []).find((n: Npc) => n.id === id);
-          if (!existingNpc) {
-            sendPacket(wt, packetManager.notify({ message: "NPC not found." }));
-            return;
-          }
-
-          const updatedNpcData: Npc = {
-            ...existingNpc,
-            position: {
-              x: position.x,
-              y: position.y,
-              direction: existingNpc.position.direction || "down",
-            },
-          };
-
-          await npcSystem.update(updatedNpcData);
-          const updatedNpcs = await npcSystem.list();
-          await assetCache.set("npcs", updatedNpcs);
-
-          const updatedNpc = updatedNpcs.find((n: Npc) => n.id === id);
-          if (updatedNpc) {
-            const resolvedNpc = await resolveNpcForClient(updatedNpc);
-            const updatePacket = packetManager.npcUpdated(resolvedNpc);
-            const playersInMap = filterPlayersByMap(resolvedNpc.map);
-            for (const p of playersInMap) {
-              if (p.wt && p.wt.readyState === 1) {
-                sendPacket(p.wt, updatePacket);
-              }
-            }
-          }
-
-          log.info(`NPC ${id} moved by ${currentPlayer.username}`);
-        } catch (error: any) {
-          log.error(`Error moving NPC: ${error.message}`);
-          sendPacket(wt, packetManager.notify({ message: "Error moving NPC." }));
-        }
-        break;
-      }
-      case "DELETE_NPC": {
-        if (!currentPlayer) return;
-
-        if (
-          !currentPlayer.permissions.some(
-            (p: string) => p === "server.admin" || p === "server.*"
-          )
-        ) {
-          sendPacket(wt, packetManager.notify({ message: "You do not have permission to delete NPCs." }));
-          return;
-        }
-
-        try {
-          const { id } = data as unknown as { id: number };
-          if (!id) {
-            sendPacket(wt, packetManager.notify({ message: "Invalid NPC ID." }));
-            return;
-          }
-
-          const allNpcs = await assetCache.get("npcs") as Npc[];
-          const existingNpc = (allNpcs || []).find((n: Npc) => n.id === id);
-          if (!existingNpc) {
-            sendPacket(wt, packetManager.notify({ message: "NPC not found." }));
-            return;
-          }
-
-          const mapName = existingNpc.map;
-          await npcSystem.remove({ id } as Npc);
-          const updatedNpcs = await npcSystem.list();
-          await assetCache.set("npcs", updatedNpcs);
-          // Nobody's home is at an innkeeper that is gone.
-          if (existingNpc.innkeeper) await homes.innGone(id).catch((error) => log.error(`The homes at NPC ${id} could not be cleared: ${error}`));
-          // Its inn or its shop is no longer marked on anyone's map.
-          if (existingNpc.innkeeper || vendors.isVendor(existingNpc)) void resendMapMarkers();
-
-          const removePacket = packetManager.npcRemoved(id);
-          const playersInMap = filterPlayersByMap(mapName);
-          for (const p of playersInMap) {
-            if (p.wt && p.wt.readyState === 1) {
-              sendPacket(p.wt, removePacket);
-            }
-          }
-
-          sendPacket(wt, packetManager.notify({ message: "NPC deleted successfully." }));
-          log.info(`NPC ${id} deleted by ${currentPlayer.username}`);
-        } catch (error: any) {
-          log.error(`Error deleting NPC: ${error.message}`);
-          sendPacket(wt, packetManager.notify({ message: "Error deleting NPC." }));
-        }
-        break;
-      }
-      case "TEST_PARTICLE": {
-        if (!currentPlayer) return;
-
-        const userPermissions = await permissions.get(currentPlayer.username) as string;
-        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
-        const hasPermission = perms.includes('server.admin') || perms.includes('server.*');
-
-        if (!hasPermission) {
-          return;
-        }
-
-        try {
-          const { testType, data: testData } = data as { testType: string; data: any };
-          log.info(`Particle test by ${currentPlayer.username}: type=${testType}`);
-
-          // Broadcast test particle event to all players in the map
-          const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-          playersInMap.forEach((player) => {
-            sendPacket(player.wt, packetManager.custom({
-              type: "TEST_PARTICLE_EVENT",
-              data: {
-                testType,
-                particle: testData.particle,
-                position: testData.position || currentPlayer.location,
-                npcId: testData.npcId
-              }
-            }));
-          });
-        } catch (error: any) {
-          log.error(`Error testing particle: ${error.message}`);
-        }
-        break;
-      }
-      case "COMMAND": {
-        if (!currentPlayer) return;
-        // Corpses keep party/whisper/guild chat; the allowlist is enforced
-        // after parsing below. Ghosts keep all commands; only proximity say
-        // (/s, the CHAT packet) is barred for them.
-        if (currentPlayer.isGuest) {
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: "Please create an account to use that feature.",
-            })
-          );
-          return;
-        }
-        const _data = data as any;
-        const command = _data?.command;
-        const mode = _data?.mode;
-
-        // A command line is text, or in decrypt mode one RSA block; capped before
-        // it is split. Decrypting costs a private-key operation, so it is held to
-        // the chat rate limit.
-        if (mode === "decrypt" ? !isCiphertext(command) : typeof command !== "string") return;
-        if (typeof command === "string" && command.length > MAX_COMMAND_LENGTH) {
-          sendPacket(wt, packetManager.notify({ message: `Command too long (max ${MAX_COMMAND_LENGTH} characters).` }));
-          return;
-        }
-        if (mode === "decrypt" && !chatRateOk(wt)) return;
-
-        let decryptedMessage;
-        if (mode && mode == "decrypt") {
-          const encryptedMessage = Buffer.from(
-            Object.values(command) as number[]
-          );
-
-          const privateKey = _privateKey;
-          if (!privateKey) return;
-          const decryptedPrivateKey = decryptPrivateKey(
-            privateKey,
-            process.env.RSA_PASSPHRASE || ""
-          ).toString();
-          decryptedMessage =
-            decryptRsa(encryptedMessage, decryptedPrivateKey) || "";
-          if (typeof decryptedMessage !== "string" || decryptedMessage.length > MAX_COMMAND_LENGTH) return;
-        } else {
-          decryptedMessage = command;
-        }
-
-        const commandParts = decryptedMessage.match(/[^\s"]+|"([^"]*)"/g) || [];
-        // A command run for the control panel arrives already split: its
-        // arguments are values, not chat text to parse.
-        const panelCommand = panelCommands.get(parsedMessage);
-        const commandName = panelCommand?.name ?? commandParts[0]?.toUpperCase();
-
-        // Corpses may use chat channels only: no admin, tool, or other
-        // commands while awaiting release.
-        if (
-          currentPlayer.isDead &&
-          !["P", "PARTY", "W", "WHISPER", "G", "GUILD", "O", "OFFICER"].includes(commandName || "")
-        ) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "You cannot do that while dead." })
-          );
-          return;
-        }
-
-        const args = panelCommand?.args ?? commandParts
-          .slice(1)
-          .map((arg: any) => (arg.startsWith('"') ? arg.slice(1, -1) : arg));
-
-        switch (commandName) {
-
-          case "P":
-          case "PARTY": {
-            if (!currentPlayer) return;
-            if (subscriptionLocked(wt, currentPlayer, "party_chat")) break;
-            const message = args.join(" ");
-            if (!message) {
-              sendPacket(
-                wt,
-                packetManager.notify({ message: "Please provide a message" })
-              );
-              break;
-            }
-            if (!channelLineOk(wt, message)) break;
-
-            const partyId = await player.getPartyIdByUsername(
-              currentPlayer.username
-            );
-            if (!partyId) {
-              sendPacket(
-                wt,
-                packetManager.notify({ message: "You are not in a party" })
-              );
-              break;
-            }
-
-            const partyMembers = await parties.getPartyMembers(partyId);
-            if (partyMembers.length === 0 || !partyMembers) {
-              sendPacket(
-                wt,
-                packetManager.notify({ message: "You are not in a party" })
-              );
-              break;
-            }
-
-            const partyHearing = await chatHearing(currentPlayer.username, "party", message, partyMembers);
-            const partyLine = await chatLinksOf(message);
-
-            partyMembers.forEach(async (member: any) => {
-              if (!partyHearing.has(String(member).toLowerCase())) return;
-              const session_id = await player.getSessionIdByUsername(member);
-              const memberPlayer = playerCache.get(session_id);
-              if (memberPlayer) {
-                sendPacket(
-                  memberPlayer.wt,
-                  packetManager.partyChat({
-                    id: wt.data.id,
-                    message: partyLine.message,
-                    ...(partyLine.links.length > 0 ? { links: partyLine.links } : {}),
-                    username:
-                      currentPlayer.username.charAt(0).toUpperCase() +
-                      currentPlayer.username.slice(1),
-                  })
-                );
-              }
-            });
-
-            if (!partyHearing.muted) listener.emit(Events.PARTY_CHAT, { player: currentPlayer, message, partyMembers } as any);
-            break;
-          }
-
-          case "W":
-          case "WHISPER": {
-            if (subscriptionLocked(wt, currentPlayer, "whisper")) break;
-            const username = args[0]?.toLowerCase() || null;
-            if (!username) {
-              const notifyData = {
-                message: "Please provide a username",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            const players = Object.values(playerCache.list());
-            const targetPlayer = players.find(
-              (p) => p.username.toLowerCase() === username.toLowerCase()
-            );
-
-            if (!targetPlayer) {
-              const notifyData = {
-                message: "Player not found or is not online",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (!channelLineOk(wt, args.slice(1).join(" "))) break;
-
-            // The whisper is shown as sent either way: a muted player, or one
-            // the target ignores, is not told that it went nowhere.
-            const whispered = await chatAudience(currentPlayer.username, "whisper", args.slice(1).join(" "), [targetPlayer.username]);
-            const whisperLine = await chatLinksOf(args.slice(1).join(" "));
-            const whisperLinks = whisperLine.links.length > 0 ? { links: whisperLine.links } : {};
-            if (whispered.recipients.length > 0) {
-              sendPacket(
-                targetPlayer.wt,
-                packetManager.whisper({
-                  id: wt.data.id,
-                  message: whisperLine.message,
-                  ...whisperLinks,
-
-                  username: `<- ${currentPlayer.username.charAt(0).toUpperCase() +
-                    currentPlayer.username.slice(1)
-                    }`,
-                })
-              );
-            }
-
-            sendPacket(
-              wt,
-              packetManager.whisper({
-                id: targetPlayer.id,
-                message: whisperLine.message,
-                ...whisperLinks,
-                username: `-> ${targetPlayer.username.charAt(0).toUpperCase() +
-                  targetPlayer.username.slice(1)
-                  }`,
-              })
-            );
-
-            break;
-          }
-
-          case "INVITE": {
-            const username = args[0]?.toLowerCase() || null;
-            if (!username) {
-              sendPacket(
-                wt,
-                packetManager.notify({
-                  message: "Usage: /invite <username>",
-                })
-              );
-              break;
-            }
-
-            if (username === currentPlayer.username.toLowerCase()) {
-              sendPacket(
-                wt,
-                packetManager.notify({
-                  message: "You cannot invite yourself to a party.",
-                })
-              );
-              break;
-            }
-
-            const players = Object.values(playerCache.list());
-            const targetPlayer = players.find(
-              (p: any) => p.username && p.username.toLowerCase() === username.toLowerCase()
-            );
-
-            if (!targetPlayer) {
-              sendPacket(
-                wt,
-                packetManager.notify({
-                  message: `Player ${username} is not online.`,
-                })
-              );
-              break;
-            }
-
-            if (targetPlayer.id === currentPlayer.id) {
-              sendPacket(
-                wt,
-                packetManager.notify({
-                  message: "You cannot invite yourself to a party.",
-                })
-              );
-              break;
-            }
-
-            const existingInvite = targetPlayer.invitations?.find(
-              (invite: any) => invite?.type === "party" && invite?.from === currentPlayer.username
-            );
-
-            if (existingInvite) {
-              sendPacket(
-                wt,
-                packetManager.notify({
-                  message: `You have already sent a party invite to ${targetPlayer.username}.`,
-                })
-              );
-              break;
-            }
-
-            const player_username =
-              currentPlayer.username.charAt(0).toUpperCase() +
-              currentPlayer.username.slice(1);
-
-            const invite_data = {
-              action: "INVITE_PARTY",
-              message: `${player_username} wants to invite you to their party`,
-              originator: currentPlayer.id.toString(),
-              authorization: randomBytes(16).toString(),
-            };
-
-            if (!currentPlayer.invitations) {
-              currentPlayer.invitations = [];
-            }
-
-            currentPlayer.invitations.push({
-              action: invite_data.action,
-              originator: invite_data.originator,
-              authorization: invite_data.authorization,
-            });
-
-            playerCache.set(currentPlayer.id, currentPlayer);
-
-            await sendInvitation(currentPlayer, targetPlayer, invite_data);
-
-            sendPacket(
-              wt,
-              packetManager.notify({
-                message: `Invitation sent to ${targetPlayer.username.charAt(0).toUpperCase() +
-                  targetPlayer.username.slice(1)
-                  }`,
-              })
-            );
-
-            break;
-          }
-
-          case "G":
-          case "GUILD": {
-            if (!currentPlayer) return;
-            if (subscriptionLocked(wt, currentPlayer, "guild_chat")) break;
-            const message = args.join(" ");
-            if (!message) {
-              sendPacket(wt, packetManager.notify({ message: "Please provide a message" }));
-              break;
-            }
-            if (!channelLineOk(wt, message)) break;
-
-            const guildId = currentPlayer.guild_id;
-            if (!guildId) {
-              sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
-              break;
-            }
-
-            const allMembers = await guilds.getGuildMembers(guildId);
-            if (!allMembers || allMembers.length === 0) {
-              sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
-              break;
-            }
-
-            if (!(await guilds.can(currentPlayer.username, GuildPermission.GUILD_CHAT_SPEAK))) {
-              sendPacket(wt, packetManager.notify({ message: refusalText.no_permission }));
-              break;
-            }
-
-            const guildMembers = await guilds.listeners(guildId, GuildPermission.GUILD_CHAT_LISTEN);
-            const guildHearing = await chatHearing(currentPlayer.username, "guild", message, guildMembers);
-            const guildLine = await chatLinksOf(message);
-
-            for (const member of withSender(guildMembers, currentPlayer.username)) {
-              if (!guildHearing.has(String(member).toLowerCase())) continue;
-              const session_id = await player.getSessionIdByUsername(member);
-              const memberPlayer = playerCache.get(session_id);
-              if (memberPlayer) {
-                sendPacket(
-                  memberPlayer.wt,
-                  packetManager.guildChat({
-                    id: wt.data.id,
-                    message: guildLine.message,
-                    ...(guildLine.links.length > 0 ? { links: guildLine.links } : {}),
-                    username:
-                      currentPlayer.username.charAt(0).toUpperCase() +
-                      currentPlayer.username.slice(1),
-                  })
-                );
-              }
-            }
-
-            if (!guildHearing.muted) listener.emit(Events.GUILD_CHAT, { player: currentPlayer, message, guildMembers, guildId } as any);
-            break;
-          }
-
-          case "O":
-          case "OFFICER": {
-            if (!currentPlayer) return;
-            const officerLine = args.join(" ");
-            if (!officerLine) {
-              sendPacket(wt, packetManager.notify({ message: "Please provide a message" }));
-              break;
-            }
-            await officerChat(wt, currentPlayer, officerLine);
-            break;
-          }
-
-          case "GPROMOTE":
-          case "GDEMOTE": {
-            if (!currentPlayer) return;
-            if (subscriptionLocked(wt, currentPlayer, "guild")) break;
-            const target = args[0];
-            if (!target) {
-              sendPacket(wt, packetManager.notify({ message: "Please provide a username" }));
-              break;
-            }
-            if (!guildEditOk(wt, commandName)) break;
-            const up = commandName === "GPROMOTE";
-            const result = up ? await guilds.promote(currentPlayer.username, target) : await guilds.demote(currentPlayer.username, target);
-            if (!guildDone(wt, result)) break;
-            await pushGuild(currentPlayer.guild_id);
-            listener.emit(Events.GUILD_CHANGED, { type: up ? "promote" : "demote", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username, targetUsername: target });
-            break;
-          }
-
-          case "GREMOVE": {
-            if (!currentPlayer) return;
-            if (subscriptionLocked(wt, currentPlayer, "guild")) break;
-            const target = args[0];
-            if (!target) {
-              sendPacket(wt, packetManager.notify({ message: "Please provide a username" }));
-              break;
-            }
-            if (!guildEditOk(wt, commandName)) break;
-            const guildId = currentPlayer.guild_id;
-            const kicked = await guilds.kick(currentPlayer.username, target);
-            if (!guildDone(wt, kicked)) break;
-            sendPacket(wt, packetManager.notify({ message: `${target} has been kicked from the guild` }));
-            await pushGuild(guildId);
-            await kickedFromGuild(currentPlayer, guildId, target);
-            break;
-          }
-
-          case "GMOTD": {
-            if (!currentPlayer) return;
-            if (subscriptionLocked(wt, currentPlayer, "guild")) break;
-            if (!guildEditOk(wt, commandName)) break;
-            const result = await guilds.setMotd(currentPlayer.username, args.join(" "));
-            if (!guildDone(wt, result) || result.changed === false) break;
-            await pushGuild(currentPlayer.guild_id);
-            listener.emit(Events.GUILD_CHANGED, { type: "motd", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username });
-            break;
-          }
-
-          case "GLEADER": {
-            if (!currentPlayer) return;
-            if (subscriptionLocked(wt, currentPlayer, "guild")) break;
-            const target = args[0];
-            if (!target) {
-              sendPacket(wt, packetManager.notify({ message: "Please provide a username" }));
-              break;
-            }
-            if (!guildEditOk(wt, commandName)) break;
-            const result = await guilds.transferLeader(currentPlayer.username, target);
-            if (!guildDone(wt, result)) break;
-            await pushGuild(currentPlayer.guild_id);
-            listener.emit(Events.GUILD_CHANGED, { type: "transfer", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username, targetUsername: target });
-            break;
-          }
-
-          case "GINVITE": {
-            if (!currentPlayer) return;
-            if (currentPlayer.isGuest) {
-              sendPacket(wt, packetManager.notify({ message: "Please create an account to use that feature." }));
-              break;
-            }
-            if (subscriptionLocked(wt, currentPlayer, "guild")) break;
-
-            const guildId = currentPlayer.guild_id;
-            if (!guildId) {
-              sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
-              break;
-            }
-
-            if (!(await guilds.can(currentPlayer.username, GuildPermission.INVITE))) {
-              sendPacket(wt, packetManager.notify({ message: refusalText.no_permission }));
-              break;
-            }
-
-            const username = args[0]?.toLowerCase() || null;
-            if (!username) {
-              sendPacket(wt, packetManager.notify({ message: "Usage: /ginvite <username>" }));
-              break;
-            }
-
-            if (username === currentPlayer.username.toLowerCase()) {
-              sendPacket(wt, packetManager.notify({ message: "You cannot invite yourself to your guild." }));
-              break;
-            }
-
-            const players = Object.values(playerCache.list());
-            const targetPlayer = players.find(
-              (p: any) => p.username && p.username.toLowerCase() === username.toLowerCase()
-            );
-
-            if (!targetPlayer) {
-              sendPacket(wt, packetManager.notify({ message: `Player ${username} is not online.` }));
-              break;
-            }
-
-            if (targetPlayer.isGuest) {
-              sendPacket(wt, packetManager.notify({ message: `${targetPlayer.username} is a guest and cannot join a guild.` }));
-              break;
-            }
-
-            const targetInGuild = await guilds.isInGuild(targetPlayer.username);
-            if (targetInGuild) {
-              sendPacket(wt, packetManager.notify({ message: `${targetPlayer.username} is already in a guild` }));
-              break;
-            }
-
-            const existingInvite = targetPlayer.invitations?.find(
-              (invite: any) => invite?.action === "INVITE_GUILD" && invite?.originator === currentPlayer.id.toString()
-            );
-
-            if (existingInvite) {
-              sendPacket(wt, packetManager.notify({ message: `You have already sent a guild invite to ${targetPlayer.username}.` }));
-              break;
-            }
-
-            const player_username =
-              currentPlayer.username.charAt(0).toUpperCase() +
-              currentPlayer.username.slice(1);
-
-            const guildName = currentPlayer.guild_name || "Unknown Guild";
-
-            const invite_data = {
-              action: "INVITE_GUILD",
-              message: `${player_username} wants to invite you to join "${guildName}"`,
-              originator: currentPlayer.id.toString(),
-              authorization: randomBytes(16).toString(),
-            };
-
-            if (!currentPlayer.invitations) {
-              currentPlayer.invitations = [];
-            }
-
-            currentPlayer.invitations.push({
-              action: invite_data.action,
-              originator: invite_data.originator,
-              authorization: invite_data.authorization,
-            });
-
-            playerCache.set(currentPlayer.id, currentPlayer);
-
-            await sendInvitation(currentPlayer, targetPlayer, invite_data);
-
-            sendPacket(
-              wt,
-              packetManager.notify({
-                message: `Invitation sent to ${targetPlayer.username.charAt(0).toUpperCase() +
-                  targetPlayer.username.slice(1)}`,
-              })
-            );
-
-            break;
-          }
-
-          case "SUMMON": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.summon" || p === "admin.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            const identifier = args[0]?.toLowerCase() || null;
-            if (!identifier) {
-              const notifyData = {
-                message: "Please provide a username or ID",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            let targetPlayer;
-            if (isNaN(Number(identifier))) {
-
-              const players = Object.values(playerCache.list());
-              targetPlayer = players.find(
-                (p) => p.username.toLowerCase() === identifier.toLowerCase()
-              );
-            } else {
-              targetPlayer = playerCache.get(identifier);
-            }
-
-            if (!targetPlayer) {
-              const notifyData = {
-                message: "Player not found or is not online",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (targetPlayer.id === currentPlayer.id) {
-              const notifyData = {
-                message: "You cannot summon yourself",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (targetPlayer.isAdmin && !currentPlayer.permissions.some((p: string) => p === "admin.summonadmins" || p === "admin.*")) {
-              const notifyData = {
-                message: "You cannot summon other admins",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (targetPlayer.location.map !== currentPlayer.location.map) {
-
-              const result = await player.setLocation(
-                targetPlayer.id,
-                currentPlayer.location.map,
-                {
-                  x: currentPlayer.location.position.x,
-                  y: currentPlayer.location.position.y,
-                  direction: targetPlayer.location.position?.direction || "down",
-                }
-              );
-
-              if (
-                result &&
-                typeof result === "object" &&
-                "affectedRows" in result &&
-                ((result as { affectedRows: number | null; count?: number }).affectedRows ?? (result as { count?: number }).count) != 0
-              ) {
-                if (!currentPlayer.forceVisibleTo) currentPlayer.forceVisibleTo = new Set();
-                currentPlayer.forceVisibleTo.add(targetPlayer.id);
-
-                playerCache.set(targetPlayer.id, targetPlayer);
-
-                setTimeout(() => {
-                  const admin = playerCache.get(currentPlayer.id);
-                  if (admin?.forceVisibleTo) {
-                    admin.forceVisibleTo.delete(targetPlayer.id);
-                    playerCache.set(admin.id, admin);
-                  }
-                }, 5000);
-
-                await transitionPlayerToMap(
-                  targetPlayer,
-                  currentPlayer.location.map,
-                  {
-                    x: Math.round(currentPlayer.location.position.x),
-                    y: Math.round(currentPlayer.location.position.y),
-                    direction: targetPlayer.location.position?.direction || "down",
-                  },
-                  targetPlayer.wt,
-                  spawnBatchQueue,
-                  despawnBatchQueue
-                );
-
-                sendPacket(
-                  targetPlayer.wt,
-                  packetManager.notify({
-                    message: `You have been summoned by an admin`,
-                  })
-                );
-
-                sendPacket(
-                  wt,
-                  packetManager.notify({
-                    message: `Summoned ${targetPlayer.username.charAt(0).toUpperCase() +
-                      targetPlayer.username.slice(1)
-                      } to your location`,
-                  })
-                );
-              } else {
-                const notifyData = {
-                  message: "Failed to summon player",
-                };
-                sendPacket(wt, packetManager.notify(notifyData));
-              }
-            } else {
-
-              targetPlayer.location.position = {
-                x: Math.round(currentPlayer.location.position.x),
-                y: Math.round(currentPlayer.location.position.y),
-                direction: targetPlayer.location.position?.direction || "down",
-              };
-
-              if (currentPlayer.aoi?.layerId && targetPlayer.aoi) {
-                const adminLayerId = currentPlayer.aoi.layerId;
-                const adminLayerInfo = layerManager.getLayerInfo(adminLayerId);
-
-                if (adminLayerInfo && adminLayerInfo.playerCount < 100) {
-
-                  layerManager.removePlayerFromLayer(targetPlayer.id);
-                  const layer = layerManager.getLayerInfo(adminLayerId);
-                  if (layer) {
-                    layer.players.add(targetPlayer.id);
-                    layer.playerCount++;
-                    targetPlayer.aoi.layerId = adminLayerId;
-                    resyncSkeletonsFor(targetPlayer.id);
-                    log.info(`[SUMMON] ${targetPlayer.username} moved to admin's layer ${adminLayerId}`);
-                  }
-                }
-              }
-
-              playerCache.set(targetPlayer.id, targetPlayer);
-
-              await updatePlayerAOI(targetPlayer, spawnBatchQueue, despawnBatchQueue);
-              await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
-              await resyncNpcChunks(targetPlayer, targetPlayer.wt); // summoned within the map
-
-              const targetAnimationNameForSprite = getAnimationNameForDirection(
-                targetPlayer.location.position?.direction || "down",
-                !!targetPlayer.moving,
-                !!targetPlayer.mounted,
-                targetPlayer.mount_type,
-                !!targetPlayer.casting
-              );
-              const targetSpriteData = await getPlayerSpriteSheetData(targetAnimationNameForSprite, targetPlayer.equipment || null);
-
-              let targetSpritesData = null;
-              if (targetSpriteData?.bodySprite || targetSpriteData?.headSprite) {
-                targetSpritesData = {
-                  mountSprite: targetPlayer.mounted && targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
-                  bodySprite: targetSpriteData.bodySprite || null,
-                  headSprite: targetSpriteData.headSprite || null,
-                  armorHelmetSprite: targetSpriteData.armorHelmetSprite || null,
-                  armorShoulderguardsSprite: targetSpriteData.armorShoulderguardsSprite || null,
-                  armorNeckSprite: targetSpriteData.armorNeckSprite || null,
-                  armorHandsSprite: targetSpriteData.armorHandsSprite || null,
-                  armorChestSprite: targetSpriteData.armorChestSprite || null,
-                  armorFeetSprite: targetSpriteData.armorFeetSprite || null,
-                  armorLegsSprite: targetSpriteData.armorLegsSprite || null,
-                  armorWeaponSprite: targetSpriteData.armorWeaponSprite || null,
-                  animationState: targetSpriteData.animationState,
-                };
-              }
-
-              const targetSpawnData = {
-                id: targetPlayer.id,
-                userid: targetPlayer.userid,
-                location: {
-                  map: targetPlayer.location.map,
-                  x: targetPlayer.location.position.x,
-                  y: targetPlayer.location.position.y,
-                  direction: targetPlayer.location.position?.direction || "down",
-                  moving: targetPlayer.moving || false,
-                },
-                username: targetPlayer.username,
-                isAdmin: targetPlayer.isAdmin,
-                isGuest: targetPlayer.isGuest,
-                isStealth: targetPlayer.isStealth,
-                isNoclip: targetPlayer.isNoclip,
-                stats: targetPlayer.stats,
-                animation: null,
-                spriteData: targetSpritesData,
-                mounted: targetPlayer.mounted,
-                guild: targetPlayer.guild || [],
-                guild_name: targetPlayer.guild_name || null,
-              };
-
-              sendPacket(wt, packetManager.loadPlayers({
-                players: [targetSpawnData],
-                snapshotRevision: globalStateRevision
-              }));
-
-              const targetAnimationName = getAnimationNameForDirection(
-                targetPlayer.location.position?.direction || "down",
-                !!targetPlayer.moving,
-                !!targetPlayer.mounted,
-                targetPlayer.mount_type || undefined,
-                !!targetPlayer.casting
-              );
-              await sendAnimationTo(wt, targetAnimationName, targetPlayer.id);
-
-              globalStateRevision++;
-
-              const targetMovementData = {
-                i: targetPlayer.id,
-                d: {
-                  x: Number(targetPlayer.location.position.x),
-                  y: Number(targetPlayer.location.position.y),
-                  dr: targetPlayer.location.position.direction
-                },
-                r: globalStateRevision,
-                s: targetPlayer.isStealth ? 1 : 0
-              };
-              sendPacket(targetPlayer.wt, packetManager.moveXY(targetMovementData));
-
-              sendPacket(wt, packetManager.moveXY(targetMovementData));
-
-              const allPlayers = playerCache.list();
-              for (const playerId of currentPlayer.aoi.playersInAOI) {
-                const otherPlayer = allPlayers[playerId as string];
-                if (!otherPlayer || !otherPlayer.wt || otherPlayer.id === targetPlayer.id || otherPlayer.id === currentPlayer.id) continue;
-
-                const canSeeTarget = !targetPlayer.isStealth || otherPlayer.isAdmin;
-                if (canSeeTarget) {
-                  sendPacket(otherPlayer.wt, packetManager.moveXY(targetMovementData));
-                }
-              }
-
-              sendPacket(
-                targetPlayer.wt,
-                packetManager.notify({
-                  message: `You have been summoned by an admin`,
-                })
-              );
-
-              sendPacket(
-                wt,
-                packetManager.notify({
-                  message: `Summoned ${targetPlayer.username.charAt(0).toUpperCase() +
-                    targetPlayer.username.slice(1)
-                    }`,
-                })
-              );
-            }
-            break;
-          }
-
-          case "GOTO":
-          case "TELEPORT": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.summon" || p === "admin.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            const identifier = args[0]?.toLowerCase() || null;
-            if (!identifier) {
-              const notifyData = {
-                message: "Please provide a username or ID",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            let targetPlayer;
-            if (isNaN(Number(identifier))) {
-
-              const players = Object.values(playerCache.list());
-              targetPlayer = players.find(
-                (p) => p.username.toLowerCase() === identifier.toLowerCase()
-              );
-            } else {
-
-              targetPlayer = playerCache.get(identifier);
-            }
-
-            if (!targetPlayer) {
-              const notifyData = {
-                message: "Player not found or is not online",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (targetPlayer.id === currentPlayer.id) {
-              const notifyData = {
-                message: "You cannot teleport to yourself",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (targetPlayer.location.map !== currentPlayer.location.map) {
-
-              const result = await player.setLocation(
-                currentPlayer.id,
-                targetPlayer.location.map,
-                {
-                  x: targetPlayer.location.position.x,
-                  y: targetPlayer.location.position.y,
-                  direction: currentPlayer.location.position?.direction || "down",
-                }
-              );
-
-              if (
-                result &&
-                typeof result === "object" &&
-                "affectedRows" in result &&
-                ((result as { affectedRows: number | null; count?: number }).affectedRows ?? (result as { count?: number }).count) != 0
-              ) {
-                if (!currentPlayer.forceVisibleTo) currentPlayer.forceVisibleTo = new Set();
-                currentPlayer.forceVisibleTo.add(targetPlayer.id);
-
-                playerCache.set(currentPlayer.id, currentPlayer);
-                playerCache.set(targetPlayer.id, targetPlayer);
-
-                setTimeout(() => {
-                  const admin = playerCache.get(currentPlayer.id);
-                  if (admin?.forceVisibleTo) {
-                    admin.forceVisibleTo.delete(targetPlayer.id);
-                    playerCache.set(admin.id, admin);
-                  }
-                }, 5000);
-
-                await transitionPlayerToMap(
-                  currentPlayer,
-                  targetPlayer.location.map,
-                  {
-                    x: Math.round(targetPlayer.location.position.x),
-                    y: Math.round(targetPlayer.location.position.y),
-                    direction: currentPlayer.location.position?.direction || "down",
-                  },
-                  wt,
-                  spawnBatchQueue,
-                  despawnBatchQueue
-                );
-
-                sendPacket(
-                  wt,
-                  packetManager.notify({
-                    message: `Teleported to ${targetPlayer.username.charAt(0).toUpperCase() +
-                      targetPlayer.username.slice(1)
-                      }'s location`,
-                  })
-                );
-              } else {
-                const notifyData = {
-                  message: "Failed to teleport to player",
-                };
-                sendPacket(wt, packetManager.notify(notifyData));
-              }
-            } else {
-
-              currentPlayer.location.position = {
-                x: Math.round(targetPlayer.location.position.x),
-                y: Math.round(targetPlayer.location.position.y),
-                direction: currentPlayer.location.position?.direction || "down",
-              };
-
-              if (targetPlayer.aoi?.layerId && currentPlayer.aoi) {
-                const targetLayerId = targetPlayer.aoi.layerId;
-                const targetLayerInfo = layerManager.getLayerInfo(targetLayerId);
-
-                if (targetLayerInfo && targetLayerInfo.playerCount < 100) {
-
-                  layerManager.removePlayerFromLayer(currentPlayer.id);
-                  const layer = layerManager.getLayerInfo(targetLayerId);
-                  if (layer) {
-                    layer.players.add(currentPlayer.id);
-                    layer.playerCount++;
-                    currentPlayer.aoi.layerId = targetLayerId;
-                    resyncSkeletonsFor(currentPlayer.id);
-                    log.info(`[TELEPORT] Admin ${currentPlayer.username} moved to target's layer ${targetLayerId}`);
-                  }
-                }
-              }
-
-              playerCache.set(currentPlayer.id, currentPlayer);
-
-              await updatePlayerAOI(currentPlayer, spawnBatchQueue, despawnBatchQueue);
-              await updatePlayerAOI(targetPlayer, spawnBatchQueue, despawnBatchQueue);
-              await resyncNpcChunks(currentPlayer, wt); // teleported within the map
-
-              const targetAnimationNameForSpriteTeleport = getAnimationNameForDirection(
-                targetPlayer.location.position?.direction || "down",
-                !!targetPlayer.moving,
-                !!targetPlayer.mounted,
-                targetPlayer.mount_type,
-                !!targetPlayer.casting
-              );
-              const targetSpriteDataTeleport = await getPlayerSpriteSheetData(targetAnimationNameForSpriteTeleport, targetPlayer.equipment || null);
-
-              let targetSpritesDataTeleport = null;
-              if (targetSpriteDataTeleport?.bodySprite || targetSpriteDataTeleport?.headSprite) {
-                targetSpritesDataTeleport = {
-                  mountSprite: targetPlayer.mounted && targetPlayer.mount_type ? getMountSpriteUrl(targetPlayer.mount_type) : null,
-                  bodySprite: targetSpriteDataTeleport.bodySprite || null,
-                  headSprite: targetSpriteDataTeleport.headSprite || null,
-                  armorHelmetSprite: targetSpriteDataTeleport.armorHelmetSprite || null,
-                  armorShoulderguardsSprite: targetSpriteDataTeleport.armorShoulderguardsSprite || null,
-                  armorNeckSprite: targetSpriteDataTeleport.armorNeckSprite || null,
-                  armorHandsSprite: targetSpriteDataTeleport.armorHandsSprite || null,
-                  armorChestSprite: targetSpriteDataTeleport.armorChestSprite || null,
-                  armorFeetSprite: targetSpriteDataTeleport.armorFeetSprite || null,
-                  armorLegsSprite: targetSpriteDataTeleport.armorLegsSprite || null,
-                  armorWeaponSprite: targetSpriteDataTeleport.armorWeaponSprite || null,
-                  animationState: targetSpriteDataTeleport.animationState,
-                };
-              }
-
-              const targetSpawnDataTeleport = {
-                id: targetPlayer.id,
-                userid: targetPlayer.userid,
-                location: {
-                  map: targetPlayer.location.map,
-                  x: targetPlayer.location.position.x,
-                  y: targetPlayer.location.position.y,
-                  direction: targetPlayer.location.position?.direction || "down",
-                  moving: targetPlayer.moving || false,
-                },
-                username: targetPlayer.username,
-                isAdmin: targetPlayer.isAdmin,
-                isGuest: targetPlayer.isGuest,
-                isStealth: targetPlayer.isStealth,
-                isNoclip: targetPlayer.isNoclip,
-                stats: targetPlayer.stats,
-                animation: null,
-                spriteData: targetSpritesDataTeleport,
-                mounted: targetPlayer.mounted,
-                guild: targetPlayer.guild || [],
-                guild_name: targetPlayer.guild_name || null,
-              };
-
-              sendPacket(wt, packetManager.loadPlayers({
-                players: [targetSpawnDataTeleport],
-                snapshotRevision: globalStateRevision
-              }));
-
-              const targetAnimationNameTeleport = getAnimationNameForDirection(
-                targetPlayer.location.position?.direction || "down",
-                !!targetPlayer.moving,
-                !!targetPlayer.mounted,
-                targetPlayer.mount_type || undefined,
-                !!targetPlayer.casting
-              );
-              await sendAnimationTo(wt, targetAnimationNameTeleport, targetPlayer.id);
-
-              globalStateRevision++;
-
-              const adminMovementData = {
-                i: currentPlayer.id,
-                d: {
-                  x: Number(currentPlayer.location.position.x),
-                  y: Number(currentPlayer.location.position.y),
-                  dr: currentPlayer.location.position.direction
-                },
-                r: globalStateRevision,
-                s: currentPlayer.isStealth ? 1 : 0
-              };
-              sendPacket(wt, packetManager.moveXY(adminMovementData));
-
-              const targetMovementData = {
-                i: targetPlayer.id,
-                d: {
-                  x: Number(targetPlayer.location.position.x),
-                  y: Number(targetPlayer.location.position.y),
-                  dr: targetPlayer.location.position.direction
-                },
-                r: globalStateRevision,
-                s: targetPlayer.isStealth ? 1 : 0
-              };
-              sendPacket(targetPlayer.wt, packetManager.moveXY(targetMovementData));
-
-              broadcastToAOI(currentPlayer, packetManager.moveXY(adminMovementData), true);
-              broadcastToAOI(targetPlayer, packetManager.moveXY(targetMovementData), true);
-
-              sendPacket(
-                wt,
-                packetManager.notify({
-                  message: `Teleported to ${targetPlayer.username.charAt(0).toUpperCase() +
-                    targetPlayer.username.slice(1)
-                    }`,
-                })
-              );
-            }
-            break;
-          }
-
-          case "KICK":
-          case "DISCONNECT": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.kick" || p === "admin.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-            const identifier = args[0]?.toLowerCase() || null;
-            if (!identifier) {
-              const notifyData = {
-                message: "Please provide a username or ID",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            let targetPlayer;
-            if (isNaN(Number(identifier))) {
-
-              const players = Object.values(playerCache.list());
-              targetPlayer = players.find(
-                (p) => p.username.toLowerCase() === identifier.toLowerCase()
-              );
-            } else {
-
-              targetPlayer = playerCache.get(identifier);
-            }
-
-            if (targetPlayer?.id === currentPlayer.id) {
-              const notifyData = {
-                message: "You cannot disconnect yourself",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (!targetPlayer) {
-              const notifyData = {
-                message: "Player not found or is not online",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (targetPlayer.isAdmin) {
-              const notifyData = {
-                message: "You cannot disconnect other admins",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            player.kick(targetPlayer.username, targetPlayer.wt);
-            const notifyData = {
-              message: `Disconnected ${targetPlayer.username.charAt(0).toUpperCase() +
-                targetPlayer.username.slice(1)
-                } from the server`,
-            };
-            sendPacket(wt, packetManager.notify(notifyData));
-            break;
-          }
-
-          case "NOTIFY":
-          case "BROADCAST": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "server.notify" || p === "server.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-            let message;
-            let audience = "ALL";
-
-            if (!args[0]) return;
-            if (!["ALL", "ADMINS", "MAP"].includes(args[0].toUpperCase())) {
-              message = args.join(" ");
-            } else {
-              audience = args[0].toUpperCase();
-              message = args.slice(1).join(" ");
-            }
-
-            if (!message) return;
-            const players = Object.values(playerCache.list());
-
-            switch (audience) {
-              case "ALL": {
-                players.forEach((player) => {
-                  const notifyData = {
-                    message: message,
-                  };
-                  sendPacket(player.wt, packetManager.notify(notifyData));
-                });
-                break;
-              }
-              case "ADMINS": {
-                const playersInMap = filterPlayersByMap(
-                  currentPlayer.location.map
-                );
-                const playersInMapAdmins = playersInMap.filter(
-                  (p) => p.isAdmin
-                );
-                playersInMapAdmins.forEach((player) => {
-                  const notifyData = {
-                    message: message,
-                  };
-                  sendPacket(player.wt, packetManager.notify(notifyData));
-                });
-                break;
-              }
-              case "MAP": {
-                const playersInMap = filterPlayersByMap(
-                  currentPlayer.location.map
-                );
-                playersInMap.forEach((player) => {
-                  const notifyData = {
-                    message: message,
-                  };
-                  sendPacket(player.wt, packetManager.notify(notifyData));
-                });
-                break;
-              }
-            }
-            break;
-          }
-
-          case "MUTE": {
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.mute" || p === "admin.*"
-              )
-            ) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.notify({ message: await moderation.muteCommand(currentPlayer, args) }));
-            break;
-          }
-
-          case "UNMUTE": {
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.unmute" || p === "admin.*"
-              )
-            ) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.notify({ message: await moderation.unmuteCommand(currentPlayer, args) }));
-            break;
-          }
-
-          case "IGNORE": {
-            sendIgnoreAnswer(wt, await moderation.ignore(currentPlayer, args[0]));
-            break;
-          }
-
-          case "UNIGNORE": {
-            sendIgnoreAnswer(wt, await moderation.unignore(currentPlayer, args[0]));
-            break;
-          }
-
-          case "IGNORELIST": {
-            sendPacket(wt, packetManager.notify({ message: await moderation.ignoreList(currentPlayer) }));
-            break;
-          }
-
-          case "REPORT": {
-            // From chat a report has no category to pick: the reason typed is what it says.
-            const reason = args.slice(1).join(" ");
-            if (!args[0] || !reason) {
-              sendPacket(wt, packetManager.notify({ message: "Usage: /report <username> <reason>" }));
-              break;
-            }
-            await sendReport(wt, currentPlayer, args[0], "other", reason);
-            break;
-          }
-
-          case "REPORTS": {
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.reports" || p === "admin.*"
-              )
-            ) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.notify({ message: await moderation.reportsCommand(currentPlayer, args) }));
-            break;
-          }
-
-          case "TRADES": {
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.trades" || p === "admin.*"
-              )
-            ) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.notify({ message: await moderation.tradesCommand(currentPlayer, args) }));
-            break;
-          }
-
-          case "BAN": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.ban" || p === "admin.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-            const identifier = args[0]?.toLowerCase() || null;
-            if (!identifier) {
-              const notifyData = {
-                message: "Please provide a username or ID",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            let targetPlayer;
-            if (isNaN(Number(identifier))) {
-
-              const players = Object.values(playerCache.list());
-              targetPlayer = players.find(
-                (p) => p.username.toLowerCase() === identifier.toLowerCase()
-              );
-            } else {
-
-              targetPlayer = playerCache.get(identifier);
-            }
-
-            if (!targetPlayer) {
-              const dbPlayer = (await player.findPlayerInDatabase(
-                identifier
-              )) as { username: string; banned: number }[];
-              targetPlayer = dbPlayer.length > 0 ? dbPlayer[0] : null;
-            }
-
-            if (!targetPlayer) {
-              const notifyData = {
-                message: "Player not found",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (targetPlayer.username.toLowerCase() === currentPlayer.username.toLowerCase()) {
-              const notifyData = {
-                message: "You cannot ban yourself",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            // Asked of the account, not the target found: one found in the
-            // database (offline) carries no isAdmin.
-            if (await player.isAdmin(targetPlayer.username)) {
-              const notifyData = {
-                message: "You cannot ban other admins",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (targetPlayer.banned) {
-              const notifyData = {
-                message: `${targetPlayer.username.charAt(0).toUpperCase() +
-                  targetPlayer.username.slice(1)
-                  } is already banned`,
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            await player.ban(targetPlayer.username, targetPlayer.wt);
-            const notifyData = {
-              message: `Banned ${targetPlayer.username.charAt(0).toUpperCase() +
-                targetPlayer.username.slice(1)
-                } from the server`,
-            };
-            sendPacket(wt, packetManager.notify(notifyData));
-            break;
-          }
-          case "UNBAN": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.unban" || p === "admin.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-            const identifier = args[0] || null;
-            if (!identifier) {
-              const notifyData = {
-                message: "Please provide a username or ID",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            const targetPlayer = (await player.findPlayerInDatabase(
-              identifier
-            )) as { username: string; banned: number }[] as any[];
-            // A name with no account is an empty list, not nothing.
-            if (!targetPlayer?.length) {
-              const notifyData = {
-                message: "Player not found or is not online",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (targetPlayer[0].id === currentPlayer.id) {
-              const notifyData = {
-                message: "You cannot unban yourself",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            await player.unban(targetPlayer[0].username);
-            const notifyData = {
-              message: `Unbanned ${targetPlayer[0].username} from the server`,
-            };
-            sendPacket(wt, packetManager.notify(notifyData));
-            break;
-          }
-
-          case "ADMIN":
-          case "SETADMIN": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "server.admin" || p === "server.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-            const identifier = args[0]?.toLowerCase() || null;
-            if (!identifier) {
-              const notifyData = {
-                message: "Please provide a username or ID",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            let targetPlayer;
-            if (isNaN(Number(identifier))) {
-
-              const players = Object.values(playerCache.list());
-              targetPlayer = players.find(
-                (p) => p.username.toLowerCase() === identifier.toLowerCase()
-              );
-            } else {
-
-              targetPlayer = playerCache.get(identifier);
-            }
-
-            if (!targetPlayer) {
-              const dbPlayer = (await player.findPlayerInDatabase(
-                identifier
-              )) as { username: string; banned: number }[];
-              targetPlayer = dbPlayer.length > 0 ? dbPlayer[0] : null;
-            }
-
-            if (!targetPlayer) {
-              const notifyData = {
-                message: "Player not found",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (targetPlayer.username.toLowerCase() === currentPlayer.username.toLowerCase()) {
-              const notifyData = {
-                message: "You cannot toggle your own admin status",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            // Demoting clears what the target holds, so it is held to the
-            // rule of changing it: a lower admin cannot demote a higher one.
-            if (!outranks(currentPlayer.permissions, await permissions.held(targetPlayer.username))) {
-              const notifyData = {
-                message: "You cannot change the admin status of someone who holds permissions you cannot grant",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            const admin = await player.toggleAdmin(targetPlayer.username);
-
-            if (targetPlayer && targetPlayer.wt) {
-              targetPlayer.isAdmin = admin;
-              // toggleAdmin clears them with the role.
-              if (admin === false) targetPlayer.permissions = [];
-              playerCache.set(targetPlayer.id, targetPlayer);
-            }
-            const notifyData = {
-              message: `${targetPlayer.username.charAt(0).toUpperCase() +
-                targetPlayer.username.slice(1)
-                } is now ${admin ? "an admin" : "not an admin"}`,
-            };
-
-            if (targetPlayer?.wt) {
-              sendPacket(targetPlayer.wt, packetManager.reconnect());
-            }
-            sendPacket(wt, packetManager.notify(notifyData));
-            break;
-          }
-
-          case "WHITELIST": {
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.whitelist" || p === "admin.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            const whitelistMode = args[0]?.toLowerCase() || null;
-            const whitelistUsername = args[1] || null;
-
-            // Switch it while the server runs. Turning it on loads the
-            // usernames and puts this admin on the list; players already
-            // online stay, only new logins are checked.
-            if (whitelistMode === "on" || whitelistMode === "off") {
-              const result = await setWhitelistEnabled(whitelistMode === "on", currentPlayer.username);
-              const notifyData = {
-                message: result.message,
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            // Check if whitelist is enabled
-            if (!isWhitelistEnabled()) {
-              const notifyData = {
-                message: "Whitelist is not enabled on this realm. Turn it on with /whitelist on",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (!whitelistMode || !["add", "remove"].includes(whitelistMode)) {
-              const notifyData = {
-                message: "Usage: /whitelist on|off, or /whitelist add|remove [username]",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (!whitelistUsername) {
-              const notifyData = {
-                message: `Usage: /whitelist ${whitelistMode} [username]`,
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            try {
-              if (whitelistMode === "add") {
-                if (whitelistUsername.toLowerCase() === currentPlayer.username.toLowerCase()) {
-                  const notifyData = {
-                    message: "You cannot add yourself to the whitelist",
-                  };
-                  sendPacket(wt, packetManager.notify(notifyData));
-                  break;
-                }
-                const result = await player.whitelistAdd(whitelistUsername);
-                const notifyData = {
-                  message: result.message,
-                };
-                sendPacket(wt, packetManager.notify(notifyData));
-              } else if (whitelistMode === "remove") {
-                if (whitelistUsername.toLowerCase() === currentPlayer.username.toLowerCase()) {
-                  const notifyData = {
-                    message: "You cannot remove yourself from the whitelist",
-                  };
-                  sendPacket(wt, packetManager.notify(notifyData));
-                  break;
-                }
-                const result = await player.whitelistRemove(whitelistUsername);
-                const notifyData = {
-                  message: result.message,
-                };
-                sendPacket(wt, packetManager.notify(notifyData));
-              }
-            } catch (error) {
-              log.error(`Whitelist command error: ${error}`);
-              const notifyData = {
-                message: "An error occurred while processing the whitelist command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-            }
-            break;
-          }
-
-          case "SUBSCRIPTION": {
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.subscription" || p === "admin.*"
-              )
-            ) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-
-            const subscriptionMode = args[0]?.toLowerCase() || null;
-            const subscriptionId = args[1]?.toLowerCase() || null;
-
-            if (subscriptionMode === "list") {
-              const state = subscriptionState();
-              sendPacket(wt, packetManager.notify({
-                message: `Subscriptions are ${state.enabled ? "on" : "off (the Gateway has no Stripe settings, so nothing is locked)"}. Locked for players who are not subscribed: ${state.locks.length ? state.locks.join(", ") : "nothing"}`,
-              }));
-              sendPacket(wt, packetManager.notify({
-                message: `Locks: ${state.options.map((option) => option.id).join(", ")}`,
-              }));
-              break;
-            }
-
-            if (subscriptionMode !== "lock" && subscriptionMode !== "unlock") {
-              sendPacket(wt, packetManager.notify({ message: "Usage: /subscription list, or /subscription lock|unlock [id]" }));
-              break;
-            }
-
-            if (!subscriptionId || !isSubscriptionLock(subscriptionId)) {
-              sendPacket(wt, packetManager.notify({
-                message: `Usage: /subscription ${subscriptionMode} [id]. Use /subscription list to see the ids`,
-              }));
-              break;
-            }
-
-            try {
-              const result = await setSubscriptionLock(subscriptionId, subscriptionMode === "lock");
-              sendPacket(wt, packetManager.notify({ message: result.message }));
-            } catch (error) {
-              log.error(`Subscription command error: ${error}`);
-              sendPacket(wt, packetManager.notify({ message: "An error occurred while processing the subscription command" }));
-            }
-            break;
-          }
-
-          case "SHUTDOWN": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "server.shutdown" || p === "server.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-            // Two admins asking at once would each warn, disconnect and
-            // spawn: the second is told the first is under way.
-            if (shutdownStarted) {
-              sendPacket(wt, packetManager.notify({ message: "The server is already shutting down" }));
-              break;
-            }
-            shutdownStarted = true;
-            const players = Object.values(playerCache.list());
-            players.forEach((player) => {
-              const notifyData = {
-                message:
-                  "⚠️ Server shutting down - please reconnect in a few minutes ⚠️",
-              };
-              sendPacket(player.wt, packetManager.notify(notifyData));
-            });
-
-            await new Promise((resolve) => setTimeout(resolve, 5000));
-            players.forEach((player) => {
-              player.wt.close(1000, "Server is restarting");
-            });
-
-            const checkInterval = setInterval(async () => {
-              const remainingPlayers = Object.values(playerCache.list());
-              remainingPlayers.forEach((player) => {
-                player.wt.close(1000, "Server is restarting");
-              });
-
-              if (remainingPlayers.length === 0) {
-                clearInterval(checkInterval);
-                await player.clear();
-                // Each disconnect saves its player after leaving the cache:
-                // let the database answer those writes before the process ends.
-                await drainQueries();
-                await gracefulShutdown("/shutdown");
-              }
-            }, 100);
-            break;
-          }
-
-          case "TE":
-          case "TILEEDITOR": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "tools.tile_editor" || p === "tools.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            sendPacket(wt, packetManager.toggleTileEditor());
-            break;
-          }
-
-          case "PE":
-          case "PARTICLEEDITOR": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "tools.particle_editor" || p === "tools.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            sendPacket(wt, packetManager.toggleParticleEditor());
-            break;
-          }
-
-          case "IE":
-          case "ITEMEDITOR": {
-            if (!itemEditor.canUseEditor(currentPlayer)) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.toggleItemEditor());
-            break;
-          }
-
-          case "ME":
-          case "MOUNTEDITOR": {
-            if (!mountEditor.canUseEditor(currentPlayer)) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.toggleMountEditor());
-            break;
-          }
-
-          case "SE":
-          case "SPELLEDITOR": {
-            if (!(await spellEditor.canUseEditor(currentPlayer))) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.toggleSpellEditor());
-            break;
-          }
-
-          case "WE":
-          case "WEATHEREDITOR": {
-            if (!(await weatherEditor.canUseEditor(currentPlayer))) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.toggleWeatherEditor());
-            break;
-          }
-
-          case "MAILBOX": {
-            if (!(await mailboxEditor.canUseEditor(currentPlayer))) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.toggleMailboxEditor());
-            break;
-          }
-
-          case "GATHERING": {
-            if (!(await gathering.canUseEditor(currentPlayer))) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.toggleGatheringEditor());
-            break;
-          }
-
-          case "ACHIEVEMENTS": {
-            if (!(await achievements.canUseEditor(currentPlayer))) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.toggleAchievementEditor());
-            break;
-          }
-
-          case "CLE":
-          case "CLASSEDITOR": {
-            if (!(await classEditor.canUseEditor(currentPlayer))) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.toggleClassEditor());
-            break;
-          }
-
-          case "QE":
-          case "QUESTEDITOR": {
-            if (!questEditor.canUseEditor(currentPlayer)) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.toggleQuestEditor());
-            break;
-          }
-
-          case "CE":
-          case "CREATUREEDITOR": {
-            if (!creatures.canUseEditor(currentPlayer)) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.toggleCreatureEditor());
-            break;
-          }
-
-          case "NE":
-          case "NPCEDITOR": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "tools.npc_editor" || p === "tools.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            sendPacket(wt, packetManager.toggleNpcEditor());
-            break;
-          }
-
-          case "PLAYER": {
-            // /player edit <username | id>: open the player editor on that player.
-            if (!(await playerEditor.canUseEditor(currentPlayer))) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            if (args[0]?.toUpperCase() !== "EDIT" || !args[1]) {
-              sendPacket(wt, packetManager.notify({ message: "Usage: /player edit <username | id>" }));
-              break;
-            }
-            const editTarget = await playerEditor.resolveTarget(args[1]);
-            if (!editTarget) {
-              sendPacket(wt, packetManager.notify({ message: "Player not found" }));
-              break;
-            }
-            sendPacket(wt, packetManager.playerEditorOpen({ target: editTarget.username }));
-            break;
-          }
-
-          case "CP":
-          case "CONTROLPANEL": {
-            if (!controlPanel.canUsePanel(currentPlayer)) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.toggleControlPanel());
-            break;
-          }
-
-          case "RESTART": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "server.restart" || p === "server.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (restartScheduled) {
-              restartTimers.forEach((timer) => clearTimeout(timer));
-              restartTimers = [];
-              restartScheduled = false;
-
-              const players = Object.values(playerCache.list());
-              players.forEach((player) => {
-                const notifyData = {
-                  message: "⚠️ Server restart has been aborted ⚠️",
-                };
-                sendPacket(player.wt, packetManager.notify(notifyData));
-              });
-              break;
-            }
-
-            restartScheduled = true;
-            restartTimers = [];
-
-            const minutes = 15;
-            const RESTART_DELAY = minutes * 60000;
-            const totalMinutes = Math.floor(RESTART_DELAY / 60000);
-
-            const minuteIntervals = Array.from(
-              { length: totalMinutes },
-              (_, i) => totalMinutes - i
-            );
-            const secondIntervals = Array.from(
-              { length: 30 },
-              (_, i) => 30 - i
-            );
-
-            minuteIntervals.forEach((minutes) => {
-              restartTimers.push(
-                setTimeout(() => {
-                  const players = Object.values(playerCache.list());
-                  players.forEach((player) => {
-                    const notifyData = {
-                      message: `⚠️ Server restarting in ${minutes} minute${minutes === 1 ? "" : "s"
-                        } ⚠️`,
-                    };
-                    sendPacket(player.wt, packetManager.notify(notifyData));
-                  });
-                }, RESTART_DELAY - minutes * 60 * 1000)
-              );
-            });
-
-            secondIntervals.forEach((seconds) => {
-              restartTimers.push(
-                setTimeout(() => {
-                  const players = Object.values(playerCache.list());
-                  players.forEach((player) => {
-                    const notifyData = {
-                      message: `⚠️ Server restarting in ${seconds} second${seconds === 1 ? "" : "s"
-                        } ⚠️`,
-                    };
-                    sendPacket(player.wt, packetManager.notify(notifyData));
-                  });
-                }, RESTART_DELAY - seconds * 1000)
-              );
-            });
-
-            restartTimers.push(
-              setTimeout(() => {
-                const players = Object.values(playerCache.list());
-                players.forEach((player) => {
-                  player.wt.close(1000, "Server is restarting");
-                });
-
-                const checkInterval = setInterval(async () => {
-                  const remainingPlayers = Object.values(playerCache.list());
-                  remainingPlayers.forEach((player) => {
-                    player.wt.close(1000, "Server is restarting");
-                  });
-
-                  if (remainingPlayers.length === 0) {
-                    clearInterval(checkInterval);
-                    await player.clear();
-                    await drainQueries();
-                    // The process ends here. Starting it again is its
-                    // supervisor's job (the Docker restart policy).
-                    await gracefulShutdown("/restart");
-                  }
-                }, 100);
-              }, RESTART_DELAY)
-            );
-            break;
-          }
-
-          case "RESPAWN": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.respawn" || p === "admin.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            let targetPlayer;
-            const identifier = args[0]?.toLowerCase() || null;
-
-            if (!identifier) {
-              targetPlayer = currentPlayer;
-            } else {
-
-              const players = Object.values(playerCache.list());
-              if (isNaN(Number(identifier))) {
-
-                targetPlayer = players.find(
-                  (p) => p.username.toLowerCase() === identifier.toLowerCase()
-                );
-              } else {
-
-                targetPlayer = playerCache.get(identifier);
-              }
-
-              if (!targetPlayer) {
-                const dbPlayer = (await player.findPlayerInDatabase(
-                  identifier
-                )) as { username: string }[];
-                targetPlayer = dbPlayer.length > 0 ? dbPlayer[0] : null;
-              }
-
-              if (!targetPlayer) {
-                const notifyData = {
-                  message: "Player not found",
-                };
-                sendPacket(wt, packetManager.notify(notifyData));
-                break;
-              }
-            }
-
-            const defaultMapProps = mapPropertiesCache.find(
-              (m: any) => m.name === `${defaultMap}.json`
-            );
-            const centerX = defaultMapProps?.spawn ? defaultMapProps.spawn.x : defaultMapProps
-              ? (defaultMapProps.width * defaultMapProps.tileWidth) / 2
-              : 0;
-            const centerY = defaultMapProps?.spawn ? defaultMapProps.spawn.y : defaultMapProps
-              ? (defaultMapProps.height * defaultMapProps.tileHeight) / 2
-              : 0;
-
-            // By username: the target may be offline, and has a session id only while online.
-            await player.setLocationByUsername(targetPlayer.username, `${defaultMap}`, {
-              x: centerX,
-              y: centerY,
-              direction: "down",
-            });
-
-            if (playerCache.get(targetPlayer.id)) {
-              targetPlayer.location.position = {
-                x: Math.round(centerX),
-                y: Math.round(centerY),
-                direction: "down",
-              };
-              // Admin respawn releases any death state: corpse/ghost cleared,
-              // full health, position is the respawn point.
-              targetPlayer.isDead = false;
-              targetPlayer.isGhost = false;
-              targetPlayer.corpse = null;
-              targetPlayer.reviveOffered = false;
-              targetPlayer.ghostTeleportPending = false;
-              resurrection.clearSickness(targetPlayer);
-              const respawnSynced = await player.synchronizeStats(targetPlayer.username);
-              if (respawnSynced) {
-                targetPlayer.stats = respawnSynced;
-              }
-              if (targetPlayer.stats) {
-                targetPlayer.stats.health = targetPlayer.stats.total_max_health;
-                targetPlayer.stats.stamina = targetPlayer.stats.total_max_stamina;
-              }
-              playerCache.set(targetPlayer.id, targetPlayer);
-              await resyncNpcChunks(targetPlayer, targetPlayer.wt); // respawned at the map's centre
-              try {
-                await player.setDeadState(targetPlayer.username, 0, null);
-              } catch (e: any) {
-                log.error(`Failed to clear death state for ${targetPlayer.username}: ${e?.message || e}`);
-              }
-              const playersInMap = filterPlayersByMap(
-                targetPlayer.location.map
-              );
-              globalStateRevision++;
-              playersInMap.forEach((player) => {
-                const moveData = {
-                  i: targetPlayer.id,
-                  d: {
-                    x: Number(targetPlayer.location.position.x),
-                    y: Number(targetPlayer.location.position.y),
-                    dr: targetPlayer.location.position.direction
-                  },
-                  r: globalStateRevision,
-                  s: targetPlayer.isStealth ? 1 : 0
-                };
-                sendPacket(player.wt, packetManager.moveXY(moveData));
-                sendPacket(player.wt, packetManager.playerGhost({ id: targetPlayer.id, ghost: false }));
-                if (targetPlayer.stats) {
-                  sendPacket(player.wt, packetManager.revive({
-                    id: targetPlayer.id,
-                    target: targetPlayer.id,
-                    stats: targetPlayer.stats,
-                  }));
-                }
-              });
-              spellEffects.broadcastEffectsUpdate(targetPlayer);
-            }
-
-            const notifyData = {
-              message: `Respawned ${targetPlayer.username.charAt(0).toUpperCase() +
-                targetPlayer.username.slice(1)
-                }`,
-            };
-            sendPacket(wt, packetManager.notify(notifyData));
-            // An offline target is an account, not a player in the world: only where they will log in changed.
-            if (targetPlayer.location) {
-              listener.emit(Events.PLAYER_RESPAWN, { player: targetPlayer, mapName: targetPlayer.location.map, x: targetPlayer.location.position.x, y: targetPlayer.location.position.y });
-            }
-            break;
-          }
-
-          case "REVIVE": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.revive" || p === "admin.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            const reviveIdentifier = args[0]?.toLowerCase() || null;
-
-            let reviveTarget: any = null;
-            if (!reviveIdentifier) {
-              reviveTarget = currentPlayer;
-            } else {
-              const players = Object.values(playerCache.list());
-              if (isNaN(Number(reviveIdentifier))) {
-                reviveTarget = players.find(
-                  (p) => p.username.toLowerCase() === reviveIdentifier.toLowerCase()
-                );
-              } else {
-                reviveTarget = playerCache.get(reviveIdentifier);
-              }
-            }
-
-            const onlineTarget = reviveTarget ? playerCache.get(reviveTarget.id) : null;
-            if (!onlineTarget) {
-              sendPacket(wt, packetManager.notify({ message: "Player must be online to revive" }));
-              break;
-            }
-
-            if (!onlineTarget.isDead && !onlineTarget.isGhost) {
-              const notifyData = {
-                message: `${onlineTarget.username.charAt(0).toUpperCase() + onlineTarget.username.slice(1)} is not dead`,
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            // Revive in place at full health: clear corpse/ghost state and any
-            // Resurrection Sickness, then recompute clean totals.
-            onlineTarget.isDead = false;
-            onlineTarget.isGhost = false;
-            onlineTarget.corpse = null;
-            onlineTarget.reviveOffered = false;
-            onlineTarget.ghostTeleportPending = false;
-            resurrection.clearSickness(onlineTarget);
-            const reviveSynced = await player.synchronizeStats(onlineTarget.username);
-            if (reviveSynced) {
-              onlineTarget.stats = reviveSynced;
-            }
-            onlineTarget.stats.health = onlineTarget.stats.total_max_health;
-            onlineTarget.stats.stamina = onlineTarget.stats.total_max_stamina;
-            playerCache.set(onlineTarget.id, onlineTarget);
-            try {
-              await player.setDeadState(onlineTarget.username, 0, null);
-            } catch (e: any) {
-              log.error(`Failed to clear death state for ${onlineTarget.username}: ${e?.message || e}`);
-            }
-
-            globalStateRevision++;
-            filterPlayersByMap(onlineTarget.location.map).forEach((player) => {
-              sendPacket(player.wt, packetManager.playerGhost({ id: onlineTarget.id, ghost: false }));
-              sendPacket(player.wt, packetManager.revive({
-                id: onlineTarget.id,
-                target: onlineTarget.id,
-                stats: onlineTarget.stats,
-              }));
-            });
-            spellEffects.broadcastEffectsUpdate(onlineTarget);
-            sendStatsToPartyMembers(onlineTarget.username, onlineTarget.id, onlineTarget.stats);
-
-            sendPacket(wt, packetManager.notify({
-              message: `Revived ${onlineTarget.username.charAt(0).toUpperCase() + onlineTarget.username.slice(1)}`,
-            }));
-            listener.emit(Events.PLAYER_REVIVED, { player: onlineTarget });
-            break;
-          }
-
-          // Ends every cooldown an online player is waiting on: spells, the lockout after an
-          // interrupt, the one consumables share and the home item's hour. Themselves, when no
-          // player is named.
-          case "COOLDOWNS":
-          case "RESETCOOLDOWNS": {
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.cooldowns" || p === "admin.*"
-              )
-            ) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-
-            const named = args[0]?.toLowerCase() || null;
-            const found = !named
-              ? currentPlayer
-              : isNaN(Number(named))
-                ? Object.values(playerCache.list()).find((p: any) => p.username.toLowerCase() === named)
-                : playerCache.get(named);
-            const waiting = found ? playerCache.get((found as any).id) : null;
-            if (!waiting) {
-              sendPacket(wt, packetManager.notify({ message: "Player must be online to reset their cooldowns" }));
-              break;
-            }
-
-            const waitingName = waiting.username.charAt(0).toUpperCase() + waiting.username.slice(1);
-            try {
-              await resetCooldowns(waiting);
-            } catch (error) {
-              log.error(`The cooldowns of ${waiting.username} could not all be reset: ${error}`);
-              sendPacket(wt, packetManager.notify({ message: `The home cooldown of ${waitingName} could not be reset. The others were.` }));
-            }
-            // The admin's own, as their connection carries them.
-            if (waiting.id === currentPlayer.id) {
-              currentPlayer.spellCooldowns = waiting.spellCooldowns;
-              currentPlayer.spellLockoutUntil = 0;
-            }
-            playerCache.set(waiting.id, waiting);
-            if (waiting.wt) sendPacket(waiting.wt, packetManager.cooldownsReset());
-            sendPacket(wt, packetManager.notify({ message: `Reset the cooldowns of ${waitingName}` }));
-            break;
-          }
-
-          case "KILL": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.kill" || p === "admin.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            const killIdentifier = args[0]?.toLowerCase() || null;
-
-            let killTarget: any = null;
-            if (!killIdentifier) {
-              killTarget = currentPlayer;
-            } else {
-              const players = Object.values(playerCache.list());
-              if (isNaN(Number(killIdentifier))) {
-                killTarget = players.find(
-                  (p) => p.username.toLowerCase() === killIdentifier.toLowerCase()
-                );
-              } else {
-                killTarget = playerCache.get(killIdentifier);
-              }
-            }
-
-            const onlineTarget = killTarget ? playerCache.get(killTarget.id) : null;
-            if (!onlineTarget) {
-              sendPacket(wt, packetManager.notify({ message: "Player must be online to kill" }));
-              break;
-            }
-
-            // As kick and ban: not another admin (yourself is fine).
-            if (onlineTarget.id !== currentPlayer.id && (onlineTarget.isAdmin || await player.isAdmin(onlineTarget.username))) {
-              sendPacket(wt, packetManager.notify({ message: "You cannot kill other admins" }));
-              break;
-            }
-
-            if (onlineTarget.isDead || onlineTarget.isGhost) {
-              const notifyData = {
-                message: `${onlineTarget.username.charAt(0).toUpperCase() + onlineTarget.username.slice(1)} is already dead`,
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            // Force the standard death flow: skeleton, corpse persistence,
-            // Release Spirit popup, full server-side locks.
-            await handlePlayerDeath(onlineTarget, currentPlayer, {
-              damage: onlineTarget.stats?.health || 0,
-              isCrit: false,
-            });
-
-            sendPacket(wt, packetManager.notify({
-              message: `Killed ${onlineTarget.username.charAt(0).toUpperCase() + onlineTarget.username.slice(1)}`,
-            }));
-            break;
-          }
-
-          case "PERMISSION":
-          case "PERMISSIONS": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.permission" || p === "admin.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-            const mode = args[0]?.toUpperCase() || null;
-            if (!mode) {
-              const notifyData = {
-                message: "Please provide a mode",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (
-              mode !== "ADD" &&
-              mode !== "REMOVE" &&
-              mode !== "SET" &&
-              mode !== "CLEAR" &&
-              mode !== "LIST"
-            ) {
-              const notifyData = {
-                message: "Invalid mode",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            let targetPlayer;
-            const identifier = args[1]?.toLowerCase() || null;
-            if (!identifier) {
-              const notifyData = {
-                message: "Please provide a username or ID",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            const players = Object.values(playerCache.list());
-            if (isNaN(Number(identifier))) {
-
-              targetPlayer = players.find(
-                (p) => p.username.toLowerCase() === identifier.toLowerCase()
-              );
-            } else {
-
-              targetPlayer = playerCache.get(identifier);
-            }
-
-            if (!targetPlayer) {
-              const dbPlayer = (await player.findPlayerInDatabase(
-                identifier
-              )) as { username: string }[];
-              targetPlayer = dbPlayer.length > 0 ? dbPlayer[0] : null;
-            }
-
-            if (!targetPlayer) {
-              const notifyData = {
-                message: "Player not found",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            // SECURITY: Permission checks FIRST before any other logic
-            let hasPermissionToModify = false;
-            let requiredPermission = "";
-
-            if (mode === "ADD" || mode === "SET") {
-              requiredPermission = "permission.add";
-            } else if (mode === "REMOVE" || mode === "CLEAR") {
-              requiredPermission = "permission.remove";
-            } else if (mode === "LIST") {
-              requiredPermission = "permission.list";
-            }
-
-            // Check if user has required permission
-            hasPermissionToModify = currentPlayer.permissions.some(
-              (p: string) =>
-                p === requiredPermission || p === "permission.*"
-            );
-
-            if (!hasPermissionToModify) {
-              const notifyData = {
-                message: "Insufficient permissions for this operation",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            // SECURITY: Always prevent self-modification regardless of permission level.
-            // By name: a target found in the database has no session id.
-            if (targetPlayer.username.toLowerCase() === currentPlayer.username.toLowerCase() && mode !== "LIST") {
-              const notifyData = {
-                message: "You cannot modify your own permissions",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            // Whether the target is an admin is asked of the account the player
-            // system holds (which every change of role is written to), not of
-            // the copy made at login, and so holds for a target who is offline.
-            // Only granting is held to this: what a former admin still holds
-            // has to stay listable and removable.
-            if((mode === "ADD" || mode === "SET") && !(await player.isAdmin(targetPlayer.username))) {
-              const notifyData = {
-                message: "You can only grant permissions to admin players",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            // SECURITY: Only someone who could have given the target all they
-            // hold may change it, so a lower admin cannot strip a higher one.
-            if (mode !== "LIST" && !outranks(currentPlayer.permissions, await permissions.held(targetPlayer.username))) {
-              const notifyData = {
-                message: "You cannot change the permissions of someone who holds permissions you cannot grant",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            let access;
-            let permissionsArray: string[] = [];
-            if (mode !== "CLEAR" && mode !== "LIST") {
-              access = args.slice(2).join(" ");
-
-              const validPermissions = await permissions.list();
-
-              permissionsArray = access.split(",").map((p: string) => p.trim());
-
-              // Validate all permissions exist
-              for (const permission of permissionsArray) {
-                if (!validPermissions.includes(permission)) {
-                  const notifyData = {
-                    message: `Invalid permission: ${permission}`,
-                  };
-                  sendPacket(wt, packetManager.notify(notifyData));
-                  return;
-                }
-              }
-
-              // SECURITY: Validate user can only grant permissions they have
-              for (const permission of permissionsArray) {
-                if (!canGrant(currentPlayer.permissions, permission)) {
-                  const notifyData = {
-                    message: `You cannot grant the ${permission} permission`,
-                  };
-                  sendPacket(wt, packetManager.notify(notifyData));
-                  return;
-                }
-              }
-            }
-
-            // Perform the permission modification
-            switch (mode) {
-              case "ADD": {
-                // permissions.add takes one name: a joined list is stored again beside the names already held.
-                for (const permission of permissionsArray) {
-                  await permissions.add(targetPlayer.username, permission);
-                }
-
-                if (targetPlayer.wt) {
-                  const existingPerms = targetPlayer.permissions || [];
-                  targetPlayer.permissions = [
-                    ...new Set([...existingPerms, ...permissionsArray])
-                  ];
-                  playerCache.set(targetPlayer.id, targetPlayer);
-                }
-
-                // Audit log
-                log.info(
-                  `[PERMISSION_AUDIT] ${currentPlayer.username} (${currentPlayer.id}) added permissions [${permissionsArray.join(
-                    ", "
-                  )}] to ${targetPlayer.username}`
-                );
-
-                const notifyData = {
-                  message: `Permissions \`${permissionsArray.join(
-                    ", "
-                  )}\` added to ${targetPlayer.username.charAt(0).toUpperCase() +
-                    targetPlayer.username.slice(1)}`,
-                };
-                sendPacket(wt, packetManager.notify(notifyData));
-                break;
-              }
-              case "REMOVE": {
-                // permissions.remove takes one name: a joined list matches nothing.
-                for (const permission of permissionsArray) {
-                  await permissions.remove(targetPlayer.username, permission);
-                }
-
-                if (targetPlayer.wt) {
-                  targetPlayer.permissions = (targetPlayer.permissions || []).filter(
-                    (p: string) => !permissionsArray.includes(p)
-                  );
-                  playerCache.set(targetPlayer.id, targetPlayer);
-                }
-
-                // Audit log
-                log.info(
-                  `[PERMISSION_AUDIT] ${currentPlayer.username} (${currentPlayer.id}) removed permissions [${permissionsArray.join(
-                    ", "
-                  )}] from ${targetPlayer.username}`
-                );
-
-                const notifyData = {
-                  message: `Permissions removed from ${targetPlayer.username.charAt(0).toUpperCase() +
-                    targetPlayer.username.slice(1)}`,
-                };
-                sendPacket(wt, packetManager.notify(notifyData));
-                break;
-              }
-              case "SET": {
-                await permissions.set(targetPlayer.username, permissionsArray);
-
-                if (targetPlayer.wt) {
-                  targetPlayer.permissions = permissionsArray;
-                  playerCache.set(targetPlayer.id, targetPlayer);
-                }
-
-                // Audit log
-                log.info(
-                  `[PERMISSION_AUDIT] ${currentPlayer.username} (${currentPlayer.id}) set permissions to [${permissionsArray.join(
-                    ", "
-                  )}] for ${targetPlayer.username}`
-                );
-
-                const notifyData = {
-                  message: `Permissions set for ${targetPlayer.username.charAt(0).toUpperCase() +
-                    targetPlayer.username.slice(1)}`,
-                };
-                sendPacket(wt, packetManager.notify(notifyData));
-                break;
-              }
-              case "CLEAR": {
-                await permissions.clear(targetPlayer.username);
-
-                targetPlayer.permissions = [];
-                const p = playerCache.get(targetPlayer.id);
-                if (p && p.wt) {
-                  playerCache.set(targetPlayer.id, targetPlayer);
-                }
-
-                // Audit log
-                log.info(
-                  `[PERMISSION_AUDIT] ${currentPlayer.username} (${currentPlayer.id}) cleared all permissions for ${targetPlayer.username}`
-                );
-
-                const notifyData = {
-                  message: `Permissions cleared for ${targetPlayer.username.charAt(0).toUpperCase() +
-                    targetPlayer.username.slice(1)}`,
-                };
-                sendPacket(wt, packetManager.notify(notifyData));
-                break;
-              }
-              case "LIST": {
-                const response =
-                  ((await permissions.get(targetPlayer.username)) as string) ||
-                  "No permissions found";
-                const notifyData = {
-                  message: `Permissions for ${targetPlayer.username.charAt(0).toUpperCase() +
-                    targetPlayer.username.slice(1)}: ${response.replaceAll(
-                    ",",
-                    ", "
-                  )}`,
-                };
-                sendPacket(wt, packetManager.notify(notifyData));
-                break;
-              }
-            }
-            break;
-          }
-          case "RELOADMAP": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.reloadmap" || p === "admin.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-            const mapName = args[0]?.toLowerCase() || null;
-            if (!mapName) {
-              const notifyData = {
-                message: "Please provide a map name",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            const map = (maps as any[]).find(
-              (m) => m.name === `${mapName}.json`
-            );
-            if (!map) {
-              const notifyData = {
-                message: `Map ${mapName} not found`,
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            const result = (await reloadMap(mapName)) as MapData | null;
-            if (result) {
-              const notifyData = {
-                message: `Map ${mapName} reloaded successfully`,
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-
-              map.compressed = result.compressed;
-              map.data = result.data;
-
-              const playersInMap = filterPlayersByMap(mapName);
-
-              playersInMap.forEach((player) => {
-                const mapMetadata = constructMapMetadata(
-                  mapName,
-                  player.location.position?.x || 0,
-                  player.location.position?.y || 0,
-                  player.location.position?.direction || "down",
-                  maps,
-                  mapPropertiesCache
-                );
-                sendPacket(player.wt, packetManager.loadMap(mapMetadata));
-                // loading a map clears the client's creatures and gathering nodes
-                creatures.resyncPlayer(player.id);
-                gathering.resyncPlayer(player.id);
-              });
-            } else {
-              log.error(`Failed to reload map ${mapName}`);
-              const notifyData = {
-                message: `Failed to reload map ${mapName}`,
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-            }
-            break;
-          }
-          case "WARP": {
-
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.warp" || p === "admin.*"
-              )
-            ) {
-              const notifyData = {
-                message: "You don't have permission to use this command",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-            const currentMapName = currentPlayer.location.map;
-
-            const mapName = args[0]?.toLowerCase() || null;
-            if (!mapName) {
-              const notifyData = {
-                message: "Please provide a map name",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            if (mapName === currentMapName) {
-              const notifyData = {
-                message: "You are already in this map",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            const map = (maps as any[]).find(
-              (map: MapData) => map.name === `${mapName}.json`
-            );
-
-            if (!map) {
-              const notifyData = {
-                message: "Map not found",
-              };
-              sendPacket(wt, packetManager.notify(notifyData));
-              break;
-            }
-
-            const identifier = args[1]?.toLowerCase() || null;
-
-            if (!identifier) {
-
-              const mapProps = mapPropertiesCache.find((m: any) => m.name === `${mapName}.json`);
-              // A world names its own spawn (a town square): its centre may well be a lake
-              const centerX = mapProps?.spawn ? mapProps.spawn.x : mapProps
-                ? (mapProps.width * mapProps.tileWidth) / 2
-                : 0;
-              const centerY = mapProps?.spawn ? mapProps.spawn.y : mapProps
-                ? (mapProps.height * mapProps.tileHeight) / 2
-                : 0;
-
-              const result = await player.setLocation(
-                currentPlayer.id,
-                mapName,
-                {
-                  x: centerX,
-                  y: centerY,
-                  direction: currentPlayer.location.position?.direction || "down",
-                }
-              );
-
-              if (
-                result &&
-                typeof result === "object" &&
-                "affectedRows" in result &&
-                ((result as { affectedRows: number | null; count?: number }).affectedRows ?? (result as { count?: number }).count) != 0
-              ) {
-                await transitionPlayerToMap(
-                  currentPlayer,
-                  mapName,
-                  {
-                    x: centerX,
-                    y: centerY,
-                    direction: currentPlayer.location.position?.direction || "down",
-                  },
-                  wt,
-                  spawnBatchQueue,
-                  despawnBatchQueue
-                );
-              } else {
-                const notifyData = {
-                  message: "Failed to update location",
-                };
-                sendPacket(wt, packetManager.notify(notifyData));
-              }
-              break;
-            }
-
-            // /warp moves only the admin who typed it: /summon is the command
-            // that moves another player.
-            sendPacket(
-              wt,
-              packetManager.notify({ message: "Warping another player is not supported. Usage: /warp <map>" })
-            );
-            break;
-          }
-          case "WEATHER": {
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.weather" || p === "admin.*"
-              )
-            ) {
-              sendPacket(
-                wt,
-                packetManager.notify({ message: "You don't have permission to use this command" })
-              );
-              break;
-            }
-
-            const weatherName = args[0]?.toLowerCase() || null;
-            if (!weatherName) {
-              sendPacket(
-                wt,
-                packetManager.notify({ message: "Usage: /weather <weather_name|clear|random|weather_api|tornado>" })
-              );
-              break;
-            }
-
-            // "clear", "random", "weather_api" and "tornado" are /weather's own words: they need no row of the weather table.
-            if (weatherName !== "clear" && weatherName !== "random" && weatherName !== weatherApi.WEATHER_API && weatherName !== TORNADO) {
-              const allWeathers = await assetCache.get("weather") as WeatherData[];
-              if (!allWeathers?.find((w: WeatherData) => w.name === weatherName)) {
-                sendPacket(
-                  wt,
-                  packetManager.notify({ message: `Weather '${weatherName}' not found` })
-                );
-                break;
-              }
-            }
-
-            const currentMapName = currentPlayer.location.map;
-
-            const existingWorld = worldsCache.find((w) => w.name === currentMapName);
-            await worlds.update({ name: currentMapName, weather: weatherName, players: existingWorld?.players || 0 });
-
-            if (existingWorld) {
-              existingWorld.weather = weatherName;
-            }
-
-            resolvedWeatherCache.delete(currentMapName);
-
-            let weatherData = null;
-            let resolvedWeatherName = weatherName;
-            if (weatherName === "random") {
-              const randomWeather = randomPick(await assetCache.get("weather") as WeatherData[]);
-              if (randomWeather) {
-                weatherData = randomWeather;
-                resolvedWeatherName = randomWeather.name;
-                resolvedWeatherCache.set(currentMapName, { weather: resolvedWeatherName, weatherData: randomWeather });
-              } else {
-                resolvedWeatherName = "clear";
-              }
-            } else if (weatherName === weatherApi.WEATHER_API) {
-              weatherData = weatherApi.currentWeather();
-            } else {
-              weatherData = rowOf(await assetCache.get("weather") as WeatherData[], weatherName);
-            }
-
-            const playerIds = mapIndex.getPlayersOnMap(currentMapName);
-            for (const playerId of playerIds) {
-              const player = playerCache.get(playerId);
-              if (player?.wt && player.wt.readyState === 1) {
-                sendPacket(
-                  player.wt,
-                  packetManager.changeWeather(await weatherShown(resolvedWeatherName, weatherData))
-                );
-              }
-            }
-
-            sendPacket(
-              wt,
-              packetManager.notify({ message: `Weather changed to '${weatherName}' for world '${currentMapName}'` })
-            );
-            break;
-          }
-          case "GIVE": {
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.items" || p === "admin.*"
-              )
-            ) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-
-            const targetIdentifier = args[0]?.toLowerCase() || null;
-            const itemName = args[1] || null;
-            const quantity = parseInt(args[2]) || 1;
-
-            if (!targetIdentifier || !itemName) {
-              sendPacket(wt, packetManager.notify({ message: "Usage: /give <user> <item> <amount>" }));
-              break;
-            }
-
-            let targetPlayer;
-            if (isNaN(Number(targetIdentifier))) {
-              const players = Object.values(playerCache.list());
-              targetPlayer = players.find((p: any) => p.username.toLowerCase() === targetIdentifier.toLowerCase());
-            } else {
-              targetPlayer = playerCache.get(targetIdentifier);
-            }
-
-            if (!targetPlayer) {
-              const dbPlayer = await player.findPlayerInDatabase(targetIdentifier, undefined) as { username: string }[];
-              targetPlayer = dbPlayer.length > 0 ? dbPlayer[0] : null;
-            }
-
-            if (!targetPlayer) {
-              sendPacket(wt, packetManager.notify({ message: "Player not found" }));
-              break;
-            }
-
-            const targetName = targetPlayer.username;
-
-            const items = await assetCache.get("items") as Item[];
-            const itemDef = Array.isArray(items) ? items.find((i: any) => i.name.toLowerCase() === itemName.toLowerCase()) : null;
-            if (!itemDef) {
-              sendPacket(wt, packetManager.notify({ message: `Item '${itemName}' does not exist` }));
-              break;
-            }
-
-            await inventory.add(targetName, { name: itemDef.name, quantity });
-
-            const cachedTarget = playerCache.get(targetPlayer.id);
-            if (cachedTarget) {
-              if (!Array.isArray(cachedTarget.inventory)) cachedTarget.inventory = [];
-              const existing = cachedTarget.inventory.find((i: any) => i.name.toLowerCase() === itemDef.name.toLowerCase());
-              if (existing) {
-                existing.quantity += quantity;
-                if (cachedTarget.wt) {
-                  sendPacket(cachedTarget.wt, packetManager.addInventoryItem(existing));
-                  sendPacket(cachedTarget.wt, packetManager.notify({ message: `You received ${quantity}x ${itemDef.name}` }));
-                }
-              } else {
-                const newItem = {
-                  name: itemDef.name,
-                  quantity,
-                  equipped: false,
-                  slot: null,
-                  bag_slot: null,
-                  type: itemDef?.type || '',
-                  quality: itemDef?.quality || 'common',
-                  iconUrl: getIconUrl(itemDef?.icon),
-                  equipment_slot: itemDef?.equipment_slot || null,
-                  bag_slots: itemDef?.bag_slots ?? null,
-                  stat_health: itemDef?.stat_health ?? null,
-                  stat_stamina: itemDef?.stat_stamina ?? null,
-                  stat_armor: itemDef?.stat_armor ?? null,
-                  stat_damage: itemDef?.stat_damage ?? null,
-                  stat_critical_chance: itemDef?.stat_critical_chance ?? null,
-                  stat_critical_damage: itemDef?.stat_critical_damage ?? null,
-                  stat_avoidance: itemDef?.stat_avoidance ?? null,
-                  level_requirement: itemDef?.level_requirement ?? null,
-                  description: itemDef?.description || '',
-                };
-                cachedTarget.inventory.push(newItem);
-                if (cachedTarget.wt) {
-                  sendPacket(cachedTarget.wt, packetManager.addInventoryItem(newItem));
-                  sendPacket(cachedTarget.wt, packetManager.notify({ message: `You received ${quantity}x ${itemDef.name}` }));
-                }
-              }
-              playerCache.set(cachedTarget.id, cachedTarget);
-            }
-
-            sendPacket(wt, packetManager.notify({ message: `Gave ${quantity}x ${itemDef.name} to ${targetName}` }));
-            break;
-          }
-          case "DROP": {
-            if (
-              !currentPlayer.permissions.some(
-                (p: string) => p === "admin.items" || p === "admin.*"
-              )
-            ) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-
-            const dropItem = args[0] || null;
-            const dropQty = Math.min(parseInt(args[1]) || 1, 9999);
-
-            if (!dropItem) {
-              sendPacket(wt, packetManager.notify({ message: "Usage: /drop <item> [amount]" }));
-              break;
-            }
-
-            const dropItems = await assetCache.get("items") as Item[];
-            const dropDef = Array.isArray(dropItems) ? dropItems.find((i: any) => i.name.toLowerCase() === dropItem.toLowerCase()) : null;
-            if (!dropDef) {
-              sendPacket(wt, packetManager.notify({ message: `Item '${dropItem}' does not exist` }));
-              break;
-            }
-
-            const iconUrl = getIconUrl(dropDef.icon) || "";
-            const quality = dropDef.quality || "common";
-            // Dropped for everyone: no owner, so any player nearby may pick it up.
-            const spawnedLoot = loot.create(currentPlayer, dropDef.name, dropQty, iconUrl, quality, null);
-
-            const spawnData = {
-              id: spawnedLoot.id,
-              item: spawnedLoot.item,
-              quantity: spawnedLoot.quantity,
-              quality: spawnedLoot.quality,
-              iconUrl: spawnedLoot.iconUrl,
-              x: spawnedLoot.x,
-              y: spawnedLoot.y,
-              ownerId: spawnedLoot.ownerId,
-              ownerName: spawnedLoot.ownerName,
-            };
-            const playerIds = mapIndex.getPlayersOnMap(spawnedLoot.map);
-            for (const playerId of playerIds) {
-              const p = playerCache.get(playerId);
-              if (p?.wt && p.wt.readyState === 1) {
-                sendPacket(p.wt, packetManager.lootSpawn(spawnData));
-              }
-            }
-
-            sendPacket(wt, packetManager.notify({ message: `Dropped ${dropQty}x ${dropDef.name}.` }));
-            break;
-          }
-          case "SPAWNCHEST": {
-            if (!currentPlayer.permissions.some((p: string) => p === "admin.items" || p === "admin.*")) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            const mode = args[0]?.toLowerCase() || null;
-            if (!mode || (mode !== "table" && mode !== "inline")) {
-              sendPacket(wt, packetManager.notify({ message: "Usage: /spawnchest table <loot_table_id> or /spawnchest inline <item> <min> <max> <chance> ..." }));
-              break;
-            }
-            const playerPos = typeof currentPlayer.location.position === 'string'
-              ? { x: Number(currentPlayer.location.position.split(',')[0]), y: Number(currentPlayer.location.position.split(',')[1]) }
-              : (currentPlayer.location.position as any);
-            if (mode === "table") {
-              const tableId = parseInt(args[1]);
-              if (!tableId || isNaN(tableId)) { sendPacket(wt, packetManager.notify({ message: "Usage: /spawnchest table <loot_table_id>" })); break; }
-              const table = await lootTable.get(tableId);
-              if (!table) { sendPacket(wt, packetManager.notify({ message: `Loot table ${tableId} not found.` })); break; }
-              const chestId = lootChest.spawn(currentPlayer.location.map, playerPos.x, playerPos.y, tableId, undefined, currentPlayer.username);
-              const chestData = { id: chestId, x: playerPos.x, y: playerPos.y, iconUrl: getIconUrl("loot_chest"), map: currentPlayer.location.map };
-              const playerIds = mapIndex.getPlayersOnMap(currentPlayer.location.map);
-              for (const pid of playerIds) { const p = playerCache.get(pid); if (p?.wt && p.wt.readyState === 1) { sendPacket(p.wt, packetManager.lootChestSpawn(chestData)); } }
-              sendPacket(wt, packetManager.notify({ message: `Loot chest spawned using table "${table.name}".` }));
-            } else {
-              const itemArgs = args.slice(1);
-              if (itemArgs.length < 4 || itemArgs.length % 4 !== 0) {
-                sendPacket(wt, packetManager.notify({ message: "Usage: /spawnchest inline <item> <min> <max> <chance> ..." }));
-                break;
-              }
-              const inlineEntries: any[] = [];
-              for (let i = 0; i < itemArgs.length; i += 4) {
-                const itemName = itemArgs[i]; const minQty = parseInt(itemArgs[i + 1]); const maxQty = parseInt(itemArgs[i + 2]); const chance = parseFloat(itemArgs[i + 3]);
-                if (!itemName || isNaN(minQty) || isNaN(maxQty) || isNaN(chance)) { sendPacket(wt, packetManager.notify({ message: `Invalid entry at position ${i}` })); break; }
-                inlineEntries.push({ itemName, minQuantity: minQty, maxQuantity: maxQty, dropChance: chance, quality: "common" });
-              }
-              if (inlineEntries.length === 0) break;
-              const chestId = lootChest.spawn(currentPlayer.location.map, playerPos.x, playerPos.y, undefined, inlineEntries, currentPlayer.username);
-              const chestData = { id: chestId, x: playerPos.x, y: playerPos.y, iconUrl: getIconUrl("loot_chest"), map: currentPlayer.location.map };
-              const playerIds = mapIndex.getPlayersOnMap(currentPlayer.location.map);
-              for (const pid of playerIds) { const p = playerCache.get(pid); if (p?.wt && p.wt.readyState === 1) { sendPacket(p.wt, packetManager.lootChestSpawn(chestData)); } }
-              sendPacket(wt, packetManager.notify({ message: `Loot chest spawned with ${inlineEntries.length} inline entries.` }));
-            }
-            break;
-          }
-          case "LOOTTABLE": {
-            if (!currentPlayer.permissions.some((p: string) => p === "admin.loot" || p === "admin.*")) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            const sub = args[0]?.toLowerCase() || null;
-            if (!sub) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable list|create|delete|info|additem|removeitem ..." })); break; }
-            if (sub === "list") {
-              const tables = await lootTable.list();
-              const names = tables.length ? tables.map((t: any) => `#${t.id} ${t.name} (${t.items.length} items)`).join(", ") : "No loot tables found.";
-              sendPacket(wt, packetManager.notify({ message: `Loot tables: ${names}` }));
-            } else if (sub === "create") {
-              const name = args[1]; if (!name) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable create <name>" })); break; }
-              const r = await lootTable.create(name);
-              sendPacket(wt, packetManager.notify({ message: r ? `Loot table "${name}" created.` : `Table "${name}" already exists.` }));
-            } else if (sub === "delete") {
-              const id = parseInt(args[1]); if (!id || isNaN(id)) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable delete <id>" })); break; }
-              await lootTable.delete(id); sendPacket(wt, packetManager.notify({ message: `Loot table ${id} deleted.` }));
-            } else if (sub === "info") {
-              const id = parseInt(args[1]); if (!id || isNaN(id)) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable info <id>" })); break; }
-              const table = await lootTable.get(id);
-              if (!table) { sendPacket(wt, packetManager.notify({ message: `Loot table ${id} not found.` })); break; }
-              const lines = table.items.map((it: any) => `  #${it.id} ${it.item_name} (${it.min_quantity}-${it.max_quantity}, ${it.drop_chance}%, ${it.quality})`).join("\n");
-              sendPacket(wt, packetManager.notify({ message: `Table #${table.id} "${table.name}":\n${lines || "  (no items)"}` }));
-            } else if (sub === "additem") {
-              const tableId = parseInt(args[1]); const itemName = args[2];
-              const minQty = parseInt(args[3]) || 1; const maxQty = parseInt(args[4]) || 1;
-              const chance = normalizeDropChance(args[5]); const quality = args[6] || "common";
-              if (!tableId || isNaN(tableId) || !itemName) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable additem <tableId> <item> <min> <max> <chance> [quality]" })); break; }
-              const r = await lootTable.addItem(tableId, itemName, minQty, maxQty, chance, quality);
-              if (r && (r as any).error) { sendPacket(wt, packetManager.notify({ message: (r as any).error })); break; }
-              sendPacket(wt, packetManager.notify({ message: `Added "${itemName}" to loot table ${tableId}.` }));
-            } else if (sub === "removeitem") {
-              const itemId = parseInt(args[1]); if (!itemId || isNaN(itemId)) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable removeitem <itemId>" })); break; }
-              await lootTable.removeItem(itemId); sendPacket(wt, packetManager.notify({ message: `Item ${itemId} removed from loot table.` }));
-            } else if (sub === "updateitem") {
-              const itemId = parseInt(args[1]); const minQty = parseInt(args[2]) || 1; const maxQty = parseInt(args[3]) || 1;
-              const chance = normalizeDropChance(args[4]); const quality = args[5] || "common";
-              if (!itemId || isNaN(itemId)) { sendPacket(wt, packetManager.notify({ message: "Usage: /loottable updateitem <itemId> <min> <max> <chance> [quality]" })); break; }
-              await lootTable.updateItem(itemId, minQty, maxQty, chance, quality);
-              sendPacket(wt, packetManager.notify({ message: `Item ${itemId} updated.` }));
-            } else { sendPacket(wt, packetManager.notify({ message: "Unknown sub-command. Use: list|create|delete|info|additem|removeitem|updateitem" })); }
-            break;
-          }
-          case "LE":
-          case "LOOTEDITOR": {
-            if (!currentPlayer.permissions.some((p: string) => p === "admin.loot" || p === "admin.*")) {
-              sendPacket(wt, packetManager.notify({ message: "You don't have permission to use this command" }));
-              break;
-            }
-            sendPacket(wt, packetManager.toggleLootEditor());
-            break;
-          }
-          default: {
-            const notifyData = {
-              message: "Invalid command",
-            };
-            sendPacket(wt, packetManager.notify(notifyData));
-            break;
-          }
-        }
-        break;
-      }
-      case "KICK_PARTY_MEMBER": {
-        if (!currentPlayer) return;
-
-        const partyId = await parties.getPartyId(currentPlayer.username);
-        if (!partyId) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "You are not in a party" })
-          );
-          return;
-        }
-
-        const isLeader = await parties.isPartyLeader(currentPlayer.username);
-        if (!isLeader) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "You are not the party leader" })
-          );
-          return;
-        }
-
-        const member = (data as any)?.username;
-        if (!member) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "Please provide a username" })
-          );
-          return;
-        }
-
-        const members = await parties.getPartyMembers(partyId);
-        if (!members || members?.length === 0) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "You are not in a party" })
-          );
-          return;
-        }
-
-        if (!members.includes(member)) {
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: `${member.charAt(0).toUpperCase() + member.slice(1)
-                } is not in your party`,
-            })
-          );
-          return;
-        }
-
-        const result = await parties.remove(member);
-
-        // An empty list is the party system's answer when nobody was removed.
-        if (result === false || (Array.isArray(result) && result.length === 0)) {
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: `Failed to kick ${member.charAt(0).toUpperCase() + member.slice(1)
-                } from the party`,
-            })
-          );
-          return;
-        }
-
-        if (typeof result === "boolean" && result) {
-
-          members.forEach(async (m: string) => {
-            const session_id = await player.getSessionIdByUsername(m);
-            const p = session_id && playerCache.get(session_id);
-            if (p) {
-              sendPacket(p.wt, packetManager.updateParty({ members: [] }));
-              sendPacket(
-                p.wt,
-                packetManager.notify({
-                  message: "The party has been disbanded",
-                })
-              );
-              p.party = [];
-              playerCache.set(p.id, p);
-            }
-          });
-          listener.emit(Events.PARTY_CHANGED, { type: "disband", members });
-          return;
-        }
-
-        if (Array.isArray(result) && result.length > 0) {
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: `${member.charAt(0).toUpperCase() + member.slice(1)
-                } has been kicked from the party`,
-            })
-          );
-          // Those still in the party, the leader among them, get the list as it now is.
-          result.forEach(async (m: string) => {
-            const session_id = await player.getSessionIdByUsername(m);
-            const p = session_id && playerCache.get(session_id);
-            if (p) {
-              sendPacket(
-                p.wt,
-                packetManager.updateParty({ members: result })
-              );
-              if (p.id !== currentPlayer.id) {
-                sendPacket(
-                  p.wt,
-                  packetManager.notify({
-                    message: `${currentPlayer.username.charAt(0).toUpperCase() +
-                      currentPlayer.username.slice(1)
-                      } has kicked ${member.charAt(0).toUpperCase() + member.slice(1)
-                      } from the party`,
-                  })
-                );
-              }
-              p.party = result;
-              playerCache.set(p.id, p);
-            }
-          });
-
-          const partyLeader = await parties.getPartyLeader(partyId);
-          if (partyLeader && result.length > 0) {
-            await syncPartyLayers(partyLeader, result, playerCache, sendAnimationTo);
-          }
-
-          // The kicked player is not on that list: they are told they have no party.
-          const kickedSessionId = await player.getSessionIdByUsername(member);
-          const kickedPlayer = kickedSessionId && playerCache.get(kickedSessionId);
-          if (kickedPlayer) {
-            sendPacket(kickedPlayer.wt, packetManager.updateParty({ members: [] }));
-            sendPacket(
-              kickedPlayer.wt,
-              packetManager.notify({
-                message: `You have been kicked from the party`,
-              })
-            );
-            kickedPlayer.party = [];
-            playerCache.set(kickedPlayer.id, kickedPlayer);
-            listener.emit(Events.PARTY_CHANGED, { type: "kick", username: currentPlayer.username, kickedUsername: member, members: [member] });
-          }
-        }
-
-        break;
-      }
-      case "LEAVE_PARTY": {
-        if (!currentPlayer) return;
-
-        const partyId = await parties.getPartyId(currentPlayer.username);
-        if (!partyId) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "You are not in a party" })
-          );
-          return;
-        }
-
-        const members = await parties.getPartyMembers(partyId);
-        if (!members || members?.length === 0) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "You are not in a party" })
-          );
-          return;
-        }
-
-        const result = await parties.leave(currentPlayer.username);
-
-        const type = typeof result;
-        // An empty list is the party system's answer when nobody was removed.
-        if (result === false || (Array.isArray(result) && result.length === 0)) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "Failed to leave party" })
-          );
-          return;
-        }
-
-        if (type === "boolean" && result) {
-          members.forEach(async (member: string) => {
-            const session_id = await player.getSessionIdByUsername(member);
-            const p = session_id && playerCache.get(session_id);
-            if (p) {
-              sendPacket(p.wt, packetManager.updateParty({ members: [] }));
-              sendPacket(
-                p.wt,
-                packetManager.notify({
-                  message: "The party has been disbanded",
-                })
-              );
-              p.party = [];
-              playerCache.set(p.id, p);
-            }
-          });
-          listener.emit(Events.PARTY_CHANGED, { type: "disband", members });
-          if (currentPlayer.isVanished) {
-            for (const member of members) {
-              const session_id = await player.getSessionIdByUsername(member);
-              const pm = session_id && playerCache.get(session_id);
-              if (pm && pm.wt && pm.id !== currentPlayer.id) sendPacket(pm.wt, packetManager.despawnPlayer(currentPlayer.id));
-            }
-          }
-          return;
-        }
-
-        if (type === "object" && (result as string[]).length > 0) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "You have left the party" })
-          );
-          currentPlayer.party = [];
-          playerCache.set(currentPlayer.id, currentPlayer);
-          sendPacket(wt, packetManager.updateParty({ members: [] }));
-          listener.emit(Events.PARTY_CHANGED, { type: "leave", username: currentPlayer.username, members: [currentPlayer.username] });
-
-          (result as string[]).forEach(async (member: string) => {
-            const session_id = await player.getSessionIdByUsername(member);
-            const p = session_id && playerCache.get(session_id);
-            if (p) {
-              sendPacket(p.wt, packetManager.updateParty({ members: result }));
-              sendPacket(
-                p.wt,
-                packetManager.notify({
-                  message: `${currentPlayer.username.charAt(0).toUpperCase() +
-                    currentPlayer.username.slice(1)
-                    } has left the party`,
-                })
-              );
-              p.party = result;
-              playerCache.set(p.id, p);
-            }
-          });
-
-          if ((result as string[]).length > 0) {
-            const remainingPartyId = await parties.getPartyId((result as string[])[0]);
-            if (remainingPartyId) {
-              const partyLeader = await parties.getPartyLeader(remainingPartyId);
-              if (partyLeader) {
-                await syncPartyLayers(partyLeader, result as string[], playerCache, sendAnimationTo);
-              }
-            }
-          }
-          // Vanish: former party members can no longer see the vanished player
-          if (currentPlayer.isVanished) {
-            for (const member of (result as string[])) {
-              const session_id = await player.getSessionIdByUsername(member);
-              const pm = session_id && playerCache.get(session_id);
-              if (pm && pm.wt && pm.id !== currentPlayer.id) sendPacket(pm.wt, packetManager.despawnPlayer(currentPlayer.id));
-            }
-          }
-        }
-        break;
-      }
-      case "DISBAND_GUILD": {
-        if (!currentPlayer) return;
-
-        const guildId = currentPlayer.guild_id;
-        if (!guildId) {
-          sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
-          return;
-        }
-
-        const isLeader = await guilds.isGuildLeader(currentPlayer.username);
-        if (!isLeader) {
-          sendPacket(wt, packetManager.notify({ message: "You are not the guild leader" }));
-          return;
-        }
-
-        const members = await guilds.getGuildMembers(guildId);
-        if (!members || members.length === 0) {
-          sendPacket(wt, packetManager.notify({ message: "Your guild has no members" }));
-          return;
-        }
-
-        // First, so nobody is told of a disband the guild refused (a transfer got there first).
-        if (!(await guilds.disband(currentPlayer.username))) {
-          sendPacket(wt, packetManager.notify({ message: "Failed to disband guild" }));
-          return;
-        }
-
-        for (const member of members) {
-          const session_id = await player.getSessionIdByUsername(member);
-          const p = session_id && playerCache.get(session_id);
-          if (p) {
-            sendPacket(p.wt, packetManager.updateGuild({ members: [] }));
-            if (p.id !== currentPlayer.id) {
-              sendPacket(p.wt, packetManager.notify({ message: "The guild has been disbanded" }));
-            }
-            p.guild_id = null;
-            p.guild = [];
-            p.guild_name = null;
-            playerCache.set(p.id, p);
-            broadcastPlayerUpdate(p);
-          }
-        }
-
-        listener.emit(Events.GUILD_CHANGED, { type: "disband", guildId, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username });
-
-        break;
-      }
-      case "LEAVE_GUILD": {
-        if (!currentPlayer) return;
-
-        const guildId = currentPlayer.guild_id;
-        if (!guildId) {
-          sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
-          return;
-        }
-
-        const isLeader = await guilds.isGuildLeader(currentPlayer.username);
-        if (isLeader) {
-          sendPacket(wt, packetManager.notify({ message: "You cannot leave your own guild." }));
-          return;
-        }
-
-        const members = await guilds.getGuildMembers(guildId);
-        if (!members || members.length === 0) {
-          sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
-          return;
-        }
-
-        const result = await guilds.leave(currentPlayer.username);
-
-        // No one left is a leave refused (the Guild Master never leaves) or not written.
-        if (!result || (Array.isArray(result) && result.length === 0)) {
-          sendPacket(wt, packetManager.notify({ message: "Failed to leave guild" }));
-          return;
-        }
-
-        listener.emit(Events.GUILD_CHANGED, { type: "leave", guildId, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username });
-
-        currentPlayer.guild_id = null;
-        currentPlayer.guild = [];
-        currentPlayer.guild_name = null;
-        playerCache.set(currentPlayer.id, currentPlayer);
-
-        broadcastPlayerUpdate(currentPlayer);
-        sendPacket(wt, packetManager.updateGuild({ members: [] }));
-        await pushGuild(guildId);
-
-        break;
-      }
-      case "KICK_GUILD_MEMBER": {
-        if (!currentPlayer) return;
-
-        const guildId = currentPlayer.guild_id;
-        if (!guildId) {
-          sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
-          return;
-        }
-
-        const memberUsername = (data as any)?.username;
-        if (!memberUsername || typeof memberUsername !== "string") {
-          sendPacket(wt, packetManager.notify({ message: "Please provide a username" }));
-          return;
-        }
-        if (!guildEditOk(wt, type)) return;
-        const kicked = await guilds.kick(currentPlayer.username, memberUsername);
-        if (!guildDone(wt, kicked)) return;
-        sendPacket(wt, packetManager.notify({ message: `${memberUsername} has been kicked from the guild` }));
-        await pushGuild(guildId);
-        await kickedFromGuild(currentPlayer, guildId, memberUsername);
-
-        break;
-      }
-      case "GUILD_PROMOTE":
-      case "GUILD_DEMOTE": {
-        if (!currentPlayer) return;
-        const target = (data as any)?.username;
-        if (typeof target !== "string" || !target) return;
-        if (!guildEditOk(wt, type)) return;
-        const up = type === "GUILD_PROMOTE";
-        const result = up ? await guilds.promote(currentPlayer.username, target) : await guilds.demote(currentPlayer.username, target);
-        if (!guildDone(wt, result)) return;
-        await pushGuild(currentPlayer.guild_id);
-        listener.emit(Events.GUILD_CHANGED, { type: up ? "promote" : "demote", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username, targetUsername: target });
-        break;
-      }
-      case "GUILD_SET_MOTD": {
-        if (!currentPlayer) return;
-        if (!guildEditOk(wt, type)) return;
-        const result = await guilds.setMotd(currentPlayer.username, (data as any)?.motd);
-        if (!guildDone(wt, result) || result.changed === false) return;
-        await pushGuild(currentPlayer.guild_id);
-        listener.emit(Events.GUILD_CHANGED, { type: "motd", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username });
-        break;
-      }
-      case "GUILD_SET_NOTE": {
-        if (!currentPlayer) return;
-        const { username: target, note, officer } = (data as any) || {};
-        if (typeof target !== "string" || !target) return;
-        if (!guildEditOk(wt, officer === true ? "GUILD_SET_OFFICER_NOTE" : type)) return;
-        const result = await guilds.setNote(currentPlayer.username, target, note, officer === true);
-        if (!guildDone(wt, result) || result.changed === false) return;
-        await pushGuild(currentPlayer.guild_id);
-        listener.emit(Events.GUILD_CHANGED, { type: "note", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username, targetUsername: target });
-        break;
-      }
-      case "GUILD_ADD_RANK":
-      case "GUILD_EDIT_RANK":
-      case "GUILD_DELETE_RANK": {
-        if (!currentPlayer) return;
-        if (!guildEditOk(wt, type)) return;
-        const body = (data as any) || {};
-        const result = type === "GUILD_ADD_RANK" ? await guilds.addRank(currentPlayer.username, body.name)
-          : type === "GUILD_EDIT_RANK" ? await guilds.editRank(currentPlayer.username, Number(body.index), { name: body.name, permissions: body.permissions })
-          : await guilds.deleteRank(currentPlayer.username);
-        if (!guildDone(wt, result) || result.changed === false) return;
-        await pushGuild(currentPlayer.guild_id);
-        listener.emit(Events.GUILD_CHANGED, { type: "rank", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username });
-        break;
-      }
-      case "GUILD_TRANSFER_LEADER": {
-        if (!currentPlayer) return;
-        const target = (data as any)?.username;
-        if (typeof target !== "string" || !target) return;
-        if (!guildEditOk(wt, type)) return;
-        const result = await guilds.transferLeader(currentPlayer.username, target);
-        if (!guildDone(wt, result)) return;
-        await pushGuild(currentPlayer.guild_id);
-        listener.emit(Events.GUILD_CHANGED, { type: "transfer", guildId: currentPlayer.guild_id, guildName: currentPlayer.guild_name, playerUsername: currentPlayer.username, targetUsername: target });
-        break;
-      }
-      case "CREATE_GUILD": {
-        if (!currentPlayer) return;
-        if (currentPlayer.isGuest) {
-          sendPacket(wt, packetManager.notify({ message: "Please create an account to use that feature." }));
-          return;
-        }
-        if (subscriptionLocked(wt, currentPlayer, "guild")) return;
-
-        const guildName = (data as any)?.name;
-        if (!guildName || !guildName.trim()) {
-          sendPacket(wt, packetManager.notify({ message: "Please provide a guild name" }));
-          return;
-        }
-
-        const alreadyInGuild = await guilds.isInGuild(currentPlayer.username);
-        if (alreadyInGuild) {
-          sendPacket(wt, packetManager.notify({ message: "You are already in a guild" }));
-          return;
-        }
-
-        const nameExists = await guilds.exists(guildName.trim());
-        if (nameExists) {
-          sendPacket(wt, packetManager.notify({ message: "A guild with that name already exists" }));
-          return;
-        }
-
-        const result = await guilds.create(currentPlayer.username.toLowerCase(), guildName.trim());
-        if (!result) {
-          sendPacket(wt, packetManager.notify({ message: "Failed to create guild" }));
-          return;
-        }
-
-        const guildId = await guilds.getGuildId(currentPlayer.username);
-        currentPlayer.guild_id = guildId;
-        currentPlayer.guild = result as string[];
-        currentPlayer.guild_name = guildName.trim();
-        playerCache.set(currentPlayer.id, currentPlayer);
-
-        broadcastPlayerUpdate(currentPlayer);
-        await pushGuild(guildId);
-        sendPacket(wt, packetManager.notify({ message: `Guild "${guildName.trim()}" created successfully` }));
-        listener.emit(Events.GUILD_CHANGED, { type: "create", guildId: currentPlayer.guild_id, guildName: guildName.trim(), playerUsername: currentPlayer.username });
-        break;
-      }
-      case "INVITE_GUILD": {
-        const invited_user = (data as any).id;
-        const invitedUser = playerCache.get(invited_user);
-        const invitedUserUsername = invitedUser?.username || invited_user;
-        if (!currentPlayer || !invited_user || !invitedUserUsername) return;
-
-        if (currentPlayer.isGuest) {
-          sendPacket(wt, packetManager.notify({ message: "Please create an account to use that feature." }));
-          return;
-        }
-        if (subscriptionLocked(wt, currentPlayer, "guild")) return;
-
-        if (invitedUser.isGuest) {
-          sendPacket(wt, packetManager.notify({
-            message: `${invitedUserUsername.charAt(0).toUpperCase() + invitedUserUsername.slice(1)} is a guest and cannot join a guild.`,
-          }));
-          return;
-        }
-
-        const guildId = currentPlayer.guild_id;
-        if (!guildId) {
-          sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
-          return;
-        }
-
-        if (!(await guilds.can(currentPlayer.username, GuildPermission.INVITE))) {
-          sendPacket(wt, packetManager.notify({ message: refusalText.no_permission }));
-          return;
-        }
-
-        const invitedUserInGuild = await guilds.isInGuild(invitedUserUsername);
-        if (invitedUserInGuild) {
-          sendPacket(wt, packetManager.notify({
-            message: `${invitedUserUsername.charAt(0).toUpperCase() + invitedUserUsername.slice(1)} is already in a guild`,
-          }));
-          return;
-        }
-
-        const player_username =
-          currentPlayer.username.charAt(0).toUpperCase() +
-          currentPlayer.username.slice(1);
-
-        const guildName = currentPlayer.guild_name || "Unknown Guild";
-
-        const invite_data = {
-          action: "INVITE_GUILD",
-          message: `${player_username} wants to invite you to join "${guildName}"`,
-          originator: currentPlayer.id.toString(),
-          authorization: randomBytes(16).toString(),
-        };
-
-        currentPlayer.invitations.push({
-          action: invite_data.action,
-          originator: invite_data.originator,
-          authorization: invite_data.authorization,
-        });
-
-        playerCache.set(currentPlayer.id, currentPlayer);
-
-        await sendInvitation(currentPlayer, invitedUser, invite_data);
-        sendPacket(
-          wt,
-          packetManager.notify({
-            message: `Invitation sent to ${invitedUserUsername.charAt(0).toUpperCase() + invitedUserUsername.slice(1)}`,
-          })
-        );
-        break;
-      }
-      case "GUILD_CHAT": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "guild_chat")) return;
-
-        const { message } = data as any;
-        // As /guild: the chat cap, the rate limit, mutes and ignores.
-        if (!channelLineOk(wt, message)) return;
-
-        const guildId = currentPlayer.guild_id;
-        if (!guildId) {
-          sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
-          return;
-        }
-
-        const allMembers = await guilds.getGuildMembers(guildId);
-        if (!allMembers || allMembers.length === 0) {
-          sendPacket(wt, packetManager.notify({ message: "You are not in a guild" }));
-          return;
-        }
-
-        if (!(await guilds.can(currentPlayer.username, GuildPermission.GUILD_CHAT_SPEAK))) {
-          sendPacket(wt, packetManager.notify({ message: refusalText.no_permission }));
-          return;
-        }
-
-        const guildMembers = await guilds.listeners(guildId, GuildPermission.GUILD_CHAT_LISTEN);
-        const guildHearing = await chatHearing(currentPlayer.username, "guild", message, guildMembers);
-        const guildLine = await chatLinksOf(message);
-        for (const member of withSender(guildMembers, currentPlayer.username)) {
-          if (!guildHearing.has(String(member).toLowerCase())) continue;
-          const session_id = await player.getSessionIdByUsername(member);
-          const memberPlayer = playerCache.get(session_id);
-          if (memberPlayer) {
-            sendPacket(
-              memberPlayer.wt,
-              packetManager.guildChat({
-                id: wt.data.id,
-                message: guildLine.message,
-                ...(guildLine.links.length > 0 ? { links: guildLine.links } : {}),
-                username:
-                  currentPlayer.username.charAt(0).toUpperCase() +
-                  currentPlayer.username.slice(1),
-              })
-            );
-          }
-        }
-
-        if (!guildHearing.muted) listener.emit(Events.GUILD_CHAT, { player: currentPlayer, message, guildMembers, guildId } as any);
-        break;
-      }
-      case "OFFICER_CHAT": {
-        if (!currentPlayer) return;
-        await officerChat(wt, currentPlayer, (data as any)?.message);
-        break;
-      }
-      case "INVITE_PARTY": {
-        const invited_user = (data as any).id;
-        const invitedUser = playerCache.get(invited_user);
-        const invitedUserUsername = invitedUser?.username || invited_user;
-        if (!currentPlayer || !invited_user || !invitedUserUsername) return;
-
-        if (currentPlayer.isGuest) {
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: "Please create an account to use that feature.",
-            })
-          );
-          return;
-        }
-        if (subscriptionLocked(wt, currentPlayer, "party")) return;
-
-        if (invitedUser.isGuest) {
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: `${invitedUserUsername.charAt(0).toUpperCase() +
-                invitedUserUsername.slice(1)
-                } is a guest and cannot be invited to a party.`,
-            })
-          );
-          return;
-        }
-
-        const partyId = await parties.getPartyId(currentPlayer.username);
-        if (partyId) {
-
-          const isLeader = await parties.isPartyLeader(currentPlayer.username);
-          if (!isLeader) {
-            sendPacket(
-              wt,
-              packetManager.notify({ message: "You are not the party leader" })
-            );
-            return;
-          }
-        }
-
-        const invitedUserPartyId = await parties.getPartyId(
-          invitedUserUsername
-        );
-
-        if (invitedUserPartyId) {
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: `${invitedUserUsername.charAt(0).toUpperCase() +
-                invitedUserUsername.slice(1)
-                } is already in a party`,
-            })
-          );
-          return;
-        }
-
-        const invitedUserLeader = await parties.isPartyLeader(
-          invitedUserUsername
-        );
-        if (invitedUserLeader) {
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: `${invitedUserUsername.charAt(0).toUpperCase() +
-                invitedUserUsername.slice(1)
-                } is already in a party`,
-            })
-          );
-          return;
-        }
-
-        const player_username =
-          currentPlayer.username.charAt(0).toUpperCase() +
-          currentPlayer.username.slice(1);
-
-        const invite_data = {
-          action: "INVITE_PARTY",
-          message: `${player_username} wants to invite you to their party`,
-          originator: currentPlayer.id.toString(),
-          authorization: randomBytes(16).toString(),
-        };
-
-        if (!invitedUser) {
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: `${invitedUserUsername.charAt(0).toUpperCase() +
-                invitedUserUsername.slice(1)
-                } is not online`,
-            })
-          );
-          return;
-        }
-
-        currentPlayer.invitations.push({
-          action: invite_data.action,
-          originator: invite_data.originator,
-          authorization: invite_data.authorization,
-        });
-
-        playerCache.set(currentPlayer.id, currentPlayer);
-
-        await sendInvitation(currentPlayer, invitedUser, invite_data);
-        sendPacket(
-          wt,
-          packetManager.notify({
-            message: `Invitation sent to ${invitedUserUsername.charAt(0).toUpperCase() +
-              invitedUserUsername.slice(1)
-              }`,
-          })
-        );
-        listener.emit(Events.PARTY_INVITE, { inviterUsername: currentPlayer.username, invitedUsername: invitedUserUsername });
-        break;
-      }
-      case "IGNORE_PLAYER":
-      case "UNIGNORE_PLAYER": {
-        if (!currentPlayer) return;
-        if (currentPlayer.isGuest) {
-          sendPacket(wt, packetManager.notify({ message: "Please create an account to use that feature." }));
-          return;
-        }
-        // Each one writes a row: the same pace as the other things a player clicks.
-        if (isQuestRateLimited(String(currentPlayer.id))) return;
-        // By the id of a player in sight (the menu on a character), or by name (the list of who is ignored).
-        const named = playerCache.get((data as any)?.id)?.username ?? (data as any)?.username;
-        if (typeof named !== "string" || !named) return;
-        sendIgnoreAnswer(wt, type === "IGNORE_PLAYER" ? await moderation.ignore(currentPlayer, named) : await moderation.unignore(currentPlayer, named));
-        break;
-      }
-      case "REPORT_PLAYER": {
-        if (!currentPlayer) return;
-        if (currentPlayer.isGuest) {
-          sendPacket(wt, packetManager.notify({ message: "Please create an account to use that feature." }));
-          return;
-        }
-        if (isQuestRateLimited(String(currentPlayer.id))) return;
-        const reported = playerCache.get((data as any)?.id)?.username ?? (data as any)?.username;
-        if (typeof reported !== "string" || !reported) return;
-        await sendReport(wt, currentPlayer, reported, (data as any)?.category, (data as any)?.details);
-        break;
-      }
-      case "TRADE_REQUEST": {
-        if (!currentPlayer) return;
-        if (isQuestRateLimited(String(currentPlayer.id))) return;
-        const asked = playerCache.get((data as any)?.id);
-        const refusal = tradeRefusal(currentPlayer, asked);
-        if (refusal) {
-          sendPacket(wt, packetManager.notify({ message: refusal }));
-          break;
-        }
-
-        const invite_data = {
-          action: "TRADE_REQUEST",
-          message: `${shownName(currentPlayer.username)} wants to trade with you`,
-          originator: currentPlayer.id.toString(),
-          authorization: randomBytes(16).toString(),
-        };
-        // One request at a time: asking again, or someone else, takes back the one before.
-        currentPlayer.invitations = currentPlayer.invitations.filter((inv: any) => inv.action !== "TRADE_REQUEST");
-        currentPlayer.invitations.push({
-          action: invite_data.action,
-          originator: invite_data.originator,
-          authorization: invite_data.authorization,
-          // Who it was sent to: nobody else can answer it.
-          target: asked.id.toString(),
-        });
-        playerCache.set(currentPlayer.id, currentPlayer);
-
-        await sendInvitation(currentPlayer, asked, invite_data);
-        sendPacket(wt, packetManager.notify({ message: `Trade request sent to ${shownName(asked.username)}` }));
-        break;
-      }
-      case "TRADE_OFFER": {
-        if (!currentPlayer) return;
-        const offered = await trades.offer(currentPlayer.username, data);
-        if (offered.ok && offered.changed) {
-          await sendTradeState(offered.trade);
-          break;
-        }
-        if (!offered.ok) sendPacket(wt, packetManager.notify({ message: offered.message }));
-        // Nothing changed: the player is sent the trade as it stands, which puts back what their window showed.
-        const standing = trades.of(currentPlayer.username);
-        if (standing) sendPacket(wt, packetManager.tradeState(await trades.view(standing, currentPlayer.username)));
-        break;
-      }
-      case "TRADE_ACCEPT": {
-        if (!currentPlayer) return;
-        const accepted = await trades.accept(currentPlayer.username, traderNamed);
-        if (accepted.state === "wait") {
-          sendPacket(wt, packetManager.notify({ message: accepted.message }));
-        } else if (accepted.state === "accepted") {
-          await sendTradeState(accepted.trade);
-        } else if (accepted.state === "failed") {
-          sendTradeClosed(accepted.trade, false, accepted.reasons);
-        } else if (accepted.state === "completed") {
-          const { trade, record } = accepted;
-          if (record) await sendBelongingsAfterTrade(trade);
-          const said = record ? "Trade complete." : "Nothing was traded.";
-          sendTradeClosed(trade, record !== null, Object.fromEntries(trade.players.map((name) => [name, said])));
-          if (record) listener.emit(Events.TRADE_COMPLETED, { trade: record });
-        }
-        break;
-      }
-      case "TRADE_CANCEL": {
-        if (!currentPlayer) return;
-        const cancelled = trades.cancel(currentPlayer.username);
-        if (!cancelled) break;
-        const me = currentPlayer.username.toLowerCase();
-        sendTradeClosed(cancelled, false, Object.fromEntries(cancelled.players.map((name) =>
-          [name, name === me ? "You cancelled the trade." : `${shownName(currentPlayer.username)} cancelled the trade.`]
-        )));
-        break;
-      }
-      case "ADD_FRIEND": {
-        const id = (data as any).id;
-        if (!id) return;
-
-        if (!currentPlayer) return;
-
-        if (currentPlayer.isGuest) {
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: "Please create an account to use that feature.",
-            })
-          );
-          return;
-        }
-        if (subscriptionLocked(wt, currentPlayer, "friends")) return;
-
-        const get_friend = playerCache.get(id);
-        if (!get_friend) return;
-
-        if (get_friend.id === currentPlayer.id || get_friend.username.toLowerCase() === currentPlayer.username.toLowerCase()) {
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: "You cannot add yourself as a friend.",
-            })
-          );
-          return;
-        }
-
-        const player_username =
-          currentPlayer.username.charAt(0).toUpperCase() +
-          currentPlayer.username.slice(1);
-
-        if (get_friend.isGuest) {
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: `${get_friend.username.charAt(0).toUpperCase() +
-                get_friend.username.slice(1)
-                } is a guest and cannot be added as a friend.`,
-            })
-          );
-          return;
-        }
-
-        const invite_data = {
-          action: "FRIEND_REQUEST",
-          message: `${player_username} wants to add you as a friend`,
-          originator: currentPlayer.id.toString(),
-          authorization: randomBytes(16).toString(),
-        };
-
-        currentPlayer.invitations.push({
-          action: invite_data.action,
-          originator: invite_data.originator,
-          authorization: invite_data.authorization,
-        });
-
-        playerCache.set(currentPlayer.id, currentPlayer);
-
-        await sendInvitation(currentPlayer, get_friend, invite_data);
-        break;
-      }
-      case "INVITATION_RESPONSE": {
-        const { action, originator, authorization, response } = data as any;
-        if (!action || !originator || !authorization || !response) return;
-
-        log.info(
-          `Invitation response received: ${action}, ${originator}, ${authorization}, ${response}`
-        );
-
-        const inviter = playerCache.get(originator);
-
-        if (!inviter) {
-
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message:
-                "Unable to process invitation - user not found or has disconnected",
-            })
-          );
-          return;
-        }
-
-        const invitationByAuth = new Map<any, any>(inviter.invitations.map((inv: any) => [inv.authorization, inv]));
-        const invite = invitationByAuth.get(authorization);
-
-        if (!invite || invite.action !== action || invite.originator !== originator) {
-
-          const notifyData = {
-            message: "Invitation not found or has already been processed",
-          };
-          sendPacket(wt, packetManager.notify(notifyData));
-          return;
-        }
-
-        // Subscription locks on accepting an invitation (a trade is checked with the trade itself). The invitation stays open.
-        if (response.toUpperCase() === "ACCEPT") {
-          const lockOfInvitation = ({ INVITE_PARTY: "party", INVITE_GUILD: "guild", FRIEND_REQUEST: "friends" } as Record<string, string>)[action.toUpperCase()];
-          if (lockOfInvitation && subscriptionLocked(wt, currentPlayer, lockOfInvitation)) return;
-        }
-
-        inviter.invitations = inviter.invitations.filter((inv: any) => inv.authorization !== authorization);
-        playerCache.set(inviter.id, inviter);
-
-        switch (action.toUpperCase()) {
-
-          case "TRADE_REQUEST": {
-            // Answered by someone it was not sent to: it is spent, and nothing comes of it.
-            if (invite.target !== currentPlayer.id.toString()) break;
-            if (response.toUpperCase() !== "ACCEPT") {
-              sendPacket(inviter.wt, packetManager.notify({ message: `${shownName(currentPlayer.username)} declined your trade request` }));
-              break;
-            }
-            // Things may have changed since it was asked: one walked off, or began another trade.
-            const refusal = tradeRefusal(currentPlayer, inviter);
-            const trade = refusal ?? trades.open(inviter, currentPlayer);
-            if (typeof trade === "string") {
-              sendPacket(wt, packetManager.notify({ message: trade }));
-              break;
-            }
-            await sendTradeState(trade);
-            break;
-          }
-
-          case "FRIEND_REQUEST": {
-            if (response.toUpperCase() === "ACCEPT") {
-
-              const updatedCurrentPlayersFriendsList = await friends.add(
-                currentPlayer.username.toLowerCase(),
-                inviter.username.toLowerCase()
-              );
-
-              const updatedFriendsList = await friends.add(
-                inviter.username.toLowerCase(),
-                currentPlayer.username.toLowerCase()
-              );
-
-              sendPacket(
-                wt,
-                packetManager.notify({
-                  message: `You are now friends with ${inviter.username.charAt(0).toUpperCase() +
-                    inviter.username.slice(1)
-                    }`,
-                })
-              );
-              sendPacket(
-                wt,
-                packetManager.updateFriends({
-                  friends: updatedCurrentPlayersFriendsList,
-                })
-              );
-
-              sendPacket(
-                inviter.wt,
-                packetManager.notify({
-                  message: `You are now friends with ${currentPlayer.username.charAt(0).toUpperCase() +
-                    currentPlayer.username.slice(1)
-                    }`,
-                })
-              );
-
-              sendPacket(
-                inviter.wt,
-                packetManager.updateFriends({ friends: updatedFriendsList })
-              );
-
-              // only an accepted request makes friends
-              listener.emit(Events.FRIEND_ADDED, { type: "add", playerUsername: currentPlayer.username, friendUsername: inviter.username });
-            }
-            break;
-          }
-          case "INVITE_PARTY": {
-
-            const partyId = await parties.getPartyId(inviter.username);
-            let updatedPartyMembers: string[] | boolean = false;
-            if (response.toUpperCase() === "ACCEPT") {
-
-              if (partyId) {
-
-                updatedPartyMembers = await parties.add(
-                  currentPlayer.username.toLowerCase(),
-                  partyId
-                );
-                // An empty list is the party system's answer when the player was not added.
-                if (!updatedPartyMembers || updatedPartyMembers.length === 0) {
-                  sendPacket(
-                    wt,
-                    packetManager.notify({ message: "Failed to join party" })
-                  );
-                  return;
-                }
-                sendPacket(
-                  wt,
-                  packetManager.notify({
-                    message: `You have joined ${inviter.username.charAt(0).toUpperCase() +
-                      inviter.username.slice(1)
-                      }'s party`,
-                  })
-                );
-                sendPacket(
-                  inviter.wt,
-                  packetManager.notify({
-                    message: `${currentPlayer.username.charAt(0).toUpperCase() +
-                      currentPlayer.username.slice(1)
-                      } has joined your party`,
-                  })
-                );
-
-                for (const member of (updatedPartyMembers as string[])) {
-                  const session_id = await player.getSessionIdByUsername(member);
-                  const p = session_id && playerCache.get(session_id);
-                  if (p) {
-                    sendPacket(p.wt, packetManager.updateParty({ members: updatedPartyMembers }));
-                    p.party = updatedPartyMembers;
-                    playerCache.set(p.id, p);
-                  }
-                }
-
-                const partyLeader = await parties.getPartyLeader(partyId);
-                if (partyLeader && updatedPartyMembers.length > 0) {
-                  await syncPartyLayers(partyLeader, updatedPartyMembers as string[], playerCache, sendAnimationTo);
-                }
-
-                // Vanish: spawn all vanished party members to all other online party members
-                for (const memberUsername of (updatedPartyMembers as string[])) {
-                  const memberSessionId = await player.getSessionIdByUsername(memberUsername);
-                  const memberPlayer = memberSessionId && playerCache.get(memberSessionId);
-                  if (!memberPlayer || !memberPlayer.isVanished) continue;
-                  const sd = queueSpawnPlayerPacket(memberPlayer);
-                  if (!sd) continue;
-                  const an = getAnimationNameForDirection(memberPlayer.location.position?.direction || "down", !!memberPlayer.moving, !!memberPlayer.mounted, memberPlayer.mount_type, !!memberPlayer.casting);
-                  const ss = await getPlayerSpriteSheetData(an, memberPlayer.equipment || null);
-                  const ms = memberPlayer.mount_type ? getMountSpriteUrl(memberPlayer.mount_type) : null;
-                  if (ss?.bodySprite || ss?.headSprite || ms) {
-                    (sd as any).spriteData = { mountSprite: ms, bodySprite: ss.bodySprite || null, headSprite: ss.headSprite || null, armorHelmetSprite: ss.armorHelmetSprite || null, armorShoulderguardsSprite: ss.armorShoulderguardsSprite || null, armorNeckSprite: ss.armorNeckSprite || null, armorHandsSprite: ss.armorHandsSprite || null, armorChestSprite: ss.armorChestSprite || null, armorFeetSprite: ss.armorFeetSprite || null, armorLegsSprite: ss.armorLegsSprite || null, armorWeaponSprite: ss.armorWeaponSprite || null, animationState: ss.animationState };
-                  }
-                  const fx = spellEffects.getEffectsPayload(memberPlayer);
-                  if (fx.length > 0) (sd as any).effects = fx;
-                  const receivers: any[] = [];
-                  for (const otherUsername of (updatedPartyMembers as string[])) {
-                    if (otherUsername.toLowerCase() === memberUsername.toLowerCase()) continue;
-                    const otherSessionId = await player.getSessionIdByUsername(otherUsername);
-                    const otherPlayer = otherSessionId && playerCache.get(otherSessionId);
-                    if (otherPlayer && otherPlayer.wt) receivers.push(otherPlayer);
-                  }
-                  queueSpawnForReceivers(memberPlayer, receivers, (sd as any).spriteData);
-                }
-              } else {
-
-                updatedPartyMembers = await parties.create(
-                  inviter.username.toLowerCase(),
-                  currentPlayer.username.toLowerCase()
-                );
-                if (!updatedPartyMembers) {
-                  sendPacket(
-                    wt,
-                    packetManager.notify({ message: "Failed to create party" })
-                  );
-                  return;
-                }
-                sendPacket(
-                  wt,
-                  packetManager.notify({
-                    message: `You have joined ${inviter.username.charAt(0).toUpperCase() +
-                      inviter.username.slice(1)
-                      }'s party`,
-                  })
-                );
-                sendPacket(
-                  inviter.wt,
-                  packetManager.notify({
-                    message: `${currentPlayer.username.charAt(0).toUpperCase() +
-                      currentPlayer.username.slice(1)
-                      } has joined your party`,
-                  })
-                );
-                sendPacket(
-                  inviter.wt,
-                  packetManager.updateParty({ members: updatedPartyMembers })
-                );
-                sendPacket(
-                  wt,
-                  packetManager.updateParty({ members: updatedPartyMembers })
-                );
-                for (const member of (updatedPartyMembers as string[])) {
-                  const session_id = await player.getSessionIdByUsername(member);
-                  const p = session_id && playerCache.get(session_id);
-                  if (p) {
-                    sendPacket(p.wt, packetManager.updateParty({ members: updatedPartyMembers }));
-                    p.party = updatedPartyMembers;
-                    playerCache.set(p.id, p);
-                  }
-                }
-
-                if (Array.isArray(updatedPartyMembers) && updatedPartyMembers.length > 0) {
-                  await syncPartyLayers(inviter.username.toLowerCase(), updatedPartyMembers as string[], playerCache, sendAnimationTo);
-                }
-
-                // Vanish: spawn all vanished party members to all other online party members
-                for (const memberUsername of (updatedPartyMembers as string[])) {
-                  const memberSessionId = await player.getSessionIdByUsername(memberUsername);
-                  const memberPlayer = memberSessionId && playerCache.get(memberSessionId);
-                  if (!memberPlayer || !memberPlayer.isVanished) continue;
-                  const sd = queueSpawnPlayerPacket(memberPlayer);
-                  if (!sd) continue;
-                  const an = getAnimationNameForDirection(memberPlayer.location.position?.direction || "down", !!memberPlayer.moving, !!memberPlayer.mounted, memberPlayer.mount_type, !!memberPlayer.casting);
-                  const ss = await getPlayerSpriteSheetData(an, memberPlayer.equipment || null);
-                  const ms = memberPlayer.mount_type ? getMountSpriteUrl(memberPlayer.mount_type) : null;
-                  if (ss?.bodySprite || ss?.headSprite || ms) {
-                    (sd as any).spriteData = { mountSprite: ms, bodySprite: ss.bodySprite || null, headSprite: ss.headSprite || null, armorHelmetSprite: ss.armorHelmetSprite || null, armorShoulderguardsSprite: ss.armorShoulderguardsSprite || null, armorNeckSprite: ss.armorNeckSprite || null, armorHandsSprite: ss.armorHandsSprite || null, armorChestSprite: ss.armorChestSprite || null, armorFeetSprite: ss.armorFeetSprite || null, armorLegsSprite: ss.armorLegsSprite || null, armorWeaponSprite: ss.armorWeaponSprite || null, animationState: ss.animationState };
-                  }
-                  const fx = spellEffects.getEffectsPayload(memberPlayer);
-                  if (fx.length > 0) (sd as any).effects = fx;
-                  const receivers: any[] = [];
-                  for (const otherUsername of (updatedPartyMembers as string[])) {
-                    if (otherUsername.toLowerCase() === memberUsername.toLowerCase()) continue;
-                    const otherSessionId = await player.getSessionIdByUsername(otherUsername);
-                    const otherPlayer = otherSessionId && playerCache.get(otherSessionId);
-                    if (otherPlayer && otherPlayer.wt) receivers.push(otherPlayer);
-                  }
-                  queueSpawnForReceivers(memberPlayer, receivers, (sd as any).spriteData);
-                }
-
-              }
-            }
-            // Only a join is a join: a declined invitation leaves this false.
-            if (Array.isArray(updatedPartyMembers) && updatedPartyMembers.length > 0) {
-              listener.emit(Events.PARTY_CHANGED, { type: "join", username: currentPlayer.username, members: updatedPartyMembers } as any);
-            }
-            break;
-          }
-          case "INVITE_GUILD": {
-            if (response.toUpperCase() === "ACCEPT") {
-
-              const guildId = await guilds.getGuildId(inviter.username);
-              if (!guildId) {
-                sendPacket(wt, packetManager.notify({ message: "That guild no longer exists" }));
-                return;
-              }
-
-              if (!(await guilds.can(inviter.username, GuildPermission.INVITE))) {
-                sendPacket(wt, packetManager.notify({ message: "The inviter can no longer invite to the guild" }));
-                return;
-              }
-
-              const targetInGuild = await guilds.isInGuild(currentPlayer.username);
-              if (targetInGuild) {
-                sendPacket(wt, packetManager.notify({ message: "You are already in a guild" }));
-                return;
-              }
-
-              const updatedGuildMembers = await guilds.add(
-                currentPlayer.username.toLowerCase(),
-                guildId
-              );
-              if (!updatedGuildMembers || updatedGuildMembers.length === 0) {
-                sendPacket(wt, packetManager.notify({ message: "Failed to join guild" }));
-                return;
-              }
-
-              const guildName = await guilds.getGuildName(guildId);
-
-              sendPacket(wt, packetManager.notify({
-                message: `You have joined "${guildName}"`,
-              }));
-              sendPacket(inviter.wt, packetManager.notify({
-                message: `${currentPlayer.username} has joined your guild`,
-              }));
-
-              currentPlayer.guild_id = guildId;
-              currentPlayer.guild = updatedGuildMembers;
-              currentPlayer.guild_name = guildName;
-              playerCache.set(currentPlayer.id, currentPlayer);
-
-              broadcastPlayerUpdate(currentPlayer);
-              await pushGuild(guildId);
-              listener.emit(Events.GUILD_CHANGED, { type: "join", guildId, guildName, playerUsername: currentPlayer.username });
-            }
-            break;
-          }
-        }
-        break;
-      }
-      case "REMOVE_FRIEND": {
-        const id = (data as any).id;
-        const username = (data as any).username;
-
-        if (!currentPlayer) return;
-
-        let get_friend;
-        if (id) {
-          get_friend = playerCache.get(id);
-        } else if (username) {
-
-          get_friend = Object.values(playerCache.list()).find(
-            (p: any) => p.username.toLowerCase() === username.toLowerCase()
-          );
-
-          if (!get_friend) {
-            get_friend = await player.findPlayerInDatabase(username);
-
-            if (Array.isArray(get_friend) && get_friend.length > 0) {
-              get_friend = get_friend[0];
-            }
-          }
-        }
-
-        const updatedFriendsList = await friends.remove(
-          currentPlayer.username.toLowerCase(),
-          get_friend?.username?.toLowerCase() || username.toLowerCase()
-        );
-
-        const updatedCurrentPlayersFriendsList = await friends.remove(
-          get_friend?.username?.toLowerCase() || username.toLowerCase(),
-          currentPlayer.username.toLowerCase()
-        );
-
-        if (get_friend?.wt) {
-
-          sendPacket(
-            get_friend.wt,
-            packetManager.updateFriends({
-              friends: updatedCurrentPlayersFriendsList,
-            })
-          );
-        }
-
-        sendPacket(
-          wt,
-          packetManager.updateFriends({ friends: updatedFriendsList })
-        );
-        sendPacket(
-          wt,
-          packetManager.notify({
-            message: `You have removed ${get_friend.username.charAt(0).toUpperCase() +
-              get_friend.username.slice(1)
-              } from your friends list`,
-          })
-        );
-        listener.emit(Events.FRIEND_REMOVED, { type: "remove", playerUsername: currentPlayer.username, friendUsername: get_friend.username });
-        break;
-      }
-      case "MOUNT": {
-        if (!currentPlayer) return;
-
-        // Dismounting if mounted is already true
-        const dismounting = currentPlayer.mounted === true;
-        // Getting off stays allowed: only mounting is locked.
-        if (!dismounting && subscriptionLocked(wt, currentPlayer, "mount")) return;
-
-
-        // Prevent mounting while casting
-        if (currentPlayer.casting && !dismounting) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "Cannot mount while casting." })
-          );
-          return;
-        }
-
-        // Prevent mounting when PvP flag is enabled or vanished
-        if ((currentPlayer.pvp || currentPlayer.isVanished) && !dismounting) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "Cannot mount while in PvP." })
-          );
-          return;
-        }
-
-        // Corpses and ghosts cannot mount.
-        if ((currentPlayer.isDead || currentPlayer.isGhost) && !dismounting) {
-          return;
-        }
-
-        // No mount is ridden inside a building.
-        if (!dismounting && isInteriorMap(currentPlayer.location?.map)) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "Cannot mount indoors." })
-          );
-          return;
-        }
-
-        const canMount = player.canMount(currentPlayer);
-        const mount = (data as any).mount;
-        if (!mount) {
-          sendPacket(
-            wt,
-            packetManager.notify({ message: "No mount type specified." })
-          );
-          break;
-        }
-
-        if (!canMount) {
-          sendPacket(
-            wt,
-            packetManager.notify({
-              message: "Mount feature is currently locked.",
-              })
-            );
-
-            break;
-          }
-
-        if (!dismounting) {
-          const hasMount = currentPlayer.collectables.some((c: any) => c.type === "mount" && c.item === mount);
-          if (!hasMount) {
-            sendPacket(
-              wt,
-              packetManager.notify({ message: "You do not have the specified mount." })
-            );
-            break;
-          }
-        }
-
-        currentPlayer.mounted = !currentPlayer.mounted;
-
-        if (currentPlayer.mounted) {
-          currentPlayer.mount_type = mount;
-        } else {
-          currentPlayer.mount_type = null;
-        }
-
-        const direction = currentPlayer.location.position?.direction || "down";
-        const walking = currentPlayer.moving || false;
-        const mounted = currentPlayer.mounted;
-
-        globalStateRevision++;
-
-        await sendPositionAnimation(
-          wt,
-          direction,
-          walking,
-          mounted,
-          currentPlayer.mount_type,
-          currentPlayer.id,
-          globalStateRevision,
-          currentPlayer.casting || false
-        );
-
-        if (gameLoop.isPlayerMoving(currentPlayer.id)) {
-
-          const moveDirection = currentPlayer.location.position?.direction || "down";
-
-          await packetReceiver(server, wt, JSON.stringify({ type: "MOVEXY", data: moveDirection }));
-        }
-        listener.emit(Events.PLAYER_MOUNT, { player: currentPlayer, mounted: currentPlayer.mounted, mountType: currentPlayer.mount_type });
-        break;
-      }
-      case "RELEASE_SPIRIT": {
-        if (!currentPlayer) return;
-        // Only a corpse awaiting release can release. Ghosts are already out.
-        if (!currentPlayer.isDead || currentPlayer.isGhost || currentPlayer.ghostTeleportPending) return;
-
-        const spawn = findGraveyardSpawn(
-          currentPlayer.location.map,
-          currentPlayer.location.position.x,
-          currentPlayer.location.position.y
-        );
-        currentPlayer.stats.health = 0;
-        currentPlayer.stats.stamina = 0;
-        // Belt and braces: ghosts move at mounted speed with no lingering
-        // combat modifiers (death already resets these, keep them clean here).
-        currentPlayer.slowPercent = 0;
-        currentPlayer.slowMultiplier = 1;
-        currentPlayer.stunnedUntil = 0;
-        currentPlayer.isDead = false;
-        currentPlayer.isGhost = true;
-        currentPlayer.reviveOffered = false;
-        currentPlayer.ghostTeleportPending = true;
-        await forceStopPlayerMovement(currentPlayer);
-        // Server state moves now so SAVE/logout/disconnect all agree on the
-        // graveyard (relog lands there). Only the moveXY broadcast waits for
-        // the client's mid-black moment below.
-        currentPlayer.location.position = { x: spawn.x, y: spawn.y, direction: "down" };
-        playerCache.set(currentPlayer.id, currentPlayer);
-        try {
-          await player.setDeadState(currentPlayer.username, 2, currentPlayer.corpse);
-        } catch (e: any) {
-          log.error(`Failed to persist ghost state for ${currentPlayer.username}: ${e?.message || e}`);
-        }
-
-        // Announce ghost form immediately: it starts the client's ~5s release
-        // cinematic and carries the destination so graveyard chunks preload.
-        // pendingTeleport keeps observers from rendering the ghost at the
-        // corpse; the confirm at teleport time is their spawn signal.
-        globalStateRevision++;
-        const releaseMap = currentPlayer.location.map;
-        const releaseId = currentPlayer.id;
-        filterPlayersByMap(releaseMap).forEach((p) => {
-          sendPacket(
-            p.wt,
-            packetManager.playerGhost({ id: releaseId, ghost: true, x: spawn.x, y: spawn.y, map: releaseMap, pendingTeleport: true })
-          );
-        });
-        listener.emit(Events.PLAYER_GHOST_RELEASED, { player: currentPlayer });
-
-        setTimeout(() => {
-          const p = playerCache.get(releaseId);
-          if (!p || !p.isGhost || !p.ghostTeleportPending) return;
-          p.ghostTeleportPending = false;
-          playerCache.set(p.id, p);
-          void resyncNpcChunks(p, p.wt); // the graveyard's NPCs
-          globalStateRevision++;
-          filterPlayersByMap(p.location.map).forEach((v) => {
-            sendPacket(
-              v.wt,
-              packetManager.moveXY({
-                i: p.id,
-                d: { x: spawn.x, y: spawn.y, dr: "down" },
-                r: globalStateRevision,
-                s: p.isStealth ? 1 : 0
-              })
-            );
-            // Ghost spawn signal: render from here, at the graveyard.
-            sendPacket(
-              v.wt,
-              packetManager.playerGhost({ id: p.id, ghost: true, x: spawn.x, y: spawn.y, map: p.location.map })
-            );
-          });
-        }, GHOST_TELEPORT_DELAY_MS);
-        break;
-      }
-      case "CONFIRM_REVIVE": {
-        if (!currentPlayer) return;
-        // Rejecting a confirm revokes the offer client-side so a stale popup
-        // can never linger: it only hides on this verdict or on REVIVE.
-        const denyRevive = () => {
-          currentPlayer.reviveOffered = false;
-          if (currentPlayer.wt) {
-            sendPacket(currentPlayer.wt, packetManager.reviveOffer({ revoked: true }));
-          }
-        };
-        // Only a ghost standing at its own corpse can revive.
-        if (!currentPlayer.isGhost) return;
-        if (!currentPlayer.corpse) {
-          denyRevive();
-          return;
-        }
-        if (currentPlayer.corpse.map !== currentPlayer.location.map) {
-          denyRevive();
-          return;
-        }
-        const dx = currentPlayer.location.position.x - currentPlayer.corpse.x;
-        const dy = currentPlayer.location.position.y - currentPlayer.corpse.y;
-        if (dx * dx + dy * dy > REVIVE_OFFER_RADIUS * REVIVE_OFFER_RADIUS) {
-          denyRevive();
-          return;
-        }
-
-        currentPlayer.stats.health = Math.round(currentPlayer.stats.total_max_health * 0.5);
-        currentPlayer.stats.stamina = Math.round(currentPlayer.stats.total_max_stamina * 0.5);
-        currentPlayer.isDead = false;
-        currentPlayer.isGhost = false;
-        currentPlayer.corpse = null;
-        currentPlayer.reviveOffered = false;
-        playerCache.set(currentPlayer.id, currentPlayer);
-        try {
-          await player.setDeadState(currentPlayer.username, 0, null);
-        } catch (e: any) {
-          log.error(`Failed to clear death state for ${currentPlayer.username}: ${e?.message || e}`);
-        }
-
-        globalStateRevision++;
-        const playersInMap = filterPlayersByMap(currentPlayer.location.map);
-        playersInMap.forEach((p) => {
-          sendPacket(
-            p.wt,
-            packetManager.playerGhost({ id: currentPlayer.id, ghost: false })
-          );
-          sendPacket(
-            p.wt,
-            packetManager.revive({
-              id: currentPlayer.id,
-              target: currentPlayer.id,
-              stats: currentPlayer.stats,
-            })
-          );
-        });
-        sendStatsToPartyMembers(currentPlayer.username, currentPlayer.id, currentPlayer.stats);
-        listener.emit(Events.PLAYER_REVIVED, { player: currentPlayer });
-        break;
-      }
-      case "CONFIRM_GRAVEYARD_REVIVE": {
-        if (!currentPlayer) return;
-        // Only a ghost may resurrect at the graveyard. No distance check:
-        // skipping the corpse run is the point, Resurrection Sickness is
-        // the price (15 min: -20% health, -10% all other stats).
-        if (!currentPlayer.isGhost || currentPlayer.isDead) return;
-
-        resurrection.applySickness(currentPlayer);
-        const synced = await player.synchronizeStats(currentPlayer.username);
-        if (synced) {
-          currentPlayer.stats = synced;
-        }
-        currentPlayer.stats.health = Math.round(currentPlayer.stats.total_max_health * 0.5);
-        currentPlayer.stats.stamina = Math.round(currentPlayer.stats.total_max_stamina * 0.5);
-        currentPlayer.isDead = false;
-        currentPlayer.isGhost = false;
-        currentPlayer.corpse = null;
-        currentPlayer.reviveOffered = false;
-        currentPlayer.ghostTeleportPending = false;
-        playerCache.set(currentPlayer.id, currentPlayer);
-        try {
-          await player.setDeadState(currentPlayer.username, 0, null);
-        } catch (e: any) {
-          log.error(`Failed to clear death state for ${currentPlayer.username}: ${e?.message || e}`);
-        }
-
-        globalStateRevision++;
-        filterPlayersByMap(currentPlayer.location.map).forEach((p) => {
-          sendPacket(
-            p.wt,
-            packetManager.playerGhost({ id: currentPlayer.id, ghost: false })
-          );
-          sendPacket(
-            p.wt,
-            packetManager.revive({
-              id: currentPlayer.id,
-              target: currentPlayer.id,
-              stats: currentPlayer.stats,
-            })
-          );
-        });
-        spellEffects.broadcastEffectsUpdate(currentPlayer);
-        sendStatsToPartyMembers(currentPlayer.username, currentPlayer.id, currentPlayer.stats);
-        sendPacket(
-          currentPlayer.wt,
-          packetManager.notify({ message: "You have been resurrected with Resurrection Sickness (15 min)." })
-        );
-        listener.emit(Events.PLAYER_REVIVED, { player: currentPlayer });
-        break;
-      }
-      case "EQUIP_ITEM": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "equip")) break;
-        // As for a bag (see BAG_EQUIP): an item on offer in a trade is not put on while the trade is open.
-        if (trades.of(currentPlayer.username)) {
-          sendPacket(wt, packetManager.notify({ message: "You can't change equipment while trading." }));
-          break;
-        }
-        const item = (data as any).item;
-        const slotIndex = (data as any).slotIndex;
-        if (!item) return;
-        const equipmentItems = currentPlayer.inventory.filter((invItem: any) => invItem.type === "equipment");
-        const foundEquipment = equipmentItems.find((invItem: any) => invItem.name.toLowerCase() === item.toLowerCase());
-        const slot = foundEquipment?.equipment_slot;
-        if (await blockEquipmentChangeWhilePvp(wt, currentPlayer, slot)) return;
-
-        if (foundEquipment?.level_requirement) {
-          const playerLevel = currentPlayer.stats.level || 1;
-          if (playerLevel < foundEquipment.level_requirement) return;
-        }
-
-        const previouslyEquippedItem = currentPlayer.equipment[slot];
-
-        const result = await equipment.equipItem(currentPlayer.username, slot, item);
-        if (result) {
-
-          const canonicalName = foundEquipment?.name || item;
-
-          if (previouslyEquippedItem) {
-            const previousItem = currentPlayer.inventory.find((invItem: any) => invItem.name.toLowerCase() === previouslyEquippedItem.toLowerCase());
-            if (previousItem) {
-              previousItem.equipped = false;
-            }
-          }
-
-          currentPlayer.equipment[slot] = canonicalName;
-
-          const inventoryItem = currentPlayer.inventory.find((invItem: any) => invItem.name.toLowerCase() === item.toLowerCase());
-          if (inventoryItem) {
-            inventoryItem.equipped = true;
-          }
-
-          if (slotIndex !== undefined) {
-
-            const freshConfig = await player.getConfig(currentPlayer.username);
-            currentPlayer.config = freshConfig;
-
-            const config = currentPlayer.config && currentPlayer.config.length > 0 ? currentPlayer.config[0] : null;
-
-            const inventoryConfig = config?.inventory_config || {};
-
-            if (previouslyEquippedItem) {
-              inventoryConfig[slotIndex.toString()] = previouslyEquippedItem;
-            }
-
-            for (const key in inventoryConfig) {
-              if (inventoryConfig[key] && inventoryConfig[key].toLowerCase() === item.toLowerCase()) {
-                delete inventoryConfig[key];
-                break;
-              }
-            }
-
-            for (const key in inventoryConfig) {
-              if (inventoryConfig[key] === null) {
-                delete inventoryConfig[key];
-              }
-            }
-
-            await player.saveInventoryConfig(currentPlayer.username, inventoryConfig);
-
-            const updatedConfig = await player.getConfig(currentPlayer.username);
-            currentPlayer.config = updatedConfig;
-            playerCache.set(currentPlayer.id, currentPlayer);
-          }
-
-          playerCache.set(currentPlayer.id, currentPlayer);
-
-          const stats = await player.synchronizeStats(currentPlayer.username);
-          if (stats) {
-            const currentHealth = currentPlayer.stats.health;
-            const currentStamina = currentPlayer.stats.stamina;
-
-            currentPlayer.stats = stats;
-
-            currentPlayer.stats.health = Math.min(currentHealth, stats.total_max_health);
-            currentPlayer.stats.stamina = Math.min(currentStamina, stats.total_max_stamina);
-
-            playerCache.set(currentPlayer.id, currentPlayer);
-
-            sendPacket(
-              wt,
-              packetManager.updateStats({
-                target: currentPlayer.id,
-                stats: currentPlayer.stats,
-              })
-            );
-
-            await sendStatsToPartyMembers(
-              currentPlayer.username,
-              currentPlayer.id,
-              currentPlayer.stats
-            );
-
-            broadcastToAOIBestEffort(
-              currentPlayer,
-              packetManager.updateStats({
-                target: currentPlayer.id,
-                stats: currentPlayer.stats,
-              })
-            );
-
-            if (slotIndex !== undefined) {
-              sendPacket(
-                wt,
-                packetManager.clientConfig(currentPlayer.config || [])
-              );
-            }
-
-            sendPacket(
-              wt,
-              packetManager.equipment(currentPlayer.equipment)
-            );
-            sendPacket(
-              wt,
-              packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer))
-            );
-
-            currentPlayer.equipmentRevision = (currentPlayer.equipmentRevision || 0) + 1;
-
-            const currentAnimationName = getAnimationNameForDirection(
-              currentPlayer.location.position?.direction || "down",
-              !!currentPlayer.moving,
-              !!currentPlayer.mounted,
-              currentPlayer.mount_type || undefined,
-              !!currentPlayer.casting
-            );
-            await sendSpriteSheetAnimation(wt, currentAnimationName, currentPlayer.id);
-          }
-        }
-        listener.emit(Events.ITEM_EQUIP, { player: currentPlayer, item: foundEquipment, slot });
-        break;
-      }
-      case "UNEQUIP_ITEM": {
-        if (!currentPlayer) return;
-        const slot = (data as any).slot;
-        const targetSlotIndex = (data as any).targetSlotIndex;
-        if (!slot) return;
-
-        const equippedItemName = currentPlayer.equipment[slot];
-        if (!equippedItemName) return;
-        if (await blockEquipmentChangeWhilePvp(wt, currentPlayer, slot)) return;
-
-        const result = await equipment.unEquipItem(currentPlayer.username, slot, equippedItemName);
-        if (result) {
-
-          const inventoryItem = currentPlayer.inventory.find((invItem: any) => invItem.name.toLowerCase() === equippedItemName.toLowerCase());
-          if (inventoryItem) {
-            const maxSlots = await getInventorySlots(currentPlayer);
-            const bagBoundaries = await getBagBoundaries(currentPlayer.username);
-            const occupied = new Set<number>();
-            for (const inv of currentPlayer.inventory) {
-              if (inv !== inventoryItem && !inv.equipped && inv.slot != null) occupied.add(inv.slot);
-            }
-
-            let chosen = inventoryItem.slot;
-            if (chosen == null || chosen < 0 || chosen >= maxSlots || occupied.has(chosen)) {
-              chosen = targetSlotIndex;
-            }
-            if (chosen == null || chosen < 0 || chosen >= maxSlots || occupied.has(chosen)) {
-              chosen = 0;
-              while (occupied.has(chosen) && chosen < maxSlots) chosen++;
-            }
-            if (chosen < maxSlots) {
-              inventoryItem.slot = chosen;
-              inventoryItem.bag_slot = computeBagSlot(chosen, bagBoundaries);
-              await inventory.setUnequippedSlot(currentPlayer.username, equippedItemName, chosen, inventoryItem.bag_slot);
-            }
-            inventoryItem.equipped = false;
-          }
-
-          currentPlayer.equipment[slot] = null;
-
-          if (targetSlotIndex !== undefined) {
-
-            const freshConfig = await player.getConfig(currentPlayer.username);
-            currentPlayer.config = freshConfig;
-
-            const config = currentPlayer.config && currentPlayer.config.length > 0 ? currentPlayer.config[0] : null;
-
-            const inventoryConfig = config?.inventory_config || {};
-
-            inventoryConfig[targetSlotIndex.toString()] = equippedItemName;
-
-            for (const key in inventoryConfig) {
-              if (inventoryConfig[key] === null) {
-                delete inventoryConfig[key];
-              }
-            }
-
-            await player.saveInventoryConfig(currentPlayer.username, inventoryConfig);
-
-            const updatedConfig = await player.getConfig(currentPlayer.username);
-            currentPlayer.config = updatedConfig;
-          }
-
-          playerCache.set(currentPlayer.id, currentPlayer);
-
-          const stats = await player.synchronizeStats(currentPlayer.username);
-          if (stats) {
-            const currentHealth = currentPlayer.stats.health;
-            const currentStamina = currentPlayer.stats.stamina;
-
-            currentPlayer.stats = stats;
-
-            currentPlayer.stats.health = Math.min(currentHealth, stats.total_max_health);
-            currentPlayer.stats.stamina = Math.min(currentStamina, stats.total_max_stamina);
-
-            playerCache.set(currentPlayer.id, currentPlayer);
-
-            sendPacket(
-              wt,
-              packetManager.updateStats({
-                target: currentPlayer.id,
-                stats: currentPlayer.stats,
-              })
-            );
-
-            await sendStatsToPartyMembers(
-              currentPlayer.username,
-              currentPlayer.id,
-              currentPlayer.stats
-            );
-
-            broadcastToAOIBestEffort(
-              currentPlayer,
-              packetManager.updateStats({
-                target: currentPlayer.id,
-                stats: currentPlayer.stats,
-              })
-            );
-
-            sendPacket(
-              wt,
-              packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer))
-            );
-            sendPacket(
-              wt,
-              packetManager.equipment(currentPlayer.equipment)
-            );
-
-            currentPlayer.equipmentRevision = (currentPlayer.equipmentRevision || 0) + 1;
-
-            const currentAnimationName = getAnimationNameForDirection(
-              currentPlayer.location.position?.direction || "down",
-              !!currentPlayer.moving,
-              !!currentPlayer.mounted,
-              currentPlayer.mount_type || undefined,
-              !!currentPlayer.casting
-            );
-            await sendSpriteSheetAnimation(wt, currentAnimationName, currentPlayer.id);
-          }
-        }
-        listener.emit(Events.ITEM_UNEQUIP, { player: currentPlayer, slot });
-        break;
-      }
-      case "BAG_EQUIP": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "equip")) break;
-        // What is spare of an item can be on offer in a trade: nothing more of it is put to use until the trade is over.
-        if (trades.of(currentPlayer.username)) {
-          sendPacket(wt, packetManager.notify({ message: "You can't change equipment while trading." }));
-          break;
-        }
-        const item = (data as any).item;
-        const bagSlot = (data as any).slot;
-        if (!item || !bagSlot) return;
-        if (!bags.SLOTS.includes(bagSlot)) return;
-
-        // One bag change at a time for a player, and none while a batch of theirs (mail, a sale) counts
-        // what is in use: two equips read "none equipped" side by side, and one bag filled two slots.
-        await atomically([currentPlayer.username], async () => {
-          const inventoryItem = currentPlayer.inventory.find((invItem: any) =>
-            invItem.name.toLowerCase() === String(item).toLowerCase() &&
-            invItem.bag_slots != null &&
-            invItem.bag_slots > 0
-          );
-          if (!inventoryItem) return;
-
-          const existingBags = await bags.ensure(currentPlayer.username);
-          if (existingBags[bagSlot] && existingBags[bagSlot].toLowerCase() === String(item).toLowerCase()) return;
-
-          // Counted against what the player holds now, not the copy made before the lock was taken.
-          const held = ((await inventory.find(currentPlayer.username, { name: inventoryItem.name, quantity: 0 } as any)) || [])
-            .reduce((sum: number, row: any) => sum + (Number(row.quantity) || 0), 0);
-          const alreadyEquippedCount = bags.SLOTS.filter((s: string) =>
-            existingBags[s] && existingBags[s].toLowerCase() === String(item).toLowerCase()
-          ).length;
-          if (alreadyEquippedCount >= held) return;
-
-          const canonicalName = inventoryItem.name;
-
-          await bags.setBag(currentPlayer.username, bagSlot, canonicalName);
-          await inventory.setEquipped(currentPlayer.username, canonicalName, true);
-          if (alreadyEquippedCount + 1 >= held) {
-            await inventory.clearSlot(currentPlayer.username, canonicalName);
-          }
-          const freshInventory = await inventory.get(currentPlayer.username);
-          currentPlayer.inventory = await patchInventoryBagSlots(freshInventory, currentPlayer.username);
-          playerCache.set(currentPlayer.id, currentPlayer);
-          sendPacket(wt, packetManager.bags(await bags.ensure(currentPlayer.username)));
-          sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
-        });
-        break;
-      }
-      case "BAG_UNEQUIP": {
-        if (!currentPlayer) return;
-        const bagSlot = (data as any).slot;
-        if (!bagSlot) return;
-        if (!bags.SLOTS.includes(bagSlot)) return;
-
-        // As BAG_EQUIP: one bag change at a time for a player (this one takes the bag out and puts it back to measure).
-        await atomically([currentPlayer.username], async () => {
-          const bagRow = await bags.ensure(currentPlayer.username);
-          const itemName = bagRow[bagSlot];
-          if (!itemName) return;
-
-          // Temporarily remove to calculate new max
-          await bags.setBag(currentPlayer.username, bagSlot, null);
-          const newMax = await getInventorySlots(currentPlayer);
-          await bags.setBag(currentPlayer.username, bagSlot, itemName); // restore
-
-          const freshInv = await inventory.get(currentPlayer.username);
-          const itemsBeyond = (freshInv || []).filter((i: any) => !i.equipped && i.slot != null && i.slot >= newMax);
-          if (itemsBeyond.length > 0) {
-            sendPacket(wt, packetManager.notify({ message: `Cannot unequip bag - ${itemsBeyond.length} item(s) occupy the extra slots. Move them to free up space first.` }));
-            return;
-          }
-
-          await bags.setBag(currentPlayer.username, bagSlot, null);
-          const updatedBags = await bags.ensure(currentPlayer.username);
-          const stillEquipped = bags.SLOTS.some((s: string) =>
-            updatedBags[s] && updatedBags[s].toLowerCase() === itemName.toLowerCase()
-          );
-          if (itemName && !stillEquipped) {
-            const invItem = currentPlayer.inventory.find((i: any) => i.name.toLowerCase() === itemName.toLowerCase());
-            await inventory.setUnequippedSlot(currentPlayer.username, itemName, invItem?.slot ?? null, invItem?.bag_slot ?? null);
-          }
-          currentPlayer.inventory = await patchInventoryBagSlots(await inventory.get(currentPlayer.username), currentPlayer.username);
-          playerCache.set(currentPlayer.id, currentPlayer);
-          sendPacket(wt, packetManager.bags(await bags.ensure(currentPlayer.username)));
-          sendPacket(wt, packetManager.inventory(currentPlayer.inventory, newMax));
-        });
-        break;
-      }
-      case "SAVE_INVENTORY_SLOTS": {
-        if (!currentPlayer) return;
-        const slots = (data as any)?.slots;
-        if (!Array.isArray(slots)) return;
-
-        const maxSlots = await getInventorySlots(currentPlayer);
-        const boundaries = await getBagBoundaries(currentPlayer.username);
-        const seen = new Set<number>();
-        const validItems = new Map<string, string>();
-        if (Array.isArray(currentPlayer.inventory)) {
-          for (const inv of currentPlayer.inventory) {
-            validItems.set(inv.name.toLowerCase(), inv.name);
-          }
-        }
-        for (const s of slots) {
-          if (typeof s.slot !== "number" || s.slot < 0 || s.slot >= maxSlots) return;
-          if (seen.has(s.slot)) return;
-          seen.add(s.slot);
-          if (!s.item || typeof s.item !== "string") return;
-          const canonical = validItems.get(s.item.toLowerCase());
-          if (!canonical) return;
-        }
-
-        const patched = slots.map((s: any) => {
-          const canonical = validItems.get(s.item.toLowerCase()) || s.item;
-          return {
-            ...s,
-            item: canonical,
-            bag_slot: computeBagSlot(s.slot, boundaries),
-          };
-        });
-
-        await inventory.saveSlots(currentPlayer.username, patched);
-
-        const slotMap = new Map(patched.map((s: any) => [s.item.toLowerCase(), s]));
-        if (Array.isArray(currentPlayer.inventory)) {
-          for (const inv of currentPlayer.inventory) {
-            const s = slotMap.get(inv.name.toLowerCase());
-            if (s) {
-              inv.slot = s.slot;
-              inv.bag_slot = s.bag_slot;
-            }
-          }
-        }
-        playerCache.set(currentPlayer.id, currentPlayer);
-        break;
-      }
-      case "DELETE_ITEM": {
-        if (!currentPlayer) return;
-        const itemName = (data as any)?.item;
-        const from = (data as any)?.from;
-        const slot = (data as any)?.slot;
-        if (!itemName || !from) return;
-
-        if (from === "inventory") {
-          const invItem = currentPlayer.inventory.find((i: any) =>
-            i.name.toLowerCase() === String(itemName).toLowerCase()
-          );
-          if (!invItem) return;
-          // The home item stays with its player.
-          const definition = (((await assetCache.get("items")) || []) as Item[]).find((held) => held.name.toLowerCase() === String(invItem.name).toLowerCase());
-          if (isKept(definition)) {
-            sendPacket(wt, packetManager.notify({ message: `${invItem.name} cannot be destroyed.` }));
-            break;
-          }
-
-          await inventory.delete(currentPlayer.username, { name: invItem.name, quantity: 0 });
-          currentPlayer.inventory = currentPlayer.inventory.filter((i: any) => i !== invItem);
-          playerCache.set(currentPlayer.id, currentPlayer);
-
-          sendPacket(wt, packetManager.removeInventoryItem({ name: invItem.name }));
-          sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
-        } else if (from === "equipment" && slot) {
-          const equippedName = currentPlayer.equipment[slot];
-          if (!equippedName || equippedName.toLowerCase() !== String(itemName).toLowerCase()) return;
-          if (await blockEquipmentChangeWhilePvp(wt, currentPlayer, slot)) return;
-
-          await equipment.unEquipItem(currentPlayer.username, slot, equippedName);
-          await inventory.delete(currentPlayer.username, { name: equippedName, quantity: 0 });
-          currentPlayer.equipment[slot] = null;
-
-          currentPlayer.inventory = currentPlayer.inventory.filter((i: any) =>
-            i.name.toLowerCase() !== equippedName.toLowerCase()
-          );
-          playerCache.set(currentPlayer.id, currentPlayer);
-
-          sendPacket(wt, packetManager.removeInventoryItem({ name: equippedName }));
-          sendPacket(wt, packetManager.equipment(currentPlayer.equipment));
-          sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
-
-          const stats = await player.synchronizeStats(currentPlayer.username);
-          if (stats) {
-            currentPlayer.stats = stats;
-            playerCache.set(currentPlayer.id, currentPlayer);
-            sendPacket(wt, packetManager.updateStats({ target: currentPlayer.id, stats: currentPlayer.stats }));
-          }
-        }
-        break;
-      }
-      case "PICKUP_LOOT": {
-        if (!currentPlayer) return;
-        // Corpses and ghosts cannot pick up loot.
-        if (currentPlayer.isDead || currentPlayer.isGhost) return;
-        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
-        const lootId = (data as any)?.id;
-        if (!lootId) return;
-
-        const result = loot.pickup(currentPlayer, lootId);
-        if (!result.success || !result.item) {
-          sendPacket(wt, packetManager.notify({ message: result.message || "Could not pick up loot." }));
-          break;
-        }
-
-        const lootItem = result.item;
-        const addResult = await inventory.add(currentPlayer.username, { name: lootItem.item, quantity: lootItem.quantity });
-        if (!addResult) break;
-
-        // Re-read the inventory instead of patching the cached list by hand: an
-        // item the player did not hold before needs its full details (quality,
-        // icon, type), and the client cannot draw an entry without them.
-        currentPlayer.inventory = await patchInventoryBagSlots(await inventory.get(currentPlayer.username), currentPlayer.username);
-        playerCache.set(currentPlayer.id, currentPlayer);
-        sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
-        break;
-      }
-      case "GATHER": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
-        if (isGatherRateLimited(String(wt.data.id))) return;
-        await castGather(currentPlayer, (data as any)?.nodeId);
-        break;
-      }
-      case "FISH_CAST": {
-        // A click on a fishable tile (systems/fishing), under the same limit as gathering's presses
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
-        if (isGatherRateLimited(String(wt.data.id))) return;
-        await castFish(currentPlayer, data);
-        break;
-      }
-      case "FISH_REEL": {
-        // the player began reeling in a fish that bit (systems/fishing BITE_ESCAPE_MS)
-        if (!currentPlayer) return;
-        fishReel(currentPlayer.id);
-        break;
-      }
-      case "FISH_LAND": {
-        if (!currentPlayer) return;
-        if (isGatherRateLimited(String(wt.data.id))) return;
-        await landFish(currentPlayer);
-        break;
-      }
-      case "FISH_CANCEL": {
-        if (!currentPlayer) return;
-        // the player reeled the line in with no fish on it: the staff stays out while the bobber comes back to it
-        if (castingFish(playerCache.get(currentPlayer.id) || currentPlayer)) await stopFishing(currentPlayer, fishing.LINE_IN_MS);
-        break;
-      }
-      case "FISHING_EDITOR_LIST":
-      case "FISHING_EDITOR_SAVE": {
-        // The map editor's Fishing tab: what it shows, and its saves (as for tile sounds: server.admin or server.*)
-        if (!currentPlayer) return;
-        const userPermissions = await permissions.get(currentPlayer.username) as string;
-        const perms = userPermissions.includes(",") ? userPermissions.split(",") : userPermissions.length ? [userPermissions] : [];
-        if (!fishing.mayEditFishing(perms)) {
-          sendPacket(wt, packetManager.notify({ message: "You do not have permission to change fishing." }));
-          return;
-        }
-        if (type === "FISHING_EDITOR_SAVE") {
-          await fishing.loadItems();
-          const read = fishing.readFishingChanges(data, fishing.materialName, fishing.weaponName);
-          if ("error" in read) {
-            sendPacket(wt, packetManager.notify({ message: read.error }));
-            return;
-          }
-          try {
-            await fishing.saveFishing(read.changes);
-            log.info(`Fishing saved by ${currentPlayer.username}: ${read.changes.reduce((n, c) => n + c.ids.length, 0)} tiles`);
-          } catch (error: any) {
-            log.error(`Error saving fishing: ${error.message}`);
-            sendPacket(wt, packetManager.notify({ message: `Error saving fishing: ${error.message}` }));
-            return;
-          }
-          // every player is told which tiles are fishable now
-          const tiles = packetManager.fishingTiles({ tilesets: fishing.publicTiles() });
-          for (const online of Object.values(playerCache.list()) as any[]) {
-            if (online?.wt) sendPacket(online.wt, tiles);
-          }
-        }
-        sendPacket(wt, packetManager.fishingEditorData(await fishing.editorData()));
-        break;
-      }
-      case "BATCH_PICKUP_LOOT": {
-        if (!currentPlayer) return;
-        // Corpses and ghosts cannot pick up loot.
-        if (currentPlayer.isDead || currentPlayer.isGhost) return;
-        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
-
-        const items = loot.pickupAllNearby(currentPlayer);
-        if (items.length === 0) break;
-
-        for (const item of items) {
-          await inventory.add(currentPlayer.username, { name: item.item, quantity: item.quantity });
-        }
-
-        // As in PICKUP_LOOT: re-read, so new items arrive with their full details.
-        currentPlayer.inventory = await patchInventoryBagSlots(await inventory.get(currentPlayer.username), currentPlayer.username);
-        playerCache.set(currentPlayer.id, currentPlayer);
-        sendPacket(wt, packetManager.inventory(currentPlayer.inventory, await getInventorySlots(currentPlayer)));
-        sendPacket(wt, packetManager.notify({ message: `Picked up ${items.length} item(s).` }));
-        break;
-      }
-      case "OPEN_LOOT_CHEST": {
-        if (!currentPlayer) return;
-        // Corpses and ghosts cannot open chests.
-        if (currentPlayer.isDead || currentPlayer.isGhost) return;
-        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
-        const chestId = (data as any)?.chestId;
-        if (!chestId) return;
-        const chest = lootChest.getChest(chestId);
-        if (!chest) { sendPacket(wt, packetManager.notify({ message: "Chest not found." })); break; }
-        if (chest.map !== currentPlayer.location.map) { sendPacket(wt, packetManager.notify({ message: "Chest is on a different map." })); break; }
-        const playerPos = currentPlayer.location.position;
-        const playerX = typeof playerPos === 'string' ? Number(playerPos.split(',')[0]) : (playerPos as any).x;
-        const playerY = typeof playerPos === 'string' ? Number(playerPos.split(',')[1]) : (playerPos as any).y;
-        if (!lootChest.isWithinRange(chestId, playerX, playerY)) { sendPacket(wt, packetManager.notify({ message: "You are too far from the chest." })); break; }
-        const result = await lootChest.open(chestId, String(currentPlayer.id));
-        if (!result) { sendPacket(wt, packetManager.notify({ message: "Could not open chest." })); break; }
-        if (result.items.length === 0) { sendPacket(wt, packetManager.notify({ message: "This chest is empty for you." })); break; }
-        sendPacket(wt, packetManager.lootChestContents({ chestId, items: result.items }));
-        break;
-      }
-      case "TAKE_CHEST_ITEMS": {
-        if (!currentPlayer) return;
-        // Corpses and ghosts cannot take chest items.
-        if (currentPlayer.isDead || currentPlayer.isGhost) return;
-        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
-        const chestId = (data as any)?.chestId;
-        const indices = (data as any)?.indices;
-        if (!chestId || !Array.isArray(indices) || indices.length === 0) return;
-        const result = await lootChest.takeItems(chestId, String(currentPlayer.id), currentPlayer.username, indices);
-        if (!result) { sendPacket(wt, packetManager.notify({ message: "Could not take items." })); break; }
-        currentPlayer.inventory = await inventory.get(currentPlayer.username);
-        playerCache.set(currentPlayer.id, currentPlayer);
-        const invSlots = await getInventorySlots(currentPlayer);
-        sendPacket(wt, packetManager.inventory(currentPlayer.inventory, invSlots));
-        if (result.allTaken) {
-          sendPacket(wt, packetManager.lootChestDespawn(chestId));
-          sendPacket(wt, packetManager.notify({ message: `Took ${result.taken.length} item(s). Chest emptied.` }));
-        } else {
-          sendPacket(wt, packetManager.notify({ message: `Took ${result.taken.length} item(s). ${result.remaining.length} item(s) remain.` }));
-        }
-        break;
-      }
-      case "TAKE_ALL_CHEST_ITEMS": {
-        if (!currentPlayer) return;
-        // Corpses and ghosts cannot take chest items.
-        if (currentPlayer.isDead || currentPlayer.isGhost) return;
-        if (subscriptionLocked(wt, currentPlayer, "loot")) return;
-        const chestId = (data as any)?.chestId;
-        if (!chestId) return;
-        const result = await lootChest.takeAllItems(chestId, String(currentPlayer.id), currentPlayer.username);
-        if (!result) { sendPacket(wt, packetManager.notify({ message: "Could not take items." })); break; }
-        currentPlayer.inventory = await inventory.get(currentPlayer.username);
-        playerCache.set(currentPlayer.id, currentPlayer);
-        const invSlots = await getInventorySlots(currentPlayer);
-        sendPacket(wt, packetManager.inventory(currentPlayer.inventory, invSlots));
-        sendPacket(wt, packetManager.lootChestDespawn(chestId));
-        sendPacket(wt, packetManager.notify({ message: `Took all ${result.taken.length} item(s).` }));
-        break;
-      }
-      case "MAILBOX_EDITOR_LIST":
-      case "MAILBOX_EDITOR_SAVE":
-      case "MAILBOX_EDITOR_DELETE": {
-        if (!currentPlayer) return;
-        // The handler checks permission first, on every one of these; its answer carries the maps as they stand.
-        const result = await mailboxEditor.handleEditorPacket(currentPlayer, type, data, mailboxEditorWorld(currentPlayer));
-        if (result.kind === "data") {
-          sendPacket(wt, packetManager.mailboxEditorData(result.data));
-          break;
-        }
-        if (result.denied) sendPacket(wt, packetManager.notify({ message: mailboxEditor.DENIED }));
-        sendPacket(wt, packetManager.mailboxEditorResult({
-          ok: result.ok, errors: result.errors, fields: result.fields, name: result.name, notes: result.notes, action: type, data: result.data,
-        }));
-        if (result.changed) {
-          const map = result.changed;
-          // Everyone on the map sees the mailboxes where they now stand, and every other open editor asks for the maps again.
-          const updated = packetManager.mailboxEditorUpdated({ by: currentPlayer.username });
-          for (const other of Object.values(playerCache.list()) as any[]) {
-            if (!other?.wt) continue;
-            if (String(other.location?.map ?? "").replaceAll(".json", "") === map) await sendMailboxes(other.wt, map);
-            if (other.id !== currentPlayer.id && mailboxEditor.mayHaveEditorOpen(other)) sendPacket(other.wt, updated);
-          }
-        }
-        break;
-      }
-      case "ACHIEVEMENT_EDITOR_LIST":
-      case "ACHIEVEMENT_EDITOR_SAVE":
-      case "ACHIEVEMENT_EDITOR_DELETE": {
-        if (!currentPlayer) return;
-        // The handler checks permission first, on every one of these, and sends its own answers.
-        await achievements.handleEditorPacket(currentPlayer, type, data);
-        break;
-      }
-      case "ACHIEVEMENTS_LIST": {
-        if (!currentPlayer) return;
-        if (isQuestRateLimited(`achievements:${wt.data.id}`)) return;
-        // read from the caches only (systems/achievements/store.ts)
-        await achievements.sendList(currentPlayer);
-        break;
-      }
-      case "GATHERING_EDITOR_LIST":
-      case "GATHERING_EDITOR_SAVE":
-      case "GATHERING_EDITOR_DELETE":
-      case "GATHERING_EDITOR_PREVIEW": {
-        if (!currentPlayer) return;
-        // The handler checks permission first, on every one of these, and sends its own answers.
-        await gathering.handleEditorPacket(currentPlayer, type, data);
-        break;
-      }
-      case "MAIL_OPEN": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "mail")) return;
-        if (isQuestRateLimited(`mail:${wt.data.id}`)) return;
-        if (!(await mayUseMail(wt, currentPlayer))) break;
-        await sendMailbox(wt, currentPlayer);
-        break;
-      }
-      case "MAIL_SEND": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "mail")) return;
-        if (isQuestRateLimited(`mail:${wt.data.id}`)) return;
-        if (!(await mayUseMail(wt, currentPlayer))) break;
-        if (trades.of(currentPlayer.username)) {
-          sendPacket(wt, packetManager.mailSent({ ok: false, message: "You cannot send mail while trading." }));
-          break;
-        }
-        const sent = await mail.send(currentPlayer, data);
-        sendPacket(wt, packetManager.mailSent({ ok: sent.ok, message: sent.message }));
-        if (!sent.ok) break;
-        await sendBelongingsOf(currentPlayer);
-        await sendMailNotice(playerCache.getByUsername(sent.recipient), true);
-        break;
-      }
-      case "MAIL_TAKE": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "mail")) return;
-        if (isQuestRateLimited(`mail:${wt.data.id}`)) return;
-        if (!(await mayUseMail(wt, currentPlayer))) break;
-        const part = (data as any)?.part;
-        if (part !== "all" && part !== "coins" && !(Number.isInteger(part) && part >= 0 && part < MAIL_ITEMS_MAX)) return;
-        const taken = await mail.take(currentPlayer.username, Number((data as any)?.mailId), part);
-        // What was taken shows in the bags: only a refusal is said.
-        if (!taken.ok) sendPacket(wt, packetManager.notify({ message: taken.message }));
-        if (taken.ok) await sendBelongingsOf(currentPlayer);
-        await sendMailbox(wt, currentPlayer);
-        break;
-      }
-      case "MAIL_READ": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "mail")) return;
-        if (!(await mayUseMail(wt, currentPlayer))) break;
-        await mail.markRead(currentPlayer.username, Number((data as any)?.mailId));
-        await sendMailNotice(currentPlayer);
-        break;
-      }
-      case "MAIL_DELETE": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "mail")) return;
-        if (isQuestRateLimited(`mail:${wt.data.id}`)) return;
-        if (!(await mayUseMail(wt, currentPlayer))) break;
-        const deleted = await mail.remove(currentPlayer.username, Number((data as any)?.mailId));
-        if (!deleted.ok) sendPacket(wt, packetManager.notify({ message: deleted.message }));
-        await sendMailbox(wt, currentPlayer);
-        break;
-      }
-      case "MAIL_RETURN": {
-        if (!currentPlayer) return;
-        if (subscriptionLocked(wt, currentPlayer, "mail")) return;
-        if (isQuestRateLimited(`mail:${wt.data.id}`)) return;
-        if (!(await mayUseMail(wt, currentPlayer))) break;
-        const mailId = Number((data as any)?.mailId);
-        const sender = (await mail.inbox(currentPlayer.username)).find((held) => held.id === mailId)?.sender;
-        const returned = await mail.returnToSender(currentPlayer.username, mailId);
-        sendPacket(wt, packetManager.notify({ message: returned.message }));
-        await sendMailbox(wt, currentPlayer);
-        if (returned.ok && sender) await sendMailNotice(playerCache.getByUsername(sender), true);
-        break;
-      }
-      case "LIST_LOOT_TABLES": {
-        if (!currentPlayer) return;
-        // Only the loot editor window asks for this, and /le opens it for those it lets through.
-        if (!lootEditor.canUseEditor(currentPlayer)) return;
-        const tables = await lootTable.list();
-        sendPacket(wt, packetManager.lootTableList(tables, await lootEditor.itemCatalogue()));
-        break;
-      }
-      case "GET_ONLINE_PLAYERS": {
-        if (!currentPlayer?.isAdmin) return;
-
-        const allPlayers = Object.values(playerCache.list());
-        const playerList = allPlayers.map((p: any) => ({
-          username: p.username,
-          map: p.location.map.replace(".json", ""),
-          isAdmin: p.isAdmin || false
-        }));
-
-        sendPacket(wt, packetManager.onlinePlayersList(playerList));
-        break;
-      }
-
-      default: {
-        log.error(`Unknown packet type: ${type}`);
-        break;
-      }
+    const routes = (handlerRoutes ??= await import("./handlers/index"));
+    const handler = routes.route(String(type));
+    if (!handler) {
+      log.error(`Unknown packet type: ${type}`);
+      return;
     }
+    // Counted in flight once here, for the router and everything it awaits; a single node calls it directly.
+    if (CELLS_ON) {
+      return await trackPacket(String(wt.data?.id ?? ""), () => handler.handle({ server, wt, message, parsedMessage, data, type: String(type), currentPlayer, resolveNpcParticles, resolveNpcForClient }));
+    }
+    return await handler.handle({ server, wt, message, parsedMessage, data, type: String(type), currentPlayer, resolveNpcParticles, resolveNpcForClient });
   } catch (e) {
     log.error(e as string);
   }
 }
 
+// Queue the position a player stopped at as one last movement entry. A far
+// mover is otherwise only sent every few flushes, so one that stops on an
+// off-slot tick would never show where it ended up. The entry is flagged
+// final so the flush never throttles it.
+export function queueFinalMovement(player: any) {
+  if (!player?.aoi || !player.location?.position) return;
+  const groupKey = player.aoi.layerId || layerManager.getPlayerLayer(player.id) || player.location.map;
+  let group = movementBatchQueue.get(groupKey);
+  if (!group) {
+    group = new Map();
+    movementBatchQueue.set(groupKey, group);
+  }
+  group.set(player.id, {
+    i: player.id,
+    d: {
+      x: Number(player.location.position.x),
+      y: Number(player.location.position.y),
+      dr: player.location.position.direction,
+    },
+    r: globalStateRevision,
+    s: player.isStealth ? 1 : 0,
+    f: 1,
+  });
+}
+
+// Cluster mode: a mirrored player's step (GHOST_MOVE), batched with the local walkers of its layer so its
+// viewers here get it in the same flush. A mirror is in no layer here, so its own layer id is the key.
+export function queueRemoteMovement(mirror: any, final: boolean) {
+  if (!mirror?.aoi || !mirror.location?.position) return;
+  const groupKey = mirror.aoi.layerId || mirror.location.map;
+  let group = movementBatchQueue.get(groupKey);
+  if (!group) {
+    group = new Map();
+    movementBatchQueue.set(groupKey, group);
+  }
+  group.set(mirror.id, {
+    i: mirror.id,
+    d: {
+      x: Number(mirror.location.position.x),
+      y: Number(mirror.location.position.y),
+      dr: mirror.location.position.direction,
+    },
+    r: globalStateRevision,
+    s: mirror.isStealth ? 1 : 0,
+    ...(final ? { f: 1 } : {}),
+  });
+}
+
 // Force a player to stop moving server-side, independent of any client ABORT.
 // Used by the MOVEXY "abort" branch, on-collision, and when a stun lands on a
 // player who is mid-movement (the client may never send ABORT in that case).
-async function forceStopPlayerMovement(target: any) {
+export async function forceStopPlayerMovement(target: any) {
   if (!target) return;
 
+  if (gameLoop.isPlayerMoving(target.id)) queueFinalMovement(target);
   gameLoop.unregisterMovingPlayer(target.id);
   target.moving = false;
+  ghosts.touch("player", target.id);
   if (target._movementState) {
     target._movementState = undefined;
   }
+  target._stepCarry = undefined;
 
   const cached = playerCache.get(target.id);
   if (cached && cached !== target) {
     cached.moving = false;
     cached._movementState = undefined;
+    cached._stepCarry = undefined;
   }
 
   const wt = target.wt;
@@ -13218,7 +4536,7 @@ async function forceStopPlayerMovement(target: any) {
 
 // Interrupt a player's in-progress cast: aborts the pending cast promise via castId,
 // broadcasts the interrupted cast bar, and reverts the casting animation.
-async function interruptPlayerCast(target: any) {
+export async function interruptPlayerCast(target: any) {
   // fishing (castFish) ends with its line taken in, not with an interrupted cast bar: it never showed one
   const fishingCast = castingFish(target) || castingFish(playerCache.get(target.id));
   target.casting = false;
@@ -13243,23 +4561,16 @@ async function interruptPlayerCast(target: any) {
     playerCache.set(cached.id, cached);
   }
 
-  const playersInMap = filterPlayersByMap(target.location.map);
   if (fishingCast) {
     const ended = fishing.endSession(target.id);
     broadcastFishing(ended?.map ?? target.location.map, { id: target.id, state: "end" });
   } else {
-    broadcastCastToMap(
-      playersInMap,
-      target.id,
+    broadcastCastToAOI(
+      target,
       packetManager.castSpell({ id: target.id, spell: 'interrupted', time: 1 })
     );
   }
-  playersInMap.forEach((p) => {
-    sendPacket(
-      p.wt,
-      packetManager.groundAoeDespawn({ id: target.id + "_casting" })
-    );
-  });
+  clearGroundPreviewForAOI(target, packetManager.groundAoeDespawn({ id: target.id + "_casting" }));
 
   restoreWalkingFacing(target);
   globalStateRevision++;
@@ -13280,7 +4591,7 @@ async function interruptPlayerCast(target: any) {
 // Spirit-tongue for ghosts: random short O-words ("OooOoo ooOoo Oooo").
 // Word count and lengths are purely random so nothing leaks about the real
 // message's length.
-function generateGhostSpeak(): string {
+export function generateGhostSpeak(): string {
   const wordCount = 1 + Math.floor(Math.random() * 4);
   const words: string[] = [];
   for (let i = 0; i < wordCount; i++) {
@@ -13299,15 +4610,15 @@ function generateGhostSpeak(): string {
 // skeleton marker, and notify the victim (Release Spirit popup). The corpse
 // stays where it fell until release; the graveyard teleport happens in the
 // RELEASE_SPIRIT handler. Used by direct spell damage and DoT ticks.
-const REVIVE_OFFER_RADIUS = 100;
+export const REVIVE_OFFER_RADIUS = 100;
 // Release timing: the client plays a ~5s cinematic (orb + fade) on release.
 // The teleport lands mid-black at +3s so it is never seen.
-const GHOST_TELEPORT_DELAY_MS = 3000;
+export const GHOST_TELEPORT_DELAY_MS = 3000;
 // Hide band: wider than the offer radius so small client/server position
 // desync at the boundary can't flap the popup. Re-entry re-offers.
 const REVIVE_OFFER_HIDE_RADIUS = 120;
 
-function checkGhostReviveProximity(player: any): void {
+export function checkGhostReviveProximity(player: any): void {
   if (!player.isGhost || !player.corpse) return;
   if (player.corpse.map !== player.location.map) {
     player.reviveOffered = false;
@@ -13329,7 +4640,7 @@ function checkGhostReviveProximity(player: any): void {
   // Between offer and hide radius: sticky, neither offer nor re-arm.
 }
 
-function findGraveyardSpawn(mapName: string, x: number, y: number): { x: number; y: number } {
+export function findGraveyardSpawn(mapName: string, x: number, y: number): { x: number; y: number } {
   const mapProps = mapPropertiesCache.find((m: any) => m.name === `${mapName}.json`);
   if (mapProps?.graveyards && Array.isArray(mapProps.graveyards) && mapProps.graveyards.length > 0) {
     let closest = mapProps.graveyards[0];
@@ -13404,7 +4715,8 @@ export async function handlePlayerDeath(target: any, killer: any, info: { damage
 
   const deathStats = { ...target.stats, health: 0, stamina: 0 };
 
-  if (killer && killer.id !== target.id) {
+  // A killer on another node (casterFor's stand-in) is not cached here: its own node updates it.
+  if (killer && killer.id !== target.id && !killer.remote) {
     const syncedStats = await player.synchronizeStats(killer.username);
     if (syncedStats) {
       killer.stats = syncedStats;
@@ -13444,7 +4756,7 @@ export async function handlePlayerDeath(target: any, killer: any, info: { damage
     sendPacket(target.wt, packetManager.playerDied({ id: target.id, corpse: target.corpse }));
   }
 
-  if (killer) {
+  if (killer && !killer.remote) {
     sendStatsToPartyMembers(killer.username, killer.id, killer.stats);
   }
   sendStatsToPartyMembers(target.username, target.id, target.stats);
@@ -13461,7 +4773,7 @@ export async function handlePlayerDeath(target: any, killer: any, info: { damage
  * Rolls spell hit and damage per creature like a direct cast, then applies
  * the spell's effects. Healing spells never touch creatures.
  */
-function splashCreatures(caster: any, spell: SpellData, x: number, y: number, radius: number, excludeCreatureId: number | null) {
+export function splashCreatures(caster: any, spell: SpellData, x: number, y: number, radius: number, excludeCreatureId: number | null) {
   const base = Number(spell.damage) || 0;
   if (base < 0 || !radius || radius <= 0) return;
   const level = caster.stats?.level || 1;
@@ -13483,7 +4795,8 @@ function splashCreatures(caster: any, spell: SpellData, x: number, y: number, ra
       const min = base + (level - 1) * 2;
       const max = base + (level - 1) * 5;
       const amount = Math.floor(Math.random() * (max - min + 1)) + min + (caster.stats?.stat_damage || 0);
-      const dealt = creatures.combat.damageCreature(creature, caster.id, amount, now);
+      // A mirrored creature's text is shown by its owner, which needs the kind (emitCombatText does nothing for a mirror).
+      const dealt = creatures.combat.damageCreature(creature, caster.id, amount, now, 1, creature.remote ? "spell" : null);
       creatures.combat.emitCombatText({ ...text, kind: "spell", amount: dealt });
     } else {
       creatures.combat.damageCreature(creature, caster.id, 0, now);
@@ -13493,7 +4806,7 @@ function splashCreatures(caster: any, spell: SpellData, x: number, y: number, ra
 }
 
 /** 8-way facing from one point toward another (the sprite directions). */
-function directionToward(fromX: number, fromY: number, toX: number, toY: number): string {
+export function directionToward(fromX: number, fromY: number, toX: number, toY: number): string {
   const ang = Math.atan2(toY - fromY, toX - fromX) * (180 / Math.PI);
   if (ang >= -22.5 && ang < 22.5) return "right";
   if (ang >= 22.5 && ang < 67.5) return "downright";
@@ -13510,7 +4823,7 @@ function directionToward(fromX: number, fromY: number, toX: number, toY: number)
  * something behind you, so the cast never fails for facing the wrong way.
  * Only the stored facing changes; the cast's animation packets show it.
  */
-function faceToward(caster: any, x: number, y: number): void {
+export function faceToward(caster: any, x: number, y: number): void {
   const pos = caster?.location?.position;
   if (!pos || !Number.isFinite(x) || !Number.isFinite(y)) return;
   if (pos.x === x && pos.y === y) return;
@@ -13537,7 +4850,7 @@ function restoreWalkingFacing(caster: any): boolean {
  * PvP flag is set, and resend equipment + inventory so a client that moved the
  * item optimistically snaps back. Returns true when the change was blocked.
  */
-async function blockEquipmentChangeWhilePvp(wt: any, currentPlayer: any, slot: unknown): Promise<boolean> {
+export async function blockEquipmentChangeWhilePvp(wt: any, currentPlayer: any, slot: unknown): Promise<boolean> {
   if (!currentPlayer?.pvp || !slot) return false;
   sendPacket(wt, packetManager.notify({ message: "You can't change equipment while in combat." }));
   sendPacket(wt, packetManager.equipment(currentPlayer.equipment));
@@ -13546,13 +4859,13 @@ async function blockEquipmentChangeWhilePvp(wt: any, currentPlayer: any, slot: u
 }
 
 /** restoreWalkingFacing, then show the turn with a walking animation. */
-async function resumeWalkingFacing(wt: any, caster: any): Promise<void> {
+export async function resumeWalkingFacing(wt: any, caster: any): Promise<void> {
   if (!restoreWalkingFacing(caster)) return;
   globalStateRevision++;
   await sendPositionAnimation(wt, caster.location.position.direction, true, caster.mounted || false, caster.mount_type || "unicorn", undefined, globalStateRevision, caster.casting || false);
 }
 
-async function castSpellOnCreature(wt: any, currentPlayer: any, spell: SpellData, creatureId: number) {
+export async function castSpellOnCreature(wt: any, currentPlayer: any, spell: SpellData, creatureId: number) {
   const spellId = spell.id as number;
   const fail = (reason: string, message?: string) => {
     if (message) sendPacket(wt, packetManager.notify({ message }));
@@ -13617,7 +4930,7 @@ async function castSpellOnCreature(wt: any, currentPlayer: any, spell: SpellData
   const direction = currentPlayer.location.position?.direction || "down";
   globalStateRevision++;
   await sendPositionAnimation(wt, direction, currentPlayer.moving || false, false, currentPlayer.mount_type || "unicorn", undefined, globalStateRevision, true);
-  broadcastCastToMap(filterPlayersByMap(currentPlayer.location.map), currentPlayer.id, packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: spell.cast_time }));
+  broadcastCastToAOI(currentPlayer, packetManager.castSpell({ id: currentPlayer.id, spell: spell.name, time: spell.cast_time }));
 
   await new Promise((resolve) => setTimeout(resolve, (spell.cast_time || 0) * 1000));
 
@@ -13645,7 +4958,7 @@ async function castSpellOnCreature(wt: any, currentPlayer: any, spell: SpellData
   const target = creatures.getCreature(creatureId);
   const finalCheck = target ? inRangeWithSight(target) : "invalid_target";
   if (!target || finalCheck || after.isDead) {
-    broadcastCastToMap(filterPlayersByMap(after.location.map), after.id, packetManager.castSpell({ id: after.id, spell: "failed", time: 1 }));
+    broadcastCastToAOI(after, packetManager.castSpell({ id: after.id, spell: "failed", time: 1 }));
     resetCooldown();
     return fail(finalCheck || "invalid_target", finalCheck === "range" ? "Target is out of range" : finalCheck === "path_blocked" ? "Target is not in line of sight" : undefined);
   }
@@ -13666,7 +4979,7 @@ async function castSpellOnCreature(wt: any, currentPlayer: any, spell: SpellData
   // Projectile visual from the caster to the creature, same as player targets:
   // travel time scales with distance and the damage lands when it arrives.
   const travelMs = projectileTravelMs(Math.hypot(after.location.position.x - target.x, after.location.position.y - target.y));
-  const creatureParticles = resolveSpellParticles(spell, (await assetCache.get("particles")) as Particle[] | null);
+  const creatureParticles = resolveSpellParticles(spell, (await readHeldList<Particle>("particles")));
   const projectile = packetManager.projectile({
     id: after.id,
     time: travelMs / 1000,
@@ -13709,7 +5022,8 @@ async function castSpellOnCreature(wt: any, currentPlayer: any, spell: SpellData
     const rolled = Math.floor(Math.random() * (maxDamage - minDamage + 1)) + minDamage + (after.stats.stat_damage || 0);
     const isCrit = Math.random() * 100 < (after.stats.stat_critical_chance || 0);
     const amount = Math.round(isCrit ? rolled * (1.5 + (after.stats.stat_critical_damage || 0) / 100) : rolled);
-    const dealt = creatures.combat.damageCreature(target, after.id, amount, now);
+    // A mirrored creature's text is shown by its owner, which needs the kind (emitCombatText does nothing for a mirror).
+    const dealt = creatures.combat.damageCreature(target, after.id, amount, now, 1, target.remote ? (isCrit ? "crit" : "spell") : null);
     creatures.combat.emitCombatText({ ...textBase, kind: isCrit ? "crit" : "spell", amount: dealt });
     if (hasCreatureEffects) creatures.combat.applySpellToCreature(target, after.id, spell, now);
   }
@@ -13816,6 +5130,12 @@ playerEditor.setPlayerEditorBridge({
   announce: (target) => broadcastPlayerUpdate(target),
   syncPartyLayers: (leader, members) => syncPartyLayers(leader, members, playerCache, sendAnimationTo),
   relocate: async (target, map, x, y, direction) => {
+    // A player in a handoff is moved by no one here: the move (and its saved location) would be lost or clash with the
+    // new node's (security review M3). The editor's own answer is unchanged.
+    if (CELLS_ON && inHandoff(target)) {
+      log.info(`Relocation of ${target.username} skipped: the player is changing server node`);
+      return;
+    }
     await forceStopPlayerMovement(target);
     if (map !== String(target.location?.map ?? "").replace(".json", "")) {
       target.location.position.direction = direction;
@@ -13826,6 +5146,7 @@ playerEditor.setPlayerEditorBridge({
     // Already on that map: move there like an admin teleport, without
     // reloading the map (a reload wipes everything the client shows).
     target.location.position = { ...target.location.position, x, y, direction };
+    ghosts.touch("player", target.id);
     globalStateRevision++;
     if (shouldUpdateAOI(target)) {
       await updatePlayerAOI(target, spawnBatchQueue, despawnBatchQueue);
@@ -13843,7 +5164,7 @@ playerEditor.setPlayerEditorBridge({
 // What the control panel (systems/controlpanel.ts) needs from the socket
 // layer: the state only this file holds.
 controlPanel.setControlPanelBridge({
-  restartScheduled: () => !!restartScheduled,
+  restartScheduled: () => !!restartState.scheduled,
   status: () => ({
     eventLoopLagMs: getEventLoopLagMs(),
     whitelistEnabled: isWhitelistEnabled(),
@@ -13869,7 +5190,7 @@ controlPanel.setControlPanelBridge({
  * and the chat command are one implementation. Resolves with what the
  * command told the admin. The panel runs one at a time per admin.
  */
-async function runForControlPanel(wt: any, run: controlPanel.PanelRun): Promise<string[]> {
+export async function runForControlPanel(wt: any, run: controlPanel.PanelRun): Promise<string[]> {
   const replies: string[] = [];
   const stood = "command" in run ? { type: "COMMAND", data: { command: "" } } : { type: run.packet, data: null };
   if ("command" in run) panelCommands.set(stood, { name: run.command, args: run.args });
@@ -13956,7 +5277,7 @@ listener.on(Events.SPELL_INTERRUPTED, async ({ player }) => {
   await interruptPlayerCast(player);
 });
 
-function filterPlayersByMap(map: string) {
+export function filterPlayersByMap(map: string) {
 
   const playerIds = mapIndex.getPlayersOnMap(map);
   const players: any[] = [];
@@ -13984,11 +5305,405 @@ function parsePos(pos: any): { x: number; y: number } {
 // - callers that don't want self filter it out (see TARGETCLOSEST); the
 // attack-range check relies on self being present for self-targeted spells.
 //
-// Iterates the caller's layer membership, which is capped at
-// MAX_PLAYERS_PER_LAYER (~50). The previous implementation scanned every player
-// on the map: at high pop with everyone clustered on one map that was O(1000s)
-// per call, and TARGETCLOSEST / SELECTPLAYER / attack-range fire it per packet,
-// so the inbound queue collapsed under it (~4ms/call, count climbing).
+// Candidates come from the spatial grid cells round the caller, so the cost is
+// the local crowd. TARGETCLOSEST / SELECTPLAYER / attack range fire this per
+// packet, and a layer is per block now (one layer of a big map can hold the
+// whole map's population), so scanning layer membership was O(map) per packet.
+// The grid is not layer aware: other-layer players are dropped by the same
+// layer check as before. When the range covers more grid cells than the layer
+// has players (a very long range), the layer membership is scanned instead.
+// Both give the same players: the grid follows every movement tick and the
+// query is padded for the rest.
+const TARGET_GRID_PAD_PX = Math.max(128, (Number(AOI_CONFIG.UPDATE_THRESHOLD) || 100) + 32);
+const TARGET_GRID_CELL_PX = Number(AOI_CONFIG.GRID_CELL_SIZE) || 512;
+
+/** Whether the session of `player` is still the one this node holds (a player who left, or logged in elsewhere, is not). */
+function stillHere(player: any): boolean {
+  const live = playerCache.get(player.id);
+  return !!live && live.wt === player.wt;
+}
+
+/**
+ * Items and money another node handed over for a player here (LOOT_TAKE, CHEST_TAKE), written in one batch.
+ * Answers the items that were really added: inventory.add answers nothing for a name that is not an item, and such
+ * an item is logged by name. Null when none could be written (the session ended meanwhile, or the write failed):
+ * the owner has already let them go, so they go back to the grant store when nothing of them was written, and are
+ * logged by name as lost when they cannot be parked, or may have been written. Nothing is checked against the room in
+ * the bags again: inventory.add does not count slots, so an item is never dropped for want of one, and bags that
+ * filled during the round trip hold the extra.
+ */
+async function receiveHanded<T extends { name: string; quantity: number }>(player: any, items: T[], copper: number, call = "hand-over", grantId?: unknown): Promise<T[] | null> {
+  if (items.length === 0 && copper <= 0) return [];
+  // The hand-over this node claimed, if the owner parked one: its id is written with the items (grantwrites.ts).
+  const id = typeof grantId === "string" ? grantId : null;
+  const lostText = `${JSON.stringify(items.map((item) => ({ name: item.name, quantity: item.quantity })))}, ${copper} copper`;
+  // The session may have ended during the round trip: another node can hold this player's rows by now.
+  if (!stillHere(player)) {
+    await parkAgain(player.username, items, copper, call, `Items handed over by another node were lost for ${player.username}, who left meanwhile: ${lostText}`, id);
+    return null;
+  }
+  const added: T[] = [];
+  try {
+    const balance = await atomically([player.username], async (batch) => {
+      added.length = 0;
+      // Security review M2: the claimed hand-over's id is written with it, first in the batch, so a store that brings
+      // the grant back after this write cannot have it written again by its owner. Guard (test "a claimed hand-over is
+      // written with its grant id, and one written before is not written again").
+      if (id) await recordGrantWrite(batch, id);
+      for (const item of items) {
+        if (await inventory.add(player.username, { name: item.name, quantity: item.quantity } as any, batch)) added.push(item);
+      }
+      return copper > 0 ? await currencySystem.add(player.username, { copper, silver: 0, gold: 0 }, batch) : null;
+    });
+    for (const item of items) {
+      if (!added.includes(item)) log.error(`Item handed over by another node was lost for ${player.username}: ${item.quantity} x ${item.name} is not an item`);
+    }
+    if (balance) {
+      sendPacket(player.wt, packetManager.currency(balance));
+      sendPacket(player.wt, packetManager.notify({ message: `You receive loot: ${formatMoney(copper)}` }));
+    }
+    return added;
+  } catch (error) {
+    if (id && grantWrittenBefore(error)) {
+      log.info(`Hand-over ${id} for ${player.username} was written before: not written again (${lostText})`);
+      return null;
+    }
+    const lost = `Items handed over by another node were lost for ${player.username}: ${lostText}: ${error}`;
+    // Thrown before the batch was sent (a lock check, an item check): nothing was written, and what was handed over
+    // goes back to the grant store whole. Any other throw may come after the commit (a kept step, a lost answer):
+    // parked again, it could be given twice, so it is logged as lost.
+    if (nothingWritten(error)) await parkAgain(player.username, items, copper, call, lost, id);
+    else log.error(lost);
+    return null;
+  }
+}
+
+/**
+ * Items another node handed over (and this node claimed) that could not be written here go back to the grant store
+ * as a grant (cells phase 7): its owner's recovery gives them to the player on whichever node they are, or writes
+ * them to their rows. Only when they cannot be parked (no cluster store, or the store failed) are they lost, and then
+ * `lost` names them. A grant holds at most MAX_GRANT_ITEMS rows: more are parked as several, the money with the first.
+ *
+ * `grantId`: the hand-over this node claimed. The first grant is parked again under it (security review Important 3),
+ * so a copy of the hand-over the store brings back and this re-park share one grant_writes row. A claimed hand-over
+ * holds at most MAX_GRANT_ITEMS rows (its owner parked it so, and the bounds refuse more), so it is one grant. Guard
+ * (test "the receiver parks a hand-over it could not write again under its grant id").
+ */
+async function parkAgain(username: string, items: Array<{ name: string; quantity: number }>, copper: number, call: string, lost: string, grantId: string | null = null): Promise<void> {
+  const parked: string[] = [];
+  try {
+    const rows = items.map((item) => ({ itemName: item.name, quantity: item.quantity }));
+    let at = 0;
+    do {
+      const id = await grants.park({ username, items: rows.slice(at, at + MAX_GRANT_ITEMS), copper: at === 0 ? copper : 0, call }, at === 0 && grantId ? grantId : undefined);
+      if (!id) throw new Error("the grant store did not take it");
+      parked.push(id);
+      at += MAX_GRANT_ITEMS;
+    } while (at < rows.length);
+  } catch {
+    // Rows parked before the failure are given by their own grants, which their park line names.
+    log.error(parked.length > 0 ? `${lost} (except what hand-over(s) ${parked.join(", ")} hold)` : lost);
+    return;
+  }
+  log.warn(`Items handed over by another node could not be written for ${username}: they are parked again as hand-over(s) ${parked.join(", ")}`);
+}
+
+/** The players with a call to a neighbouring node's items under way, by lowercase name. */
+const itemCallsUnderWay = new Set<string>();
+/** What a player is told when a call of theirs is refused for another being under way. */
+export const ITEM_CALL_BUSY = "You are already doing that. Try again in a moment.";
+
+/**
+ * Runs the call of `player` on the items of the neighbouring node `owner` (null when this node owns them: `run`
+ * goes on at once, as before). A player has one at a time: a client's packets run side by side, and each would be
+ * a call that stays pending for seconds. While one is under way another is refused (`refused` makes the answer)
+ * and sends nothing, so nothing is taken for it; the one under way is not touched, and it is still written whole
+ * when it is answered.
+ */
+async function oneItemCallAtATime<T, R>(owner: string | null, player: any, refused: () => R, run: () => Promise<T>): Promise<T | R> {
+  if (!owner) return run();
+  const key = String(player.username).toLowerCase();
+  if (itemCallsUnderWay.has(key)) return refused();
+  itemCallsUnderWay.add(key);
+  try {
+    return await run();
+  } finally {
+    itemCallsUnderWay.delete(key);
+  }
+}
+
+/** Opens a corpse for a player here: this node's corpse as before, or a neighbouring node's (LOOT_OPEN). A reason when it cannot. */
+export async function openCorpseHere(player: any, creatureId: number): Promise<{ items: CorpseItem[]; copper: number } | string> {
+  return oneItemCallAtATime(itemOwner("LOOT_OPEN", creatureId), player, () => "busy", async () => {
+    const asked = await askOwner("LOOT_OPEN", creatureId, player, { creatureId });
+    if (!asked) return creatures.openCorpseFor(player, creatureId);
+    return asked.ok ? { items: (asked.items as CorpseItem[]) || [], copper: Number(asked.copper) || 0 } : String(asked.reason ?? "failed");
+  });
+}
+
+/** Takes from a corpse for a player here: from this node's corpse as before, or from a neighbouring node's (LOOT_TAKE). */
+export async function takeCorpseLootHere(player: any, creatureId: number, indices: number[] | null) {
+  const owner = itemOwner("LOOT_TAKE", creatureId);
+  if (!owner) return creatures.takeCorpseLootFor(player, creatureId, indices);
+  // Held across the read of the bags too: the room is a database read for every packet that gets this far.
+  return oneItemCallAtATime(owner, player, () => "busy" as LootError, async () => {
+    const asked = await askOwner("LOOT_TAKE", creatureId, player, { creatureId, indices, room: await bagRoom(player.username) });
+    if (!asked?.ok) return ((asked?.reason as LootError | undefined) ?? "failed") as LootError;
+    const taken = (asked.items as CorpseItem[]) || [];
+    const copper = Number(asked.copper) || 0;
+    const added = await receiveHanded(player, taken.map((item) => ({ name: item.itemName, quantity: item.quantity, item })), copper, "LOOT_TAKE", asked.grantId);
+    if (added === null) return "failed" as LootError;
+    // As on the owner's own node, only what was really added is told to the player and counted.
+    for (const { item } of added) {
+      sendPacket(player.wt, packetManager.lootReceived({ itemName: item.itemName, quantity: item.quantity, quality: item.quality || "common" }));
+      listener.emit(Events.PLAYER_LOOT_RETRIEVED, { player, itemName: item.itemName, quantity: item.quantity, mapName: bareMap(player.location?.map), x: player.location?.position?.x, y: player.location?.position?.y } as any);
+    }
+    if (asked.empty) sendPacket(player.wt, packetManager.creatureLootable({ id: creatureId, lootable: false }));
+    return { taken, empty: !!asked.empty, full: !!asked.full, remaining: (asked.remaining as CorpseItem[]) || [], copper: 0 };
+  });
+}
+
+/**
+ * Picks up ground loot for a player here: this node's as before, or a neighbouring node's (PICKUP_REQUEST), whose
+ * item is added here. `added` says whether the item is in the inventory; `message` is what to tell the player when not.
+ */
+export async function pickupLootHere(player: any, lootId: string): Promise<{ added: boolean; message?: string }> {
+  return oneItemCallAtATime(itemOwner("PICKUP_REQUEST", String(lootId)), player, () => ({ added: false, message: ITEM_CALL_BUSY }), async () => {
+    const asked = await askOwner("PICKUP_REQUEST", String(lootId), player, { lootId: String(lootId) });
+    const result = asked
+      ? { success: asked.ok, message: asked.reason, item: asked.item as any }
+      : loot.pickup(player, lootId);
+    if (!result.success || !result.item) return { added: false, message: result.message || "Could not pick up loot." };
+
+    const lootItem = result.item;
+    const lost = `Loot handed over by another node was lost for ${player.username}: ${lootItem.item} x${lootItem.quantity}`;
+    // The owner has let the item go: an item that cannot be written here goes back to the grant store (parkAgain) when
+    // nothing of it was written, and is logged by name as lost when it cannot be parked, or may have been written.
+    const handed = [{ name: String(lootItem.item), quantity: Number(lootItem.quantity) || 1 }];
+    // The hand-over this node claimed, if the owner parked one: its id is written with the item (grantwrites.ts, M2),
+    // and an item not written is parked again under it.
+    const grantId = typeof asked?.grantId === "string" ? asked.grantId : null;
+    if (asked && !stillHere(player)) {
+      await parkAgain(player.username, handed, 0, "PICKUP_REQUEST", `${lost}, who left meanwhile`, grantId);
+      return { added: false };
+    }
+    let addResult;
+    try {
+      // A handed-over item is written as one batch, so a failure says whether anything was written (nothingWritten).
+      addResult = asked
+        ? await atomically([player.username], async (batch) => {
+          if (grantId) await recordGrantWrite(batch, grantId);
+          return await inventory.add(player.username, { name: lootItem.item, quantity: lootItem.quantity }, batch);
+        })
+        : await inventory.add(player.username, { name: lootItem.item, quantity: lootItem.quantity });
+    } catch (error) {
+      if (!asked) throw error;
+      if (grantId && grantWrittenBefore(error)) {
+        log.info(`Hand-over ${grantId} for ${player.username} was written before: not written again (${lootItem.item} x${lootItem.quantity})`);
+        return { added: false };
+      }
+      if (nothingWritten(error)) await parkAgain(player.username, handed, 0, "PICKUP_REQUEST", `${lost}: ${error}`, grantId);
+      else log.error(`${lost}: ${error}`);
+      return { added: false };
+    }
+    if (!addResult) {
+      if (asked) log.error(lost);
+      return { added: false };
+    }
+    // The owner leaves this hook to the player's node.
+    if (asked) listener.emit(Events.PLAYER_LOOT_RETRIEVED, { player, itemName: lootItem.item, quantity: lootItem.quantity, mapName: lootItem.map, x: lootItem.x, y: lootItem.y } as any);
+    return { added: true };
+  });
+}
+
+/** The packets that answer opening a chest a neighbouring node owns (CHEST_OPEN). Null when this node owns it. */
+export async function openChestOnOwner(player: any, chestId: string): Promise<any[] | null> {
+  return oneItemCallAtATime(itemOwner("CHEST_OPEN", chestId), player, () => packetManager.notify({ message: ITEM_CALL_BUSY }), async () => {
+    const asked = await askOwner("CHEST_OPEN", chestId, player, { chestId });
+    if (!asked) return null;
+    const items = (asked.items as any[]) || [];
+    if (!asked.ok) return packetManager.notify({ message: asked.reason || "Could not open chest." });
+    if (items.length === 0) return packetManager.notify({ message: "This chest is empty for you." });
+    return packetManager.lootChestContents({ chestId, items });
+  });
+}
+
+/** Takes chest items for a player here (all of them when `indices` is null), from this node's chest or a neighbour's (CHEST_TAKE). */
+export async function takeChestItems(player: any, chestId: string, indices: number[] | null): Promise<{ taken: any[]; remaining: any[]; allTaken: boolean } | null> {
+  // A refused take is null, which the packet case answers "Could not take items.": nothing was sent or taken.
+  return oneItemCallAtATime(itemOwner("CHEST_TAKE", chestId), player, () => null, async () => {
+    const asked = await askOwner("CHEST_TAKE", chestId, player, { chestId, indices });
+    if (!asked) {
+      if (indices) return lootChest.takeItems(chestId, String(player.id), player.username, indices);
+      const all = await lootChest.takeAllItems(chestId, String(player.id), player.username);
+      return all ? { ...all, remaining: [] } : null;
+    }
+    if (!asked.ok) return null;
+    const taken = (asked.items as any[]) || [];
+    if ((await receiveHanded(player, taken.map((item) => ({ name: item.itemName, quantity: item.quantity })), 0, "CHEST_TAKE", asked.grantId)) === null) return null;
+    return { taken, remaining: (asked.remaining as any[]) || [], allTaken: !!asked.allTaken };
+  });
+}
+
+/** getPlayersNearPoint, and the mirrored players the same query finds: what an area spell may hit. */
+export function playersAndMirrorsNear(x: number, y: number, map: string, radius: number, layerId: string | null | undefined): any[] {
+  const players = getPlayersNearPoint(x, y, map, radius, layerId);
+  for (const mirror of mirrorsOnLayerNear(map, x, y, radius, layerId)) players.push(mirror);
+  return players;
+}
+
+/** What the inspect window is sent of `target`: their whole inventory when `whole`, else only the rows of what they wear. */
+export function inspectPlayerData(target: any, whole: boolean) {
+  const worn = new Set(Object.values(target.equipment || {}).filter(Boolean).map((name: any) => String(name)));
+  return {
+    id: target.id,
+    stats: target.stats,
+    username: target.username,
+    equipment: target.equipment || {},
+    inventory: whole ? (target.inventory || []) : (target.inventory || []).filter((row: any) => worn.has(String(row?.name))),
+  };
+}
+
+/** The players within `distance` of the caster (filterPlayersByDistance), and the mirrored players on the caster's layer in it too. */
+export function withMirrors(wt: any, distance: number, map: string): any[] {
+  const result = filterPlayersByDistance(wt, distance, map);
+  const caster = playerCache.get(wt.data.id);
+  const pos = caster?.location?.position;
+  if (!caster || !pos || mirrorPlayers.size === 0) return result;
+  const layerId = caster.aoi?.layerId || layerManager.getPlayerLayer(caster.id) || null;
+  const at = parsePos(pos);
+  for (const mirror of mirrorsNearPoint(caster.location.map, at.x, at.y, distance)) {
+    if (layerId && (playerLayer(mirror.id) ?? null) !== layerId) continue;
+    result.push(mirror);
+  }
+  return result;
+}
+
+/** A hit from `caster` on a mirrored player, as sent to that player's owner. */
+export function remoteHit(caster: any, spell: any, damage: number, isCrit: boolean, how: { skipEffects?: boolean; showsDamage: boolean; harmful: boolean }): PlayerHit {
+  return {
+    casterId: String(caster.id),
+    casterName: caster.username,
+    casterStats: caster.stats,
+    casterLocation: { map: caster.location.map, position: { ...caster.location.position } },
+    casterLayer: caster.aoi?.layerId || layerManager.getPlayerLayer(caster.id) || null,
+    casterParty: [...(caster.party ?? [])],
+    spell: spell ?? null,
+    damage,
+    isCrit,
+    skipEffects: !!how.skipEffects,
+    showsDamage: how.showsDamage,
+    harmful: how.harmful,
+  };
+}
+
+/**
+ * A hit on a mirrored player: sent to its owner, which checks and applies it (spec §4). The caster's
+ * side is done here once it lands: the caster's PvP flag, the damage number for viewers here, and on a
+ * kill PLAYER_DEATH with the mirror as the player (its threat goes, and the killer's PvP kill counts).
+ */
+export async function hitRemotePlayer(caster: any, target: any, hit: PlayerHit): Promise<boolean> {
+  const result = await sendPlayerHit(target, hit);
+  if (!result || (result.outcome !== "applied" && result.outcome !== "killed")) return false;
+  if (hit.harmful && !hit.casterParty.includes(target.username)) setPlayerPvp(caster, true);
+  caster.last_attack = performance.now();
+  if (hit.showsDamage && result.stats) {
+    const packets = packetManager.updateStats({ id: caster.id, target: target.id, stats: result.stats, isCrit: hit.isCrit, damage: hit.damage, absorb: result.absorb || 0 });
+    if (result.outcome === "killed") {
+      // The owner's death flow shows nothing to the viewers here, so the number goes to everyone.
+      broadcastStatsUpdateToAOI(target, caster, packets);
+    } else {
+      // The owner showed the same number to the target's viewers, and its relay (ghosts.relay) already
+      // reached those on this node, the caster among them. Only the receivers it did not reach are sent it.
+      const relayed = new Set(findPlayersWithTargetInAOI(target.id).map((viewer: any) => String(viewer.id)));
+      const receivers = new Map<string, any>();
+      if (caster.wt) receivers.set(String(caster.id), caster);
+      for (const viewer of findPlayersWithTargetInAOI(caster.id)) if (viewer.wt) receivers.set(String(viewer.id), viewer);
+      for (const [id, receiver] of receivers) if (!relayed.has(id)) sendPacketBestEffort(receiver.wt, packets);
+    }
+  }
+  if (result.outcome === "killed") listener.emit(Events.PLAYER_DEATH, { player: target, killer: caster });
+  return true;
+}
+
+/**
+ * One victim of an area spell. A mirrored player's hit is started towards its owner (the promise is added
+ * to `pending`, for the caller to await once the local victims are done) and true is returned: the caller
+ * must not apply it here. A local player is left alone and false is returned.
+ */
+export function routeSplashToMirror(pending: Promise<boolean>[], caster: any, victim: any, spell: any, damage: number, how: { skipEffects?: boolean; showsDamage: boolean; harmful: boolean }): boolean {
+  if (!victim.remote) return false;
+  pending.push(hitRemotePlayer(caster, victim, remoteHit(caster, spell, damage, false, how)));
+  return true;
+}
+
+/**
+ * Inspecting a player of a neighbouring node: that node holds their inventory, so the request is sent to it
+ * (cells-inspect) and it answers the asker. `admin` is the asker's own, read here. False when `targetId` is a
+ * player of this node or no mirror, which the caller then looks up locally.
+ */
+export async function inspectOnOwner(asker: any, targetId: unknown): Promise<boolean> {
+  const mirrored = targetId && !playerCache.get(targetId as string) ? mirrorPlayers.get(String(targetId)) : undefined;
+  if (!mirrored) return false;
+  await runOnPlayer(mirrored.username, "cells-inspect", { asker: asker.username, admin: !!asker.isAdmin });
+  return true;
+}
+
+/**
+ * A hit on a player of this node from a player of a neighbouring node (APPLY_EFFECT player_hit). The
+ * checks that protect the target are made here, where the target is; then it is applied as a splash
+ * hit is. `caster` is casterFor's stand-in.
+ */
+async function applyRemotePlayerHit(targetId: string, hit: PlayerHit, caster: any): Promise<EffectResult> {
+  const target = playerCache.get(targetId);
+  const allowed: PvpAllowed = (position) => player.isInPvPZone(target.location.map, position as PositionData, PVP_BODY);
+  const harmAllowed = !target?.location || !hit.harmful ? true : await areaSpellHarms(hit.casterLocation?.position, target.location.position, allowed);
+  const refused = refusalOf(target, hit, harmAllowed);
+  if (refused) return { outcome: refused === "missing" ? "missing" : "refused", reason: refused };
+  const damage = Number(hit.damage) || 0;
+  let toHealth = damage;
+  if (damage > 0) {
+    const absorbed = spellEffects.consumeBarrier(target, damage);
+    toHealth = damage - absorbed;
+    if (absorbed > 0) spellEffects.broadcastEffectsUpdate(target);
+  }
+  target.stats.health = Math.round(target.stats.health - toHealth);
+  if (target.stats.health > target.stats.total_max_health) target.stats.health = target.stats.total_max_health;
+  if (damage < 0) listener.emit(Events.PLAYER_HEALED, { caster, target, amount: Math.abs(damage), source: hit.spell?.name } as any);
+  listener.emit(Events.PLAYER_DAMAGED, { attacker: caster, target, damage, isCrit: hit.isCrit });
+  if (hit.harmful) recordAttack(caster.id, target.id);
+  if (target.stats.health <= 0) {
+    await handlePlayerDeath(target, caster, { damage, isCrit: hit.isCrit });
+    return { outcome: "killed", stats: { ...target.stats } };
+  }
+  let effectResult: any = {};
+  if (hit.spell && !hit.skipEffects && Array.isArray(hit.spell.effects) && hit.spell.effects.length > 0) {
+    effectResult = (await spellEffects.applySpellEffects(hit.spell, caster, target,
+      (pp: any) => broadcastStatsUpdateToAOI(pp, caster, packetManager.updateStats({ id: pp.id, target: pp.id, stats: pp.stats })),
+      (pp: any) => spellEffects.broadcastEffectsUpdate(pp)
+    )) ?? {};
+  }
+  if (hit.showsDamage) {
+    broadcastStatsUpdateToAOI(target, caster, packetManager.updateStats({ id: caster.id, target: target.id, stats: target.stats, isCrit: hit.isCrit, damage, absorb: effectResult.absorb || 0 }));
+  }
+  sendStatsToPartyMembers(target.username, target.id, target.stats);
+  if (hit.harmful && !hit.casterParty.includes(target.username)) setPlayerPvp(target, true);
+  target.last_attack = performance.now();
+  if (damage > 0 && target.isVanished) {
+    const vanishId = spellEffects.getVanishedEffectId(target);
+    if (vanishId) {
+      cancelEffect(target, vanishId);
+      spellEffects.broadcastEffectsUpdate(target);
+    }
+  }
+  return { outcome: "applied", stats: { ...target.stats }, absorb: effectResult.absorb || 0 };
+}
+
+// Registered once at load; the effect channel reaches it only when the links are attached.
+setPlayerHitApplier(applyRemotePlayerHit);
+// A player who leaves this node (every removal from playerCache: logout, disconnect, a replaced session) takes the memory of who hit them with them.
+playerCache.onRemove((key) => forgetVictim(key));
+
 function filterPlayersByDistance(wt: any, distance: number, _map: string) {
   const currentPlayer = playerCache.get(wt.data.id);
   if (!currentPlayer) return [];
@@ -13998,12 +5713,25 @@ function filterPlayersByDistance(wt: any, distance: number, _map: string) {
 
   const layerId =
     currentPlayer.aoi?.layerId || layerManager.getPlayerLayer(currentPlayer.id);
-  const candidateIds = layerId
-    ? layerManager.getPlayersInLayer(layerId)
-    : mapIndex.getPlayersOnMap(currentPlayer.location.map.replaceAll(".json", ""));
+  const mapName = String(currentPlayer.location.map).replaceAll(".json", "");
+  const queryRadius = distance + TARGET_GRID_PAD_PX;
+  const cellsPerSide = Math.floor((currPos.x + queryRadius) / TARGET_GRID_CELL_PX) -
+    Math.floor((currPos.x - queryRadius) / TARGET_GRID_CELL_PX) + 1;
+  const layerSize = layerId ? (layerManager.getLayerInfo(layerId)?.playerCount ?? 0) : Infinity;
+  const useGrid = AOI_CONFIG.USE_SPATIAL_GRID && Number.isFinite(currPos.x) && Number.isFinite(currPos.y) &&
+    cellsPerSide * cellsPerSide <= layerSize;
+
+  let candidateIds: Iterable<string>;
+  if (useGrid) {
+    candidateIds = spatialGrid.getPlayersInRadius(currPos.x, currPos.y, queryRadius, mapName);
+  } else {
+    candidateIds = layerId ? layerManager.getPlayersInLayer(layerId) : mapIndex.getPlayersOnMap(mapName);
+  }
 
   const result: any[] = [];
   for (const playerId of candidateIds) {
+    // Grid candidates span every layer of the map; keep the caller's own.
+    if (useGrid && layerId && layerManager.getPlayerLayer(playerId) !== layerId) continue;
     const p = playerCache.get(playerId);
     if (!p || !p.location) continue;
     const pPos = parsePos(p.location.position);
@@ -14025,23 +5753,36 @@ function tryParsePacket(data: any) {
   }
 }
 
-function sendPacket(wt: any, packets: any[]) {
+export function sendPacket(wt: any, packets: any[]): void {
+  sendPacketQueued(wt, packets);
+}
+
+/** sendPacket that says whether every packet was queued; a connection that reports nothing counts as having queued it. */
+export function sendPacketQueued(wt: any, packets: any[]): boolean {
   if (!wt || !wt.send || wt.readyState !== 1) {
 
-    return;
+    return false;
   }
   // What a command tells the admin is also the control panel's answer.
   if (panelReplies.size) controlPanel.collectReplies(panelReplies.get(wt), packets);
+  let queued = true;
   try {
     packets.forEach((packet) => {
-      wt.send(packet);
+      if (wt.send(packet) === false) queued = false;
     });
   } catch (error) {
     log.error(`Failed to send packet: ${error}`);
+    return false;
   }
+  return queued;
 }
 
-function sendPacketBestEffort(wt: any, packets: any[]) {
+/** A packet that reaches the admin by another way than sendPacket (a world broadcast): what it says is the control panel's answer too. */
+export function panelHears(wt: any, packets: any[]) {
+  if (panelReplies.size) controlPanel.collectReplies(panelReplies.get(wt), packets);
+}
+
+export function sendPacketBestEffort(wt: any, packets: any[]) {
   if (!wt || typeof wt.sendBestEffort !== "function" || wt.readyState !== 1) {
     return;
   }
@@ -14054,31 +5795,20 @@ function sendPacketBestEffort(wt: any, packets: any[]) {
   }
 }
 
-/**
- * Broadcast a cosmetic cast-state packet (CAST_SPELL variants) to a map's
- * players with split delivery: the caster's own copy stays on the reliable
- * stream (their cast bar / cooldown UI must not lose the "interrupted"
- * packet), while every observer gets it as a loss-tolerant datagram.
- */
-function broadcastCastToMap(playersInMap: any[], casterId: string, packets: any[]) {
-  for (const player of playersInMap) {
-    if (!player?.wt || player.wt.readyState !== 1) continue;
-    if (player.id === casterId) {
-      sendPacket(player.wt, packets);
-    } else {
-      sendPacketBestEffort(player.wt, packets);
+// Loot and chests go to the whole map, all layers: login and map change send a
+// player every item on the map, so a despawn has to reach all of them or a
+// stale icon never clears. Nearby-only waits for a resync when a player walks in.
+export function sendToWholeMap(map: string, packets: any[]) {
+  for (const playerId of mapIndex.getPlayersOnMap(String(map ?? "").replaceAll(".json", ""))) {
+    const p = playerCache.get(playerId);
+    if (p?.wt && p.wt.readyState === 1) {
+      sendPacket(p.wt, packets);
     }
   }
 }
 
 loot.setOnDespawn((lootItem) => {
-  const playerIds = mapIndex.getPlayersOnMap(lootItem.map);
-  for (const playerId of playerIds) {
-    const p = playerCache.get(playerId);
-    if (p?.wt && p.wt.readyState === 1) {
-      sendPacket(p.wt, packetManager.lootDespawn(lootItem.id));
-    }
-  }
+  sendToWholeMap(lootItem.map, packetManager.lootDespawn(lootItem.id));
 });
 
 function toSkeletonPacket(skeleton: any) {
@@ -14091,6 +5821,23 @@ function toSkeletonPacket(skeleton: any) {
     createdAt: skeleton.createdAt,
     expiresAt: skeleton.expiresAt,
   };
+}
+
+// The layer a summoned or teleported player moves to at their new spot, or
+// null to stay: the other player's layer when it has room in the destination
+// block, else the lower layer the block change offered (never a higher one).
+export function destinationLayerFor(player: any, wantedLayerId: string | null | undefined, lowerLayerId: string | null): string | null {
+  if (!player?.aoi) return null;
+  const currentLayerId = player.aoi.layerId;
+  if (wantedLayerId) {
+    if (wantedLayerId === currentLayerId) return null;
+    const pos = player.location.position;
+    if (layerManager.getLayerInfo(wantedLayerId) &&
+      layerManager.countInBlock(wantedLayerId, blockOf(pos.x, pos.y)) < MAX_PLAYERS_PER_LAYER) {
+      return wantedLayerId;
+    }
+  }
+  return lowerLayerId && lowerLayerId !== currentLayerId ? lowerLayerId : null;
 }
 
 // Death skeletons are position-static, low importance markers, so both spawn
@@ -14107,9 +5854,13 @@ function resyncSkeletonsFor(playerId: string): void {
   sendPacketBestEffort(viewer.wt, packetManager.loadSkeletons(visible.map((s) => toSkeletonPacket(s))));
 }
 
-// Layer moves (party sync, layer condensation, warps) change which markers a
-// player should see, so the list is rebuilt for them.
-setLayerChangeHandler(resyncSkeletonsFor);
+// Layer moves (party sync, layer condensation, warps) change which markers and
+// ground zones a player should see, so both are rebuilt for them (zones of the
+// layer they left are despawned, those of the new one near them are sent).
+setLayerChangeHandler((playerId) => {
+  resyncSkeletonsFor(playerId);
+  resyncZonesFor(playerCache.get(playerId));
+});
 
 skeletons.setOnSpawn((skeleton) => {
   broadcastToAOIBestEffortAtPosition(
@@ -14149,7 +5900,7 @@ resurrection.setOnSicknessExpiry(async (p) => {
   sendStatsToPartyMembers(p.username, p.id, p.stats);
 });
 
-async function sendStatsToPartyMembers(playerUsername: string, playerId: string, stats: any) {
+export async function sendStatsToPartyMembers(playerUsername: string, playerId: string, stats: any) {
   const partyId = await parties.getPartyId(playerUsername);
   if (!partyId) return;
 
@@ -14159,63 +5910,170 @@ async function sendStatsToPartyMembers(playerUsername: string, playerId: string,
   for (const memberName of partyMembers) {
     if (memberName.toLowerCase() === playerUsername.toLowerCase()) continue;
 
-    const sessionId = await player.getSessionIdByUsername(memberName);
-    const partyMember = sessionId && playerCache.get(sessionId);
-
-    if (partyMember && partyMember.wt) {
-      sendPacketBestEffort(
-        partyMember.wt,
-        packetManager.updateStats({
-          target: playerId,
-          username: playerUsername,
-          stats: stats,
-        })
-      );
-    }
+    await deliverToPlayer(
+      memberName,
+      packetManager.updateStats({
+        target: playerId,
+        username: playerUsername,
+        stats: stats,
+      }),
+      { bestEffort: true }
+    );
   }
 }
 
-async function sendSpriteSheetAnimation(wt: any, name: string, playerId?: string, revision?: number) {
+/** What revivePlayer needs of this node: the REVIVE command and the cells-revive action share it (cells phase 7). */
+export function reviveDeps(): ReviveDeps {
+  return {
+    clearSickness: (target) => resurrection.clearSickness(target),
+    synchronizeStats: (username) => player.synchronizeStats(username),
+    setDeadState: (username) => player.setDeadState(username, 0, null),
+    keep: (target) => { playerCache.set(target.id, target); },
+    bumpStateRevision: () => { bumpStateRevision(); },
+    viewersOn: (map) => filterPlayersByMap(map),
+    send: (viewer, packets) => sendPacket(viewer.wt, packets),
+    ghostPacket: (target) => packetManager.playerGhost({ id: target.id, ghost: false }),
+    revivePacket: (target) => packetManager.revive({ id: target.id, target: target.id, stats: target.stats }),
+    broadcastEffects: (target) => spellEffects.broadcastEffectsUpdate(target),
+    sendPartyStats: (target) => { void sendStatsToPartyMembers(target.username, target.id, target.stats); },
+    revived: (target) => { listener.emit(Events.PLAYER_REVIVED, { player: target }); },
+  };
+}
+
+// src/tests/packet-srv.test.ts cuts the code from the next line down to the end marker below out of this file and runs it: keep both markers.
+/** The layer fields of a SPRITE_SHEET_ANIMATION packet, in the order they are written. */
+const POSE_LAYER_FIELDS = [
+  "mountSprite", "bodySprite", "headSprite", "armorHelmetSprite", "armorShoulderguardsSprite", "armorNeckSprite",
+  "armorHandsSprite", "armorChestSprite", "armorFeetSprite", "armorLegsSprite", "armorWeaponSprite",
+] as const;
+
+/** The equipment slots getPlayerSpriteSheetData draws. */
+const POSE_EQUIPMENT_SLOTS = ["helmet", "shoulderguards", "necklace", "gloves", "chestplate", "boots", "pants", "weapon"] as const;
+
+/**
+ * The SPRITE_SHEET_ANIMATION packets last built for a player (the one the player gets and the one their observers
+ * get), with the frames the observers' queues share. They hold while every input of the packet is unchanged:
+ * the pose, the mount, the worn items and the item-to-sheet table (key / sheets). A player keeps the last
+ * POSE_CACHE_PER_PLAYER poses (a walker alternates a few), the oldest dropped first, and the list is weakly held by the
+ * player, so it goes with the player (logout, handoff) and there is nothing else to clear.
+ */
+interface PoseEntry {
+  key: string;
+  sheets: object | null;
+  self: any[];
+  observers: any[];
+  observerFrames: { frame?: Uint8Array }[];
+  /** lookSignature of the sheets in the packets, and the pose packet (socket/looks.ts) with its frame holder. */
+  signature: string;
+  pose: any[];
+  poseFrames: { frame?: Uint8Array }[];
+  /** The animation state the pose packet carries: what the pose datagram of a viewer carries (socket/posedgram.ts). */
+  animationState: string;
+  /** The data of the observers' sheet packet, to build it again with the pose revision (withRevision below). */
+  observerData: Record<string, any>;
+}
+const POSE_CACHE_PER_PLAYER = 4;
+const poseCache = new WeakMap<object, PoseEntry[]>();
+
+/** Everything the packet depends on besides the sheet table, as one string. */
+function poseKey(name: string, mountType: string, equipment: any): string {
+  let key = name + "\u0001" + mountType;
+  for (const slot of POSE_EQUIPMENT_SLOTS) key += "\u0001" + (equipment?.[slot] ?? "");
+  return key;
+}
+
+/**
+ * The packet data of a pose. The player's own copy carries every layer, null for an empty one: the client keeps its
+ * character sheet preview by the fields present (noteSelfSpritesChanged), so an emptied slot has to be sent as null.
+ * Observers' copies leave out the empty layers, which the client reads as null all the same, and `revision`, which
+ * the client reads only for the legacy ANIMATION packet.
+ */
+export function poseData(id: string, spriteSheetData: any, mountSprite: any, forObservers: boolean): Record<string, any> {
+  const layers: Record<string, any> = { mountSprite, ...spriteSheetData };
+  const data: Record<string, any> = { id };
+  for (const field of POSE_LAYER_FIELDS) {
+    const layer = layers[field] || null;
+    if (layer || !forObservers) data[field] = layer;
+  }
+  data.animationState = spriteSheetData.animationState;
+  return data;
+}
+
+export async function sendSpriteSheetAnimation(wt: any, name: string, playerId?: string, _revision?: number) {
   const currentPlayer = playerCache.get(playerId || wt.data.id);
   if (!currentPlayer) return;
 
   const playerEquipment = drawnEquipment(currentPlayer);
+  const mountType: string = currentPlayer.mounted && currentPlayer.mount_type ? String(currentPlayer.mount_type) : "";
+  const key = poseKey(name, mountType, playerEquipment);
+  notePoseCall(currentPlayer, name, key);
+  // Read before the sheets are asked for: getPlayerSpriteSheetData uses this table when it is held, so what it
+  // builds is valid for exactly as long as this token is.
+  const sheets = playerEquipment ? equipmentSheetsToken() : null;
 
-  const spriteSheetData = await getPlayerSpriteSheetData(name, playerEquipment);
+  const kept = poseCache.get(currentPlayer);
+  let entry = kept?.find((e) => e.key === key && (!playerEquipment || (sheets && e.sheets === sheets)));
+  if (!entry) {
+    const spriteSheetData = await getPlayerSpriteSheetData(name, playerEquipment);
 
-  if (!spriteSheetData.bodySprite && !spriteSheetData.headSprite) {
-    log.warn(`No sprite sheet layers available for animation "${name}", player ${currentPlayer.id}`);
-    return;
+    if (!spriteSheetData.bodySprite && !spriteSheetData.headSprite) {
+      log.warn(`No sprite sheet layers available for animation "${name}", player ${currentPlayer.id}`);
+      return;
+    }
+
+    const mountSprite = mountType ? getMountSpriteUrl(mountType) : null;
+    const observerData = poseData(currentPlayer.id, spriteSheetData, mountSprite, true);
+    entry = {
+      key,
+      sheets,
+      self: packetManager.spriteSheetAnimation(poseData(currentPlayer.id, spriteSheetData, mountSprite, false)),
+      observers: packetManager.spriteSheetAnimation(observerData),
+      observerData,
+      observerFrames: [{}],
+      signature: lookSignature({ mountSprite, ...spriteSheetData }),
+      pose: packetManager.spriteSheetPose({ id: currentPlayer.id, animationState: spriteSheetData.animationState }),
+      poseFrames: [{}],
+      animationState: spriteSheetData.animationState,
+    };
+    // A table that had already expired when it was asked for may be newer than the one used: not kept this time.
+    if (!playerEquipment || sheets) {
+      const list = (poseCache.get(currentPlayer) ?? []).filter((e) => e.key !== key);
+      list.push(entry);
+      if (list.length > POSE_CACHE_PER_PLAYER) list.shift();
+      poseCache.set(currentPlayer, list);
+    }
   }
-
-  // Sprite URLs are now sent directly to the client
-  const spriteSheetPacketData = {
-    id: currentPlayer.id,
-    mountSprite: currentPlayer.mounted && currentPlayer.mount_type ? getMountSpriteUrl(currentPlayer.mount_type) : null,
-    bodySprite: spriteSheetData.bodySprite || null,
-    headSprite: spriteSheetData.headSprite || null,
-    armorHelmetSprite: spriteSheetData.armorHelmetSprite || null,
-    armorShoulderguardsSprite: spriteSheetData.armorShoulderguardsSprite || null,
-    armorNeckSprite: spriteSheetData.armorNeckSprite || null,
-    armorHandsSprite: spriteSheetData.armorHandsSprite || null,
-    armorChestSprite: spriteSheetData.armorChestSprite || null,
-    armorFeetSprite: spriteSheetData.armorFeetSprite || null,
-    armorLegsSprite: spriteSheetData.armorLegsSprite || null,
-    armorWeaponSprite: spriteSheetData.armorWeaponSprite || null,
-    animationState: spriteSheetData.animationState,
-    revision: revision,
-  };
 
   // Split delivery: the player's own copy rides the reliable stream (their
-  // sprite state must never desync). Observers also get the reliable stream:
-  // animation is state, not latest-wins data - a single lost walk/idle
-  // datagram would stick the wrong pose until the next direction change.
+  // sprite state must never desync). So do the full sheets of an observer
+  // that does not hold the player's look yet. An observer that already holds
+  // the sheets gets the pose alone, as a datagram with the pose revision and
+  // again 100 and 400 ms after (broadcastPoseToAOI, socket/posedgram.ts): animation
+  // is state, so the current pose is repeated rather than queued, and a client
+  // applies only a newer revision. One reliable write per observer and pose
+  // change (150-190 us each) is what stalled a node at 800 players.
   if (currentPlayer.wt) {
-    sendPacket(currentPlayer.wt, packetManager.spriteSheetAnimation(spriteSheetPacketData));
+    sendPacket(currentPlayer.wt, entry.self);
+    notePoseSelf();
   }
-  broadcastToAOI(currentPlayer, packetManager.spriteSheetAnimation(spriteSheetPacketData), false);
+  const shown = entry;
+  broadcastPoseToAOI(currentPlayer, {
+    id: String(currentPlayer.id),
+    key,
+    signature: entry.signature,
+    full: entry.observers,
+    fullFrames: entry.observerFrames,
+    pose: entry.pose,
+    poseFrames: entry.poseFrames,
+    animationState: entry.animationState,
+    withRevision: (poseRev: number) => ({
+      full: packetManager.spriteSheetAnimation({ ...shown.observerData, poseRev }),
+      pose: packetManager.spriteSheetPose({ id: currentPlayer.id, animationState: shown.animationState, poseRev }),
+    }),
+  });
 }
 
+// (end marker of the cut above: src/tests/packet-srv.test.ts)
 async function sendAnimation(wt: any, name: string, playerId?: string, revision?: number) {
   const currentPlayer = playerCache.get(playerId || wt.data.id);
   if (!currentPlayer) return;
@@ -14233,7 +6091,7 @@ async function sendAnimation(wt: any, name: string, playerId?: string, revision?
   await sendSpriteSheetAnimation(wt, name, playerId, revision);
 }
 
-function getAnimationNameForDirection(
+export function getAnimationNameForDirection(
   direction: string,
   walking: boolean,
   mounted: boolean = false,
@@ -14255,7 +6113,7 @@ function getAnimationNameForDirection(
   return `player_${action}_${normalized}.png`;
 }
 
-async function sendPositionAnimation(
+export async function sendPositionAnimation(
   wt: any,
   direction: string,
   walking: boolean,
@@ -14279,7 +6137,8 @@ function normalizeDirection(direction: string): string {
 }
 
 async function getAnimationData(name: string, playerId: string, revision?: number): Promise<any | null> {
-  const targetPlayer = playerCache.get(playerId);
+  // A mirrored player (cluster mode) is animated from its record, for the viewers here.
+  const targetPlayer = entityById(playerId);
   if (!targetPlayer) return null;
 
   if (!useSpriteSheets || !(await isSpriteSheetSystemAvailable())) {
@@ -14313,7 +6172,8 @@ async function getAnimationData(name: string, playerId: string, revision?: numbe
 }
 
 export async function sendAnimationTo(targetWs: any, name: string, playerId?: string, revision?: number) {
-  const targetPlayer = playerCache.get(playerId || targetWs.data.id);
+  // A mirrored player (cluster mode) is animated from its record, for the viewers here.
+  const targetPlayer = entityById(playerId || targetWs.data.id);
   if (!targetPlayer) return;
 
   if (!useSpriteSheets || !(await isSpriteSheetSystemAvailable())) {
@@ -14348,7 +6208,9 @@ export async function sendAnimationTo(targetWs: any, name: string, playerId?: st
     revision: revision,
   };
 
-  sendPacket(targetWs, packetManager.spriteSheetAnimation(spriteSheetPacketData));
+  if (sendPacketQueued(targetWs, packetManager.spriteSheetAnimation(spriteSheetPacketData))) {
+    noteLook(targetWs, String(targetPlayer.id), lookSignature(spriteSheetPacketData));
+  }
   // a player who comes into view while fishing comes with their line (castFish)
   const line = castingFish(targetPlayer) ? fishing.session(targetPlayer.id) : undefined;
   if (line && targetWs !== targetPlayer.wt) {
@@ -14438,6 +6300,7 @@ tornadoes.setTornadoBridge({
     player.checkCollisionSync(who.location.map, { x, y, direction: who.location?.position?.direction || "down" }, { width: 24, height: 40 }).value === false,
   move: async (who, x, y) => {
     who.location.position = { ...who.location.position, x, y };
+    ghosts.touch("player", who.id);
     // a walking player's next step goes on from here, and tells them and those around them
     if (gameLoop.isPlayerMoving(who.id)) return;
     globalStateRevision++;
@@ -14469,12 +6332,22 @@ tornadoes.setTornadoBridge({
     );
     sendStatsToPartyMembers(target.username, target.id, target.stats);
   },
+  // Tornadoes are the whole map's, on every layer, but each player hears only of those near them (tornadoes.showNearby).
   show: (map, list) => {
-    const packet = packetManager.tornadoes({ map, tornadoes: list });
-    for (const id of mapIndex.getPlayersOnMap(map)) {
-      const p = playerCache.get(id);
-      if (p?.wt && p.wt.readyState === 1) sendPacket(p.wt, packet);
-    }
+    const onMap = (p: any) => p?.wt && p.wt.readyState === 1 && String(p.location?.map ?? "").replaceAll(".json", "") === map;
+    tornadoes.showNearby(map, list, {
+      near: (x, y) => getPlayersNearPoint(x, y, map, AOI_CONFIG.DEFAULT_RADIUS + tornadoes.SHOW_MARGIN, undefined),
+      get: (id) => { const p = playerCache.get(id); return onMap(p) ? p : undefined; },
+      reach: (viewer) => viewer.aoi?.aoiRadius || AOI_CONFIG.DEFAULT_RADIUS,
+      send: (viewer, near) => {
+        if (!onMap(viewer)) return;
+        const packet = packetManager.tornadoes({ map, tornadoes: near });
+        // The list is replaced wholesale ten times a second, so the latest is all that matters; only the one that
+        // empties it must arrive, or the player is left with a tornado that is gone.
+        if (near.length) sendPacketBestEffort(viewer.wt, packet);
+        else sendPacket(viewer.wt, packet);
+      },
+    });
   },
 });
 listener.on(Events.FIXED_UPDATE, () => {

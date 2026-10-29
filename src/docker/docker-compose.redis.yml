@@ -1,0 +1,49 @@
+# Redis for cluster mode (CLUSTER=true) and the RedisStore tests
+# (CLUSTER_TEST_REDIS_URL=redis://127.0.0.1:6379). Bound to this machine
+# only. Append-only persistence keeps the world id counter (cells:ids) across
+# restarts, so ids handed out before a restart are never handed out again.
+#
+# Password: set REDIS_PASSWORD (a long random value, for example
+# `bun -e "console.log(crypto.randomBytes(32).toString('hex'))"`) in the
+# environment or in an env file passed with --env-file, and Redis then requires
+# it. Put it in the URLs too: redis://:<password>@127.0.0.1:6379. Without
+# REDIS_PASSWORD, Redis starts without a password, as before. A running
+# container keeps its old settings until it is recreated:
+#   docker compose -f src/docker/docker-compose.redis.yml up -d --force-recreate
+name: frostfire-redis
+
+services:
+  redis:
+    image: redis:7.4.1-alpine
+    container_name: frostfire-redis
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    # The password goes into a config file on a tmpfs (mode 700 directory, file made with umask 077), not onto the
+    # command line, where `ps` in the container would show it. A cluster node refuses to start with a REDIS_URL
+    # that has no password (validate_config), so without REDIS_PASSWORD this Redis only serves tests.
+    command:
+      - sh
+      - -c
+      - |
+        umask 077
+        : > /run/redis-conf/redis.conf
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          esc=$$(printf %s "$$REDIS_PASSWORD" | sed 's/[\\"]/\\&/g')
+          printf 'requirepass "%s"\n' "$$esc" >> /run/redis-conf/redis.conf
+        fi
+        exec redis-server /run/redis-conf/redis.conf --appendonly yes
+    tmpfs:
+      - /run/redis-conf:mode=0700
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - frostfire-redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "[ -z \"$$REDIS_PASSWORD\" ] || export REDISCLI_AUTH=\"$$REDIS_PASSWORD\"; redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  frostfire-redis-data:

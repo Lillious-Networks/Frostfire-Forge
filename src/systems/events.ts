@@ -348,6 +348,8 @@ export interface PlayerAoeEvent {
 
 export function setPlayerPvp(player: any, value: boolean): void {
     if (!player) return;
+    // A mirror's flag belongs to its owner node, which sets it when the hit lands there.
+    if (player.remote) return;
     if (player.pvp === value) return;
     player.pvp = value;
     if (value) {

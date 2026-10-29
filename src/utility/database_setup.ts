@@ -54,7 +54,9 @@ const createAccountsTable = async () => {
         class_id INT DEFAULT NULL,
         token_expires BIGINT DEFAULT NULL,
         session_server VARCHAR(64) DEFAULT NULL,
-        session_seen BIGINT DEFAULT NULL
+        session_seen BIGINT DEFAULT NULL,
+        owner_epoch BIGINT NOT NULL DEFAULT 0,
+        saved_at BIGINT NOT NULL DEFAULT 0
       );
   `;
   await query(sql);
@@ -80,6 +82,9 @@ const addDeathColumns = async () => {
     // Which realm holds the account's session, and when it last said so.
     { name: "session_server", type: "VARCHAR(64) DEFAULT NULL" },
     { name: "session_seen", type: "BIGINT DEFAULT NULL" },
+    // Cluster mode: which node may save the player, and when it last did.
+    { name: "owner_epoch", type: "BIGINT NOT NULL DEFAULT 0" },
+    { name: "saved_at", type: "BIGINT NOT NULL DEFAULT 0" },
   ];
   for (const col of columns) {
     const exists = (await query(
@@ -853,6 +858,15 @@ const createTradeLogTable = async () => {
 };
 
 /**
+ * Cluster mode: the grant ids (hand-overs and corpse money between nodes) whose items or money were written, each
+ * written in the same transaction as what it gave (systems/grantwrites.ts, which also creates it when first used).
+ */
+const createGrantWritesTable = async () => {
+  log.info("Creating grant_writes table...");
+  await query(`CREATE TABLE IF NOT EXISTS grant_writes (id VARCHAR(191) NOT NULL PRIMARY KEY, written_at BIGINT NOT NULL)`);
+};
+
+/**
  * Each player's home: the innkeeper it was set at, where they stood from that NPC, and when their
  * home item was last used (milliseconds since the epoch; 0: never). A player with no row has no home.
  */
@@ -1588,6 +1602,7 @@ const setupDatabase = async () => {
   await createFriendsListTable();
   await createModerationTables();
   await createTradeLogTable();
+  await createGrantWritesTable();
   await createMailTable();
   await createPartiesTable();
   await createCurrencyTable();

@@ -35,6 +35,34 @@ export class NotStartedError extends Error {
   }
 }
 
+/** The transaction could not open by its open-by deadline: nothing was sent, and it is not tried again. */
+export class LateError extends Error {
+  /** The deadline (ms since the epoch). */
+  openBy: number;
+
+  constructor(openBy: number) {
+    super(`Transaction not opened: its open-by deadline passed ${Math.max(0, Date.now() - openBy)} ms ago`);
+    this.name = "LateError";
+    this.openBy = openBy;
+  }
+}
+
+/**
+ * `attempt`, run up to `maxRetries` times in all, `retryDelay` ms apart, while it fails with NotStartedError: only a
+ * transaction that never opened may be run again. Any other error ends it, a LateError among them, so a transaction
+ * with an open-by deadline is not retried past it.
+ */
+export async function runWithRetries<T>(attempt: () => Promise<T>, maxRetries: number, retryDelay: number): Promise<T> {
+  for (let tries = 1; ; tries++) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!(error instanceof NotStartedError) || tries >= maxRetries) throw error;
+      await new Promise((resolve) => setTimeout(resolve, retryDelay));
+    }
+  }
+}
+
 /** Bun reports the rows a write changed as `affectedRows` on MySQL and as `count` elsewhere. */
 function changedRows(result: any): number {
   return typeof result?.affectedRows === "number" ? result.affectedRows : result?.count ?? 0;
@@ -51,16 +79,25 @@ function inTime<T>(work: Promise<T>, left: number, timeoutMs: number): Promise<T
 /**
  * One result for each statement, as `unsafe` gives them, once all are kept. Throws once none are:
  * a statement failed, a `mustChange` statement changed nothing, or `timeoutMs` ran out.
+ *
+ * `openBy` (ms since the epoch), when given, is the latest the transaction may open. Past it the transaction is
+ * refused whole with LateError, before a connection is asked for or, when `begin` waited past it, before the first
+ * statement. A throw inside `begin` rolls the transaction back, so nothing of it is kept.
  */
-export async function runTransaction(db: any, statements: TransactionStatement[], engine: DatabaseEngine, timeoutMs = 15000): Promise<any[]> {
+export async function runTransaction(db: any, statements: TransactionStatement[], engine: DatabaseEngine, timeoutMs = 15000, openBy?: number): Promise<any[]> {
   if (statements.length === 0) return [];
 
   // Built before the transaction opens: a list that cannot be built is refused whole.
   const texts = statements.map((statement) => sqlWrapper(statement.sql, statement.values || [], engine));
+  // Guard (test "a transaction past its open-by deadline does not ask for a connection").
+  if (openBy !== undefined && Date.now() > openBy) throw new LateError(openBy);
   let started = false;
 
   const work = async (tx: any) => {
     started = true;
+    // The wait for a connection in `begin` has no limit of its own. Guard (test "a transaction that opens after its
+    // open-by deadline sends nothing and is refused whole").
+    if (openBy !== undefined && Date.now() > openBy) throw new LateError(openBy);
     const deadline = Date.now() + timeoutMs;
     const results: any[] = [];
     for (let i = 0; i < texts.length; i++) {

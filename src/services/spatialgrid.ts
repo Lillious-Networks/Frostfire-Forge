@@ -8,6 +8,10 @@ export class SpatialGrid {
 
   private cellSize: number;
 
+  // Mirrors of players another node owns (cluster mode, phase 4): in the grid so AOI finds them,
+  // flagged so code can tell them from local players.
+  private remote = new Set<string>();
+
   private stats = {
     totalCells: 0,
     totalPlayers: 0,
@@ -44,7 +48,18 @@ export class SpatialGrid {
     return cells;
   }
 
-  addPlayer(playerId: string, x: number, y: number, map: string): void {
+  addPlayer(playerId: string, x: number, y: number, map: string, remote = false): void {
+    const wasRemote = this.remote.has(playerId);
+    if (remote) this.remote.add(playerId);
+    else this.remote.delete(playerId);
+
+    // A local player taking over a mirror's id, or a mirror filed again: move the entry, so the
+    // old cell does not keep the id. (Neither happens outside cluster mode.)
+    if ((remote || wasRemote) && this.playerCells.has(playerId)) {
+      this.updatePlayer(playerId, x, y, map);
+      return;
+    }
+
     const cellKey = this.getCellKey(x, y, map);
 
     if (!this.grid.has(cellKey)) {
@@ -58,7 +73,12 @@ export class SpatialGrid {
     this.stats.totalPlayers++;
   }
 
+  isRemote(playerId: string): boolean {
+    return this.remote.has(playerId);
+  }
+
   removePlayer(playerId: string): void {
+    this.remote.delete(playerId);
     const cellKey = this.playerCells.get(playerId);
     if (!cellKey) return;
 
@@ -150,6 +170,7 @@ export class SpatialGrid {
   clear(): void {
     this.grid.clear();
     this.playerCells.clear();
+    this.remote.clear();
     this.stats = {
       totalCells: 0,
       totalPlayers: 0,
@@ -174,6 +195,7 @@ export class SpatialGrid {
         for (const playerId of cell) {
           if (this.playerCells.get(playerId) === cellKey) {
             this.playerCells.delete(playerId);
+            this.remote.delete(playerId);
             this.stats.totalPlayers--;
           }
         }

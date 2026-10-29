@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { databaseModule } from "./setup";
-import { readFileSync } from "fs";
-import { join } from "path";
+import { receiverSource } from "./receiver-source";
 
 // ------------------------------------------------------------ fake database
 // The statements the party system sends, run against in-memory tables. A
@@ -486,7 +485,7 @@ test("when the table cannot be read again either, the write still answers that i
 // it), so its party cases are run from their source over the real party
 // system, with the other names they use handed in as fakes.
 
-const receiver = readFileSync(join(import.meta.dir, "..", "socket", "receiver.ts"), "utf8");
+const receiver = receiverSource();
 const transpiler = new Bun.Transpiler({ loader: "ts" });
 
 /** `source` from where `from` starts up to the first match of `until` after it. */
@@ -500,10 +499,22 @@ function cut(source: string, from: string, until: RegExp): string {
 }
 
 const caseNames = [
-  "type", "data", "response", "inviter", "currentPlayer", "wt", "parties", "player", "playerCache", "sendPacket", "packetManager",
+  "type", "data", "response", "inviterName", "currentPlayer", "wt", "parties", "player", "playerCache", "sendPacket", "packetManager",
   "listener", "Events", "syncPartyLayers", "sendAnimationTo", "queueSpawnPlayerPacket", "getAnimationNameForDirection",
-  "getPlayerSpriteSheetData", "getMountSpriteUrl", "spellEffects", "queueSpawnForReceivers",
+  "getPlayerSpriteSheetData", "getMountSpriteUrl", "spellEffects", "queueSpawnForReceivers", "runOnPlayer", "deliverToPlayer", "clusterEnabled",
 ];
+
+/** One of the receiver's player actions (registerPlayerAction at module level), as a function of the names it uses. */
+function receiverAction(name: string): (given: Row) => (member: any, args: any) => void {
+  const from = `registerPlayerAction("${name}", `;
+  const action = cut(receiver, from, /\r?\n\}\);\r?\n/).slice(from.length);
+  return new Function(`"use strict";\n${transpiler.transformSync(`function make({ sendPacket, packetManager, playerCache, clusterEnabled, clearParty, trackPacket, applyPartyMembers, cacheIfHeld, parties }: any) { return ${action}\n}; }`)}\nreturn make;`)();
+}
+
+const partyActions: Record<string, ReturnType<typeof receiverAction>> = {
+  "party-cleared": receiverAction("party-cleared"),
+  "party-update": receiverAction("party-update"),
+};
 
 /** One `case` of a switch in the receiver, indented by `indent`, as a function of the names it uses. */
 function receiverCase(name: string, indent: number): (given: Row) => Promise<void> {
@@ -537,6 +548,8 @@ const given = () => ({
   parties,
   player: { getSessionIdByUsername: async (username: string) => Object.values(online).find((live) => live.username === username)?.id },
   playerCache: { get: (id: string) => online[id], set: (id: string, value: any) => { online[id] = value; }, list: () => online },
+  // One node: the party actions take their single-node path.
+  clusterEnabled: () => false,
   sendPacket: (to: any, packet: Row) => { sent.push([to.username, packet]); },
   packetManager: {
     notify: (data: Row) => ({ type: "NOTIFY", data }),
@@ -553,6 +566,20 @@ const given = () => ({
   getMountSpriteUrl: () => null,
   spellEffects: { getEffectsPayload: () => [] },
   queueSpawnForReceivers: () => {},
+  // As cluster/deliver.ts on one node: the receiver's action runs at once on the member, when they are online.
+  runOnPlayer: async (username: string, action: string, args: any) => {
+    const live = Object.values(online).find((each) => each.username.toLowerCase() === username.toLowerCase());
+    if (!live) return false;
+    await partyActions[action]!(given())(live, args);
+    return true;
+  },
+  // As cluster/deliver.ts on one node: sent to the player's connection, when they are online.
+  deliverToPlayer: async (username: string, packet: Row) => {
+    const live = Object.values(online).find((each) => each.username.toLowerCase() === username.toLowerCase());
+    if (!live) return false;
+    sent.push([live.username, packet]);
+    return true;
+  },
 });
 
 /** The cases tell each member without waiting for it to be done: let that finish. */
@@ -567,7 +594,7 @@ async function leave(live: any): Promise<void> {
   await settled();
 }
 async function answerInvite(invited: any, inviter: any, response = "ACCEPT"): Promise<void> {
-  await inviteAnswerCase({ ...given(), type: "INVITE_PARTY", response, inviter, currentPlayer: invited, wt: invited.wt });
+  await inviteAnswerCase({ ...given(), type: "INVITE_PARTY", response, inviterName: inviter.username, currentPlayer: invited, wt: invited.wt });
   await settled();
 }
 
@@ -654,6 +681,9 @@ describe("what the socket layer does with a party's answer", () => {
     expect(partiesTable[0].members).toBe("user1, user2, user3");
     expect(sentTo("user3")).toEqual([notice("You have joined User1's party"), partyNow(["user1", "user2", "user3"])]);
     expect(sentTo("user2")).toEqual([partyNow(["user1", "user2", "user3"])]);
+    // The inviter is reached by name (on whichever node holds them).
+    expect(sentTo("user1")).toEqual([notice("User3 has joined your party"), partyNow(["user1", "user2", "user3"])]);
+    expect(leader.party).toEqual(["user1", "user2", "user3"]);
     expect(member.party).toEqual(["user1", "user2", "user3"]);
 
     const [inviter, invited] = [connect("user7"), connect("user8")];
@@ -661,6 +691,8 @@ describe("what the socket layer does with a party's answer", () => {
     await answerInvite(invited, inviter);
     expect(partiesTable[2]).toEqual({ id: 3, leader: "user7", members: "user7, user8" });
     expect(sentTo("user8")[0]).toEqual(notice("You have joined User7's party"));
+    expect(sentTo("user7")).toEqual([notice("User8 has joined your party"), partyNow(["user7", "user8"]), partyNow(["user7", "user8"])]);
+    expect(inviter.party).toEqual(["user7", "user8"]);
     expect(invited.party).toEqual(["user7", "user8"]);
   });
 

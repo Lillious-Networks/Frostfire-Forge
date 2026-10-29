@@ -4,10 +4,17 @@ permissions:
   contents: write
   packages: write
 
+# Pushes to main run the tests, the development image and the integration test.
+# A release (production image, GitHub Release, hosting bundle, Octopus deploy)
+# happens only when a vMAJOR.MINOR.PATCH tag on main is pushed, for example:
+#   git tag v1.1.0 && git push origin v1.1.0
+# Tag pushes ignore the paths filter.
 on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
     paths:
       - 'src/**'
       - 'package.json'
@@ -22,16 +29,43 @@ on:
         required: false
         default: 'false'
 
+# A release run is never cancelled.
 concurrency:
   group: 'release-pipeline-${{ github.ref }}'
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   REGISTRY: ghcr.io
-  # Single source for the release number: Octopus release, production image tag and GitHub Release
-  RELEASE_VERSION: 1.0.${{ github.run_number }}
 
 jobs:
+  # Only tag runs get a version. Every release job needs this one, so they all skip on main.
+  # Single source for the release number: Octopus release, production image tag and GitHub Release
+  version:
+    name: Read Release Version
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Read Version From Tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "❌ $TAG is not a release tag (vMAJOR.MINOR.PATCH)."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "❌ $TAG points at a commit that is not on main."
+            exit 1
+          fi
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
   validate:
     name: Validate Code Quality
     runs-on: ubuntu-latest
@@ -254,8 +288,10 @@ jobs:
   publish-production:
     name: Build and Publish Production Docker Image
     runs-on: ubuntu-latest
-    needs: [test-integration]
+    needs: [test-integration, version]
     if: success() && inputs.dry_run != 'true'
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v6
@@ -321,8 +357,10 @@ jobs:
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [publish-production]
+    needs: [publish-production, version]
     if: success() && inputs.dry_run != 'true'
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - name: Set lowercase image name
         id: image
@@ -336,7 +374,7 @@ jobs:
         run: |
           gh release create "v${{ env.RELEASE_VERSION }}" \
             --repo "${{ github.repository }}" \
-            --target "${{ github.sha }}" \
+            --verify-tag \
             --title "v${{ env.RELEASE_VERSION }}" \
             --notes "Docker image: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/frostfire-forge:${{ env.RELEASE_VERSION }}" \
             --generate-notes
@@ -365,10 +403,11 @@ jobs:
       OCTOPUS_SPACE: 'Default'
       OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
       OCTOPUS_URL: ${{ secrets.OCTOPUS_URL }}
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
     permissions:
       id-token: write
-    needs: [test-integration]
-    if: success()
+    needs: [test-integration, version]
+    if: success() && inputs.dry_run != 'true'
     steps:
     - name: Create a release in Octopus Deploy 🐙
       uses: OctopusDeploy/create-release-action@v3
@@ -402,7 +441,11 @@ jobs:
           PUBLISH_STATUS="${{ needs.publish.result }}"
           DEPLOY_STATUS="${{ needs.deploy.result }}"
 
-          if [ "$INTEGRATION_STATUS" = "success" ] && [ "$PUBLISH_STATUS" = "success" ] && [ "$DEPLOY_STATUS" = "success" ]; then
+          if [ "$INTEGRATION_STATUS" = "success" ] && [ "$PUBLISH_STATUS" = "success" ] && [ "$DEPLOY_STATUS" = "skipped" ] && [ "${{ startsWith(github.ref, 'refs/tags/') }}" != "true" ]; then
+            echo "✅ Gateway and Game Server Integration Tests Passed"
+            echo "✅ Docker Image Published to GitHub Packages"
+            echo "ℹ️  No release: push a vMAJOR.MINOR.PATCH tag to release and deploy"
+          elif [ "$INTEGRATION_STATUS" = "success" ] && [ "$PUBLISH_STATUS" = "success" ] && [ "$DEPLOY_STATUS" = "success" ]; then
             echo "✅ Gateway and Game Server Integration Tests Passed"
             echo "✅ Docker Image Published to GitHub Packages"
             echo "✅ Development Pipeline Complete"

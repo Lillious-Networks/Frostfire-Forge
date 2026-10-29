@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { afterEach, beforeEach } from "bun:test";
 import { canonicalLinks, clearItemNameCache, findChatLinks, findItemLinks, protectLinks, restoreLinks, LINK_FIELDS, MAX_ITEM_LINKS } from "../systems/itemlinks";
+import { receiverSource } from "./receiver-source";
 
 beforeEach(clearItemNameCache);
 afterEach(clearItemNameCache);
@@ -225,7 +226,7 @@ describe("protectLinks and restoreLinks", () => {
 });
 
 describe("the chat relays", () => {
-  const source = require("node:fs").readFileSync(require("node:path").join(import.meta.dir, "../socket/receiver.ts"), "utf8") as string;
+  const source = receiverSource();
 
   test("global, party, guild (command and packet) and whisper lines are linked", () => {
     expect(source.match(/chatLinksOf\(/g)?.length).toBeGreaterThanOrEqual(6);

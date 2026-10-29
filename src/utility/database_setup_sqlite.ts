@@ -43,7 +43,9 @@ const createAccountsTable = async () => {
         class_id INTEGER DEFAULT NULL,
         token_expires INTEGER DEFAULT NULL,
         session_server TEXT DEFAULT NULL,
-        session_seen INTEGER DEFAULT NULL
+        session_seen INTEGER DEFAULT NULL,
+        owner_epoch INTEGER NOT NULL DEFAULT 0,
+        saved_at INTEGER NOT NULL DEFAULT 0
       );
   `;
   await query(sql);
@@ -65,6 +67,9 @@ const addDeathColumns = async () => {
     // Which realm holds the account's session, and when it last said so.
     { name: "session_server", type: "TEXT DEFAULT NULL" },
     { name: "session_seen", type: "INTEGER DEFAULT NULL" },
+    // Cluster mode: which node may save the player, and when it last did.
+    { name: "owner_epoch", type: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "saved_at", type: "INTEGER NOT NULL DEFAULT 0" },
   ];
   for (const col of columns) {
     if (!ddl.includes(col.name)) {
@@ -475,6 +480,15 @@ const createTradeLogTable = async () => {
       created_at INTEGER NOT NULL
     );
   `);
+};
+
+/**
+ * Cluster mode: the grant ids (hand-overs and corpse money between nodes) whose items or money were written, each
+ * written in the same transaction as what it gave (systems/grantwrites.ts, which also creates it when first used).
+ */
+const createGrantWritesTable = async () => {
+  log.info("Creating grant_writes table...");
+  await query(`CREATE TABLE IF NOT EXISTS grant_writes (id TEXT NOT NULL PRIMARY KEY, written_at INTEGER NOT NULL)`);
 };
 
 /**
@@ -1378,6 +1392,7 @@ const setupDatabase = async () => {
   await createFriendsListTable();
   await createModerationTables();
   await createTradeLogTable();
+  await createGrantWritesTable();
   await createMailTable();
   await createPartiesTable();
   await createCurrencyTable();

@@ -182,3 +182,32 @@ test("frameLimitFor: login, then a player's limit, and the maximum for admins an
   expect(frameLimitFor({ isAdmin: false, permissions: [] }, 1024)).toBe(1024);
   expect(CONNECT_FRAME_BYTES).toBeLessThan(LOGIN_FRAME_BYTES);
 });
+
+// ---- empty frames: dropped, and logged once per source per minute
+
+test("an empty payload, or one 0x00 byte, is dropped and logged once per source; a normal one is not", async () => {
+  const { TransportConnection } = await import("../socket/transport");
+  const { default: log } = await import("../modules/logger");
+  const { spyOn } = await import("bun:test");
+  const writes: Uint8Array[] = [];
+  const connection = new TransportConnection({ queuedBytes: 0n, close: () => {} } as any, 1200, 1024 * 1024);
+  connection.attachStream({ getWriter: () => ({ write: (chunk: Uint8Array) => { writes.push(chunk); return Promise.resolve(); } }) });
+  const warn = spyOn(log, "warn").mockImplementation(() => {});
+  try {
+    // One call site, three drops: one log line. The call site of sendFramed is another source.
+    for (const payload of [new Uint8Array(0), new Uint8Array([0]), new Uint8Array([0])]) expect(connection.send(payload)).toBe(false);
+    expect(connection.sendFramed(new Uint8Array([0]), {})).toBe(false);
+    const empties = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("empty frame"));
+    expect(empties.length).toBe(2);
+    expect(empties[0]).toContain("transport.test");
+    // A normal payload, including a one-byte one that is not 0x00, is queued and not logged.
+    expect(connection.send(new TextEncoder().encode("{}"))).toBe(true);
+    expect(connection.send(new Uint8Array([7]))).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("empty frame")).length).toBe(2);
+    const decoder = new FrameDecoder(1024 * 1024);
+    expect(writes.flatMap((w) => decoder.push(w)).map((f) => f.length)).toEqual([2, 1]);
+  } finally {
+    warn.mockRestore();
+  }
+});

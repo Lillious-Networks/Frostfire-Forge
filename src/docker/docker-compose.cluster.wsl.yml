@@ -1,0 +1,38 @@
+# Override for running the cluster test stack on Docker Engine inside a WSL2
+# distro (not Docker Desktop). Use it through src/docker/cluster-wsl.sh, which
+# sets WSL_HOST_IP to the distro's current address and passes both files.
+#
+# Why: Docker Desktop forwards published UDP ports from Windows into its VM
+# through a user-space relay, which caps a WebTransport session at about 57
+# datagrams per second and builds a growing backlog while a player walks. Here
+# the browser on Windows dials the WSL2 VM's own address, so UDP goes through
+# the Hyper-V virtual switch like on a Linux host.
+#
+# The nodes advertise WSL_HOST_IP as PUBLIC_HOST (the client dials it for
+# WebTransport, and the node puts it in its self-signed certificate's SAN) and
+# bind their game ports on it. The WSL2 address is reachable only from this
+# Windows machine (WSL2 NAT), not from the LAN. TCP ports bound to 127.0.0.1
+# (gateway 18081/19999, assets 18000, MySQL 13306) still reach Windows through
+# WSL's localhost forwarding.
+
+services:
+  node-1:
+    environment:
+      PUBLIC_HOST: ${WSL_HOST_IP:?run through src/docker/cluster-wsl.sh}
+    ports: !override
+      - "${WSL_HOST_IP}:3101:3101/tcp"
+      - "${WSL_HOST_IP}:3101:3101/udp"
+
+  node-2:
+    environment:
+      PUBLIC_HOST: ${WSL_HOST_IP:?run through src/docker/cluster-wsl.sh}
+    ports: !override
+      - "${WSL_HOST_IP}:3102:3102/tcp"
+      - "${WSL_HOST_IP}:3102:3102/udp"
+
+  node-3:
+    environment:
+      PUBLIC_HOST: ${WSL_HOST_IP:?run through src/docker/cluster-wsl.sh}
+    ports: !override
+      - "${WSL_HOST_IP}:3103:3103/tcp"
+      - "${WSL_HOST_IP}:3103:3103/udp"

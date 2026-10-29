@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import * as t from "../systems/tornadoes";
+import log from "../modules/logger";
+import { resetEntityIds, useWorldIds } from "../cluster/entityids";
+import type { IdAllocator } from "../cluster/ids";
 
 type W = "tornado" | "storm" | "none";
 
@@ -39,6 +42,7 @@ afterEach(() => {
   for (const spy of spies.splice(0)) spy.mockRestore();
   t.setTornadoBridge(null);
   t.resetTornadoes();
+  resetEntityIds();
 });
 
 /** Runs the tornadoes from `from` for `ms`: a tick every 100 ms, and a pull three times in each (30 Hz). */
@@ -183,6 +187,30 @@ test("a pull moves a player a little every 1/30 s, evenly, not a lump every 100 
   expect(start - end).toBeGreaterThan(25);
 });
 
+test("a pull covers the same distance a second at a 30 and a 60 Hz movement loop", async () => {
+  /** How far a second's pull, a pull every 1/`rate` s, draws a player 150 px out toward the middle. */
+  const pulledIn = async (rate: number) => {
+    t.resetTornadoes();
+    weather = "tornado";
+    await run(0, 100);
+    const [one] = t.tornadoesOn("overworld");
+    one.speed = 0;
+    people[0].location.position = { x: Math.round(one.x + 150), y: Math.round(one.y), direction: "down" };
+    moves = [];
+    let now = 1_000;
+    await t.pull(now);
+    for (let i = 0; i < rate; i++) await t.pull((now += 1000 / rate));
+    const last = moves.at(-1)!;
+    return { distance: 150 - Math.hypot(last.x - one.x, last.y - one.y), steps: moves.length };
+  };
+  const at30 = await pulledIn(30);
+  const at60 = await pulledIn(60);
+  expect(at30.distance).toBeGreaterThan(25);
+  // the same px a second, give or take the px left over at the end, in about twice the steps
+  expect(Math.abs(at60.distance - at30.distance)).toBeLessThan(2);
+  expect(at60.steps).toBeGreaterThan(at30.steps * 1.7);
+});
+
 test("a tornado forms anywhere on the map, not by the players", async () => {
   weather = "tornado";
   const spots: Array<{ x: number; y: number }> = [];
@@ -194,4 +222,18 @@ test("a tornado forms anywhere on the map, not by the players", async () => {
   // spread over the map, not gathered round the player at 5000, 5000
   const far = spots.filter((p) => Math.hypot(p.x - 5000, p.y - 5000) > 20_000).length;
   expect(far).toBeGreaterThan(30);
+});
+
+test("a tornado is named by a world entity id, and none forms when no id can be had", () => {
+  weather = "tornado";
+  useWorldIds({ next: () => 77 } as unknown as IdAllocator);
+  const formed = t.spawn("overworld", people, "tornado", 0);
+  expect(formed?.id).toBe("t77");
+  t.resetTornadoes();
+  useWorldIds({ next: () => { throw new Error("No world ids left"); } } as unknown as IdAllocator);
+  const errors = spyOn(log, "error").mockImplementation(() => {});
+  spies.push(errors);
+  expect(t.spawn("overworld", people, "tornado", 0)).toBeNull();
+  expect(t.tornadoesOn("overworld")).toEqual([]);
+  expect(errors).toHaveBeenCalled();
 });

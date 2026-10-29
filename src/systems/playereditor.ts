@@ -9,6 +9,7 @@ import assetCache from "../services/assetCache";
 import playerCache from "../services/playermanager";
 import { turns } from "../services/datacache";
 import log from "../modules/logger";
+import { ghosts } from "../cluster/ghosts";
 import { packetManager } from "../socket/packet_manager";
 import { Events, listener } from "./events";
 import player from "./player";
@@ -25,6 +26,7 @@ import bags from "./bags";
 import questLog, { rowsOf } from "./quests/log";
 import questDefinitions from "./quests/definitions";
 import { markersFor } from "./quests/markers";
+import { STALE_AFTER_SETTLE, settleForAdmin, settleStoreAttached, settlingNotice } from "../cluster/tradesettle";
 
 /** Admins of the server itself: the rule the particle editor's packets use. */
 export const EDITOR_PERMISSIONS = ["server.admin", "server.*"];
@@ -1068,6 +1070,7 @@ async function setAdmin({ admin, username, data }: ActionContext): Promise<strin
     if (!isAdmin) {
       // toggleAdmin clears these with the role.
       live.isStealth = false;
+      ghosts.touch("player", live.id);
       live.isNoclip = false;
       live.permissions = [];
     }
@@ -1152,6 +1155,9 @@ export type EditorResult =
   | { kind: "search"; data: EditorSearch }
   | { kind: "result"; ok: boolean; errors: string[]; action: string; snapshot: PlayerEditorSnapshot | null; denied?: boolean };
 
+/** Actions that write a number the admin read from a snapshot (a balance, a stack), not a change to what is held. */
+const SET_AFTER_SNAPSHOT: ReadonlySet<string> = new Set(["currency.set", "inventory.set"]);
+
 /**
  * Dispatch for every PLAYER_EDITOR_* packet. Permission is checked here, on
  * every packet, so no caller can reach a change without it.
@@ -1184,6 +1190,23 @@ export async function handleEditorPacket(admin: any, type: string, data: any): P
   if (!handler) return fail([`Unknown player editor action: ${action}`]);
 
   return oneAtATime<EditorResult>(target.username, async () => {
+    // Bags and coins a lost trade may still change are not edited until it settles (cluster/tradesettle.ts): the
+    // handlers read before they write, and would count from rows the swap replaces. The admin is told while it waits.
+    // Guard (test "the player editor waits for the target's mark before it runs an action").
+    if (settleStoreAttached()) {
+      let waited = false;
+      const refused = await settleForAdmin(target.username, (leftMs) => {
+        waited = true;
+        send(admin?.wt, packetManager.notify({ message: settlingNotice(target.username, leftMs) }));
+      });
+      if (refused) return { kind: "result", ok: false, errors: [refused], action, snapshot: await buildSnapshot(target.username) };
+      // A balance or a stack set to a number was chosen from the snapshot the admin was shown, which may predate the
+      // swap: written now it would put back what the swap moved. Refused with the bags and coins as they are now.
+      // Guard (test "after a wait the player editor refuses a balance or stack set from the old snapshot").
+      if (waited && SET_AFTER_SNAPSHOT.has(action)) {
+        return { kind: "result", ok: false, errors: [STALE_AFTER_SETTLE], action, snapshot: await buildSnapshot(target.username) };
+      }
+    }
     let errors: string[];
     try {
       errors = await handler({ admin, username: target.username, data });

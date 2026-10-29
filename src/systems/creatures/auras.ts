@@ -142,16 +142,32 @@ export interface AuraPayload {
   stacks: number;
 }
 
-export function aurasPayload(auras: CreatureAuras, now: number, iconFor: (spell: string) => string | null = () => null): AuraPayload[] {
-  const out: Array<Omit<AuraPayload, "icon">> = [];
+/**
+ * An aura with its absolute expiry instead of the time left, and no icon: what a creature's mirror is kept with. It
+ * changes only when the auras do, not as time passes, so the ghost scan sends it only then.
+ * `expiresAt` is absolute: cluster nodes need NTP-synced clocks, or a mirrored timer is off by the clock skew.
+ */
+export type AuraState = Omit<AuraPayload, "icon" | "remainingMs"> & { expiresAt: number };
+
+export function aurasState(auras: CreatureAuras, now: number): AuraState[] {
+  const out: AuraState[] = [];
   for (const d of auras.dots) {
     const hot = d.amountPerTick < 0;
-    out.push({ id: d.id, kind: hot ? "hot" : "dot", spell: d.id, debuff: !hot, remainingMs: Math.max(0, d.expiresAt - now), stacks: d.stacks });
+    out.push({ id: d.id, kind: hot ? "hot" : "dot", spell: d.id, debuff: !hot, expiresAt: d.expiresAt, stacks: d.stacks });
   }
-  if (auras.stunUntil > now) out.push({ id: "stun", kind: "stun", spell: auras.stunSpell, debuff: true, remainingMs: auras.stunUntil - now, stacks: 1 });
+  if (auras.stunUntil > now) out.push({ id: "stun", kind: "stun", spell: auras.stunSpell, debuff: true, expiresAt: auras.stunUntil, stacks: 1 });
   for (const s of auras.slows) {
-    if (s.expiresAt > now) out.push({ id: s.id, kind: "slow", spell: s.id.replace(/^slow:/, ""), debuff: true, remainingMs: s.expiresAt - now, stacks: 1 });
+    if (s.expiresAt > now) out.push({ id: s.id, kind: "slow", spell: s.id.replace(/^slow:/, ""), debuff: true, expiresAt: s.expiresAt, stacks: 1 });
   }
-  if (auras.castLockoutUntil > now) out.push({ id: "lockout", kind: "lockout", spell: auras.lockoutSpell, debuff: true, remainingMs: auras.castLockoutUntil - now, stacks: 1 });
-  return out.map((a) => ({ ...a, icon: a.spell ? iconFor(a.spell) : null }));
+  if (auras.castLockoutUntil > now) out.push({ id: "lockout", kind: "lockout", spell: auras.lockoutSpell, debuff: true, expiresAt: auras.castLockoutUntil, stacks: 1 });
+  return out;
+}
+
+/** The client's view of aura states at `now`. */
+export function auraStatePayload(states: readonly AuraState[], now: number, iconFor: (spell: string) => string | null = () => null): AuraPayload[] {
+  return states.map(({ expiresAt, ...a }) => ({ ...a, remainingMs: Math.max(0, expiresAt - now), icon: a.spell ? iconFor(a.spell) : null }));
+}
+
+export function aurasPayload(auras: CreatureAuras, now: number, iconFor: (spell: string) => string | null = () => null): AuraPayload[] {
+  return auraStatePayload(aurasState(auras, now), now, iconFor);
 }

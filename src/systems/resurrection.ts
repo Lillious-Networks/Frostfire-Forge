@@ -131,6 +131,18 @@ export function saveOnDisconnect(player: any): void {
   }
 }
 
+// Handoff release (cells phase 6): the sickness went with the player. Its timer and relog entry are dropped here;
+// the player object is not written back (it is no longer in playerCache).
+export function forgetSickness(player: any): void {
+  const key = String(player?.id);
+  const timer = expiryTimers.get(key);
+  if (timer) {
+    clearTimeout(timer);
+    expiryTimers.delete(key);
+  }
+  sickByUsername.delete(usernameKey(player));
+}
+
 // Login restore (mirrors the effectManager.load* block): re-arms the flag,
 // timer, and scaled totals on the fresh session object. Returns true when
 // sickness was restored.

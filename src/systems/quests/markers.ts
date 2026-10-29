@@ -1,9 +1,9 @@
 import playerCache from "../../services/playermanager";
-import assetCache from "../../services/assetCache";
 import log from "../../modules/logger";
 import { listener } from "../../modules/event_bus";
 import { Events } from "../events";
 import { packetManager } from "../../socket/packet_manager";
+import { readNpcList } from "../npcStreaming";
 import { find, questsGivenBy, questsEndedBy } from "./definitions";
 import { getCachedLog, MAX_ACTIVE_QUESTS } from "./log";
 
@@ -78,7 +78,7 @@ export async function markersFor(username: string, mapName: string): Promise<Rec
   const normalized = normMap(mapName);
   let npcs: Npc[] = [];
   try {
-    npcs = ((await assetCache.get("npcs")) || []) as Npc[];
+    npcs = await readNpcList();
   } catch {
     npcs = [];
   }

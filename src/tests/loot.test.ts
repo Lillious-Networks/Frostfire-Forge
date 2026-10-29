@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import loot from "../systems/loot";
+import { resetEntityIds, useWorldIds } from "../cluster/entityids";
+import type { IdAllocator } from "../cluster/ids";
 
 const player = (username: string, x = 100, y = 100, map = "main") => ({
   id: `id-${username}`,
@@ -9,6 +11,7 @@ const player = (username: string, x = 100, y = 100, map = "main") => ({
 
 // Every drop starts a 30 minute despawn timer: clear whatever a test left behind.
 afterEach(() => {
+  resetEntityIds();
   for (const map of ["main", "other"]) {
     for (const item of loot.getOnMap(map)) loot.despawn(item.id);
   }
@@ -78,5 +81,20 @@ describe("loot with no owner", () => {
     expect(loot.cleanupPlayer("alice")).toEqual([]);
     expect(loot.cleanupPlayer("")).toEqual([]);
     expect(loot.get(drop.id)).toBeDefined();
+  });
+});
+
+describe("loot ids", () => {
+  test("are named by a world entity id, with nothing else in them", () => {
+    useWorldIds({ next: () => 4242 } as unknown as IdAllocator);
+
+    expect(loot.create(player("alice"), "Rat Tail", 1, "", "common").id).toBe("loot_4242");
+  });
+
+  test("differ between drops made in the same millisecond", () => {
+    const ids = new Set(Array.from({ length: 50 }, () => loot.create(player("alice"), "Rat Tail", 1, "", "common").id));
+
+    expect(ids.size).toBe(50);
+    for (const id of ids) expect(id).toMatch(/^loot_\d+$/);
   });
 });

@@ -1,5 +1,5 @@
 import { parentPort } from "worker_threads";
-import { collectReceiverEntries, encodeBatch, MoverSnapshot, ReceiverInfo } from "./movement_batch.ts";
+import { applyReceiverDiffs, batchVolume, collectReceiverEntries, encodeBatch, indexMovers, NEAR_TIER_DISTANCE, type EntryTally, MoverSnapshot, ReceiverDiff, ReceiverInfo } from "./movement_batch.ts";
 
 const receiverSets = new Map<string, Set<string>>();
 
@@ -7,16 +7,8 @@ const receiverSets = new Map<string, Set<string>>();
 // loss accounting sees one monotonic stream per receiver).
 const probeSeqs = new Map<string, number>();
 
-function applyDiffs(diffs: Array<{ playerId: string; add: string[]; remove: string[] }>): void {
-  for (const diff of diffs) {
-    let set = receiverSets.get(diff.playerId);
-    if (!set) {
-      set = new Set<string>();
-      receiverSets.set(diff.playerId, set);
-    }
-    for (const add of diff.add) set.add(add);
-    for (const remove of diff.remove) set.delete(remove);
-  }
+function applyDiffs(diffs: ReceiverDiff[]): void {
+  applyReceiverDiffs(receiverSets, diffs);
 }
 
 parentPort?.on("message", (message: any) => {
@@ -39,16 +31,18 @@ parentPort?.on("message", (message: any) => {
       applyDiffs(message.diffs || []);
 
       const tick = message.tick as number;
+      const farEvery = typeof message.farEvery === "number" ? message.farEvery : undefined;
       const movers = message.movers as MoverSnapshot[];
       const receiverIds = message.receiverIds as string[];
       const receiverInfo = message.receiverInfo as Record<string, ReceiverInfo>;
+      const moverIndex = indexMovers(movers);
 
       const batches: Array<{ receiverId: string; offsets: number[]; data: Uint8Array }> = [];
       const buffers: ArrayBuffer[] = [];
 
-      const tierDistance = receiverIds.length > 800 ? 400 : 0;
-
       const updatedSeqs: Record<string, number> = {};
+      // The flush's movement volume (batchVolume), for the flush floor.
+      let volume = 0;
 
       for (const receiverId of receiverIds) {
         const set = receiverSets.get(receiverId);
@@ -57,7 +51,9 @@ parentPort?.on("message", (message: any) => {
         const receiver = receiverInfo[receiverId];
         if (!receiver) continue;
 
-        const entries = collectReceiverEntries(set, movers, receiver, tick, tierDistance);
+        const tally: EntryTally = { full: 0, far: 0 };
+        const entries = collectReceiverEntries(set, movers, receiver, tick, NEAR_TIER_DISTANCE, farEvery, moverIndex, tally);
+        volume += batchVolume(tally);
         if (entries.length === 0) continue;
 
         const receiverProbeSeq = receiver.seq ?? probeSeqs.get(receiverId) ?? 0;
@@ -69,7 +65,7 @@ parentPort?.on("message", (message: any) => {
         buffers.push(data.buffer as ArrayBuffer);
       }
 
-      parentPort?.postMessage({ type: "flushResult", tick, batches, updatedSeqs }, buffers);
+      parentPort?.postMessage({ type: "flushResult", tick, batches, updatedSeqs, volume }, buffers);
     }
   } catch (error: any) {
     parentPort?.postMessage({ type: "flushError", error: error?.message || String(error) });

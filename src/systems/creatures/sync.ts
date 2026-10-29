@@ -1,3 +1,4 @@
+import { encodeCreatureMove } from "../../socket/creature_move_codec";
 import { aurasPayload } from "./auras";
 import { SYNC_EXIT_HYSTERESIS } from "./constants";
 
@@ -101,8 +102,16 @@ export interface SyncDeps {
   resolvePlayer(id: string): SyncPlayer | null;
   sendSpawn(wt: any, snapshots: CreatureSnapshot[]): void;
   sendDespawn(wt: any, ids: number[]): void;
-  /** Position updates; `reliable` is used for stop packets so final positions are never lost. */
-  sendMoves(wt: any, entries: CreatureMoveEntry[], reliable: boolean): void;
+  /**
+   * Position updates; `reliable` is used for stop packets so final positions are never lost. `json` is each entry
+   * already serialized (JSON.stringify of it, in the same order), made once per tick for all viewers.
+   */
+  sendMoves(wt: any, entries: CreatureMoveEntry[], reliable: boolean, json: string[]): void;
+  /**
+   * The moving (not reliable) entries as binary records (socket/creature_move_codec.ts), each made once per tick.
+   * Without it every entry goes through sendMoves. An entry that does not fit a record still goes through sendMoves.
+   */
+  sendBinaryMoves?(wt: any, records: Uint8Array[]): void;
   /** Per-viewer fields (tap state, lootable) applied to snapshots before sending. */
   decorate?(snapshot: CreatureSnapshot, creature: CreatureInstance, playerId: string): void;
 }
@@ -139,6 +148,23 @@ export class CreatureSync {
     if (!state) return;
     for (const id of state.ids) this.unobserve(id, playerId);
     this.viewers.delete(playerId);
+  }
+
+  /**
+   * A player arrived from another node by a handoff, with its client still showing `ids`. Recorded as known,
+   * so the next refresh sends only what differs: despawns for those this node does not show them, spawns for
+   * the new ones.
+   */
+  adopt(playerId: string, map: string, layerId: string | null, ids: Iterable<number>): void {
+    this.forget(playerId);
+    const state: ViewerState = { map, layerId, ids: new Set() };
+    this.viewers.set(playerId, state);
+    for (const id of ids) {
+      const n = Number(id);
+      if (!Number.isInteger(n)) continue;
+      state.ids.add(n);
+      this.observe(n, playerId);
+    }
   }
 
   /**
@@ -266,6 +292,10 @@ export class CreatureSync {
   flushMoves(candidates: Iterable<CreatureInstance>): void {
     const moving = new Map<number, CreatureMoveEntry>();
     const stopped = new Map<number, CreatureMoveEntry>();
+    // Each entry serialized once per tick, on the first viewer that needs it (none, nothing serialized).
+    const serialized = new Map<CreatureMoveEntry, string>();
+    // And encoded once per tick as a binary record (null: the entry does not fit one).
+    const encoded = new Map<CreatureMoveEntry, Uint8Array | null>();
     for (const c of candidates) {
       const isMoving = c.move !== null;
       const x = Math.round(c.x);
@@ -293,8 +323,29 @@ export class CreatureSync {
       if (!movingOut && !stoppedOut) continue;
       const player = this.deps.resolvePlayer(playerId);
       if (!player) continue;
-      if (movingOut) this.deps.sendMoves(player.wt, movingOut, false);
-      if (stoppedOut) this.deps.sendMoves(player.wt, stoppedOut, true);
+      const json = (e: CreatureMoveEntry): string => {
+        let s = serialized.get(e);
+        if (s === undefined) serialized.set(e, (s = JSON.stringify(e)));
+        return s;
+      };
+      if (movingOut) {
+        const sendBinary = this.deps.sendBinaryMoves;
+        if (sendBinary) {
+          const records: Uint8Array[] = [];
+          const rest: CreatureMoveEntry[] = [];
+          for (const e of movingOut) {
+            let record = encoded.get(e);
+            if (record === undefined) encoded.set(e, (record = encodeCreatureMove(e)));
+            if (record) records.push(record);
+            else rest.push(e);
+          }
+          if (records.length > 0) sendBinary.call(this.deps, player.wt, records);
+          if (rest.length > 0) this.deps.sendMoves(player.wt, rest, false, rest.map(json));
+        } else {
+          this.deps.sendMoves(player.wt, movingOut, false, movingOut.map(json));
+        }
+      }
+      if (stoppedOut) this.deps.sendMoves(player.wt, stoppedOut, true, stoppedOut.map(json));
     }
   }
 

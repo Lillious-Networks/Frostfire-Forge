@@ -1,6 +1,7 @@
 import { Worker } from "worker_threads";
 import assetCache from "../services/assetCache";
 import log from "../modules/logger";
+import { AuthDispatcher, authWorkerEnv } from "./authdispatch";
 
 const MAX_AUTH_POOL_SIZE = 64;
 const parsedAuthPoolSize = parseInt(process.env.AUTH_POOL_SIZE || "", 10);
@@ -22,64 +23,42 @@ const prepareAssets = async () => {
     };
 };
 
-let serializedAssets: Awaited<ReturnType<typeof prepareAssets>> | null = null;
-const authWorkers: Worker[] = [];
-let nextAuthWorker = 0;
-
-async function createWorker(): Promise<Worker> {
-    const worker = new Worker(new URL("authentication.ts", import.meta.url), {
-        workerData: { assets: serializedAssets }
-    });
-
-    worker.on("error", (error: Error) => {
-        log.error(`[AUTH POOL] Worker error: ${error.message}`);
-        const idx = authWorkers.indexOf(worker);
-        if (idx >= 0) {
-            authWorkers.splice(idx, 1);
-            createWorker().then(w => authWorkers.push(w));
-        }
-    });
-
-    worker.on("exit", (code) => {
-        if (code !== 0) {
-            log.error(`[AUTH POOL] Worker exited with code ${code}`);
-        }
-        const idx = authWorkers.indexOf(worker);
-        if (idx >= 0) {
-            authWorkers.splice(idx, 1);
-            createWorker().then(w => authWorkers.push(w));
-        }
-    });
-
-    return worker;
-}
+const pool = new AuthDispatcher<Worker>({
+    size: AUTH_POOL_SIZE,
+    create: (assets) => new Worker(new URL("authentication.ts", import.meta.url), {
+        workerData: { assets },
+        env: authWorkerEnv(process.env),
+    }),
+    debug: (message) => log.debug(message),
+    error: (message) => log.error(message),
+});
+let initializing: Promise<void> | null = null;
 
 async function initPool(): Promise<void> {
-    if (authWorkers.length > 0) return;
-
-    serializedAssets = await prepareAssets();
-
-    for (let i = 0; i < AUTH_POOL_SIZE; i++) {
-        authWorkers.push(await createWorker());
-    }
-    log.info(`[AUTH POOL] ${AUTH_POOL_SIZE} workers ready`);
+    if (pool.started) return;
+    initializing ??= prepareAssets().then((assets) => {
+        pool.start(assets);
+        log.info(`[AUTH POOL] ${pool.size} workers ready`);
+    }).catch((error) => {
+        initializing = null;
+        throw error;
+    });
+    await initializing;
 }
 
-export async function getAuthWorker(): Promise<Worker> {
-    if (authWorkers.length === 0) {
-        await initPool();
-    }
-    const worker = authWorkers[nextAuthWorker];
-    nextAuthWorker = (nextAuthWorker + 1) % authWorkers.length;
-    return worker;
+/**
+ * The pool, started on first use. Logins are posted to it as to one worker (`postMessage`) and its answers are read
+ * as from one (`on("message")`): each login goes to the worker with the fewest in flight, and every answer, a
+ * replacement worker's too, reaches the same handlers (authdispatch.ts).
+ */
+export async function getAuthPool(): Promise<AuthDispatcher<Worker>> {
+    await initPool();
+    return pool;
 }
 
 export function resetAuthWorker(): void {
-    for (const w of authWorkers) {
-        w.terminate();
-    }
-    authWorkers.length = 0;
-    serializedAssets = null;
+    pool.stop();
+    initializing = null;
 }
 
 /**
@@ -89,13 +68,9 @@ export function resetAuthWorker(): void {
  * worker started later.
  */
 export async function refreshAuthSpells(): Promise<void> {
-    if (authWorkers.length === 0) return;
+    if (!pool.started) return;
     const spells = await assetCache.get("spells");
-    const serialized = spells ? JSON.stringify(spells) : null;
-    if (serializedAssets) serializedAssets.spells = serialized;
-    for (const w of authWorkers) {
-        w.postMessage({ spells: serialized });
-    }
+    pool.refresh("spells", spells ? JSON.stringify(spells) : null);
 }
 
 /**
@@ -105,13 +80,9 @@ export async function refreshAuthSpells(): Promise<void> {
  * worker started later.
  */
 export async function refreshAuthItems(): Promise<void> {
-    if (authWorkers.length === 0) return;
+    if (!pool.started) return;
     const items = await assetCache.get("items");
-    const serialized = items ? JSON.stringify(items) : null;
-    if (serializedAssets) serializedAssets.items = serialized;
-    for (const w of authWorkers) {
-        w.postMessage({ items: serialized });
-    }
+    pool.refresh("items", items ? JSON.stringify(items) : null);
 }
 
 /**
@@ -121,11 +92,7 @@ export async function refreshAuthItems(): Promise<void> {
  * started later.
  */
 export async function refreshAuthMounts(): Promise<void> {
-    if (authWorkers.length === 0) return;
+    if (!pool.started) return;
     const mounts = await assetCache.get("mounts");
-    const serialized = mounts ? JSON.stringify(mounts) : null;
-    if (serializedAssets) serializedAssets.mounts = serialized;
-    for (const w of authWorkers) {
-        w.postMessage({ mounts: serialized });
-    }
+    pool.refresh("mounts", mounts ? JSON.stringify(mounts) : null);
 }

@@ -13,6 +13,7 @@ import { isKept, isSoulbound } from "./consumables";
 import currency, { CURRENCY_LIMITS, coinsWorth } from "./currency";
 import inventory from "./inventory";
 import { inUse } from "./spare";
+import { SWAP_START_MS, unsettled } from "../cluster/tradesettle";
 import tradeLog, { type TradeGave, type TradeRecord } from "./tradelog";
 
 /** How far apart (px) two players may stand and still trade. The reach of talking to an NPC. */
@@ -31,6 +32,15 @@ export interface Trader {
   /** In combat. */
   pvp?: boolean;
   location?: { map?: string; position?: unknown };
+  /** A player of a neighbouring node, read from their mirror here (cells). */
+  remote?: boolean;
+}
+
+/** The checks a swap with a player across a border makes right before its transaction (see swap). */
+interface SwapBound {
+  find: (username: string) => Trader | undefined;
+  /** When the transaction must have started by (ms since the epoch). */
+  startBy: number;
 }
 
 export interface Trade {
@@ -67,6 +77,16 @@ export type AcceptAnswer =
   /** The trade ended with nothing exchanged: what each player is told. */
   | { state: "failed"; trade: Trade; reasons: Record<string, string> };
 
+/**
+ * How long (ms) after the final accept the swap of a trade with a player across a border may still start. One held
+ * up longer (by a turn of one of its players) is not made: this bounds how long after a lost link a swap the
+ * partner's node cannot see can commit (cluster/tradesettle.ts, SETTLE_MS). A trade of two players of this node has
+ * no such bound. Tests make it shorter.
+ */
+export const swapStart = { ms: SWAP_START_MS };
+/** Told to a player who accepts while a lost trade of theirs or their partner's is settling (cluster/tradesettle.ts). */
+const SETTLING = "A trade that was cut off is still being settled. Try again in a moment.";
+
 /** A swap that is not made, for a reason the players are told. */
 class Refused extends Error {}
 
@@ -82,7 +102,8 @@ const MOST_COINS = coinsWorth(CURRENCY_LIMITS);
 function placeOf(player: Trader): { map: string; x: number; y: number } {
   const position = player.location?.position as any;
   const [x, y] = typeof position === "string" ? position.split(",").map(Number) : [Number(position?.x), Number(position?.y)];
-  return { map: String(player.location?.map ?? ""), x, y };
+  // A mirror of a neighbouring node's player names its map without ".json" (cluster/kinds/players.ts).
+  return { map: String(player.location?.map ?? "").replace(/\.json$/, ""), x, y };
 }
 
 /** Why `me` cannot trade with `them` now, in words for `me`. Null when they can. */
@@ -180,7 +201,7 @@ const sameOffer = (a: TradeGave, b: TradeGave) =>
  * they have there, and then every item and coin is moved, and the trade written to the log, as one
  * transaction.
  */
-async function swap(trade: Trade, now: number): Promise<TradeRecord> {
+async function swap(trade: Trade, now: number, bound: SwapBound | null): Promise<TradeRecord> {
   const [a, b] = trade.players;
   const sides: Array<{ giver: string; receiver: string; gave: TradeGave }> = [
     { giver: a, receiver: b, gave: trade.offers[a] },
@@ -188,6 +209,10 @@ async function swap(trade: Trade, now: number): Promise<TradeRecord> {
   ];
 
   return atomically([a, b], async (batch) => {
+    // The transaction may not open after the start bound either, however long the database takes to give it a
+    // connection: the partner's settle window is counted from that bound (cluster/tradesettle.ts). Guard (test "a swap
+    // across a border may not open after its start bound").
+    if (bound) batch.openBy(bound.startBy);
     const gone = (giver: string, item: { name: string; quantity: number }) => new Refused(`${named(giver)} no longer has ${item.quantity} ${item.name}.`);
     for (const { giver, gave } of sides) {
       for (const item of gave.items) {
@@ -220,6 +245,19 @@ async function swap(trade: Trade, now: number): Promise<TradeRecord> {
         if (!(await inventory.add(receiver, item, batch))) throw new Error(`${item.name} could not be given to ${receiver}`);
       }
       if (coinsWorth(gave.coins) > 0) await currency.add(receiver, gave.coins, batch);
+    }
+    // The last check before the transaction, with every turn taken and every row read: nothing is awaited between it
+    // and the transaction's start (services/batch.ts). A partner across a border whose link went down meanwhile is no
+    // longer found (find, through tradeLink.partnerPeer): their node has let go of the trade, and a swap made now is one
+    // it cannot be told of. A swap held up past swapStart could commit after the partner's node stopped waiting for it.
+    // Only for a trade with a player across a border: a trade of two players of this node goes on as it always has.
+    if (bound) {
+      const lost = trade.players.find((player) => !bound.find(player));
+      const late = Date.now() > bound.startBy;
+      if (lost || late) {
+        log.warn(`The trade between ${a} and ${b} was not swapped: ${lost ? `${lost} could no longer be reached` : `it could not start within ${swapStart.ms} ms of the final accept`}. Nothing was moved`);
+        throw new Refused(lost ? `${named(lost)} is no longer online.` : "The trade took too long to complete.");
+      }
     }
     return tradeLog.write(batch, { player_a: a, player_b: b, a_gave: structuredClone(trade.offers[a]), b_gave: structuredClone(trade.offers[b]), created_at: now });
   });
@@ -284,6 +322,8 @@ const trades = {
     if (!trade) return { state: "none" };
     if (trade.settling) return { state: "accepted", trade };
     if (now - trade.changedAt < ACCEPT_DELAY_MS) return { state: "wait", message: "The offer just changed. Look it over, then accept." };
+    // A player marked unsettled after a lost trade: their rows may predate a swap on another node.
+    if (trade.players.some((player) => unsettled(player))) return { state: "wait", message: SETTLING };
 
     trade.accepted[name] = true;
     if (!trade.players.every((player) => trade.accepted[player])) return { state: "accepted", trade };
@@ -295,7 +335,11 @@ const trades = {
       const apart = noLonger(trade, find);
       if (apart) return failed(apart);
       if (trade.players.every((player) => isEmpty(trade.offers[player]))) return { state: "completed", trade, record: null };
-      return { state: "completed", trade, record: await swap(trade, now) };
+      // A player across a border (their mirror here) bounds the swap; with the cluster off there are none. The bound is
+      // on the real clock: `now` may be given.
+      const across = trade.players.some((player) => find(player)?.remote === true);
+      const bound = across ? { find, startBy: Date.now() + swapStart.ms } : null;
+      return { state: "completed", trade, record: await swap(trade, now, bound) };
     } catch (error) {
       if (!(error instanceof Refused)) log.error(`The trade between ${trade.players.join(" and ")} was not completed: ${error}`);
       const said = `${error instanceof Refused ? error.message : "The trade could not be completed."} Nothing was traded.`;

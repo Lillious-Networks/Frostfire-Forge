@@ -3,6 +3,7 @@ import assetCache from "../services/assetCache";
 import { rowCache, turns } from "../services/datacache";
 import type { Batch } from "../services/batch";
 import log from "../modules/logger";
+import { settledThen } from "../cluster/tradesettle";
 
 async function getItems(): Promise<Item[]> {
   return await assetCache.get("items") as Item[] || [];
@@ -98,12 +99,13 @@ interface Pending {
  */
 async function pendingIn(batch: Batch, username: string): Promise<Pending> {
   await batch.hold(oneAtATime, username);
-  return batch.pending(rows, username, async () => {
+  // Read once the player is settled: a trade lost across a border may still be swapped on its host (cluster/tradesettle.ts).
+  return batch.pending(rows, username, () => settledThen(username, async () => {
     const state: Pending = { held: (await rows.get(username)) ?? [], written: [], unknown: false };
     batch.kept(() => (state.unknown ? rows.drop(username) : hold(username, state.held, state.written)));
     batch.undone(() => rows.drop(username));
     return state;
-  });
+  }));
 }
 
 /** Collect objectives treat the inventory as the source of truth: the total now held of `item` is theirs to count. */
@@ -175,7 +177,8 @@ const inventory = {
       return true;
     }
 
-    const result = await change(name, async () => {
+    // The count written is worked out from the rows held: read once the player is settled (cluster/tradesettle.ts).
+    const result = await change(name, () => settledThen(name, async () => {
       const held = (await rows.get(name)) ?? [];
       const response = held.filter((row) => sameName(row.item, resolvedName));
 
@@ -204,7 +207,7 @@ const inventory = {
       );
       await hold(name, changed(held, resolvedName, { quantity }), [quantity]);
       return result;
-    });
+    }));
     // Sync the new total so picking up quest items credits immediately.
     await syncCollected(name, resolvedName);
     return result;
@@ -287,7 +290,8 @@ const inventory = {
       return true;
     }
 
-    const removed = await change(name, async () => {
+    // As in add: read once the player is settled.
+    const removed = await change(name, () => settledThen(name, async () => {
       const held = (await rows.get(name)) ?? [];
       const response = held.filter((row) => sameName(row.item, resolvedName));
       if (response.length === 0) return null;
@@ -312,7 +316,7 @@ const inventory = {
       );
       await hold(name, changed(held, resolvedName, { quantity }), [quantity]);
       return { result };
-    });
+    }));
     if (!removed) return;
     // Dropping or using a quest item walks progress back down.
     await syncCollected(name, resolvedName);
@@ -320,14 +324,14 @@ const inventory = {
   },
   async delete(name: string, item: InventoryItem) {
     if (!name || !item.name) return;
-    return await change(name, async () => {
+    return await change(name, () => settledThen(name, async () => {
       const result = await query(
         "DELETE FROM inventory WHERE item = ? AND username = ?",
         [item.name, name]
       );
       await rows.set(name, without((await rows.get(name)) ?? [], item.name));
       return result;
-    });
+    }));
   },
   async get(name: string) {
     if (!name) return [];

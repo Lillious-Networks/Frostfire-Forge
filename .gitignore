@@ -7,6 +7,9 @@ config/
 .env*
 !.env.development
 !.env.example
+src/docker/cluster.env
+.superpowers
+/docs
 
 src/assets/sfx/*
 !src/assets/sfx/attack_sword.mp3

@@ -79,7 +79,7 @@ function getNextWorker(): Worker {
 }
 
 /** Hands `work` to the next worker and waits for its answer. */
-function ask<T>(work: { sql: string; values: any[] } | { transaction: TransactionStatement[] }): Promise<T> {
+function ask<T>(work: { sql: string; values: any[] } | { transaction: TransactionStatement[]; openBy?: number }): Promise<T> {
   return new Promise((resolve, reject) => {
     const queryId = `query_${++queryIdCounter}_${Date.now()}`;
     const worker = getNextWorker();
@@ -113,10 +113,14 @@ export default async function query<T>(sql: string, values?: any[]): Promise<T[]
  * Answers with one result for each statement, as `query` would give it. Throws when nothing was
  * kept: a GuardError when a statement marked `mustChange` changed no rows, the database's own error
  * otherwise. See TransactionStatement for what `mustChange` asks of a statement.
+ *
+ * `options.openBy` (ms since the epoch): the transaction is refused whole, with nothing sent, if it
+ * cannot open by then, however long the worker waited for a connection (LateError, sqltransaction.ts).
+ * Without it the message to the worker is what it always was.
  */
-export async function transaction(statements: TransactionStatement[]): Promise<any[]> {
+export async function transaction(statements: TransactionStatement[], options: { openBy?: number } = {}): Promise<any[]> {
   if (statements.length === 0) return [];
-  return ask<any[]>({ transaction: statements });
+  return ask<any[]>(options.openBy === undefined ? { transaction: statements } : { transaction: statements, openBy: options.openBy });
 }
 
 /** Resolves once every query sent so far has been answered or has timed out. */

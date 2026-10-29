@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } 
 import { databaseModule } from "./setup";
 import { readFileSync } from "fs";
 import { join } from "path";
+import { receiverSource } from "./receiver-source";
 
 // ------------------------------------------------------------ fake database
 // The two statements the whitelist switch sends, run against an in-memory
@@ -204,7 +205,7 @@ describe("turning it off, and on again", () => {
 
 describe("everything that reads the switch reads the live value", () => {
   const read = (...path: string[]) => readFileSync(join(import.meta.dir, "..", ...path), "utf8").replaceAll("\r\n", "\n");
-  const receiver = read("socket", "receiver.ts");
+  const receiver = receiverSource();
   const server = read("socket", "server.ts");
   const gateway = read("modules", "gateway-client.ts");
 
@@ -213,7 +214,8 @@ describe("everything that reads the switch reads the live value", () => {
     expect(receiver).toContain("if (!isWhitelistEnabled()) {");
     expect(receiver).toContain("whitelistEnabled: isWhitelistEnabled(),");
     // Never the value itself: a copy taken at import would not change.
-    expect(receiver.match(/isWhitelistEnabled(?!\(\)|,)/g)).toBeNull();
+    // (The import lines are left out: they name the function, they do not use its value.)
+    expect(receiver.replace(/^import .*$/gm, "").match(/isWhitelistEnabled(?!\(\)|,)/g)).toBeNull();
   });
 
   test("nothing keeps a copy made at startup", () => {

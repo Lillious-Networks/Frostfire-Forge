@@ -6,16 +6,31 @@ import fs from "node:fs";
 import { serverFetch } from "./https_servers.ts";
 import { isWhitelistEnabled } from "../services/whitelist.ts";
 import { pvpEnabled } from "../systems/pvpzone.ts";
+import { reportOf, type BlockReportSource } from "../cluster/blockreport.ts";
+import * as settings from "../config/settings.json";
+
+const defaultMap: string = (settings as { default_map?: string }).default_map?.replace(".json", "") || "main";
+
+// Block owners reach the Gateway (POST /blocks) when a table changes: changes of one burst go out together, this long
+// after the first of them, with the state of the moment.
+const BLOCKS_COALESCE_MS = 250;
+// A report that failed is tried again this many times, this far apart; the next registration sends every map anyway.
+const BLOCKS_RETRY_MS = 2000;
+const BLOCKS_RETRIES = 3;
 
 // Evaluate the TLS state at registration time rather than at import time:
 // the local certificate provisioning (ensureLocalCertificate) runs after
 // module imports, so an import-time check would report useSSL=false even
 // though the listeners are serving TLS.
-function resolveUseSSL(): boolean {
+export function resolveUseSSL(): boolean {
   const _cert = process.env.TLS_CERT_PATH;
   const _key = process.env.TLS_KEY_PATH;
   return process.env.HTTP_USE_SSL === "true" && !!_cert && !!_key && fs.existsSync(_cert) && fs.existsSync(_key);
 }
+
+const bareMapName = (map: string): string => (map.endsWith(".json") ? map.slice(0, -5) : map);
+// What identifies a report's table: its epoch and a hash of its owners and nodes.
+const reportSignature = (report: { epoch: number; owners: string; nodes: string[] }): string => `${report.epoch}:${Bun.hash(`${report.nodes.join(",")}|${report.owners}`)}`;
 
 class GatewayClient {
   private config: ServerRegistrationConfig;
@@ -28,9 +43,37 @@ class GatewayClient {
   private mapSyncPromise: Promise<void> | null = null;
   private mapSyncResolver: (() => void) | null = null;
   private previousRtt: number | null = null;
+  // Cluster mode: the block table the Gateway is told of, the maps changed since the last report, and the queue the
+  // reports go through (one at a time, so an older state never lands after a newer one).
+  private blocksSource: BlockReportSource | null = null;
+  private stopBlocksWatch: (() => void) | null = null;
+  private blocksPending = new Set<string>();
+  private blocksTimer?: Timer;
+  private blocksQueue: Promise<void> = Promise.resolve();
+  // Maps whose last report did not get through (until one does), the ones already warned of, and what is under way:
+  // reports in the queue and retries waiting on their timer. A good heartbeat sends the dirty maps again.
+  private blocksDirty = new Set<string>();
+  private blocksWarned = new Set<string>();
+  // Maps already warned of as not encodable: its own flag, so the warning for failed sends is not used up by this one.
+  private blocksUnencodableWarned = new Set<string>();
+  private blocksInFlight = 0;
+  private blocksRetrying = 0;
+  // Maps the gateway refused for good (a 400: it has no room for them, or does not take the report), each with the table
+  // it refused. Such a map is not sent again until its table changes, or the node registers again.
+  private blocksRefused = new Map<string, string>();
+  /** How long changes of one burst are held to go out together (settable for tests). */
+  blocksCoalesceMs = BLOCKS_COALESCE_MS;
+  blocksRetryMs = BLOCKS_RETRY_MS;
+  /** The map a fresh character starts on: its report goes first, so the gateway never lacks it for lack of room. */
+  blocksFirstMap = defaultMap;
 
   constructor(config: ServerRegistrationConfig) {
     this.config = config;
+  }
+
+  // In cluster mode the gateway knows each node of the realm by its node id; otherwise by the server id.
+  private get registrationId(): string {
+    return this.config.nodeId || this.config.serverId;
   }
 
   private async getGatewayUrl(): Promise<string> {
@@ -49,7 +92,9 @@ class GatewayClient {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          id: this.config.serverId,
+          id: this.registrationId,
+          // Cluster mode only: which node of the realm this is, and the region the realm serves.
+          ...(this.config.nodeId ? { nodeId: this.config.nodeId, regionId: this.config.regionId } : {}),
           description: this.config.description || "",
           host: this.config.host,
           publicHost: this.config.publicHost || this.config.host,
@@ -84,9 +129,11 @@ class GatewayClient {
           clearTimeout(this.reconnectTimer);
           this.reconnectTimer = undefined;
         }
-        log.success(`Successfully registered with gateway as ${this.config.serverId}`);
+        log.success(`Successfully registered with gateway as ${this.registrationId}`);
         await this.sendHeartbeat();
         this.startHeartbeat();
+        // A gateway that restarted (or never heard of this node) learns every table now, not at the next change.
+        this.reportAllBlocks();
 
         // Create a promise that resolves when map sync completes
         this.mapSyncPromise = new Promise((resolve) => {
@@ -209,7 +256,7 @@ class GatewayClient {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          id: this.config.serverId,
+          id: this.registrationId,
           activeConnections: this.activeConnections,
           cpuUsage: cpuUsage,
           ramUsage: ramUsage,
@@ -224,7 +271,9 @@ class GatewayClient {
       this.previousRtt = Date.now() - sendTime;
 
       const result = await response.json();
-      if (!result.success) {
+      if (result.success) {
+        this.resendDirtyBlocks();
+      } else {
         log.warn("Gateway heartbeat failed, reconnecting...");
         this.registered = false;
         if (this.heartbeatTimer) {
@@ -257,6 +306,146 @@ class GatewayClient {
 
   setActiveConnections(count: number) {
     this.activeConnections = count;
+  }
+
+  /**
+   * Cluster mode: tells the Gateway which node owns which block (POST /blocks), so a login can be sent to the owner
+   * of the saved point. Every map goes out when the node registers (also when it registers again), and a map goes
+   * out again when its table changes. Not with the heartbeat. Without a node id (cluster off) nothing is ever sent.
+   */
+  reportBlocksFrom(source: BlockReportSource): void {
+    if (!this.config.nodeId) return;
+    this.stopBlocksWatch?.();
+    this.blocksSource = source;
+    this.stopBlocksWatch = source.onChange((map) => this.blocksChanged(map));
+  }
+
+  // Changes of one burst are sent together, after the first of them; the table is read when they go (last state wins).
+  private blocksChanged(map: string): void {
+    this.blocksPending.add(map);
+    if (this.blocksTimer) return;
+    this.blocksTimer = setTimeout(() => {
+      this.blocksTimer = undefined;
+      const maps = [...this.blocksPending];
+      this.blocksPending.clear();
+      this.queueBlocks(maps);
+    }, this.blocksCoalesceMs);
+  }
+
+  private reportAllBlocks(): void {
+    const source = this.blocksSource;
+    if (!source || !this.registered) return;
+    // Every map goes now, which covers what was waiting for the timer.
+    clearTimeout(this.blocksTimer);
+    this.blocksTimer = undefined;
+    this.blocksPending.clear();
+    // A gateway that restarted may hold more than the one that refused (and a node that registers again is told afresh).
+    this.blocksRefused.clear();
+    this.queueBlocks(source.maps());
+  }
+
+  // A report that used up its retries stays dirty. The gateway is told of it again at the next good heartbeat (once,
+  // with the table as it is then): a gateway that was away for a while must not keep an older epoch for long.
+  private resendDirtyBlocks(): void {
+    if (this.blocksDirty.size === 0 || !this.blocksSource || !this.registered) return;
+    if (this.blocksInFlight > 0 || this.blocksRetrying > 0) return;
+    this.queueBlocks([...this.blocksDirty], BLOCKS_RETRIES);
+  }
+
+  private queueBlocks(maps: string[], attempt: number = 0): void {
+    if (maps.length === 0) return;
+    this.blocksInFlight++;
+    this.blocksQueue = this.blocksQueue
+      .then(() => this.sendBlocks(maps, attempt))
+      .catch((error) => { log.error(`Could not report the block owners to the gateway: ${error}`); })
+      .finally(() => { this.blocksInFlight--; });
+  }
+
+  private async sendBlocks(maps: string[], attempt: number): Promise<void> {
+    const source = this.blocksSource;
+    if (!source || !this.registered) return;
+    const failed: string[] = [];
+    const refused: string[] = [];
+    let lastError: unknown = null;
+    // The map a new character starts on goes first, the others as they came.
+    const first = bareMapName(this.blocksFirstMap);
+    for (const map of [...maps.filter((name) => bareMapName(name) === first), ...maps.filter((name) => bareMapName(name) !== first)]) {
+      const report = reportOf(source, map);
+      if (!report) {
+        this.blocksDirty.delete(map);
+        this.blocksRefused.delete(map);
+        if (source.epochOf(map) >= 1) {
+          // A real table that cannot be encoded (too many blocks or owners, a long node name): told once, by name.
+          if (!this.blocksUnencodableWarned.has(map)) {
+            this.blocksUnencodableWarned.add(map);
+            log.warn(`The block owners of ${map} cannot be reported to the gateway (too many blocks or owners, or a node name that is too long) and are skipped until the table changes.`);
+          }
+        } else {
+          // No table any more: a later failure is told again.
+          this.blocksUnencodableWarned.delete(map);
+          this.blocksWarned.delete(map);
+        }
+        continue;
+      }
+      // It can be encoded again: if it becomes unencodable later, that is told again.
+      this.blocksUnencodableWarned.delete(map);
+      // Refused for good, and the table is the one that was refused: nothing new to say.
+      const signature = reportSignature(report);
+      if (this.blocksRefused.get(map) === signature) {
+        this.blocksDirty.delete(map);
+        continue;
+      }
+      try {
+        const gatewayUrl = await this.getGatewayUrl();
+        const response = await serverFetch(`${gatewayUrl}/blocks`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: this.registrationId, authKey: process.env.GATEWAY_AUTH_KEY, ...report })
+        });
+        // A gateway that does not know the node (it restarted: the next heartbeat registers again, which sends every
+        // map) or that has no such route (an older one) is not asked again.
+        if (response.status === 404) {
+          this.blocksDirty.delete(map);
+          this.blocksWarned.delete(map);
+          continue;
+        }
+        // A 400 (no room for the map, a report the gateway does not take) or a 413 will be the same answer next time.
+        if (response.status === 400 || response.status === 413) {
+          const detail = await response.json().catch(() => null);
+          this.blocksRefused.set(map, signature);
+          this.blocksDirty.delete(map);
+          this.blocksWarned.delete(map);
+          refused.push(map);
+          lastError = `status ${response.status}${detail?.error ? `: ${detail.error}` : ""}`;
+          continue;
+        }
+        const result = await response.json();
+        if (!response.ok || !result.success) throw new Error(`status ${response.status}${result?.error ? `: ${result.error}` : ""}`);
+        this.blocksDirty.delete(map);
+        this.blocksWarned.delete(map);
+        this.blocksRefused.delete(map);
+      } catch (error) {
+        failed.push(map);
+        this.blocksDirty.add(map);
+        lastError = error;
+      }
+    }
+    // Told once, by name: it is not sent again until its table changes.
+    if (refused.length > 0) log.warn(`The gateway refused the block owners of ${refused.join(", ")} and is not sent them again until they change: ${lastError}`);
+    if (failed.length === 0) return;
+    if (attempt < BLOCKS_RETRIES) {
+      this.blocksRetrying++;
+      const timer = setTimeout(() => {
+        this.blocksRetrying--;
+        this.queueBlocks(failed, attempt + 1);
+      }, this.blocksRetryMs);
+      (timer as any).unref?.();
+    } else {
+      // One warning per map until it gets through, not one per heartbeat.
+      const fresh = failed.filter((map) => !this.blocksWarned.has(map));
+      for (const map of fresh) this.blocksWarned.add(map);
+      if (fresh.length > 0) log.warn(`The gateway was not told the block owners of ${fresh.join(", ")}, and is asked again at the next heartbeat: ${lastError}`);
+    }
   }
 
   private async syncMapChecksums(attempt: number = 1, maxAttempts: number = 30): Promise<void> {
@@ -370,6 +559,17 @@ class GatewayClient {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
     }
+    // Nothing more is reported once the node leaves.
+    this.stopBlocksWatch?.();
+    this.stopBlocksWatch = null;
+    this.blocksSource = null;
+    clearTimeout(this.blocksTimer);
+    this.blocksTimer = undefined;
+    this.blocksPending.clear();
+    this.blocksDirty.clear();
+    this.blocksWarned.clear();
+    this.blocksUnencodableWarned.clear();
+    this.blocksRefused.clear();
 
     if (!this.registered) {
       return;
@@ -381,7 +581,7 @@ class GatewayClient {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          id: this.config.serverId,
+          id: this.registrationId,
           authKey: process.env.GATEWAY_AUTH_KEY
         })
       });

@@ -121,7 +121,7 @@ afterAll(() => {
 
 const { clearCaches } = await import("../services/datacache");
 const { default: log } = await import("../modules/logger");
-const { default: consumables, CONSUMABLE_COOLDOWN_MS, isKept, teleportsHome } = await import("../systems/consumables");
+const { default: consumables, CONSUMABLE_COOLDOWN_MS, HOME_GIVE_TRIES, isKept, teleportsHome } = await import("../systems/consumables");
 const { default: cooldownManager } = await import("../services/cooldownmanager");
 const { resetCooldowns } = await import("../systems/cooldowns");
 const { caveMarkers, houseMarkers, innMarkers, mapMarkers, merchantMarkers } = await import("../systems/mapmarkers");
@@ -416,6 +416,72 @@ describe("the home item", () => {
     expect(await consumables.giveHomeItem("hero")).toBe(false);
     expect(holds("ally")).toEqual({ "Home Stone": 1 });
     expect(holds("hero")["Home Stone"]).toBe(1);
+  });
+
+  test("is tried again while the player's lock is busy, then given once", async () => {
+    const { setClusterPlayerLock } = await import("../services/batch");
+    let busy = 3;
+    let tries = 0;
+    const previous = setClusterPlayerLock(async (_players, work) => {
+      tries++;
+      if (busy-- > 0) {
+        const error = new Error("The player ally is being handled by another node");
+        error.name = "PlayerLockBusy";
+        throw error;
+      }
+      return work(async () => {});
+    });
+    try {
+      // Guard: PlayerLockBusy is retried (limit run C-2125: the starter item was lost at login).
+      expect(await consumables.giveHomeItem("ally", 1)).toBe(true);
+      expect(tries).toBe(4);
+      expect(holds("ally")).toEqual({ "Home Stone": 1 });
+    } finally {
+      setClusterPlayerLock(previous);
+    }
+  });
+
+  test("a lock that stays busy is given up on after a bounded number of tries, and other errors are not retried", async () => {
+    const { setClusterPlayerLock } = await import("../services/batch");
+    let tries = 0;
+    let name = "PlayerLockBusy";
+    const previous = setClusterPlayerLock(async () => {
+      tries++;
+      const error = new Error("refused");
+      error.name = name;
+      throw error;
+    });
+    try {
+      expect(await consumables.giveHomeItem("ally", 1)).toBe(false);
+      expect(tries).toBe(HOME_GIVE_TRIES);
+      tries = 0;
+      name = "Error";
+      expect(await consumables.giveHomeItem("ally", 1)).toBe(false);
+      expect(tries).toBe(1);
+      expect(holds("ally")).toEqual({});
+    } finally {
+      setClusterPlayerLock(previous);
+    }
+  });
+
+  test("a lock error after the transaction was sent is not retried: the stone may be written", async () => {
+    const { setClusterPlayerLock } = await import("../services/batch");
+    let tries = 0;
+    const previous = setClusterPlayerLock(async (_players, work) => {
+      tries++;
+      await work(async () => {});
+      const error = new Error("the lock ran out");
+      error.name = "PlayerLockBusy";
+      throw error;
+    });
+    try {
+      // Guard: nothingWritten. Retried, a second try would find the stone held (heldIn), but only a batch that sent
+      // nothing is known to be safe to run again.
+      expect(await consumables.giveHomeItem("ally", 1)).toBe(false);
+      expect(tries).toBe(1);
+    } finally {
+      setClusterPlayerLock(previous);
+    }
   });
 
   test("is not given when there is no home item, or no slot for it", async () => {

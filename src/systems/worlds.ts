@@ -1,6 +1,7 @@
 import query from "../controllers/sqldatabase";
 import log from "../modules/logger";
 import assetCache from "../services/assetCache";
+import { sharedRedis } from "../services/redisclient";
 
 // The worlds a WHERE on a name picks: MySQL compares text without regard to case, the other engines exactly.
 const sameName = (a: string, b: string) =>
@@ -22,6 +23,8 @@ function withWorldsLock<T>(action: () => Promise<T>): Promise<T> {
 }
 
 async function getRedisClient(): Promise<any | null> {
+  // The cache's own client, which comes back after an outage (services/redisclient.ts); Bun's singleton does not.
+  if (process.env.CACHE?.toLowerCase() === "redis") return sharedRedis();
   try {
     const mod = await import("bun");
     return (mod as any).redis;
@@ -95,8 +98,7 @@ const worlds = {
       if (!world) return null;
 
       // Use Redis HINCRBY for atomic cross-process counter updates. The Redis
-      // client is shared via the `bun.redis` singleton, so the async client
-      // assignment in RedisCacheService is not a problem here.
+      // client is the cache's shared one (CACHE=redis), the same RedisCacheService uses.
       const redisClient = await getRedisClient();
       if (redisClient) {
         try {

@@ -1,4 +1,6 @@
 import log from "../modules/logger";
+import { logNoIds, nextEntityId } from "../cluster/entityids";
+import { RemoteObjects } from "../cluster/mirrors";
 
 const SKELETON_TTL_MS = 15 * 60 * 1000;
 
@@ -16,13 +18,14 @@ export interface DeathSkeleton {
 
 const skeletonList = new Map<string, DeathSkeleton>();
 const despawnTimers = new Map<string, NodeJS.Timeout>();
+// Cluster mode: markers another node owns near the border. Shown here; their owner despawns them.
+const remoteSkeletons = new RemoteObjects<DeathSkeleton>();
 
-let skeletonIdCounter = 0;
 let onSpawn: ((skeleton: DeathSkeleton) => void) | null = null;
 let onDespawn: ((skeleton: DeathSkeleton) => void) | null = null;
 
 function generateId(): string {
-  return `skeleton_${++skeletonIdCounter}_${Date.now()}`;
+  return `skeleton_${nextEntityId()}`;
 }
 
 const skeletons = {
@@ -42,9 +45,18 @@ const skeletons = {
     if (typeof map !== "string" || map.length === 0) return null;
     if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
 
+    // No id to be had (the cluster's counter is unreachable): no marker, as for any other refused spawn.
+    let id: string;
+    try {
+      id = generateId();
+    } catch (error) {
+      logNoIds("skeletons", `Skeleton for ${username} not spawned: ${error}`);
+      return null;
+    }
+
     const now = Date.now();
     const skeleton: DeathSkeleton = {
-      id: generateId(),
+      id,
       username: username || "Unknown",
       map,
       layerId,
@@ -82,6 +94,41 @@ const skeletons = {
     return skeletonList.get(id);
   },
 
+  /** The markers this node owns. */
+  all(): IterableIterator<DeathSkeleton> {
+    return skeletonList.values();
+  },
+
+  addRemote(skeleton: DeathSkeleton): void {
+    remoteSkeletons.set(skeleton);
+  },
+
+  removeRemote(id: string): DeathSkeleton | null {
+    return remoteSkeletons.delete(id) ?? null;
+  },
+
+  /** Cluster mode, a block moving away: this node's marker `id` leaves it, with nothing shown and no hook fired. */
+  takeOwn(id: string): DeathSkeleton | null {
+    const skeleton = skeletonList.get(id);
+    if (!skeleton) return null;
+    const timer = despawnTimers.get(id);
+    if (timer) clearTimeout(timer);
+    despawnTimers.delete(id);
+    skeletonList.delete(id);
+    return skeleton;
+  },
+
+  /** Cluster mode: a marker of a block that moved here (or back), with the time it has left. As loot.adoptOwn. */
+  adoptOwn(skeleton: DeathSkeleton, now: number = Date.now()): "mirror" | "new" | null {
+    if (skeletonList.has(skeleton.id)) return null;
+    const known = remoteSkeletons.delete(skeleton.id) !== undefined;
+    const record: DeathSkeleton = { ...skeleton };
+    skeletonList.set(record.id, record);
+    const left = Math.min(SKELETON_TTL_MS, Math.max(0, record.expiresAt - now));
+    despawnTimers.set(record.id, setTimeout(() => { skeletons.despawn(record.id); }, left));
+    return known ? "mirror" : "new";
+  },
+
   /** Markers a viewer can see: same map, same layer (or layerless), in radius. */
   getInRadius(map: string, x: number, y: number, radius: number, layerId: string | null = null): DeathSkeleton[] {
     const result: DeathSkeleton[] = [];
@@ -104,6 +151,15 @@ const skeletons = {
     }
     for (const id of expired) {
       skeletons.despawn(id);
+    }
+    // Same checks for mirrored markers; an expired one is left for its owner to despawn.
+    for (const skeleton of remoteSkeletons.values()) {
+      if (skeleton.map !== map) continue;
+      if (skeleton.layerId !== null && layerId !== null && skeleton.layerId !== layerId) continue;
+      if (skeleton.expiresAt <= now) continue;
+      const dx = skeleton.x - x;
+      const dy = skeleton.y - y;
+      if (dx * dx + dy * dy <= r2) result.push(skeleton);
     }
     return result;
   },

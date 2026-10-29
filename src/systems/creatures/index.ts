@@ -1,13 +1,26 @@
 import AOI_CONFIG from "../../config/aoi.json";
+import { clusterBlocks, onBlocksChanged, reportCreaturesFrom, spawnsHere, usePeerDeathHandlers } from "../../cluster";
+import { blockAt } from "../../cluster/blocks";
+import { registerCreatureSlots } from "../../cluster/kinds/creatureparts";
+import { onApplyEffect, sendEffect, type EffectResult } from "../../cluster/effects";
+import { creatureHandoff, type CreatureHandoffDeps, type SerializedCreature } from "../../cluster/creaturehandoff";
+import { forwardTable } from "../../cluster/forwarding";
+import { ghosts, type GhostKind } from "../../cluster/ghosts";
+import { HANDOFFS_PER_TICK, handoffTarget } from "../../cluster/handoffwatch";
+import { onLinksAttached, type LinkContext } from "../../cluster/linkhooks";
+import { FLAG_MOVING, directionCode, directionName } from "../../cluster/linkproto";
+import { bareMap, entityById, mirrorOwner, mirrorsNearPoint, playerLayer } from "../../cluster/mirrors";
 import log from "../../modules/logger";
 import assetCache from "../../services/assetCache";
 import { getWorldMap } from "../../modules/worldmaps";
+import { readHeldList, streamSource } from "../npcStreaming";
 import { weaponProfile, type WeaponProfile } from "./combat";
-import layerManager from "../../services/layermanager";
+import layerManager, { blockOf } from "../../services/layermanager";
 import mapIndex from "../../services/mapindex";
 import playerCache from "../../services/playermanager";
 import spatialGrid from "../../services/spatialgrid";
 import { packetManager } from "../../socket/packet_manager";
+import { CREATURE_MOVE_MAX_ENTRIES } from "../../socket/creature_move_codec";
 import { Events, listener, setPlayerPvp } from "../events";
 import lootTable from "../lootTable";
 import { getCreatureEngineBridge } from "./bridge";
@@ -24,19 +37,24 @@ import {
   validateTemplate,
   type ValidationContext,
 } from "./editor";
-import { corpseLoot, handleKill, openCorpse, takeCorpseLoot, tapStateFor } from "./kill";
+import { corpseLoot, handleKill, openCorpse, setKnownTemplates, takeCorpseLoot, tapStateFor } from "./kill";
+import { setSpellLookup } from "../../cluster/playerhits";
+import type { BagRoom } from "../../cluster/remoteitems";
 import { DEBUG_EVERY_TICKS, LAYER_SYNC_EVERY_TICKS, SYNC_EVERY_TICKS, TICK_MS, rng } from "./constants";
-import { CreatureCombatSystem, type CombatText, type PlayerUnit } from "./engine";
+import { COMBAT_TEXT_KINDS, CreatureCombatSystem, type CombatText, type ForwardedHit, type PlayerUnit } from "./engine";
 import { NavGridCache } from "./navgrid";
 import registry from "./registry";
 import repository, { CACHE_KEYS } from "./repository";
-import { CreatureSpawner, type SpawnerData } from "./spawner";
+import { CreatureSpawner, isOutOfCombat, type SpawnerData } from "./spawner";
 import { CreatureSync, type SyncPlayer } from "./sync";
-import { AIState, type CreatureAbility, type CreatureInstance, type CreaturePatrolPath, type CreatureSpawn, type CreatureSpawnPool, type CreatureTemplate } from "./types";
-import { aurasPayload } from "./auras";
+import { AIState, type CreatureAbility, type CreatureInstance, type CreatureMoveState, type CreaturePatrolPath, type CreatureSpawn, type CreatureSpawnPool, type CreatureTemplate } from "./types";
+import { auraStatePayload, aurasPayload, aurasState, createAuras, type AuraState, type CreatureAuras } from "./auras";
+import { ThreatTable, createCombatState } from "./threat";
 import { registerHostileEffectType, registerSpellEffect } from "../spelleffects";
 import { setCreatureZoneHandler } from "../groundaoe";
 import { getIconUrl, getNpcSpriteLayers, getSpriteUrl } from "../../modules/spriteSheetManager";
+// The writer of durable grants registers itself at load (Task 18). Kills and gathering park grants for it.
+import "../grantwriter";
 
 let templates = new Map<number, CreatureTemplate>();
 let patrolPaths = new Map<number, CreaturePatrolPath>();
@@ -93,7 +111,7 @@ function toPlayerUnit(id: string, p: any): PlayerUnit | null {
     id,
     username: p.username,
     map: normMap(p.location.map),
-    layerId: layerManager.getPlayerLayer(id),
+    layerId: playerLayer(id) ?? null,
     x: pos.x,
     y: pos.y,
     dir: pos.direction || "down",
@@ -135,14 +153,23 @@ export const sync = new CreatureSync({
   resolvePlayer,
   sendSpawn: (wt, snapshots) => send(wt, packetManager.creatureSpawn(snapshots)),
   sendDespawn: (wt, ids) => send(wt, packetManager.creatureDespawn(ids)),
-  sendMoves: (wt, entries, reliable) =>
-    (reliable ? send : sendBestEffort)(wt, packetManager.creatureMove(entries)),
+  sendMoves: (wt, _entries, reliable, json) =>
+    (reliable ? send : sendBestEffort)(wt, packetManager.creatureMoveJson(json)),
+  // Moving creatures ride as binary datagrams; the transport splits what does not fit one (TransportConnection.sendBestEffort).
+  sendBinaryMoves: (wt, records) => {
+    for (let at = 0; at < records.length; at += CREATURE_MOVE_MAX_ENTRIES) {
+      sendBestEffort(wt, packetManager.creatureMoveBinary(records.slice(at, at + CREATURE_MOVE_MAX_ENTRIES)));
+    }
+  },
   decorate: (snapshot, creature, playerId) => {
     snapshot.spriteLayers = spriteLayersByTemplate.get(creature.templateId) ?? null;
-    snapshot.auras = aurasPayload(creature.auras, Date.now(), spellIcon);
+    snapshot.auras = creature.remote
+      ? auraStatePayload((creature.mirrorAuras ?? []) as AuraState[], Date.now(), spellIcon)
+      : aurasPayload(creature.auras, Date.now(), spellIcon);
     snapshot.tap = tapStateFor(creature, playerId);
     const username = playerCache.get(playerId)?.username;
-    snapshot.lootable = creature.state === AIState.DEAD && !!username && corpseLoot.canLoot(creature.id, username);
+    // A mirror's corpse loot stays with its owner (phase 5).
+    snapshot.lootable = !creature.remote && creature.state === AIState.DEAD && !!username && corpseLoot.canLoot(creature.id, username);
   },
 });
 
@@ -152,14 +179,58 @@ let linkGroups = new Map<number, number[]>();
 let spriteLayersByTemplate = new Map<number, unknown>();
 
 function sendTapStates(creature: CreatureInstance): void {
+  // A mirror's tapper is on its owner node, so its party is not known here: until phase 5 its party members see "other".
   for (const playerId of sync.viewersOf(creature.id)) {
     const player = playerCache.get(playerId);
     if (player?.wt) send(player.wt, packetManager.creatureTap({ id: creature.id, tap: tapStateFor(creature, playerId) }));
   }
 }
 
+/**
+ * Sends to the creature's viewers here and, in cluster mode, to its mirrors' viewers on neighbouring nodes. Takes the
+ * id (the combat-text callback has no instance); relay is given the registry's number, as the kind's candidates are.
+ */
+function toViewers(id: number, packets: any[], bestEffort = false): void {
+  sync.sendToViewers(id, (wt) => (bestEffort ? sendBestEffort : send)(wt, packets));
+  if (!registry.get(id)?.remote) ghosts.relay("creature", id, packets, bestEffort);
+}
+
 /** Creatures whose health changed this tick; flushed once per tick. */
 const healthDirty = new Set<number>();
+
+/**
+ * What a creature here does to a player another node owns: sent to that node, which applies it (spec §4).
+ * `map` and `layerId` are the creature's own, so the target's node can check they are the player's.
+ */
+type CreatureOnPlayer = {
+  kind: "damage" | "daze" | "spell";
+  creatureId: number;
+  creatureName: string;
+  amount?: number;
+  isCrit?: boolean;
+  spell?: SpellData;
+  map?: string;
+  layerId?: string | null;
+};
+
+/** A player's threat change, sent to the nodes whose creatures fight that player across a border. */
+type ThreatOp =
+  | { kind: "feign"; playerId: string; level: number }
+  | { kind: "modify"; playerId: string; percent: number }
+  | { kind: "heal"; casterId: string; targetId: string; amount: number };
+
+/** The attacking creature is passed in, not looked up: a spell that lands after a projectile flight may outlive it. */
+function onMirroredPlayer(playerId: string, body: CreatureOnPlayer, creature?: CreatureInstance): void {
+  const owner = mirrorOwner(playerId);
+  if (!owner) return;
+  const sent: CreatureOnPlayer = creature ? { ...body, map: bareMap(creature.map), layerId: creature.layerId } : body;
+  void sendEffect(owner, { op: "creature_on_player", target: playerId, body: sent })
+    .then((result) => {
+      // The player died on its owner. No PLAYER_DEATH for a mirror is heard here, so it leaves the threat tables now.
+      if (result?.outcome === "killed") combat.removeUnit(playerId, Date.now());
+    })
+    .catch(() => {});
+}
 
 export const combat = new CreatureCombatSystem(registry, {
   rng,
@@ -167,7 +238,9 @@ export const combat = new CreatureCombatSystem(registry, {
   spawn: (id) => spawner.getSpawn(id),
   patrol: (spawn) => (spawn?.patrol_path_id != null ? patrolPaths.get(spawn.patrol_path_id) : undefined),
   grid: (map) => navGrids.get(map),
-  getPlayer: (id) => toPlayerUnit(id, playerCache.get(id)),
+  // A player of a neighbouring node, mirrored here, can be aggroed and fought like a local one; what a creature
+  // does to it is sent to its owner (onMirroredPlayer).
+  getPlayer: (id) => toPlayerUnit(id, entityById(id)),
   playersNear: (map, x, y, radius) => {
     // aoi.ts only maintains the spatial grid when USE_SPATIAL_GRID is on, and
     // aoi.json is never regenerated once it exists, so an older config can have
@@ -177,21 +250,37 @@ export const combat = new CreatureCombatSystem(registry, {
       ? spatialGrid.getPlayersInRadius(x, y, radius + GRID_LAG_PAD_PX, map)
       : mapIndex.getPlayersOnMap(map);
     const out: PlayerUnit[] = [];
+    // The grid holds mirrored players too (phase 4); the map index holds only this node's, so with no grid
+    // the mirrors come from their own store.
     for (const id of ids) {
-      const unit = toPlayerUnit(id, playerCache.get(id));
+      const unit = toPlayerUnit(id, entityById(id));
       if (unit && unit.map === map && Math.hypot(unit.x - x, unit.y - y) <= radius) out.push(unit);
+    }
+    if (!AOI_CONFIG.USE_SPATIAL_GRID) {
+      for (const mirror of mirrorsNearPoint(map, x, y, radius)) {
+        const unit = toPlayerUnit(String(mirror.id), mirror);
+        if (unit) out.push(unit);
+      }
     }
     return out;
   },
   damagePlayer: (creature, playerId, amount, outcome) => {
+    const name = templates.get(creature.templateId)?.name ?? "Creature";
+    if (!playerCache.get(playerId)) {
+      onMirroredPlayer(playerId, { kind: "damage", creatureId: creature.id, creatureName: name, amount, isCrit: outcome === "crit" || outcome === "crush" }, creature);
+      return;
+    }
     const player = playerCache.get(playerId);
     const bridge = getCreatureEngineBridge();
     if (!player || !bridge) return;
-    const name = templates.get(creature.templateId)?.name ?? "Creature";
     Promise.resolve(bridge.damagePlayer(player, amount, { isCrit: outcome === "crit" || outcome === "crush", creatureId: creature.id, creatureName: name }))
       .catch((error) => log.error(`Creature damage to player failed: ${error}`));
   },
-  dazePlayer: (playerId) => {
+  dazePlayer: (playerId, creature) => {
+    if (!playerCache.get(playerId)) {
+      onMirroredPlayer(playerId, { kind: "daze", creatureId: creature.id, creatureName: templates.get(creature.templateId)?.name ?? "Creature" }, creature);
+      return;
+    }
     const player = playerCache.get(playerId);
     const bridge = getCreatureEngineBridge();
     if (player && bridge) Promise.resolve(bridge.dazePlayer(player)).catch(() => {});
@@ -209,11 +298,11 @@ export const combat = new CreatureCombatSystem(registry, {
       state: creature.state,
       victimId: creature.combat.threat.victimId,
     });
-    sync.sendToViewers(creature.id, (wt) => send(wt, packets));
+    toViewers(creature.id, packets);
   },
   onCombatText: (text: CombatText) => {
     const packets = packetManager.creatureCombatText(text);
-    sync.sendToViewers(text.creatureId, (wt) => sendBestEffort(wt, packets));
+    toViewers(text.creatureId, packets, true);
   },
   onDied: (creature, killerId) => {
     const template = templates.get(creature.templateId);
@@ -230,9 +319,26 @@ export const combat = new CreatureCombatSystem(registry, {
     if (player?.wt) send(player.wt, packetManager.creatureAttackStopped(creatureId));
   },
   onTapChanged: (creature) => sendTapStates(creature),
+  forwardHit: (creature, hit) => {
+    const owner = ghosts.ownerOf("creature", creature.id);
+    if (!owner) return;
+    void sendEffect(owner, { op: "creature_hit", target: creature.id, body: hit })
+      .then((result) => {
+        // A swing the owner turned away (or never heard) would be sent again every swing: the auto-attack ends.
+        // A spell or a zone tick is not an auto-attack, and a refusal of one changes nothing here.
+        if (hit.spell || combat.autoAttackTarget(hit.attackerId) !== creature.id) return;
+        const gone = !result || result.outcome === "missing" || (result.outcome === "refused" && ["layer", "attacker", "dead"].includes(String(result.reason)));
+        if (gone) combat.stopAutoAttack(hit.attackerId, true);
+      })
+      .catch(() => {});
+  },
   spell: (id) => spellsById.get(id),
   abilities: (templateId) => abilitiesByTemplate.get(templateId) ?? NO_ABILITIES,
   applySpellEffectsToPlayer: (creature, playerId, spell) => {
+    if (!playerCache.get(playerId)) {
+      onMirroredPlayer(playerId, { kind: "spell", creatureId: creature.id, creatureName: templates.get(creature.templateId)?.name ?? "Creature", spell }, creature);
+      return;
+    }
     const player = playerCache.get(playerId);
     const bridge = getCreatureEngineBridge();
     if (!player || !bridge) return;
@@ -258,7 +364,7 @@ export const combat = new CreatureCombatSystem(registry, {
       durationMs: cast.endsAt - cast.startedAt,
       targetId: cast.target.kind === "creature" ? `creature:${cast.target.id}` : cast.target.id,
     });
-    sync.sendToViewers(creature.id, (wt) => send(wt, packets));
+    toViewers(creature.id, packets);
   },
   onSpellLaunch: (creature, spell, target) => {
     const packets = packetManager.projectile({
@@ -270,15 +376,15 @@ export const combat = new CreatureCombatSystem(registry, {
       creature: true,
       particles: spellParticles(spell),
     });
-    if (packets.length) sync.sendToViewers(creature.id, (wt) => sendBestEffort(wt, packets));
+    if (packets.length) toViewers(creature.id, packets, true);
   },
   onCastEnd: (creature, spell, result) => {
     const packets = packetManager.creatureCastEnd({ id: creature.id, spell, result });
-    sync.sendToViewers(creature.id, (wt) => send(wt, packets));
+    toViewers(creature.id, packets);
   },
   onAurasChanged: (creature) => {
     const packets = packetManager.creatureAuras({ id: creature.id, auras: aurasPayload(creature.auras, Date.now(), spellIcon) });
-    sync.sendToViewers(creature.id, (wt) => send(wt, packets));
+    toViewers(creature.id, packets);
   },
   linkedCreatures: (creature) => {
     const spawn = spawner.getSpawn(creature.spawnId);
@@ -304,24 +410,82 @@ export const spawner = new CreatureSpawner(registry, {
     healthDirty.delete(instance.id);
     sync.onDespawn(instance);
   },
+  // A creature whose spawn slot is on another node left the world here: its home frees and respawns the slot
+  // (CREATURE_DIED, cluster/creaturehandoff.ts). Only a creature handed over here is foreign, so only cluster mode calls it.
+  onForeignGone: (instance, home, opts) => creatureHandoff.died(instance.id, instance.templateId, home, opts),
+  playersInBlock: (layerId, x, y) => layerManager.countInBlock(layerId, blockOf(x, y)),
+  spawnsHere,
 });
+
+// Cluster mode: spawn points skipped for another node's block are looked at again when the block table changes,
+// and the load report counts the creatures. Outside cluster mode neither is ever called.
+onBlocksChanged(() => spawner.reviewOwnership(Date.now()));
+/** The ids of the awake creatures: observed by a player, or in combat. The ones tickCreatures ticks. */
+function awakeIds(): Set<number> {
+  const ids = new Set<number>(sync.observedIds());
+  for (const id of combat.activeIds()) ids.add(id);
+  return ids;
+}
+
+/**
+ * The creatures the load report counts: this node's own awake ones (observed, or in combat: the ones tickCreatures
+ * ticks), never mirrors. A dormant creature costs no tick, and it stays on the node when its block moves away, so
+ * counting it made a node's load answer to nothing the rebalancer did (spec §2: "active creatures").
+ */
+export function* reportedCreatures(): IterableIterator<CreatureInstance> {
+  for (const id of awakeIds()) {
+    const creature = registry.get(id);
+    if (creature && !creature.remote) yield creature;
+  }
+}
+/** Every live creature of this node's, awake or not: what a harness checks that none was doubled or lost. */
+export function reportedCreatureTotal(): number {
+  let total = 0;
+  for (const creature of registry.all()) if (!creature.remote && creature.state !== AIState.DEAD) total++;
+  return total;
+}
+reportCreaturesFrom(reportedCreatures, reportedCreatureTotal);
 
 function flushHealth(): void {
   for (const id of healthDirty) {
     const c = registry.get(id);
     if (!c) continue;
     const packets = packetManager.creatureHealth({ id: c.id, health: c.health, maxHealth: c.maxHealth });
-    sync.sendToViewers(id, (wt) => send(wt, packets));
+    toViewers(id, packets);
   }
   healthDirty.clear();
 }
 
+// The spell a player_hit from a neighbouring node names is looked up here, as a creature's spell is: in this
+// node's own map, which refreshSpells keeps current, so no hit reads the asset cache.
+setSpellLookup((id) => spellsById.get(id));
+
+/** The abilities of each template, as the cache holds them (a creature's spells are looked up here). */
+export async function refreshAbilities(): Promise<void> {
+  const aList = ((await assetCache.get(CACHE_KEYS.abilities)) || []) as CreatureAbility[];
+  abilitiesByTemplate = new Map();
+  for (const a of aList) {
+    const list = abilitiesByTemplate.get(a.template_id) ?? [];
+    list.push(a);
+    abilitiesByTemplate.set(a.template_id, list);
+  }
+}
+
+/** The lists refreshSpells last built its maps from. */
+let lastSpellList: SpellData[] | null = null;
+let lastParticleList: Array<Record<string, unknown>> | null = null;
+
 /** Spells are editable at runtime; keep a synchronous id lookup for the tick loop. */
-async function refreshSpells(): Promise<void> {
-  const list = ((await assetCache.get("spells")) || []) as SpellData[];
+export async function refreshSpells(): Promise<void> {
+  // The held lists (npcStreaming): read only here, and the same arrays come back until they change, so a second
+  // with nothing changed costs no Redis read and no rebuild. With CACHE=memory the lists are rebuilt as always.
+  const list = ((await readHeldList<SpellData>("spells")) || []) as SpellData[];
+  const particles = ((await readHeldList<Record<string, unknown>>("particles")) || []) as Array<Record<string, unknown>>;
+  if (streamSource.redis() && list === lastSpellList && particles === lastParticleList) return;
+  lastSpellList = list;
+  lastParticleList = particles;
   spellsById = new Map(list.filter((s) => s?.id != null).map((s) => [Number(s.id), s]));
   spellIcons = new Map(list.filter((s) => s?.name).map((s) => [s.name, getSpriteUrl((s as any).icon ?? null)]));
-  const particles = ((await assetCache.get("particles")) || []) as Array<Record<string, unknown>>;
   particlesByName = new Map(particles.filter((p) => p?.name).map((p) => [String(p.name).toLowerCase(), p]));
 }
 
@@ -354,6 +518,8 @@ async function buildSpawnerData(): Promise<SpawnerData> {
   const pList = ((await assetCache.get(CACHE_KEYS.pools)) || []) as CreatureSpawnPool[];
   const ppList = ((await assetCache.get(CACHE_KEYS.patrolPaths)) || []) as CreaturePatrolPath[];
   templates = new Map(tList.map((t) => [t.id, t]));
+  // Rewards and grants from neighbouring nodes are checked against these, with no read of the asset cache.
+  setKnownTemplates(templates);
   spriteLayersByTemplate = new Map(
     tList.map((t) => [
       t.id,
@@ -375,13 +541,7 @@ async function buildSpawnerData(): Promise<SpawnerData> {
     ])
   );
   patrolPaths = new Map(ppList.map((p) => [p.id, p]));
-  const aList = ((await assetCache.get(CACHE_KEYS.abilities)) || []) as CreatureAbility[];
-  abilitiesByTemplate = new Map();
-  for (const a of aList) {
-    const list = abilitiesByTemplate.get(a.template_id) ?? [];
-    list.push(a);
-    abilitiesByTemplate.set(a.template_id, list);
-  }
+  await refreshAbilities();
   await refreshSpells();
   await refreshItems();
   linkGroups = new Map();
@@ -415,7 +575,7 @@ async function refreshNavGrids(spawns: Iterable<CreatureSpawn>): Promise<void> {
   const creatureMaps = new Set(maps);
   for (const map of extraNavMaps) maps.add(map);
   if (maps.size === 0) return;
-  const props = ((await assetCache.get("mapProperties")) || []) as any[];
+  const props = ((await readHeldList("mapProperties")) || []) as any[]; // held list: read only
   for (const map of maps) {
     const prop = props.find((m) => normMap(m?.name) === map);
     // A world (modules/worldmaps.ts) has a collision bitset, not run lengths: its grid searches inside a window
@@ -450,7 +610,7 @@ export async function reload(): Promise<void> {
   await refreshNavGrids(spawnCache);
   spawner.load(data, Date.now());
   spawner.setLayers(currentLayers(), Date.now());
-  log.info(`Creatures reloaded: ${templates.size} template(s), ${registry.size} live`);
+  log.info(`Creatures reloaded: ${templates.size} template(s), ${localCreatureCount()} live`);
 }
 
 export interface CreatureDataChange {
@@ -458,9 +618,6 @@ export interface CreatureDataChange {
   spawnIds?: number[];
   patrolPathIds?: number[];
 }
-
-const isOutOfCombat = (c: CreatureInstance) =>
-  c.state === AIState.IDLE || c.state === AIState.WANDER || c.state === AIState.PATROL;
 
 /**
  * Apply an editor change: reload data, spawn new spawn points, remove deleted
@@ -480,6 +637,7 @@ export async function applyDataChange(change: CreatureDataChange): Promise<void>
   const pathIds = new Set(change.patrolPathIds ?? []);
   let refreshed = 0;
   for (const creature of [...registry.all()]) {
+    if (creature.remote) continue;
     const spawn = spawner.getSpawn(creature.spawnId);
     const affected =
       templateIds.has(creature.templateId) ||
@@ -490,7 +648,7 @@ export async function applyDataChange(change: CreatureDataChange): Promise<void>
     if (isOutOfCombat(creature)) spawner.despawn(creature.id, now, { delayMs: 0 });
     else creature.pendingRefresh = true;
   }
-  log.info(`Creature data updated: ${refreshed} creature(s) refreshed, ${registry.size} live`);
+  log.info(`Creature data updated: ${refreshed} creature(s) refreshed, ${localCreatureCount()} live`);
 }
 
 // ------------------------------------------------------------ tick profiling
@@ -543,15 +701,19 @@ export function stats(): Record<string, unknown> {
   const samples = Array.from(tickSamples.slice(0, tickSampleCount)).sort((a, b) => a - b);
   const observedIds = [...sync.observedIds()];
   const activeIds = [...combat.activeIds()];
-  const awake = new Set<number>([...observedIds, ...activeIds]).size;
+  // Mirrors of other nodes' creatures are not this node's: they are counted apart.
+  let awake = 0;
+  for (const id of awakeIds()) if (!registry.get(id)?.remote) awake++;
+  const local = localCreatureCount();
   return {
-    creatures: registry.size,
+    creatures: local,
+    mirrors: mirrorCount,
     // Dormant creatures are skipped entirely: nobody can see them and they are not fighting.
     awake,
-    dormant: Math.max(0, registry.size - awake),
-    observed: observedIds.length,
+    dormant: Math.max(0, local - awake),
+    observed: observedIds.filter((id) => !registry.get(id)?.remote).length,
     inCombat: activeIds.length,
-    maps: [...registry.mapsWithCreatures()].length,
+    maps: mirrorCount === 0 ? [...registry.mapsWithCreatures()].length : localMaps().length,
     templates: templates.size,
     tick: {
       ms: TICK_MS,
@@ -593,16 +755,16 @@ export function resetStats(): void {
   statsSince = Date.now();
 }
 
-function tickCreatures(now: number): void {
+/** One creature tick. Exported for the tests, which run it without the global FIXED_UPDATE event. */
+export function tickCreatures(now: number): void {
   // Creatures that someone can see, plus anything mid-fight/evade/flee (which
   // must finish even if every observer walked away).
-  const ids = new Set<number>(sync.observedIds());
-  for (const id of combat.activeIds()) ids.add(id);
+  const ids = awakeIds();
 
   const ticked: CreatureInstance[] = [];
   for (const id of ids) {
     const creature = registry.get(id);
-    if (!creature) continue;
+    if (!creature || creature.remote) continue;
     if (creature.state === AIState.DEAD) {
       if (now >= creature.combat.corpseUntil) spawner.despawn(creature.id, now);
       continue;
@@ -615,14 +777,54 @@ function tickCreatures(now: number): void {
     ticked.push(creature);
   }
   tickedCreatures += ticked.length;
+  // Cluster mode (cells phase 6): a creature that walked into another node's block is handed to that node, at most
+  // HANDOFFS_PER_TICK a tick. `ticked` holds this node's own creatures only at this point. handoffCtx is null
+  // outside cluster mode, so this never runs there.
+  if (handoffCtx) watchHandoffs(ticked, handoffCtx);
+  if (handoffCtx && foreignSweepDue(now)) sweepForeign(now, handoffCtx);
+  if (movedMirrors.size > 0) {
+    for (const mirror of movedMirrors) ticked.push(mirror);
+    movedMirrors.clear();
+  }
   combat.tickPlayerAttacks(now);
   sync.flushMoves(ticked);
   flushHealth();
 }
 
+/** How often the foreign creatures are offered to the handoff watch. */
+export const FOREIGN_SWEEP_MS = 1_000;
+let nextForeignSweepAt = 0;
+
+/** Due once a second; a clock stepped back by more than a period starts a sweep at once, not after the step. */
+function foreignSweepDue(now: number): boolean {
+  return now >= nextForeignSweepAt || now < nextForeignSweepAt - FOREIGN_SWEEP_MS;
+}
+
+/**
+ * Cluster mode: a block that moved out leaves its creatures here, foreign (spawner.exportSlots), for the handoff watch
+ * to move. The watch sees only the creatures ticked, and one nobody observes and nobody fights is never ticked, so it
+ * would stay live here for good. Once a second the foreign creatures go through the same watch (its cap, its
+ * cooldown, its isUp check). One that was ticked this tick may be offered twice: handOff sets creature.handoff before
+ * its first await, and the watch skips such a creature, so the second offer starts nothing. The spawner's foreign set
+ * is the pending set: exportSlots fills it, dropForeign and despawn empty it, and a creature whose target is down
+ * stays in it for the next pass.
+ */
+function sweepForeign(now: number, ctx: LinkContext): void {
+  nextForeignSweepAt = now + FOREIGN_SWEEP_MS;
+  if (spawner.foreignCount() === 0) return;
+  function* foreign(): IterableIterator<CreatureInstance> {
+    for (const id of spawner.foreignIds()) {
+      const creature = registry.get(id);
+      if (creature && !creature.remote) yield creature;
+    }
+  }
+  watchHandoffs(foreign(), ctx);
+}
+
 /** Corpses nobody can see still need to despawn so their spawn point respawns. */
 function sweepUnobservedCorpses(now: number): void {
   for (const creature of registry.all()) {
+    if (creature.remote) continue;
     if (creature.state === AIState.DEAD && now >= creature.combat.corpseUntil && !sync.isObserved(creature.id)) {
       spawner.despawn(creature.id, now);
     }
@@ -634,6 +836,7 @@ function sweepUnobservedCorpses(now: number): void {
 /** Validate and start auto-attacking a creature. Returns an error reason or null. */
 export function startAutoAttack(player: any, creatureId: number): string | null {
   if (!player?.id) return "invalid_player";
+  // A mirror may be auto-attacked: each swing is rolled here and sent to its owner.
   return combat.startAutoAttack(player.id, creatureId, Date.now());
 }
 
@@ -651,6 +854,7 @@ export function getTemplate(id: number): CreatureTemplate | undefined {
 
 /** Same map and layer, and alive: the creature can be targeted by this player. */
 export function isTargetableBy(player: any, creature: CreatureInstance): boolean {
+  // A mirror is targetable: what is done to it is sent to its owner (spec §4).
   if (!player?.location || creature.state === AIState.DEAD) return false;
   // GM stealth is meant to be non-interactive: an invisible admin cannot be
   // seen or hit, so they cannot attack, cast on or tab-target creatures either.
@@ -661,11 +865,17 @@ export function isTargetableBy(player: any, creature: CreatureInstance): boolean
 
 /** Tile line of sight between a player and a creature (true when the map has no grid). */
 export function openCorpseFor(player: any, creatureId: number) {
-  return openCorpse(player, registry.get(creatureId));
+  return openCorpse(player, localCreature(creatureId));
 }
 
-export function takeCorpseLootFor(player: any, creatureId: number, indices: number[] | null) {
-  return takeCorpseLoot(player, registry.get(creatureId), indices);
+export function takeCorpseLootFor(player: any, creatureId: number, indices: number[] | null, room?: BagRoom) {
+  return takeCorpseLoot(player, localCreature(creatureId), indices, room);
+}
+
+/** A creature this node owns; a mirror's corpse is its owner's to loot (phase 5). */
+function localCreature(id: number): CreatureInstance | undefined {
+  const creature = registry.get(id);
+  return creature?.remote ? undefined : creature;
 }
 
 /** Living, targetable creatures within `radius` of a point, for AoE splash. */
@@ -707,14 +917,143 @@ function registerPlayerThreatEffects(): void {
   registerSpellEffect("taunt", () => {});
   registerSpellEffect("feign_death", ({ caster }) => {
     if (!caster?.id || !caster.stats) return;
-    const resisted = combat.feignDeath(caster.id, Number(caster.stats.level) || 1, Date.now());
+    const level = Number(caster.stats.level) || 1;
+    const resisted = combat.feignDeath(caster.id, level, Date.now());
     if (resisted > 0 && caster.wt) send(caster.wt, packetManager.notify({ message: "Feign Death was resisted." }));
+    // Creatures across a border drop the caster on their own nodes; one notice is enough.
+    void forwardThreat(caster, { kind: "feign", playerId: caster.id, level }).then((results) => {
+      if (resisted === 0 && caster.wt && results.some((r) => Number(r?.reason) > 0)) send(caster.wt, packetManager.notify({ message: "Feign Death was resisted." }));
+    });
   });
   registerSpellEffect("threat", ({ caster, target, effect }) => {
     if (!caster?.id || !caster.stats || target?.id !== caster.id) return;
     combat.modifyThreatEverywhere(caster.id, Number(effect.value) || 0);
+    void forwardThreat(caster, { kind: "modify", playerId: caster.id, percent: Number(effect.value) || 0 });
   });
 }
+
+/** How far from a player a creature fighting them may be: its threat changes go to the owners of mirrors in it. */
+const THREAT_FORWARD_RADIUS_PX = (AOI_CONFIG as any).DEFAULT_RADIUS || 1000;
+
+/**
+ * Sends a player's threat change to every node that owns a mirrored creature in combat near the player.
+ * Each owner applies it to its own creatures; this node already applied it to its own.
+ */
+function forwardThreat(player: any, op: ThreatOp): Promise<Array<EffectResult | null>> {
+  const pos = player?.location?.position;
+  if (player?.remote || !pos || ghosts.mirrorCount() === 0) return Promise.resolve([]);
+  const owners = new Set<string>();
+  for (const c of registry.queryRadius(normMap(player.location.map), pos.x, pos.y, THREAT_FORWARD_RADIUS_PX)) {
+    if (!c.remote || c.state !== AIState.COMBAT) continue;
+    const owner = ghosts.ownerOf("creature", c.id);
+    if (owner) owners.add(owner);
+  }
+  const target = op.kind === "heal" ? op.targetId : op.playerId;
+  return Promise.all([...owners].map((owner) => sendEffect(owner, { op: "creature_threat", target, body: op })));
+}
+
+// Actions across a border (spec §4), run here for the node that holds the mirror. They are reached only
+// through the links, so never with the cluster off.
+
+/** The range of a threat spell's value (spelleditor.ts, the "threat" effect): -100 clears the caster's threat, 1000 is the most it adds. */
+const THREAT_PERCENT_MIN = -100;
+const THREAT_PERCENT_MAX = 1000;
+
+/** The most a threat multiplier is held to: spells and swings all use 1 (damageCreature's default), so 10 leaves room for tuning. */
+const MAX_THREAT_MULTIPLIER = 10;
+/** The ceiling of a player's stat or a heal (playereditor.ts VALUE_MAX): what a peer says of a caster's damage stat or a heal is held to it. */
+const STAT_CEILING = 1_000_000;
+
+/** `value` as a number from 0 to `most`: not a number is 0, and a negative one is 0 too. */
+function clampedTo(value: unknown, most: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.min(n, Number.isFinite(most) && most >= 0 ? most : 0);
+}
+
+/**
+ * The spell a mirrored creature of a neighbouring node casts at a player here: this node's copy of it, when it is one
+ * of the abilities of the creature's template. A spell that is not is not a spell that creature has.
+ */
+function creatureSpell(creatureId: number, sent: SpellData | undefined): SpellData | undefined {
+  const creature = registry.get(creatureId);
+  const spellId = Number(sent?.id);
+  if (!creature || !Number.isFinite(spellId)) return undefined;
+  return (abilitiesByTemplate.get(creature.templateId) ?? NO_ABILITIES).some((a) => a.spell_id === spellId) ? spellsById.get(spellId) : undefined;
+}
+
+// A player of the asking node hit a creature this node owns.
+onApplyEffect("creature_hit", (target, hit: ForwardedHit, from): EffectResult => {
+  const creature = registry.get(Number(target));
+  if (!creature || creature.remote) return { outcome: "missing" };
+  if (creature.state === AIState.DEAD) return { outcome: "refused", reason: "dead" };
+  // The attacker is a player of the asking node, mirrored here, on the creature's layer.
+  if (mirrorOwner(hit?.attackerId) !== from) return { outcome: "refused", reason: "attacker" };
+  if (creature.layerId !== null && creature.layerId !== (playerLayer(hit.attackerId) ?? null)) return { outcome: "refused", reason: "layer" };
+  // What the peer sent is not used as it is: the spell is this node's own, and the numbers are held to what play can reach.
+  const spell = hit.spell == null ? undefined : spellsById.get(Number(hit.spell.id));
+  if (hit.spell != null && !spell) return { outcome: "refused", reason: "spell" };
+  // The text of a hit is one of the known kinds, or none.
+  if (hit.textKind != null && !COMBAT_TEXT_KINDS.has(hit.textKind)) return { outcome: "refused", reason: "text" };
+  const clean: ForwardedHit = {
+    attackerId: hit.attackerId,
+    amount: clampedTo(hit.amount, creature.maxHealth),
+    threatMultiplier: clampedTo(hit.threatMultiplier, MAX_THREAT_MULTIPLIER),
+    textKind: hit.textKind,
+  };
+  if (hit.avoided) clean.avoided = true;
+  if (spell) {
+    clean.spell = spell;
+    clean.casterStat = clampedTo(hit.casterStat, STAT_CEILING);
+  }
+  const { landed, killed } = combat.applyForwardedHit(creature, clean, Date.now());
+  return { outcome: killed ? "killed" : landed ? "applied" : "refused" };
+});
+
+// A creature of the asking node attacked a player this node owns. Immunity is decided here, at the target.
+onApplyEffect("creature_on_player", async (target, body: CreatureOnPlayer, from): Promise<EffectResult> => {
+  const player = playerCache.get(String(target));
+  const bridge = getCreatureEngineBridge();
+  if (!player || !bridge) return { outcome: "missing" };
+  // Every kind, a daze too, names a creature the asker owns.
+  if (ghosts.ownerOf("creature", body?.creatureId) !== from) return { outcome: "refused", reason: "creature" };
+  // The player must still be where the creature is: same map, and the creature's layer or a shared one.
+  const sameMap = body.map !== undefined && bareMap(body.map) === bareMap(player.location?.map);
+  const layer = body.layerId ?? null;
+  if (!sameMap || (layer !== null && layer !== layerManager.getPlayerLayer(player.id))) return { outcome: "missing", reason: "layer" };
+  // A creature's spell is one of its template's abilities, and is this node's own copy of that spell.
+  let spell: SpellData | undefined;
+  if (body.kind === "spell") {
+    spell = creatureSpell(Number(body.creatureId), body.spell);
+    if (!spell) return { outcome: "refused", reason: "spell" };
+  }
+  if (player.isDead || player.isGhost || player.isStealth) return { outcome: "refused", reason: "immune" };
+  // The creature's node holds no threat entry for it here, so the player is put in combat as a local creature would.
+  if (body.kind !== "daze") {
+    setPlayerPvp(player, true);
+    player.last_attack = performance.now();
+  }
+  if (body.kind === "damage") {
+    // Not below 0: a negative amount would heal the player.
+    await bridge.damagePlayer(player, Math.max(0, Number(body.amount) || 0), { isCrit: !!body.isCrit, creatureId: body.creatureId, creatureName: body.creatureName });
+  } else if (body.kind === "daze") {
+    await bridge.dazePlayer(player);
+  } else if (spell) {
+    await bridge.applySpellEffects(player, { id: `creature:${body.creatureId}`, username: body.creatureName, isCreature: true }, spell);
+  }
+  return { outcome: player.isDead || Number(player.stats?.health ?? 1) <= 0 ? "killed" : "applied" };
+});
+
+// A player of the asking node changed their threat (feign death, a threat spell, a heal).
+onApplyEffect("creature_threat", (_target, op: ThreatOp, from): EffectResult => {
+  const playerId = op?.kind === "heal" ? op.casterId : op?.playerId;
+  if (!playerId || mirrorOwner(playerId) !== from) return { outcome: "refused", reason: "player" };
+  const now = Date.now();
+  if (op.kind === "feign") return { outcome: "applied", reason: String(combat.feignDeath(op.playerId, Number(op.level) || 1, now)) };
+  if (op.kind === "modify") combat.modifyThreatEverywhere(op.playerId, Math.max(THREAT_PERCENT_MIN, Math.min(THREAT_PERCENT_MAX, Number(op.percent) || 0)));
+  else combat.onPlayerHealed(op.casterId, op.targetId, clampedTo(op.amount, STAT_CEILING), now);
+  return { outcome: "applied" };
+});
 
 
 // ----------------------------------------------------------------- editor
@@ -905,6 +1244,7 @@ async function handleEditorAction(player: any, data: any): Promise<EditorResult>
   const action = String(data?.action ?? "");
   const now = Date.now();
   const creature = data?.creatureId != null ? registry.get(Number(data.creatureId)) : undefined;
+  if (creature?.remote) return fail(["That creature is on another node."]);
 
   switch (action) {
     case "kill":
@@ -986,7 +1326,7 @@ export async function init(): Promise<void> {
   await refreshNavGrids(spawnCache);
   spawner.load(data, Date.now());
   spawner.setLayers(currentLayers(), Date.now());
-  log.success(`Creature system started: ${templates.size} template(s), ${registry.size} creature(s) spawned`);
+  log.success(`Creature system started: ${templates.size} template(s), ${localCreatureCount()} creature(s) spawned`);
 
   let tick = 0;
   listener.on(Events.FIXED_UPDATE, () => {
@@ -1038,10 +1378,8 @@ export async function init(): Promise<void> {
     for (const creature of registry.queryRadius(normMap(zone.mapName), zone.position.x, zone.position.y, zone.radius)) {
       if (creature.state === AIState.DEAD) continue;
       if (creature.layerId !== null && creature.layerId !== casterLayer) continue;
-      if (zone.damagePerTick > 0) {
-        const dealt = combat.damageCreature(creature, sourceId, zone.damagePerTick, now);
-        if (dealt > 0) combat.emitCombatText({ creatureId: creature.id, targetId: `creature:${creature.id}`, sourceId, kind: "spell", amount: dealt });
-      }
+      // A mirror inside the zone takes the tick on its owner, which shows the text.
+      if (zone.damagePerTick > 0) combat.damageCreature(creature, sourceId, zone.damagePerTick, now, 1, "spell");
       if (zone.spell && Array.isArray(zone.effects) && zone.effects.length > 0 && (creature.state as AIState) !== AIState.DEAD) {
         combat.applySpellToCreature(creature, sourceId, { ...zone.spell, effects: zone.effects }, now);
       }
@@ -1069,6 +1407,7 @@ export async function init(): Promise<void> {
   });
   // Party changes can flip who "owns" a tapped creature.
   listener.on(Events.PARTY_CHANGED, () => {
+    // Mirrors too: their tap state is shown from this node's own parties, and this only sends.
     for (const creature of registry.all()) {
       if (creature.combat.tapper && creature.state !== AIState.DEAD) sendTapStates(creature);
     }
@@ -1076,9 +1415,15 @@ export async function init(): Promise<void> {
   listener.on(Events.PLAYER_HEALED, (payload: any) => {
     const casterId = payload?.caster?.id;
     const targetId = payload?.target?.id;
-    if (casterId && targetId) combat.onPlayerHealed(casterId, targetId, Number(payload.amount) || 0, Date.now());
+    if (!casterId || !targetId) return;
+    const amount = Number(payload.amount) || 0;
+    combat.onPlayerHealed(casterId, targetId, amount, Date.now());
+    // Creatures across a border that fight the healed player take their share on their own nodes (split per node).
+    if (amount > 0) void forwardThreat(payload.target, { kind: "heal", casterId: String(casterId), targetId: String(targetId), amount });
   });
 }
+
+export { registry };
 
 export default {
   init,
@@ -1109,3 +1454,493 @@ export default {
   stats,
   resetStats,
 };
+
+// Cluster mode: creatures this node owns are mirrored to neighbouring nodes near a border, and their creatures are
+// mirrored here. A mirror sits in the shared registry with `remote: true` so the grid and CreatureSync show it to the
+// players here with no special case; every writer above skips it.
+
+/** Stands in for a mirror's path: CreatureSync only asks whether a creature is moving. */
+const MIRROR_MOVING: CreatureMoveState = { path: [], index: 0, speed: 0, stuckTicks: 0 };
+/** Mirrors moved since the last tick; tickCreatures flushes them with the local moves. */
+const movedMirrors = new Set<CreatureInstance>();
+/** Mirrors in the registry: the stats and log lines count this node's own creatures only. */
+let mirrorCount = 0;
+
+function localCreatureCount(): number {
+  return registry.size - mirrorCount;
+}
+
+function localMaps(): string[] {
+  const maps: string[] = [];
+  for (const map of registry.mapsWithCreatures()) {
+    for (const c of registry.onMap(map)) {
+      if (c.remote) continue;
+      maps.push(map);
+      break;
+    }
+  }
+  return maps;
+}
+
+function creatureShown(c: CreatureInstance) {
+  return {
+    health: c.health,
+    maxHealth: c.maxHealth,
+    state: c.state,
+    victimId: c.combat.threat.victimId ?? null,
+    tapper: c.combat.tapper,
+    casting: c.casting,
+    // Absolute expiries: the field changes when the auras do, not on every scan.
+    auras: aurasState(c.auras, Date.now()),
+  };
+}
+
+/**
+ * Copies the shown fields onto a mirror. A GHOST_STATE change set only names what changed (null clears a field);
+ * a GHOST_SPAWN sent again is the whole record, so a field it leaves out goes back to its default.
+ */
+function applyMirror(c: CreatureInstance, r: any, whole: boolean): void {
+  if (whole || "health" in r) c.health = Number(r.health) || 0;
+  if (whole || "maxHealth" in r) c.maxHealth = Number(r.maxHealth) || 0;
+  if (whole || "state" in r) c.state = r.state ?? AIState.IDLE;
+  if (whole || "casting" in r) c.casting = r.casting ?? null;
+  if (whole || "tapper" in r) c.combat.tapper = r.tapper ?? null;
+  if (whole || "auras" in r) c.mirrorAuras = Array.isArray(r.auras) ? r.auras : [];
+  if (whole || "victimId" in r) c.combat.threat.victimId = r.victimId ?? null;
+}
+
+/** Sends a mirror's shown state to its viewers here, after a full resend replaced it. */
+function resendMirror(c: CreatureInstance): void {
+  const auras = auraStatePayload((c.mirrorAuras ?? []) as AuraState[], Date.now(), spellIcon);
+  const packets = [
+    ...packetManager.creatureHealth({ id: c.id, health: c.health, maxHealth: c.maxHealth }),
+    ...packetManager.creatureState({ id: c.id, state: c.state, victimId: c.combat.threat.victimId ?? null }),
+    ...packetManager.creatureAuras({ id: c.id, auras }),
+  ];
+  sync.sendToViewers(c.id, (wt) => send(wt, packets));
+  sendTapStates(c);
+}
+
+/** Whether a spawn record from the wire has a creature's shape: its numbers are finite, and its map and layer are what a lookup takes. */
+function mirrorRecordOk(r: any): boolean {
+  const finite = (...values: unknown[]) => values.every((value) => typeof value === "number" && Number.isFinite(value));
+  return finite(r.id, r.templateId, r.x, r.y) && typeof r.map === "string" && (r.layerId == null || typeof r.layerId === "string");
+}
+
+function newMirror(r: any): CreatureInstance {
+  const dir = typeof r.dir === "string" ? r.dir : "down";
+  const instance: CreatureInstance = {
+    id: Number(r.id),
+    templateId: Number(r.templateId),
+    spawnId: Number(r.spawnId) || 0,
+    poolId: null,
+    map: r.map,
+    layerId: r.layerId ?? null,
+    x: r.x,
+    y: r.y,
+    dir,
+    homeX: r.x,
+    homeY: r.y,
+    level: Number(r.level) || 1,
+    health: 0,
+    maxHealth: 0,
+    state: AIState.IDLE,
+    spawnedAt: Date.now(),
+    move: r.moving ? MIRROR_MOVING : null,
+    waitUntil: Infinity,
+    patrolIndex: 0,
+    patrolForward: true,
+    sentX: r.x,
+    sentY: r.y,
+    sentDir: dir,
+    sentMoving: !!r.moving,
+    combat: createCombatState(),
+    auras: createAuras(),
+    casting: null,
+    abilityStates: new Map(),
+    remote: true,
+    mirrorAuras: [],
+  };
+  applyMirror(instance, r, true);
+  return instance;
+}
+
+function removeMirror(c: CreatureInstance): void {
+  movedMirrors.delete(c);
+  if (registry.remove(c.id)) mirrorCount--;
+  sync.onDespawn(c);
+}
+
+// ------------------------------------------------------------ handoff (cells phase 6)
+
+const finiteOr = (value: unknown, fallback: number): number => (typeof value === "number" && Number.isFinite(value) ? value : fallback);
+const AI_STATES: ReadonlySet<string> = new Set(Object.values(AIState));
+
+/**
+ * A live creature as it travels to another node (cluster/creaturehandoff.ts): every field, the threat table as JSON
+ * and the ability timers as entries. Its path and cast stay here (a casting creature is never handed off, and a path
+ * is planned again there). `remote`, `handoff` and `mirrorAuras` are this node's own bookkeeping.
+ */
+export function serializeCreature(c: CreatureInstance): SerializedCreature {
+  return {
+    id: c.id, templateId: c.templateId, spawnId: c.spawnId, poolId: c.poolId,
+    map: c.map, layerId: c.layerId, x: c.x, y: c.y, dir: c.dir, homeX: c.homeX, homeY: c.homeY,
+    level: c.level, health: c.health, maxHealth: c.maxHealth, state: c.state, spawnedAt: c.spawnedAt,
+    // Infinity is not JSON.
+    waitUntil: Number.isFinite(c.waitUntil) ? c.waitUntil : null,
+    patrolIndex: c.patrolIndex, patrolForward: c.patrolForward,
+    sentX: c.sentX, sentY: c.sentY, sentDir: c.sentDir, sentMoving: c.sentMoving,
+    combat: { ...c.combat, threat: c.combat.threat.toJSON(), tapper: c.combat.tapper ? { ...c.combat.tapper } : null },
+    pendingRefresh: !!c.pendingRefresh,
+    auras: { ...c.auras, dots: c.auras.dots.map((dot) => ({ ...dot })), slows: c.auras.slows.map((slow) => ({ ...slow })) },
+    abilityStates: [...c.abilityStates.entries()].map(([id, state]) => [id, { ...state }]),
+  };
+}
+
+/** The combat state of an arriving creature: a number, flag or id the record does not carry (or carries badly) keeps its fresh default. */
+function arrivedCombat(r: any): CreatureInstance["combat"] {
+  const base = createCombatState();
+  const into: Record<string, unknown> = base as any;
+  for (const [key, fallback] of Object.entries(base)) {
+    if (key === "threat" || key === "tapper") continue;
+    const value = r[key];
+    if (typeof fallback === "number") into[key] = finiteOr(value, fallback);
+    else if (typeof fallback === "boolean") into[key] = typeof value === "boolean" ? value : fallback;
+    else if (fallback === null && typeof value === "string") into[key] = value;
+  }
+  const tapper = r.tapper;
+  base.tapper = tapper && typeof tapper.playerId === "string" && typeof tapper.username === "string" ? { playerId: tapper.playerId, username: tapper.username } : null;
+  base.threat = ThreatTable.fromJSON(r.threat);
+  return base;
+}
+
+/** The auras of an arriving creature: only whole DoTs and slows are kept, so a bad entry cannot stall the tick. */
+function arrivedAuras(r: any): CreatureAuras {
+  const base = createAuras();
+  const into: Record<string, unknown> = base as any;
+  for (const [key, fallback] of Object.entries(base)) {
+    if (typeof fallback === "number") into[key] = finiteOr(r[key], fallback);
+    else if (typeof fallback === "string") into[key] = typeof r[key] === "string" ? r[key] : fallback;
+  }
+  const isNumbers = (e: any, ...keys: string[]) => !!e && typeof e === "object" && keys.every((key) => typeof e[key] === "number" && Number.isFinite(e[key]));
+  base.dots = (Array.isArray(r.dots) ? r.dots : [])
+    .filter((e: any) => isNumbers(e, "amountPerTick", "intervalMs", "expiresAt", "nextTickAt", "stacks", "maxStacks") && e.intervalMs > 0 && typeof e.id === "string" && typeof e.casterId === "string")
+    .map((e: any) => ({ ...e }));
+  base.slows = (Array.isArray(r.slows) ? r.slows : [])
+    .filter((e: any) => isNumbers(e, "pct", "expiresAt") && typeof e.id === "string")
+    .map((e: any) => ({ ...e }));
+  return base;
+}
+
+/**
+ * A creature handed over to this node becomes live here (cluster/creaturehandoff.ts). `home` is the node that owns
+ * its spawn slot; null when this node does. The mirror this node showed of it gives up its place with no despawn,
+ * so its viewers keep the entry; the creature is announced when there was no mirror, or when the mirror differs in
+ * map, layer or template (the client treats that as a new creature). False, with nothing changed, when a live copy
+ * is already here, the record is not a living creature of a known template, or the spawner refuses it. The caller
+ * (onCommit) logs the loss by name and the home respawns the slot.
+ */
+function arriveCreature(s: SerializedCreature, home: string | null): boolean {
+  const r: any = s;
+  if (!mirrorRecordOk(r) || !r.combat || typeof r.combat !== "object" || !r.auras || typeof r.auras !== "object") return false;
+  const existing = registry.get(Number(r.id));
+  if (existing && !existing.remote) {
+    log.warn(`Creature ${r.id} was handed over here, but it is already live here: the arrival is dropped`);
+    return false;
+  }
+  const refuse = (why: string): false => {
+    log.warn(`Creature ${r.id} handed over here was refused: ${why}`);
+    return false;
+  };
+  // A creature that cannot be fought, killed or shown is not made live: its loss is logged, and its home respawns it.
+  if (r.state === AIState.DEAD) return refuse("it is dead");
+  if (!templates.has(r.templateId)) return refuse(`template ${r.templateId} is not known here`);
+  const positive = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0;
+  if (!positive(r.health) || !positive(r.maxHealth)) return refuse("its health is not a positive number");
+  if (!Number.isInteger(r.level) || r.level < 1) return refuse("its level is not a positive integer");
+  if (!Number.isInteger(r.spawnId ?? 0) || (r.poolId != null && !Number.isInteger(r.poolId))) return refuse("its spawn or pool id is not an integer");
+  if (home === null) {
+    // Coming home: it must be the creature the away slot here holds, so a later despawn frees that very slot.
+    const slot = spawner.awaySlots().find((a) => a.instanceId === r.id);
+    if (slot && (slot.spawnId !== (r.spawnId ?? 0) || slot.layerId !== (r.layerId ?? null) || slot.poolId !== (r.poolId ?? null) || slot.templateId !== r.templateId)) {
+      return refuse("its spawn, layer, pool or template is not that of the away slot held for it");
+    }
+  }
+  const instance: CreatureInstance = {
+    id: Number(r.id),
+    templateId: Number(r.templateId),
+    spawnId: r.spawnId ?? 0,
+    poolId: r.poolId ?? null,
+    map: r.map,
+    layerId: r.layerId ?? null,
+    x: r.x,
+    y: r.y,
+    dir: typeof r.dir === "string" ? r.dir : "down",
+    homeX: finiteOr(r.homeX, r.x),
+    homeY: finiteOr(r.homeY, r.y),
+    level: r.level,
+    health: Math.min(r.health, r.maxHealth),
+    maxHealth: r.maxHealth,
+    state: AI_STATES.has(r.state) ? r.state : AIState.IDLE,
+    spawnedAt: finiteOr(r.spawnedAt, Date.now()),
+    // A path is planned again at the next AI tick, and a cast never travels.
+    move: null,
+    // Infinity travels as null: the AI acts at once.
+    waitUntil: finiteOr(r.waitUntil, 0),
+    patrolIndex: finiteOr(r.patrolIndex, 0),
+    patrolForward: r.patrolForward !== false,
+    sentX: finiteOr(r.sentX, r.x),
+    sentY: finiteOr(r.sentY, r.y),
+    sentDir: typeof r.sentDir === "string" ? r.sentDir : "down",
+    sentMoving: !!r.sentMoving,
+    combat: arrivedCombat(r.combat),
+    pendingRefresh: !!r.pendingRefresh,
+    auras: arrivedAuras(r.auras),
+    casting: null,
+    abilityStates: new Map(
+      (Array.isArray(r.abilityStates) ? r.abilityStates : [])
+        .filter((e: any) => Array.isArray(e) && Number.isFinite(e[0]) && e[1] && Number.isFinite(e[1].nextReadyAt))
+        .map((e: any) => [Number(e[0]), { ...e[1], fired: e[1].fired === true }]),
+    ),
+  };
+  // The spawner takes the mirror out of the registry itself and puts the creature in its place; it refuses before
+  // changing anything, so the mirror is left alone then. Only after it said yes is the mirror's bookkeeping settled.
+  if (!spawner.adopt(instance, home, { announce: !existing })) return false;
+  if (existing) {
+    movedMirrors.delete(existing);
+    mirrorCount--;
+    // The client keys a creature's sprite and layer on its template and map: a mirror that differed is a new creature to it.
+    if (existing.map !== instance.map || existing.layerId !== instance.layerId || existing.templateId !== instance.templateId) {
+      sync.onDespawn(existing);
+      sync.onSpawn(instance);
+    }
+  }
+  combat.adopt(instance);
+  // The creature is this node's own now: no ghost record of a mirror, and no forwarding of its calls.
+  ghosts.dropMirror("creature", instance.id);
+  forwardTable.forgetCreature(instance.id);
+  return true;
+}
+
+/**
+ * The creature was handed to `to` (cluster/creaturehandoff.ts): this node keeps it as a mirror of the copy there, in
+ * place, so its viewers here see no change. Its slot and its mirrors elsewhere were already handed over.
+ */
+function creatureToMirror(c: CreatureInstance, to: string): void {
+  if (c.remote) return;
+  // Together and first: the copy is a mirror from here on, and counted as one, whatever fails below.
+  c.remote = true;
+  mirrorCount++;
+  c.handoff = false;
+  combat.release(c);
+  healthDirty.delete(c.id);
+  c.mirrorAuras = aurasState(c.auras, Date.now());
+  c.move = c.move ? MIRROR_MOVING : null;
+  c.casting = null;
+  log.debug(`Creature ${c.id} is now held by ${to}; this node shows it as a mirror`);
+}
+
+/** Handoffs wait while the shared store is unreachable (spec §7). A context that carries no store counts as up. */
+export function handoffPaused(ctx: LinkContext): boolean {
+  return ctx.store?.isUp?.() === false;
+}
+
+/**
+ * Cluster mode: hands the creatures that walked into another node's block to that node, at most HANDOFFS_PER_TICK a
+ * call, and none while the store is down (the pause is read once). A tick calls it for the creatures it ticked, and
+ * once a second more for the foreign ones (sweepForeign), so a sweep tick can start up to twice that. `ticked` holds
+ * this node's own creatures. The
+ * checks here only spare a call: handOff makes them again.
+ */
+export function watchHandoffs(
+  ticked: Iterable<CreatureInstance>,
+  ctx: LinkContext,
+  start: (c: CreatureInstance, target: string) => Promise<unknown> = (c, target) => creatureHandoff.handOff(c, target),
+): void {
+  if (handoffPaused(ctx)) return;
+  let started = 0;
+  for (const creature of ticked) {
+    if (started >= HANDOFFS_PER_TICK) break;
+    if (creature.remote || creature.handoff || creature.casting || creature.state === AIState.DEAD) continue;
+    if (creatureHandoff.coolingDown(creature.id)) continue;
+    const target = handoffTarget(creature.map, creature.x, creature.y, ctx.ownerAt, ctx.self);
+    if (!target || !ctx.calls.isUp(target)) continue;
+    started++;
+    void start(creature, target).catch((error) => {
+      log.error(`The handoff of creature ${creature.id} to ${target} failed: ${error}`);
+    });
+  }
+}
+
+/** What the creature handoff (cluster/creaturehandoff.ts) needs of this node's creatures. */
+export function creatureHandoffDeps(ctx: LinkContext): CreatureHandoffDeps {
+  return {
+    calls: ctx.calls,
+    ghosts,
+    self: ctx.self,
+    ownerAt: ctx.ownerAt,
+    now: () => Date.now(),
+    creature: (id) => {
+      const c = registry.get(Number(id));
+      return c && !c.remote ? c : null;
+    },
+    serialize: serializeCreature,
+    arrive: arriveCreature,
+    toMirror: creatureToMirror,
+    // Taken before toMirror: a mirror has no snapshot.
+    ghostRecord: (c) => creatureGhostKind.snapshot(c.id),
+    templateKnown: (templateId) => templates.has(templateId),
+    templateName: (templateId) => templates.get(templateId)?.name ?? `creature template ${templateId}`,
+    ownsSlot: (c) => c.spawnId > 0 && spawner.getLiveInstanceId(c.spawnId, c.layerId) === c.id,
+    spawner,
+    despawnForeign: (id) => {
+      // Dropped first, so the despawn does not send a CREATURE_DIED for a slot the home no longer has.
+      spawner.dropForeign(id);
+      spawner.despawn(id, Date.now(), { respawn: false });
+    },
+    forward: (id, to) => forwardTable.addCreature(id, to),
+  };
+}
+
+export const creatureGhostKind: GhostKind = {
+  name: "creature",
+  // Map by map: a map whose every block is this node's is skipped, and with a band so are the cells outside it.
+  *candidates(band) {
+    for (const map of registry.mapsWithCreatures()) {
+      if (band && !band.hasBorder(map)) continue;
+      // The cells that pass are kept between scans, until the map's band is rebuilt (its token changes).
+      const creatures = band
+        ? registry.onBandCells(map, band.token(map), (left, top, size) => band.nearRect(map, left, top, left + size, top + size))
+        : registry.onMap(map);
+      for (const c of creatures) {
+        if (!c.remote) yield { id: c.id, num: c.id, map: c.map, layerId: c.layerId, x: c.x, y: c.y };
+      }
+    }
+  },
+  snapshot: (id) => {
+    const c = registry.get(Number(id));
+    if (!c || c.remote) return null;
+    return {
+      id: c.id, templateId: c.templateId, spawnId: c.spawnId, map: c.map, layerId: c.layerId, x: c.x, y: c.y,
+      dir: c.dir, moving: !!c.move, level: c.level, ...creatureShown(c),
+    };
+  },
+  state: (id) => {
+    const c = registry.get(Number(id));
+    return c && !c.remote ? creatureShown(c) : null;
+  },
+  // Creature movement reports through registry.onMoved (set below), so the tick reads only the creatures that moved.
+  dirtyMarks: true,
+  motion: (id) => {
+    const c = registry.get(Number(id));
+    return c && !c.remote ? { x: c.x, y: c.y, dir: directionCode(c.dir), flags: c.move ? FLAG_MOVING : 0 } : null;
+  },
+  spawn: (r) => {
+    // Refused with nothing stored, so a bad record cannot put a creature in a bad cell of the grid.
+    if (!mirrorRecordOk(r)) return false;
+    const existing = registry.get(Number(r.id));
+    // Never replace a creature this node owns; Ghosts then records nothing for the id.
+    if (existing && !existing.remote) return false;
+    if (existing) {
+      // The client keys a creature's sprite and layer on its template; a change there is a new creature to it.
+      if (existing.map !== r.map || existing.layerId !== (r.layerId ?? null) || existing.templateId !== Number(r.templateId)) {
+        removeMirror(existing);
+      } else {
+        registry.move(existing, r.x, r.y);
+        existing.dir = typeof r.dir === "string" ? r.dir : "down";
+        existing.move = r.moving ? MIRROR_MOVING : null;
+        existing.level = Number(r.level) || 1;
+        existing.spawnId = Number(r.spawnId) || 0;
+        applyMirror(existing, r, true);
+        movedMirrors.add(existing);
+        resendMirror(existing);
+        return true;
+      }
+    }
+    const instance = newMirror(r);
+    registry.add(instance);
+    mirrorCount++;
+    sync.onSpawn(instance);
+    return true;
+  },
+  move: (id, x, y, dir, flags) => {
+    const c = registry.get(Number(id));
+    if (!c?.remote || !Number.isFinite(x) || !Number.isFinite(y)) return;
+    registry.move(c, x, y);
+    c.dir = directionName(dir);
+    c.move = flags & FLAG_MOVING ? MIRROR_MOVING : null;
+    movedMirrors.add(c);
+  },
+  update: (id, changes) => {
+    const c = registry.get(Number(id));
+    if (!c?.remote) return;
+    const tapper = c.combat.tapper;
+    applyMirror(c, changes, false);
+    // Tap packets are per viewer and not relayed, so each node tells its own viewers.
+    if (c.combat.tapper?.playerId !== tapper?.playerId) sendTapStates(c);
+  },
+  relay: (id, packets, bestEffort) => {
+    sync.sendToViewers(Number(id), (wt) => (bestEffort ? sendBestEffort : send)(wt, packets));
+  },
+  despawn: (id) => {
+    const c = registry.get(Number(id));
+    if (c?.remote) removeMirror(c);
+  },
+};
+
+ghosts.register(creatureGhostKind);
+// Ghosts.touch does nothing while the ghosts are not attached (cluster off), so this costs a branch per move.
+registry.onMoved = (c) => { if (!c.remote) ghosts.touch("creature", c.id); };
+
+// A node that died (cells phase 7, Task 13): the away slots it held respawn here, and creatures here whose home it
+// was are dropped (their home's blocks went to other nodes, which spawn their own). The slots this node sent it in a
+// block move are forgotten with them (Task 15).
+usePeerDeathHandlers({
+  releaseAwayHeldBy: (peer) => spawner.releaseAwayHeldBy(peer, Date.now()),
+  dropForeignFrom: (home) => {
+    spawner.forgetOutgoingTo(home);
+    return spawner.dropForeignFrom(home);
+  },
+});
+
+/** How often the creature handoff's sweeps run while the links are attached. */
+export const CREATURE_SWEEP_MS = 5_000;
+
+/** The links while they are attached (cluster mode); null otherwise, and then no creature is handed off. */
+let handoffCtx: LinkContext | null = null;
+
+/** The creature slots' part while it is registered; a later attach replaces it. */
+let undoSlots: (() => void) | null = null;
+
+/** Starts the creature handoff on the attached links; what it returns stops it. Exported for the tests. */
+export function attachCreatureHandoff(ctx: LinkContext): () => void {
+  creatureHandoff.start(creatureHandoffDeps(ctx));
+  handoffCtx = ctx;
+  // Phase 7: a block's spawn slots go with it when it moves to another node (Task 15). The spawner itself is the
+  // part's spawner, so a move lost at the deadline can drop or despawn what it took out. A later attach owns the
+  // part: the earlier one is taken off first, since a second part of one name is refused.
+  undoSlots?.();
+  const undo = registerCreatureSlots({
+    self: ctx.self,
+    now: Date.now,
+    spawner,
+    tellHome: (holder, id, home) => creatureHandoff.tellHome(holder, id, home),
+    // The table clamps at the map's edge; it is there whenever a move runs.
+    blockOf: (map, x, y) => clusterBlocks()?.blockOf(map, x, y) ?? blockAt(x, y),
+  });
+  undoSlots = undo;
+  const sweep = setInterval(() => {
+    void creatureHandoff.sweep().catch((error) => log.error(`The creature handoff sweep failed: ${error}`));
+  }, CREATURE_SWEEP_MS);
+  sweep.unref?.();
+  return () => {
+    clearInterval(sweep);
+    undo();
+    if (undoSlots === undo) undoSlots = null;
+    if (handoffCtx === ctx) handoffCtx = null;
+    creatureHandoff.stop();
+  };
+}
+
+// The creature handoff runs only while startCluster has the links attached (cells phase 6).
+onLinksAttached(attachCreatureHandoff);

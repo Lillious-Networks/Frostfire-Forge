@@ -5,6 +5,8 @@ services:
       dockerfile: src/docker/Dockerfile.prod
     container_name: frostfire-forge-prod
     restart: always
+    # The engine's shutdown takes up to 9 s (running handoffs, achievement flush, leaving the cluster).
+    stop_grace_period: 20s
     network_mode: "host"
     env_file:
       - ../../.env.production

@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { databaseModule } from "./setup";
-import { readFileSync } from "fs";
-import { join } from "path";
+import { receiverSource } from "./receiver-source";
 
 // ------------------------------------------------------------ fake database
 // The accounts the commands look up, and the permissions table as the real
@@ -30,7 +29,7 @@ const { clearCaches } = await import("../services/datacache");
 // The receiver cannot be imported (it starts the server), so a command is run
 // from its source: the body of its case, with the names it uses handed in.
 
-const source = readFileSync(join(import.meta.dir, "..", "socket", "receiver.ts"), "utf8");
+const source = receiverSource();
 const commandsAt = source.indexOf('      case "COMMAND": {');
 /** The body of one chat command's case, up to the next command. */
 function commandBlock(name: string): string {
@@ -47,9 +46,15 @@ const NAMES = [
   "listener", "Events", "maps", "mapPropertiesCache", "transitionPlayerToMap", "spawnBatchQueue", "despawnBatchQueue",
   "gracefulShutdown", "drainQueries", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "Bun",
   "defaultMap", "resurrection", "resyncNpcChunks", "filterPlayersByMap", "spellEffects", "canGrant", "outranks",
+  "runOnPlayer", "isOnline", "broadcastWorld", "panelHears", "clearShared",
 ];
 /** The receiver's module state (the restart countdown), declared as it is there. */
-const moduleState = [...source.matchAll(/^let (\w+)[^\n]*;\r?$/gm)].map((match) => ({ name: match[1], line: match[0] }));
+const moduleState = [
+  ...[...source.matchAll(/^let (\w+)[^\n]*;\r?$/gm)].map((match) => ({ name: match[1], line: match[0] })),
+  ...[...source.matchAll(/^export const (restartState) = \{[\s\S]*?\n\};/gm)].map((match) => ({ name: match[1], line: match[0].replace("export ", "") })),
+  // The revision counter, as the receiver exports it to the handler modules.
+  { name: "(?:bumpStateRevision|stateRevision)", line: "let globalStateRevision = 0;\nconst bumpStateRevision = () => ++globalStateRevision;\nconst stateRevision = () => globalStateRevision;" },
+];
 const transpiler = new Bun.Transpiler({ loader: "ts" });
 
 /** One command, ready to run. Its module state lasts as long as what is returned. */
@@ -73,6 +78,8 @@ let emitted: any[][];
 let closed: string[];
 /** What the end of a shutdown did, in order. */
 let ending: string[];
+/** Whether the clear guard (cluster/clearguard.ts) lets the clear run: false while another node of the region is alive. */
+let clearAllowed: boolean;
 let spawned: any[];
 let timeouts: Array<{ run: () => any; ms: number; cleared: boolean }>;
 let intervals: Array<{ run: () => any; ms: number; cleared: boolean }>;
@@ -80,12 +87,19 @@ let moved: any[][];
 let transitions: any[][];
 /** Rows the location update reports as changed. */
 let locationRows: number;
+/** Players online on another node of the cluster. */
+let elsewhere: Set<string>;
+/** Each action run on a player, and each world broadcast. */
+let ran: any[][];
+let broadcasts: any[][];
 
 const accountOf = (username: string) => accounts.find((row) => row.username === String(username).toLowerCase());
 /** The columns of an account a saved location is. */
 const savedAt = (map: string, position: Row) => ({ map, position: `${Math.round(position.x)},${Math.round(position.y)}`, direction: position.direction });
 /** What a connection was told, as the notifications it was sent. */
 const told = (who: any) => sent.filter((entry) => entry.to === who.wt).flatMap((entry) => entry.packets).filter((packet) => packet.type === "NOTIFY").map((packet) => packet.data.message);
+
+const onlineHere = (username: string) => Object.values(online).find((live) => live.username.toLowerCase() === username.toLowerCase());
 
 function connect(id: string, username: string, over: Row = {}): any {
   const live: Row = {
@@ -128,6 +142,12 @@ function names(name: string, args: string[], over: Row = {}): Row {
         const row = accountOf(username);
         if (row) row.banned = 0;
       },
+      // As systems/player.ts does: the account is banned and the connection given is closed.
+      ban: async (username: string, wt: any) => {
+        const row = accountOf(username);
+        if (row) row.banned = 1;
+        if (wt) wt.close();
+      },
       // A location is saved as systems/player.ts saves it: for the session with that id, or for that username.
       // A username handed to the first is no session's id, and saves nothing.
       setLocation: async (...call: any[]) => {
@@ -162,6 +182,11 @@ function names(name: string, args: string[], over: Row = {}): Row {
     transitionPlayerToMap: async (...call: any[]) => { transitions.push(call); },
     spawnBatchQueue: new Map(),
     despawnBatchQueue: new Map(),
+    clearShared: async (clear: () => Promise<void>) => {
+      if (!clearAllowed) return false;
+      await clear();
+      return true;
+    },
     gracefulShutdown: async (reason: string) => { ending.push(`gracefulShutdown ${reason}`); },
     drainQueries: async () => { ending.push("drainQueries"); },
     setTimeout: (run: () => any, ms: number) => {
@@ -183,6 +208,16 @@ function names(name: string, args: string[], over: Row = {}): Row {
     resyncNpcChunks: async () => {},
     filterPlayersByMap: (map: string) => Object.values(online).filter((live) => live.location.map === map),
     spellEffects: { broadcastEffectsUpdate: () => {} },
+    // As cluster/deliver.ts answers: a player here, or on another node, is online; the action runs on the node that holds them.
+    isOnline: async (username: string) => !!onlineHere(username) || elsewhere.has(username.toLowerCase()),
+    runOnPlayer: async (username: string, action: string, args?: unknown) => {
+      ran.push([username, action, args]);
+      const here = onlineHere(username);
+      if (here && action === "admin-kick") here.wt.close();
+      return !!here || elsewhere.has(username.toLowerCase());
+    },
+    broadcastWorld: async (packets: any[]) => { broadcasts.push(packets); },
+    panelHears: () => {},
     ...over,
   };
 }
@@ -201,12 +236,16 @@ beforeEach(async () => {
   emitted = [];
   closed = [];
   ending = [];
+  clearAllowed = true;
   spawned = [];
   timeouts = [];
   intervals = [];
   moved = [];
   transitions = [];
   locationRows = 1;
+  elsewhere = new Set();
+  ran = [];
+  broadcasts = [];
   accounts = [
     { username: "ac_boss", banned: 0, role: 1 },
     { username: "ac_mod", banned: 0, role: 1 },
@@ -249,6 +288,16 @@ describe("/shutdown", () => {
     expect(spawned).toEqual([]);
   });
 
+  test("in a cluster with another node alive it ends this node without clearing the shared guests and parties", async () => {
+    clearAllowed = false;
+    const done = run("SHUTDOWN");
+    timeouts[0].run();
+    await done;
+    online = {};
+    await intervals[0].run();
+    expect(ending).toEqual(["drainQueries", "gracefulShutdown /shutdown"]);
+  });
+
   test("is refused without its permission, and nothing is started", async () => {
     boss.permissions = ["admin.*", "permission.*"];
     await run("SHUTDOWN");
@@ -283,6 +332,23 @@ describe("/restart", () => {
     expect(intervals[0].cleared).toBe(true);
     expect(ending).toEqual(["player.clear", "drainQueries", "gracefulShutdown /restart"]);
     expect(spawned).toEqual([]);
+  });
+
+  test("in a cluster with another node alive it ends this node without clearing the shared guests and parties", async () => {
+    clearAllowed = false;
+    await run("RESTART");
+    timeouts[timeouts.length - 1].run();
+    online = {};
+    await intervals[0].run();
+    expect(ending).toEqual(["drainQueries", "gracefulShutdown /restart"]);
+  });
+
+  test("both commands clear through the cluster guard, and never with player.clear directly", () => {
+    for (const name of ["SHUTDOWN", "RESTART"]) {
+      const block = commandBlock(name);
+      expect(block).toContain("clearShared(() => player.clear())");
+      expect(block.replace("clearShared(() => player.clear())", "")).not.toContain("player.clear(");
+    }
   });
 
   test("asked again before then, the countdown is called off", async () => {
@@ -473,6 +539,143 @@ describe("/ban of an admin", () => {
     await run("BAN", ["ac_boss"], { currentPlayer: mod, wt: mod.wt });
     expect(told(mod)).toEqual(["You cannot ban other admins"]);
     expect(accountOf("ac_boss")!.banned).toBe(0);
+  });
+});
+
+describe("a player on another node", () => {
+  beforeEach(() => {
+    accounts.push({ username: "ac_far", banned: 0, role: 0 }, { username: "ac_farboss", banned: 0, role: 1 });
+    elsewhere.add("ac_far");
+    elsewhere.add("ac_farboss");
+  });
+
+  test("/kick of a player here goes through the action, and of one elsewhere too", async () => {
+    await run("KICK", ["ac_hero"]);
+    expect(ran).toEqual([["ac_hero", "admin-kick", undefined]]);
+    expect(closed).toEqual(["ac_hero"]);
+    expect(told(boss)).toEqual(["Disconnected Ac_hero from the server"]);
+
+    sent = [];
+    ran = [];
+    await run("KICK", ["ac_far"]);
+    expect(ran).toEqual([["ac_far", "admin-kick", undefined]]);
+    expect(told(boss)).toEqual(["Disconnected Ac_far from the server"]);
+  });
+
+  test("/kick still refuses an admin there, and a name that is online nowhere is not found", async () => {
+    await run("KICK", ["ac_farboss"]);
+    expect(told(boss)).toEqual(["You cannot disconnect other admins"]);
+    sent = [];
+    await run("KICK", ["ac_nobody"]);
+    expect(told(boss)).toEqual(["Player not found or is not online"]);
+    expect(ran).toEqual([]);
+  });
+
+  test("/ban bans the account and ends the session where it is: here by the connection, elsewhere by the action", async () => {
+    await run("BAN", ["ac_hero"]);
+    expect(accountOf("ac_hero")!.banned).toBe(1);
+    expect(closed).toEqual(["ac_hero"]);
+    expect(ran).toEqual([]);
+
+    await run("BAN", ["ac_far"]);
+    expect(accountOf("ac_far")!.banned).toBe(1);
+    expect(ran).toEqual([["ac_far", "admin-kick", undefined]]);
+    expect(told(boss)).toEqual(["Banned Ac_hero from the server", "Banned Ac_far from the server"]);
+  });
+
+  test("/ban of an offline account bans it and has nobody to disconnect", async () => {
+    await run("BAN", ["ac_farboss"]);
+    expect(told(boss)).toEqual(["You cannot ban other admins"]);
+    sent = [];
+    accounts.push({ username: "ac_gone", banned: 0, role: 0 });
+    await run("BAN", ["ac_gone"]);
+    expect(accountOf("ac_gone")!.banned).toBe(1);
+    expect(ran).toEqual([["ac_gone", "admin-kick", undefined]]);
+    expect(closed).toEqual([]);
+  });
+
+  test("/summon of a player on another node runs the summon there, with the admin's point", async () => {
+    await run("SUMMON", ["ac_far"]);
+    expect(ran).toEqual([["ac_far", "cells-summon", { by: "ac_boss", map: "main", x: 10, y: 20, why: "summon", admins: true }]]);
+    // The target's node tells the admin how it went.
+    expect(told(boss)).toEqual([]);
+    expect(moved).toEqual([]);
+    expect(transitions).toEqual([]);
+  });
+
+  test("/summon tells the target's node when the admin may not summon admins", async () => {
+    const summoner = connect("9104", "ac_summoner", { isAdmin: true, permissions: ["admin.summon"] });
+    await run("SUMMON", ["ac_farboss"], { currentPlayer: summoner, wt: summoner.wt });
+    expect(ran).toEqual([["ac_farboss", "cells-summon", { by: "ac_summoner", map: "main", x: 10, y: 20, why: "summon", admins: false }]]);
+  });
+
+  test("/teleport and /goto to a player on another node ask that node for the player's point", async () => {
+    for (const name of ["TELEPORT", "GOTO"]) {
+      ran = [];
+      await run(name, ["ac_far"]);
+      // The admin's own held permission goes with it (admin.*, as /summon reads it): the target's node passes it on.
+      expect(ran).toEqual([["ac_far", "cells-teleport-to", { by: "ac_boss", admins: true }]]);
+      expect(told(boss)).toEqual([]);
+    }
+    expect(moved).toEqual([]);
+    expect(transitions).toEqual([]);
+  });
+
+  test("/teleport tells the target's node when the admin may not summon admins", async () => {
+    const visitor = connect("9105", "ac_visitor", { isAdmin: true, permissions: ["admin.summon"] });
+    await run("TELEPORT", ["ac_far"], { currentPlayer: visitor, wt: visitor.wt });
+    expect(ran).toEqual([["ac_far", "cells-teleport-to", { by: "ac_visitor", admins: false }]]);
+  });
+
+  test("/revive of a player on another node runs the revive there", async () => {
+    await run("REVIVE", ["ac_far"]);
+    expect(ran).toEqual([["ac_far", "cells-revive", { by: "ac_boss" }]]);
+    expect(told(boss)).toEqual([]);
+  });
+
+  test("/summon, /teleport and /revive of a name online nowhere are not found", async () => {
+    for (const name of ["SUMMON", "TELEPORT"]) {
+      sent = [];
+      await run(name, ["ac_nobody"]);
+      expect(told(boss)).toEqual(["Player not found or is not online"]);
+    }
+    sent = [];
+    await run("REVIVE", ["ac_nobody"]);
+    expect(told(boss)).toEqual(["Player must be online to revive"]);
+    expect(moved).toEqual([]);
+    expect(transitions).toEqual([]);
+  });
+
+  test("an id that is not here is not looked for on another node", async () => {
+    for (const name of ["SUMMON", "TELEPORT", "REVIVE"]) {
+      sent = [];
+      await run(name, ["424242"]);
+      expect(told(boss)).toEqual([name === "REVIVE" ? "Player must be online to revive" : "Player not found or is not online"]);
+    }
+    expect(ran).toEqual([]);
+  });
+
+  test("a player here who is being handed off is not summoned or revived", async () => {
+    hero.handoff = true;
+    hero.isDead = true;
+    await run("SUMMON", ["ac_hero"]);
+    expect(told(boss)).toEqual(["Ac_hero is changing server node; try again"]);
+    sent = [];
+    await run("REVIVE", ["ac_hero"]);
+    expect(told(boss)).toEqual(["Ac_hero is changing server node; try again"]);
+    expect(hero.isDead).toBe(true);
+    expect(moved).toEqual([]);
+    expect(transitions).toEqual([]);
+    expect(ran).toEqual([]);
+  });
+
+  test("/broadcast to all is one world broadcast; to a map it stays on this node", async () => {
+    await run("BROADCAST", ["ALL", "Hello", "world"]);
+    expect(broadcasts).toEqual([[{ type: "NOTIFY", data: { message: "Hello world" } }]]);
+    expect(told(hero)).toEqual([]);
+    await run("BROADCAST", ["MAP", "Near"]);
+    expect(broadcasts.length).toBe(1);
+    expect(told(hero)).toEqual(["Near"]);
   });
 });
 

@@ -69,6 +69,8 @@ const LOW_HP_FLEE_SPEED_MULT = 0.66;
 const PASSIVE_FLEE_MS = 4000;
 
 export type CombatTextKind = MeleeOutcome | "evade" | "immune" | "spell" | "resist" | "heal" | "interrupted";
+/** Every combat text kind (a peer's forwarded hit names one of these, or none). */
+export const COMBAT_TEXT_KINDS: ReadonlySet<string> = new Set<CombatTextKind>(["miss", "dodge", "parry", "glancing", "crit", "crush", "hit", "evade", "immune", "spell", "resist", "heal", "interrupted"]);
 export type CastResult = "success" | "interrupted" | "failed";
 export type CastTarget = CreatureCast["target"];
 /** Spell crit chance and multiplier for creature casts. */
@@ -108,6 +110,24 @@ export interface CombatText {
   amount: number;
 }
 
+/**
+ * A hit on a mirrored creature, sent to the node that owns it (spec §4). The node that holds the
+ * mirror rolls what needs the attacker's stats (the swing outcome, the damage stat for ticks); the
+ * owner applies it. `textKind` is the combat text the owner shows for it, null for none.
+ */
+export interface ForwardedHit {
+  attackerId: string;
+  amount: number;
+  threatMultiplier: number;
+  textKind: CombatTextKind | null;
+  /** A melee swing the creature avoided: no damage, but it still pulls and taps. */
+  avoided?: boolean;
+  /** A spell whose effects land after the damage. */
+  spell?: SpellData;
+  /** The caster's damage stat, for the spell's periodic ticks. */
+  casterStat?: number;
+}
+
 export interface CombatWorld {
   rng: Rng;
   template(id: number): CreatureTemplate | undefined;
@@ -118,7 +138,8 @@ export interface CombatWorld {
   playersNear(map: string, x: number, y: number, radiusPx: number): PlayerUnit[];
   /** Apply final damage to a player (barriers, death handling, stat broadcast). */
   damagePlayer(creature: CreatureInstance, playerId: string, amount: number, outcome: MeleeOutcome): void;
-  dazePlayer(playerId: string): void;
+  /** The creature's melee dazed the player. The creature is named so a player's node can check who dazed them. */
+  dazePlayer(playerId: string, creature: CreatureInstance): void;
   markPlayerInCombat(playerId: string): void;
   onHealthChanged(creature: CreatureInstance): void;
   onStateChanged(creature: CreatureInstance): void;
@@ -140,6 +161,8 @@ export interface CombatWorld {
   onAurasChanged(creature: CreatureInstance): void;
   /** Other live creatures in this creature's link group (same layer). */
   linkedCreatures(creature: CreatureInstance): CreatureInstance[];
+  /** Send a hit on a mirror to its owner. Without it (one node), a hit on a mirror is dropped. */
+  forwardHit?(creature: CreatureInstance, hit: ForwardedHit): void;
 }
 
 export const creatureUnitId = (id: number) => `creature:${id}`;
@@ -184,12 +207,23 @@ export class CreatureCombatSystem {
   }
 
   emitCombatText(text: CombatText): void {
+    // A mirror's text is shown by its owner, which relays it to the viewers here.
+    if (this.registry.get(text.creatureId)?.remote) return;
     this.world.onCombatText(text);
   }
 
   // ---------------------------------------------------------------- ticking
 
   tick(creature: CreatureInstance, now: number, dtMs: number = TICK_MS): void {
+    if (creature.remote) return;
+    // A stop or a turn without a step is a change the mirrors show too (position changes report through the registry).
+    const wasMoving = !!creature.move;
+    const wasDir = creature.dir;
+    this.tickBody(creature, now, dtMs);
+    if (!!creature.move !== wasMoving || creature.dir !== wasDir) this.registry.touch(creature);
+  }
+
+  private tickBody(creature: CreatureInstance, now: number, dtMs: number): void {
     const template = this.world.template(creature.templateId);
     if (!template) return;
 
@@ -520,6 +554,7 @@ export class CreatureCombatSystem {
    * creatures (assist radius) and every member of its link group join too.
    */
   enterCombat(creature: CreatureInstance, now: number, social = true): void {
+    if (creature.remote) return;
     if (creature.state === AIState.COMBAT || creature.state === AIState.DEAD || creature.state === AIState.EVADING) return;
     const template = this.world.template(creature.templateId);
     if (!template || template.stance === "passive") return;
@@ -567,6 +602,7 @@ export class CreatureCombatSystem {
     const assist = yards(template.assist_radius);
     if (assist > 0) {
       for (const other of this.registry.queryRadius(creature.map, creature.x, creature.y, assist)) {
+        if (other.remote) continue;
         if (this.canAssist(creature, template, other)) helpers.set(other.id, other);
       }
     }
@@ -584,6 +620,7 @@ export class CreatureCombatSystem {
     const radius = yards(template.call_for_help_radius);
     if (radius <= 0) return;
     for (const other of this.registry.queryRadius(creature.map, creature.x, creature.y, radius)) {
+      if (other.remote) continue;
       if (this.canAssist(creature, template, other)) this.joinFight(other, creature, now);
     }
   }
@@ -595,6 +632,7 @@ export class CreatureCombatSystem {
   }
 
   addThreat(creature: CreatureInstance, unitId: string, amount: number, now: number): void {
+    if (creature.remote) return;
     if (creature.state === AIState.DEAD || creature.state === AIState.EVADING) return;
     creature.combat.threat.add(unitId, amount, now);
     let set = this.unitIndex.get(unitId);
@@ -651,9 +689,47 @@ export class CreatureCombatSystem {
 
   /**
    * Apply damage from a player to a creature. Handles evade immunity, threat,
-   * stance reactions and death. Returns the damage actually dealt.
+   * stance reactions and death. Returns the damage actually dealt. With
+   * `textKind`, the combat text of a hit that lands is shown too.
+   *
+   * A mirror of another node's creature is never changed here: the hit goes to
+   * its owner (APPLY_EFFECT), which applies it and shows its text to every
+   * viewer, and 0 is returned.
    */
-  damageCreature(creature: CreatureInstance, attackerId: string, amount: number, now: number, threatMultiplier = 1): number {
+  damageCreature(creature: CreatureInstance, attackerId: string, amount: number, now: number, threatMultiplier = 1, textKind: CombatTextKind | null = null): number {
+    if (creature.remote) {
+      this.world.forwardHit?.(creature, { attackerId, amount, threatMultiplier, textKind });
+      // The owner cannot mark a mirror in combat; the attacker is a player of this node.
+      this.world.markPlayerInCombat(attackerId);
+      return 0;
+    }
+    const landed = creature.state !== AIState.DEAD && creature.state !== AIState.EVADING;
+    const dealt = this.applyDamage(creature, attackerId, amount, now, threatMultiplier);
+    if (landed && textKind && dealt > 0) {
+      this.world.onCombatText({ creatureId: creature.id, targetId: creatureUnitId(creature.id), sourceId: attackerId, kind: textKind, amount: dealt });
+    }
+    return dealt;
+  }
+
+  /**
+   * A hit on this creature from a player of another node, forwarded by the node that holds its mirror.
+   * `landed` is false when there was nothing to hit (dead, or evading an avoided swing).
+   */
+  applyForwardedHit(creature: CreatureInstance, hit: ForwardedHit, now: number): { landed: boolean; killed: boolean } {
+    if (creature.remote || creature.state === AIState.DEAD) return { landed: false, killed: false };
+    if (hit.avoided) {
+      const template = this.world.template(creature.templateId);
+      if (!template || creature.state === AIState.EVADING) return { landed: false, killed: false };
+      this.world.onCombatText({ creatureId: creature.id, targetId: creatureUnitId(creature.id), sourceId: hit.attackerId, kind: hit.textKind ?? "evade", amount: 0 });
+      this.avoidedSwing(creature, template, hit.attackerId, now);
+      return { landed: true, killed: false };
+    }
+    if (hit.amount > 0 || !hit.spell) this.damageCreature(creature, hit.attackerId, Number(hit.amount) || 0, now, Number(hit.threatMultiplier) || 1, hit.textKind);
+    if (hit.spell && (creature.state as AIState) !== AIState.DEAD) this.applySpellToCreature(creature, hit.attackerId, hit.spell, now, hit.casterStat);
+    return { landed: true, killed: (creature.state as AIState) === AIState.DEAD };
+  }
+
+  private applyDamage(creature: CreatureInstance, attackerId: string, amount: number, now: number, threatMultiplier: number): number {
     if (creature.state === AIState.DEAD) return 0;
     if (creature.state === AIState.EVADING) {
       this.world.onCombatText({ creatureId: creature.id, targetId: creatureUnitId(creature.id), sourceId: attackerId, kind: "evade", amount: 0 });
@@ -693,6 +769,7 @@ export class CreatureCombatSystem {
   }
 
   die(creature: CreatureInstance, killerId: string | null, now: number): void {
+    if (creature.remote) return;
     // A cast cut short by death just stops; it is not reported as interrupted.
     this.cancelCast(creature, "failed");
     // Death abilities (e.g. a final explosion) fire before the threat table is gone.
@@ -712,6 +789,39 @@ export class CreatureCombatSystem {
     this.world.onHealthChanged(creature);
     this.world.onStateChanged(creature);
     this.world.onDied(creature, killerId);
+  }
+
+  /** Drop the creature from the unit index, leaving its threat table as it is. */
+  private clearThreatIndex(creature: CreatureInstance): void {
+    for (const unitId of creature.combat.threat.units()) {
+      const set = this.unitIndex.get(unitId);
+      if (!set) continue;
+      set.delete(creature.id);
+      if (set.size === 0) this.unitIndex.delete(unitId);
+    }
+  }
+
+  /**
+   * The creature was handed to another node (it is a mirror here now). Its threat table went with it; this
+   * node only forgets its index. Auto-attacks on it go on: phase 5 turns them into hits on the mirror.
+   */
+  release(creature: CreatureInstance): void {
+    this.clearThreatIndex(creature);
+    this.active.delete(creature.id);
+  }
+
+  /** A creature handed over here: index its threat table, and resume its combat if it was fighting. */
+  adopt(creature: CreatureInstance): void {
+    // Combat, evading and fleeing are the states the engine keeps in `active`. Only those carry threat that counts:
+    // an idle or dead creature's table would pin its units "in combat" with nothing to clear it.
+    const outOfCombat = creature.state === AIState.IDLE || creature.state === AIState.WANDER || creature.state === AIState.PATROL;
+    if (creature.state === AIState.DEAD || outOfCombat) return;
+    for (const unitId of creature.combat.threat.units()) {
+      let set = this.unitIndex.get(unitId);
+      if (!set) this.unitIndex.set(unitId, (set = new Set()));
+      set.add(creature.id);
+    }
+    this.active.add(creature.id);
   }
 
   /** Creature left the world (despawn/reload): drop all bookkeeping. */
@@ -772,25 +882,34 @@ export class CreatureCombatSystem {
     const inFront = isInFront(creature, creature.dir, player);
     const table = playerVsCreatureTable(player.level, creature.level, template.creature_type, inFront, player.critPct);
     const roll = rollPlayerVsCreature(table, 2 + player.critDamagePct / 100, r);
-    const text = { creatureId: creature.id, targetId: creatureUnitId(creature.id), sourceId: player.id };
     if (roll.multiplier === 0) {
-      this.world.onCombatText({ ...text, kind: roll.outcome, amount: 0 });
-      // An avoided swing still pulls and taps the creature.
-      this.addThreat(creature, player.id, 0, now);
-      this.tag(creature, player.id);
-      this.world.markPlayerInCombat(player.id);
-      if (template.stance === "passive") {
-        if (creature.state !== AIState.FLEEING) this.startFlee(creature, template, player.id, now, PASSIVE_FLEE_MS, 1);
-      } else {
-        this.enterCombat(creature, now);
+      // A mirror: the swing is rolled here, where the player's stats are, and its owner applies the outcome.
+      if (creature.remote) {
+        this.world.forwardHit?.(creature, { attackerId: player.id, amount: 0, threatMultiplier: 1, textKind: roll.outcome, avoided: true });
+        this.world.markPlayerInCombat(player.id);
+        return;
       }
+      this.world.onCombatText({ creatureId: creature.id, targetId: creatureUnitId(creature.id), sourceId: player.id, kind: roll.outcome, amount: 0 });
+      this.avoidedSwing(creature, template, player.id, now);
       return;
     }
     const [min, max] = playerMeleeDamageRange(player.level, player.statDamage, player.weapon);
     const raw = randInt(min, max, r) * roll.multiplier;
     const amount = Math.max(1, Math.round(raw * (1 - armorReduction(template.armor, player.level))));
-    const dealt = this.damageCreature(creature, player.id, amount, now);
-    this.world.onCombatText({ ...text, kind: roll.outcome, amount: dealt });
+    // The text goes with the hit: shown here for a creature of this node, by the owner for a mirror.
+    this.damageCreature(creature, player.id, amount, now, 1, roll.outcome);
+  }
+
+  /** An avoided swing still pulls and taps the creature. */
+  private avoidedSwing(creature: CreatureInstance, template: CreatureTemplate, attackerId: string, now: number): void {
+    this.addThreat(creature, attackerId, 0, now);
+    this.tag(creature, attackerId);
+    this.world.markPlayerInCombat(attackerId);
+    if (template.stance === "passive") {
+      if (creature.state !== AIState.FLEEING) this.startFlee(creature, template, attackerId, now, PASSIVE_FLEE_MS, 1);
+    } else {
+      this.enterCombat(creature, now);
+    }
   }
 
   // ------------------------------------------------------- auras and spells
@@ -812,6 +931,7 @@ export class CreatureCombatSystem {
   }
 
   private healCreature(creature: CreatureInstance, amount: number, sourceId: string): void {
+    if (creature.remote) return;
     if (creature.state === AIState.DEAD || amount <= 0) return;
     const healed = Math.min(creature.maxHealth - creature.health, Math.round(amount));
     if (healed <= 0) return;
@@ -822,6 +942,7 @@ export class CreatureCombatSystem {
 
   /** Stop a cast in progress. Returns true if one was cancelled. */
   cancelCast(creature: CreatureInstance, result: CastResult): boolean {
+    if (creature.remote) return false;
     const cast = creature.casting;
     if (!cast) return false;
     creature.casting = null;
@@ -831,6 +952,7 @@ export class CreatureCombatSystem {
 
   /** Interrupt effect: only interruptible casts, then lock out casting. */
   interruptCreature(creature: CreatureInstance, lockoutMs: number, now: number, spellName = ""): boolean {
+    if (creature.remote) return false;
     if (!creature.casting?.interruptible) return false;
     this.cancelCast(creature, "interrupted");
     applyCastLockout(creature.auras, lockoutMs, now, spellName);
@@ -842,7 +964,16 @@ export class CreatureCombatSystem {
    * A player's spell effects landing on a creature. Supports damage/heal over
    * time, stun, slow, interrupt, taunt and threat modification.
    */
-  applySpellToCreature(creature: CreatureInstance, sourceId: string, spell: SpellData, now: number): void {
+  applySpellToCreature(creature: CreatureInstance, sourceId: string, spell: SpellData, now: number, casterStatOverride?: number): void {
+    if (creature.remote) {
+      // The owner applies the effects; the caster's damage stat is read here, where the caster is. Only a player's
+      // spell is sent: the owner refuses any other source, so a creature's heal on a mirrored ally would be a wasted call.
+      const caster = this.world.getPlayer(sourceId);
+      if (caster && Array.isArray(spell?.effects)) {
+        this.world.forwardHit?.(creature, { attackerId: sourceId, amount: 0, threatMultiplier: 1, textKind: null, spell, casterStat: casterStatOverride ?? caster.statDamage ?? 0 });
+      }
+      return;
+    }
     if (creature.state === AIState.DEAD || creature.state === AIState.EVADING) return;
     if (!Array.isArray(spell?.effects)) return;
     const template = this.world.template(creature.templateId);
@@ -850,7 +981,7 @@ export class CreatureCombatSystem {
     const immune = () => this.world.onCombatText({ creatureId: creature.id, targetId: creatureUnitId(creature.id), sourceId, kind: "immune", amount: 0 });
     // A player caster's damage stat adds to their DoT/HoT ticks (classic WoW);
     // creature sources are not players and get no bonus.
-    const casterStat = this.world.getPlayer(sourceId)?.statDamage ?? 0;
+    const casterStat = casterStatOverride ?? this.world.getPlayer(sourceId)?.statDamage ?? 0;
     let changed = false;
     for (const rawEffect of spell.effects) {
       const effect = withPeriodicBonus(rawEffect, casterStat);
@@ -1029,7 +1160,7 @@ export class CreatureCombatSystem {
         let best: CreatureInstance | null = null;
         let bestPct = 1;
         for (const c of this.registry.queryRadius(creature.map, creature.x, creature.y, range)) {
-          if (c.state === AIState.DEAD || c.layerId !== creature.layerId) continue;
+          if (c.remote || c.state === AIState.DEAD || c.layerId !== creature.layerId) continue;
           const pct = c.health / c.maxHealth;
           if (pct < bestPct) {
             best = c;

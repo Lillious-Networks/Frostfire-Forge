@@ -1,7 +1,7 @@
 import { SQL } from 'bun';
 import { getSqlCert } from "./utils";
 import { sqlWrapper } from "./sqlescape";
-import { runTransaction, GuardError, NotStartedError, type TransactionStatement } from "./sqltransaction";
+import { runTransaction, runWithRetries, GuardError, type TransactionStatement } from "./sqltransaction";
 import { resolveSqlitePath } from "./sqlitepath";
 
 let sqlController: any = null;
@@ -126,26 +126,19 @@ const initializationPromise: Promise<any> = createSQLControllerWithRetry().then(
 /**
  * A list of statements, kept whole or not at all. Only a transaction that never opened is tried
  * again: one that opened and then failed may have been kept, and a second run would write it twice.
+ * One with an open-by deadline is neither opened nor tried again past it (LateError).
  */
-async function answerTransaction(id: string, statements: TransactionStatement[], maxRetries: number, retryDelay: number, timeout: number) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const result = await runTransaction(sqlController, statements, _databaseEngine, timeout);
-      self.postMessage({ id, result });
-      return;
-    } catch (error: any) {
-      if (error instanceof NotStartedError && attempt < maxRetries) {
-        await new Promise(resolve => setTimeout(resolve, retryDelay));
-        continue;
-      }
-      self.postMessage({ id, error: error?.message || 'Unknown error', guard: error instanceof GuardError ? error.statement : undefined });
-      return;
-    }
+async function answerTransaction(id: string, statements: TransactionStatement[], maxRetries: number, retryDelay: number, timeout: number, openBy?: number) {
+  try {
+    const result = await runWithRetries(() => runTransaction(sqlController, statements, _databaseEngine, timeout, openBy), maxRetries, retryDelay);
+    self.postMessage({ id, result });
+  } catch (error: any) {
+    self.postMessage({ id, error: error?.message || 'Unknown error', guard: error instanceof GuardError ? error.statement : undefined });
   }
 }
 
 self.onmessage = async (event: MessageEvent) => {
-  const { id, sql, values, transaction } = event.data;
+  const { id, sql, values, transaction, openBy } = event.data;
   const maxRetries = 3;
   const retryDelay = 1000;
   const queryTimeout = 15000;
@@ -162,7 +155,7 @@ self.onmessage = async (event: MessageEvent) => {
   }
 
   if (transaction) {
-    await answerTransaction(id, transaction, maxRetries, retryDelay, queryTimeout);
+    await answerTransaction(id, transaction, maxRetries, retryDelay, queryTimeout, typeof openBy === "number" ? openBy : undefined);
     return;
   }
 

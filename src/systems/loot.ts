@@ -1,6 +1,8 @@
 import log from "../modules/logger";
 import { listener } from "../modules/event_bus";
 import { Events } from "./events";
+import { nextEntityId } from "../cluster/entityids";
+import { bareMap, RemoteObjects } from "../cluster/mirrors";
 
 const PICKUP_RADIUS = 100;
 const DESPAWN_MINUTES = 30;
@@ -25,15 +27,16 @@ function mayTake(lootItem: LootItem, player: any): boolean {
 }
 
 const lootItems = new Map<string, LootItem>();
+// Cluster mode: loot another node owns near the border, shown here and never taken here (no pickup reaches it).
+const remoteLoot = new RemoteObjects<LootItem>();
 const despawnTimers = new Map<string, NodeJS.Timeout>();
 const cleanupTimers = new Map<string, NodeJS.Timeout>();
 const OFFLINE_CLEANUP_MS = 5 * 60 * 1000;
 
-let lootIdCounter = 0;
 let onDespawn: ((lootItem: LootItem) => void) | null = null;
 
 function generateId(): string {
-  return `loot_${++lootIdCounter}_${Date.now()}`;
+  return `loot_${nextEntityId()}`;
 }
 
 const loot = {
@@ -94,11 +97,54 @@ const loot = {
     return lootItems.get(id);
   },
 
+  /** The loot this node owns. */
+  all(): IterableIterator<LootItem> {
+    return lootItems.values();
+  },
+
+  addRemote(item: LootItem): void {
+    remoteLoot.set(item);
+  },
+
+  removeRemote(id: string): LootItem | null {
+    return remoteLoot.delete(id) ?? null;
+  },
+
+  /**
+   * Cluster mode, a block moving away: this node's loot `id` leaves it. Nothing is shown and no hook fires: its
+   * viewers keep it as the new owner's mirror (objectmoves.ts).
+   */
+  takeOwn(id: string): LootItem | null {
+    const lootItem = lootItems.get(id);
+    if (!lootItem) return null;
+    const timer = despawnTimers.get(id);
+    if (timer) clearTimeout(timer);
+    despawnTimers.delete(id);
+    lootItems.delete(id);
+    return lootItem;
+  },
+
+  /**
+   * Cluster mode: loot of a block that moved here (or back, after a move that did not happen) becomes this node's
+   * own, with the time it has left. "mirror" when it was shown here as a mirror, "new" when not. null when this node
+   * already owns loot of that id: that one is kept, and the item is not there twice.
+   */
+  adoptOwn(item: LootItem, now: number = Date.now()): "mirror" | "new" | null {
+    if (lootItems.has(item.id)) return null;
+    const known = remoteLoot.delete(item.id) !== undefined;
+    const record: LootItem = { ...item };
+    lootItems.set(record.id, record);
+    const left = Math.min(DESPAWN_MINUTES * 60 * 1000, Math.max(0, record.expiresAt - now));
+    despawnTimers.set(record.id, setTimeout(() => { loot.despawn(record.id); }, left));
+    return known ? "mirror" : "new";
+  },
+
   pickup(player: any, lootId: string): { success: boolean; message?: string; item?: LootItem } {
     const lootItem = lootItems.get(lootId);
     if (!lootItem) return { success: false, message: "Loot no longer exists." };
     if (!mayTake(lootItem, player)) return { success: false, message: "This loot belongs to someone else." };
-    if (lootItem.map !== player.location.map) return { success: false, message: "Loot is on a different map." };
+    // A mirror's map has no ".json" (PICKUP_REQUEST from a neighbouring node).
+    if (bareMap(lootItem.map) !== bareMap(player.location.map)) return { success: false, message: "Loot is on a different map." };
 
     const dx = player.location.position.x - lootItem.x;
     const dy = player.location.position.y - lootItem.y;
@@ -111,7 +157,8 @@ const loot = {
     lootItems.delete(lootId);
 
     if (onDespawn) onDespawn(lootItem);
-    listener.emit(Events.PLAYER_LOOT_RETRIEVED, { player, itemName: lootItem.item, quantity: lootItem.quantity, mapName: lootItem.map, x: lootItem.x, y: lootItem.y } as any);
+    // A player of a neighbouring node gets the item, and this hook, on their own node.
+    if (!player.remote) listener.emit(Events.PLAYER_LOOT_RETRIEVED, { player, itemName: lootItem.item, quantity: lootItem.quantity, mapName: lootItem.map, x: lootItem.x, y: lootItem.y } as any);
     return { success: true, item: lootItem };
   },
 
@@ -175,6 +222,7 @@ const loot = {
         result.push(lootItem);
       }
     }
+    for (const item of remoteLoot.onMap(mapName, (l) => l.map)) result.push(item);
     return result;
   },
 

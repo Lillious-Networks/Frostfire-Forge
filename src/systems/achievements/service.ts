@@ -3,6 +3,7 @@
 // together are counted one after the other and an achievement is earned once. Earning one is one batch
 // (services/batch): the row with its date, the reward item in the bags (or in the mail when they are full) and the
 // mount, all kept or none. index.ts gives it the real dependencies; the tests give it their own.
+import { deliverToPlayer } from "../../cluster/deliver";
 import log from "../../modules/logger";
 import { atomically } from "../../services/batch";
 import playerCache from "../../services/playermanager";
@@ -196,15 +197,16 @@ export class AchievementService {
     const who = named(username);
     const line = { id: null, username: "", system: true, message: `${who} has completed [${def.name}]`, who, achievementId: def.id, achievement: def.name };
     const told = new Set<string>();
-    const tell = (members: string[], packets: any[]) => {
+    // Wherever each member is online: on this node or, in a cluster, another.
+    const tell = async (members: string[], packets: any[]) => {
       for (const member of members.map(lower)) {
         if (told.has(member)) continue;
         told.add(member);
-        send(playerCache.getByUsername(member)?.wt, packets);
+        await deliverToPlayer(member, packets);
       }
     };
-    if (circle.party.length > 0) tell(circle.party, packetManager.partyChat(line));
-    if (circle.guild.length > 0) tell(circle.guild, packetManager.guildChat(line));
+    if (circle.party.length > 0) await tell(circle.party, packetManager.partyChat(line));
+    if (circle.guild.length > 0) await tell(circle.guild, packetManager.guildChat(line));
   }
 
   /** Every enabled achievement with the player's progress and when they earned it: what their window shows. */

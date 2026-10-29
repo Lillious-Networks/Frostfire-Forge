@@ -1,8 +1,11 @@
-import query from "../controllers/sqldatabase";
+import query, { GuardError, transaction } from "../controllers/sqldatabase";
 import { verify, randomBytes } from "../modules/hash";
 import log from "../modules/logger";
+import { clusterEnabled, regionId } from "../cluster/config";
+import { bareMap } from "../cluster/mirrors";
 import assetCache from "../services/assetCache";
 import { getWorldMap, type WorldBits } from "../modules/worldmaps";
+import { readHeldList } from "./npcStreaming";
 import { pvpEnabled, targetedCastRefused } from "./pvpzone";
 import * as settings from "../config/settings.json";
 import playerCache from "../services/playermanager.ts";
@@ -305,11 +308,21 @@ export function tokenLive(row: { token_expires?: unknown } | undefined): boolean
   return Number.isFinite(expires) && expires > Date.now();
 }
 
-/** This realm, as it marks the sessions it holds (SERVER_ID): realms sharing a database must each have their own. */
-const SESSION_SERVER = String(process.env.SERVER_ID || "default");
+/**
+ * This realm, as it marks the sessions it holds (SERVER_ID): realms sharing a database must each have their own.
+ * In a cluster the lock is per region (every node of it holds the same mark); the player directory tracks the node.
+ */
+export const SESSION_SERVER = clusterEnabled() ? regionId() : String(process.env.SERVER_ID || "default");
 /** A realm marks its sessions this often; one not marked for SESSION_STALE_MS is taken to be gone (the realm stopped). */
 export const SESSION_HEARTBEAT_MS = 30_000;
 const SESSION_STALE_MS = 3 * SESSION_HEARTBEAT_MS;
+
+/**
+ * The last saved_at a fenced save wrote (player.saveFenced). Each one writes a later value than the one before, so two
+ * saves in the same millisecond at the same place still change the row: the guard counts changed rows. Only the
+ * owner's saves land, so one stamp per process is enough.
+ */
+let lastSavedAt = 0;
 
 /** Whether an account's session is held by another realm that has vouched for it lately. */
 export function heldElsewhere(row: { session_server?: unknown; session_seen?: unknown } | undefined, now = Date.now()): boolean {
@@ -350,6 +363,9 @@ const LOGIN_COLUMNS = [
   { name: "session_seen", type: "BIGINT DEFAULT NULL" },
   { name: "twofa_pending", type: "TINYINT DEFAULT 0" },
   { name: "email_verified", type: "TINYINT DEFAULT 0" },
+  // Cluster mode (cells phase 7): the directory epoch of the node that may save the player, and when it last did.
+  { name: "owner_epoch", type: "BIGINT NOT NULL DEFAULT 0" },
+  { name: "saved_at", type: "BIGINT NOT NULL DEFAULT 0" },
 ];
 
 /**
@@ -382,6 +398,8 @@ const mapCache: Map<
   string,
   {
     warps: Record<string, WarpObject>;
+    /** The warps flat, in the order for...in over `warps` yields: the collision hot path loops this, not the record. */
+    warpList: WarpObject[];
     collisionRLE?: number[];
     /** A world's collision (modules/worldmaps.ts): one bit per tile, in place of the run lengths. */
     collisionBits?: WorldBits;
@@ -401,11 +419,7 @@ function cacheWorldMap(mapKey: string): CachedMap | undefined {
 
   const warps = world.properties?.warps;
   const entry: CachedMap = {
-    warps: Array.isArray(warps)
-      ? Object.fromEntries(
-          (warps as WarpObject[]).map((warp, idx) => [warp.name ?? String(idx), warp])
-        )
-      : ((warps || {}) as Record<string, WarpObject>),
+    ...warpsOf(warps),
     collisionBits: world.collision,
     width: world.width,
     height: world.height,
@@ -415,6 +429,16 @@ function cacheWorldMap(mapKey: string): CachedMap | undefined {
 
   mapCache.set(mapKey, entry);
   return entry;
+}
+
+// Both shapes of a map's warps: the record (keyed by name, else index) and the flat list in for...in order.
+function warpsOf(raw: unknown): { warps: Record<string, WarpObject>; warpList: WarpObject[] } {
+  const warps = (Array.isArray(raw)
+    ? Object.fromEntries((raw as WarpObject[]).map((warp, idx) => [warp.name ?? String(idx), warp]))
+    : (raw || {})) as Record<string, WarpObject>;
+  const warpList: WarpObject[] = [];
+  for (const key in warps) warpList.push(warps[key]);
+  return { warps, warpList };
 }
 
 function queryRLE(rleData: number[], targetIndex: number): number {
@@ -459,11 +483,7 @@ export async function hasLineOfSight(
     if (!collisionData || !Array.isArray(collisionData)) return false;
 
     mapDataCached = {
-      warps: Array.isArray(mapData.warps)
-        ? Object.fromEntries(
-            (mapData.warps as WarpObject[]).map((warp, idx) => [warp.name ?? String(idx), warp])
-          )
-        : (mapData.warps || {}),
+      ...warpsOf(mapData.warps),
       collisionRLE: collisionData,
       width: collisionData[0],
       height: collisionData[1],
@@ -797,6 +817,55 @@ const player = {
     ));
     await wrote(accountRows, username, { map, position: at, direction: position.direction as string }, text(map, position.direction));
     return response;
+  },
+  /**
+   * Cluster mode: a save that lands only while `epoch` is still the account's owner epoch (cells phase 7). The
+   * location and saved_at go first, guarded; the stats follow in the same transaction, so a node that lost the
+   * player writes neither. saved_at is always new (lastSavedAt), so the guarded statement always changes its row when
+   * it matches. A session another realm (or the Gateway) took is refused too: those writers never raise the owner
+   * epoch, so the guard also asks that the session is still this realm's, or nobody's.
+   */
+  saveFenced: async (
+    username: string,
+    epoch: number,
+    stats: StatsData | null,
+    location: { map: string; position: PositionData }
+  ): Promise<"saved" | "fenced"> => {
+    const name = username.toLowerCase();
+    const at = `${Math.round(location.position.x)},${Math.round(location.position.y)}`;
+    const direction = location.position.direction as string;
+    const savedAt = lastSavedAt = Math.max(Date.now(), lastSavedAt + 1);
+    const statements = [{
+      sql: "UPDATE accounts SET map = ?, position = ?, direction = ?, saved_at = ? WHERE username = ? AND owner_epoch = ? AND (session_server = ? OR session_server IS NULL)",
+      values: [location.map, at, direction, savedAt, name, epoch, SESSION_SERVER],
+      mustChange: true,
+    }];
+    const savedStats = stats && stats.health && stats.max_health && stats.stamina && stats.max_stamina
+      ? { health: stats.health, max_health: stats.max_health, stamina: stats.stamina, max_stamina: stats.max_stamina }
+      : null;
+    if (savedStats) {
+      statements.push({
+        sql: "UPDATE stats SET health = ?, max_health = ?, stamina = ?, max_stamina = ? WHERE username = ?",
+        values: [savedStats.health, savedStats.max_health, savedStats.stamina, savedStats.max_stamina, name],
+        mustChange: false,
+      });
+    }
+    try {
+      await writing(accountRows, name, () => transaction(statements));
+    } catch (error) {
+      if (error instanceof GuardError) return "fenced";
+      if (savedStats) await statRows.drop(name);
+      throw error;
+    }
+    await wrote(accountRows, name, { map: location.map, position: at, direction }, text(location.map, direction));
+    if (savedStats) await wrote(statRows, name, savedStats, whole(...Object.values(savedStats)));
+    return "saved";
+  },
+  /** The owner epoch and the last fenced save time of an account (cells phase 7). Null for no account. */
+  saveStamp: async (username: string): Promise<{ ownerEpoch: number; savedAt: number } | null> => {
+    const rows = (await query("SELECT owner_epoch, saved_at FROM accounts WHERE username = ?", [username.toLowerCase()])) as any[];
+    if (!rows?.[0]) return null;
+    return { ownerEpoch: Number(rows[0].owner_epoch) || 0, savedAt: Number(rows[0].saved_at) || 0 };
   },
   setDeadState: async (
     username: string,
@@ -1367,7 +1436,8 @@ const player = {
 
     if (!worldNoPvp && (!pvpData || !Array.isArray(pvpData) || pvpData.length < 3)) return true;
 
-    const mapPropertiesRaw = await assetCache.get("mapProperties") as MapProperties[];
+    // the held list (npcStreaming): only read here, never changed
+    const mapPropertiesRaw = await readHeldList<MapProperties>("mapProperties");
     if (!mapPropertiesRaw) return true;
 
     const mapData = mapPropertiesRaw.find(m => m.name.replace(".json", "") === mapKey);
@@ -1411,10 +1481,10 @@ const player = {
 
     const playerWidth = playerProperties.width || 32;
     const playerHeight = playerProperties.height || 32;
-    const { warps, collisionRLE, collisionBits, width, height, tileWidth, tileHeight } = mapDataCached;
+    const { warpList, collisionRLE, collisionBits, width, height, tileWidth, tileHeight } = mapDataCached;
 
-    for (const key in warps) {
-      const warp = warps[key];
+    for (let i = 0; i < warpList.length; i++) {
+      const warp = warpList[i];
       if (
         // across, the position is the middle of the sprite (as the tile test below has it): a warp is met by
         // the player's own width centred on it, so a rectangle is entered as readily from its left as its right
@@ -1479,11 +1549,7 @@ const player = {
     }
 
     mapCache.set(mapKey, {
-      warps: Array.isArray(mapData.warps)
-        ? Object.fromEntries(
-            (mapData.warps as WarpObject[]).map((warp, idx) => [warp.name ?? String(idx), warp])
-          )
-        : (mapData.warps || {}),
+      ...warpsOf(mapData.warps),
       collisionRLE: collisionData,
       width: collisionData[0],
       height: collisionData[1],
@@ -1519,11 +1585,7 @@ const player = {
       }
 
       mapDataCached = {
-        warps: Array.isArray(mapData.warps)
-          ? Object.fromEntries(
-              (mapData.warps as WarpObject[]).map((warp, idx) => [warp.name ?? String(idx), warp])
-            )
-          : (mapData.warps || {}),
+        ...warpsOf(mapData.warps),
         collisionRLE: collisionData,
         width: collisionData[0],
         height: collisionData[1],
@@ -1534,10 +1596,10 @@ const player = {
       mapCache.set(mapKey, mapDataCached);
     }
 
-    const { warps, collisionRLE, collisionBits, width, height, tileWidth, tileHeight } = mapDataCached;
+    const { warpList, collisionRLE, collisionBits, width, height, tileWidth, tileHeight } = mapDataCached;
 
-    for (const key in warps) {
-      const warp = warps[key];
+    for (let i = 0; i < warpList.length; i++) {
+      const warp = warpList[i];
       if (
         // across, the position is the middle of the sprite (as the tile test below has it): a warp is met by
         // the player's own width centred on it, so a rectangle is entered as readily from its left as its right
@@ -1628,7 +1690,7 @@ const player = {
     if (
       !self.location ||
       !target.location ||
-      target.location.map !== self.location.map
+      bareMap(target.location.map) !== bareMap(self.location.map)
     )
       return { value: false, reason: "different_map" };
 

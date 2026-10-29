@@ -43,6 +43,55 @@ describe("a connection ticket", () => {
   });
 });
 
+describe("a ticket bound to a node", () => {
+  /** A ticket signed for a node, as a cluster-aware issuer would. */
+  function issueFor(nodeId: string) {
+    const token = `ticket-${++seq}`;
+    const timestamp = String(NOW);
+    const expiresAt = String(NOW + 60_000);
+    const origin = "https://play.example";
+    const account = accountBinding("account-token");
+    return { token, timestamp, expiresAt, origin, account, nodeId, signature: signTicket(SECRET, token, timestamp, expiresAt, origin, account, nodeId) };
+  }
+
+  test("without a node id the signed string keeps its five parts", () => {
+    expect(ticketPayload("t", "1", "2", "https://o", "a")).toBe("t:1:2:https://o:a");
+    expect(ticketPayload("t", "1", "2", "o", "a").split(":")).toHaveLength(5);
+    expect(ticketPayload("t", "1", "2", "o", "a", "n1")).toBe("t:1:2:o:a:n1");
+    // A gateway ticket (no node id) still passes, here and on a node that knows its own id.
+    expect(checkTicket(issue(), SECRET, [], NOW)).toMatchObject({ ok: true });
+    expect(checkTicket(issue(), SECRET, [], NOW, "a")).toMatchObject({ ok: true });
+  });
+
+  test("is accepted on the node it names", () => {
+    expect(checkTicket(issueFor("a"), SECRET, [], NOW, "a")).toMatchObject({ ok: true });
+  });
+
+  test("is refused on another node", () => {
+    expect(checkTicket(issueFor("a"), SECRET, [], NOW, "b")).toMatchObject({ ok: false, reason: "for another node" });
+  });
+
+  test("is accepted anywhere when the checking node has no id", () => {
+    expect(checkTicket(issueFor("a"), SECRET, [], NOW)).toMatchObject({ ok: true });
+  });
+
+  test("a changed node id breaks the signature", () => {
+    expect(checkTicket({ ...issueFor("a"), nodeId: "b" }, SECRET, [], NOW, "b")).toMatchObject({ ok: false, reason: "invalid signature" });
+    expect(checkTicket({ ...issueFor("a"), nodeId: "" }, SECRET, [], NOW, "a")).toMatchObject({ ok: false, reason: "invalid signature" });
+  });
+
+  test("in cluster mode a ticket must name a node", () => {
+    expect(checkTicket(issue(), SECRET, [], NOW, "a", true)).toMatchObject({ ok: false, reason: "no node" });
+    expect(checkTicket(issueFor("a"), SECRET, [], NOW, "a", true)).toMatchObject({ ok: true });
+  });
+
+  test("a ticket refused for naming no node is not spent", () => {
+    const ticket = issue();
+    expect(checkTicket(ticket, SECRET, [], NOW, "a", true)).toMatchObject({ ok: false, reason: "no node" });
+    expect(checkTicket(ticket, SECRET, [], NOW)).toMatchObject({ ok: true });
+  });
+});
+
 describe("a login on a ticket's connection", () => {
   test("is allowed only with the account token the ticket was issued for", () => {
     const binding = accountBinding("account-token");

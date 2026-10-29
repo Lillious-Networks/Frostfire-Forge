@@ -1,8 +1,10 @@
-// Keeps every gathering area filled with nodes, on every layer of its map, as the creature spawner keeps its spawn
-// points (creatures/spawner.ts). Each area on each layer is a slot: its standing nodes, and when each missing one is
-// due. A gathered node is taken out at once (before anything is awaited, so no one else can take it) and its slot
+// Keeps every gathering area filled with nodes, on every layer of its map (an overflow layer only while it has players
+// in the area's block), as the creature spawner keeps its spawn points (creatures/spawner.ts). Each area on each layer
+// is a slot: its standing nodes, and when each missing one is due. A gathered node is taken out at once (before anything is awaited, so no one else can take it) and its slot
 // gets a respawn time; a node whose item could not be given is put back and that respawn cancelled.
 import log from "../../modules/logger";
+import { logNoIds, nextEntityId } from "../../cluster/entityids";
+import { isBaseLayer } from "../../services/layermanager";
 import { NODE_GAP, apart, pickSpot } from "./placement";
 import type { GatherArea, GatherGrid, GatherNode, Rng } from "./types";
 
@@ -17,9 +19,25 @@ export const GATHER_CELL_PX = 512;
 /** The biggest a node is drawn, px: the editor's limit, and how far a new node looks for others it could overlap. */
 export const MAX_NODE_SIZE = 128;
 
+/** How long an overflow-layer area's block stands empty before its nodes are removed. */
+export const EMPTY_BLOCK_DESPAWN_MS = 60_000;
+
 export interface SpawnerHooks {
   onSpawn?(node: GatherNode): void;
   onDespawn?(node: GatherNode): void;
+  /**
+   * How many players of a layer stand in the block holding (x, y). Without it
+   * every layer is filled everywhere; with it an area on an overflow layer has
+   * nodes only while its block has players of that layer.
+   */
+  playersInBlock?(layerId: string, x: number, y: number): number;
+  /**
+   * Cluster mode: whether this node fills at (x, y) of the map (its block is
+   * this node's; or no one's, once the start grace is over). Absent: always.
+   * Nodes already standing in a block another node takes are left alone
+   * (phase 7 moves them).
+   */
+  spawnsHere?(map: string, x: number, y: number): boolean;
 }
 
 /** One area on one layer. */
@@ -29,6 +47,8 @@ interface Slot {
   live: Set<number>;
   /** When each missing node is due. */
   due: number[];
+  /** Overflow layers: when the area's block was first seen without a player of the layer. */
+  emptySince?: number;
 }
 
 const slotKey = (areaId: number, layerId: string) => `${areaId}|${layerId}`;
@@ -58,7 +78,6 @@ export class GatherSpawner {
   private taken = new Map<number, { slot: Slot; dueAt: number }>();
   /** Slots whose layer went away: their pending respawn times, kept until `until` in case the layer comes back. */
   private parked = new Map<string, { area: GatherArea; due: number[]; until: number }>();
-  private nextId = 1;
 
   constructor(
     private readonly gridFor: (map: string) => GatherGrid | undefined,
@@ -77,6 +96,30 @@ export class GatherSpawner {
 
   get(id: number): GatherNode | undefined {
     return this.nodes.get(id);
+  }
+
+  /** Every node standing now. */
+  all(): IterableIterator<GatherNode> {
+    return this.nodes.values();
+  }
+
+  /** The maps with a node standing, read from the layer index (a node outlives its area being turned off). */
+  nodeMaps(): string[] {
+    const maps = new Set<string>();
+    for (const key of this.byLayer.keys()) maps.add(key.slice(0, key.indexOf("|")));
+    return [...maps];
+  }
+
+  /** Every node standing on `map`, layer by layer. */
+  *nodesOnMap(map: string): IterableIterator<GatherNode> {
+    const prefix = `${map}|`;
+    for (const [key, ids] of this.byLayer) {
+      if (!key.startsWith(prefix)) continue;
+      for (const id of ids) {
+        const node = this.nodes.get(id);
+        if (node) yield node;
+      }
+    }
   }
 
   nodesOn(map: string, layerId: string): GatherNode[] {
@@ -148,6 +191,9 @@ export class GatherSpawner {
   tick(now: number): void {
     let budget = MAX_SPAWNS_PER_TICK;
     for (const slot of this.slots.values()) {
+      if (!this.hasPlayers(slot, now)) continue;
+      // Asked only when a node is due (a cache lookup), so a block that becomes this node's fills on the next tick.
+      if (this.hooks.spawnsHere && slot.due.some((at) => at <= now) && !this.hooks.spawnsHere(slot.area.map, slot.area.x, slot.area.y)) continue;
       let i = 0;
       while (i < slot.due.length) {
         if (slot.due[i]! > now) {
@@ -199,6 +245,32 @@ export class GatherSpawner {
     return true;
   }
 
+  /**
+   * Whether a slot fills: always on layer 1; on an overflow layer only while the
+   * area's block has a player of that layer. Once the block has stood empty for
+   * EMPTY_BLOCK_DESPAWN_MS its nodes are removed (no rewards) and are due again
+   * at once, so they come back when a player does.
+   */
+  private hasPlayers(slot: Slot, now: number): boolean {
+    const playersInBlock = this.hooks.playersInBlock;
+    if (!playersInBlock || isBaseLayer(slot.layerId)) return true;
+    if (playersInBlock(slot.layerId, slot.area.x, slot.area.y) > 0) {
+      slot.emptySince = undefined;
+      return true;
+    }
+    if (slot.emptySince === undefined) {
+      slot.emptySince = now;
+    } else if (slot.live.size > 0 && now - slot.emptySince >= EMPTY_BLOCK_DESPAWN_MS) {
+      for (const id of [...slot.live]) {
+        const node = this.nodes.get(id);
+        if (!node) continue;
+        this.removeNode(node);
+        slot.due.push(now);
+      }
+    }
+    return false;
+  }
+
   private fillSlots(now: number): void {
     for (const area of this.areas.values()) {
       for (const layerId of this.layers.get(area.map) ?? []) {
@@ -224,7 +296,15 @@ export class GatherSpawner {
         .every((other) => apart({ x, y, size }, { x: other.x, y: other.y, size: this.areas.get(other.areaId)?.size ?? size }));
     const spot = pickSpot(grid, slot.area, this.tiles.get(layerKey(map, slot.layerId)) ?? new Set(), this.r, clear);
     if (!spot) return false;
-    this.addNode({ id: this.nextId++, areaId: slot.area.id, map: slot.area.map, layerId: slot.layerId, x: spot.x, y: spot.y, item: slot.area.item, tile: spot.tile }, slot);
+    // A node that cannot get an id is as one that found no tile: its slot tries again after RETRY_MS.
+    let id: number;
+    try {
+      id = nextEntityId();
+    } catch (error) {
+      logNoIds("gathering", `[Gathering] A node was not spawned: ${error}`);
+      return false;
+    }
+    this.addNode({ id, areaId: slot.area.id, map: slot.area.map, layerId: slot.layerId, x: spot.x, y: spot.y, item: slot.area.item, tile: spot.tile }, slot);
     return true;
   }
 

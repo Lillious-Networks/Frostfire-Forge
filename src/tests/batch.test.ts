@@ -24,7 +24,7 @@ mock.module("../controllers/sqldatabase", () => databaseModule({
   },
 }));
 
-const { atomically } = await import("../services/batch");
+const { atomically, nothingWritten, setClusterPlayerLock } = await import("../services/batch");
 const { turns } = await import("../services/datacache");
 
 beforeEach(() => {
@@ -108,6 +108,36 @@ describe("atomically", () => {
 
     await expect(run).rejects.toThrow("cache gone");
     expect(order).toEqual(["transaction", "kept 2", "undone"]);
+  });
+
+  test("an error from before the transaction is told apart from one after it", async () => {
+    const caught = async (run: Promise<unknown>) => run.then(() => { throw new Error("it did not throw"); }, (error) => error);
+    // Before: what the work threw (also when it is no Error), and a lock check that refused.
+    expect(nothingWritten(await caught(atomically(["hero"], async () => { throw new Error("not an item"); })))).toBe(true);
+    const plain = await caught(atomically(["hero"], async () => { throw "plain"; }));
+    expect(nothingWritten(plain)).toBe(true);
+    expect(String(plain)).toContain("plain");
+    const previous = setClusterPlayerLock(async (_players, work) => work(async () => { throw new Error("lock lost"); }));
+    try {
+      const refused = await caught(atomically(["hero"], async (batch) => { batch.add({ sql: "first" }); }));
+      expect(String(refused)).toContain("lock lost");
+      expect(nothingWritten(refused)).toBe(true);
+      expect(sent).toEqual([]);
+    } finally {
+      setClusterPlayerLock(previous);
+    }
+    // After: the transaction's own error (its answer may have been lost after the commit), and a kept step that failed.
+    refuse = new Error("connection reset");
+    expect(nothingWritten(await caught(atomically(["hero"], async (batch) => { batch.add({ sql: "first" }); })))).toBe(false);
+    refuse = null;
+    const kept = await caught(atomically(["hero"], async (batch) => {
+      batch.add({ sql: "first" });
+      batch.kept(() => { throw new Error("cache gone"); });
+    }));
+    expect(String(kept)).toContain("cache gone");
+    expect(nothingWritten(kept)).toBe(false);
+    expect(nothingWritten(new Error("never thrown by a batch"))).toBe(false);
+    expect(nothingWritten(undefined)).toBe(false);
   });
 });
 

@@ -167,6 +167,12 @@ export interface CreatureInstance {
   casting: CreatureCast | null;
   /** ability id -> scheduling state */
   abilityStates: Map<number, AbilityState>;
+  /** Cluster mode: a read-only mirror of a creature another node owns (never ticked, written or targeted here). */
+  remote?: boolean;
+  /** A mirror's auras as its owner shows them, with absolute expiries (AuraState); decorate turns them into remainingMs. */
+  mirrorAuras?: unknown[];
+  /** A handoff of this creature to another node is in progress (cluster/creaturehandoff.ts): no second one starts. */
+  handoff?: boolean;
 }
 
 export interface CreatureCast {

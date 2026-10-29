@@ -5,6 +5,8 @@ services:
       dockerfile: src/docker/Dockerfile.dev
     container_name: frostfire-forge-dev
     restart: always
+    # The engine's shutdown takes up to 9 s (running handoffs, achievement flush, leaving the cluster).
+    stop_grace_period: 20s
     ports:
       - "3000:3000"
       - "3000:3000/udp"

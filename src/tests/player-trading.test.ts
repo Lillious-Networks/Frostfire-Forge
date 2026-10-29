@@ -245,6 +245,12 @@ describe("who may trade", () => {
     expect(cannotTrade(hero, person("ally", at(100, 100, "cave")))).toBe("Ally is too far away to trade.");
   });
 
+  test("a map named with or without .json is the same map", () => {
+    const at = (map: string, x: number) => ({ location: { map, position: { x, y: 100 } } });
+    expect(cannotTrade(person("hero", at("overworld.json", 100)), person("ally", at("overworld", 150)))).toBeNull();
+    expect(cannotTrade(person("hero", at("overworld", 100)), person("ally", at("cave.json", 100)))).toBe("Ally is too far away to trade.");
+  });
+
   test("a position kept as text is read the same", () => {
     expect(cannotTrade(hero, person("ally", { location: { map: "overworld", position: "150,100" } }))).toBeNull();
     expect(cannotTrade(hero, person("ally", { location: { map: "overworld", position: "900,100" } }))).toBe("Ally is too far away to trade.");

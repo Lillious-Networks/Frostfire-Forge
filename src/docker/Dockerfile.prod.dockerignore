@@ -71,3 +71,8 @@ build
 Dockerfile
 docker-compose*.yml
 .dockerignore
+
+# Cluster test stack: test-only env and local planning notes
+.superpowers
+docs/superpowers
+src/docker/cluster.env

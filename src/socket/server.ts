@@ -13,12 +13,12 @@ let lastSessionValidationTime = 0;
 // Fix the double-dispatch in handleBackpressure before lowering this.
 const MAX_BUFFER_SIZE = 1024 * 1024 * 1024;
 const packetQueue = new Map<string, (() => void)[]>();
-import { forgetNpcStream } from "../systems/npcStreaming";
+import { forgetNpcStream, warmStreamDataWithin } from "../systems/npcStreaming";
 import "../utility/validate_config.ts";
 import crypto from "crypto";
-import { packetManager } from "./packet_manager.ts";
+import { packetManager, regenStatsFrames } from "./packet_manager.ts";
 import { packetTypes } from "./types.ts";
-import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady, teleportPlayerWrapper, removePlayerFromCleanupMaps, removeFromAuthenticationQueues, releaseDraggedBy, startArea } from "./receiver.ts";
+import packetReceiver, { despawnBatchQueue, clearBatchQueuesForPlayer, clearPlayerTarget, sendAnimationTo, spriteDataCacheReady, teleportPlayerWrapper, removePlayerFromCleanupMaps, removeFromAuthenticationQueues, releaseDraggedBy, startArea, forceStopPlayerMovement, handoffRecheck, sendPacket } from "./receiver.ts";
 import eventEmitter from "node:events";
 import { listener } from "../modules/event_bus.ts";
 import { Events, setPlayerPvp } from "../systems/events";
@@ -31,23 +31,43 @@ import { ensureMailboxSchema } from "../systems/mailboxeditor.ts";
 import { ensureGatheringSchema } from "../systems/gathering/editor.ts";
 import fishing, { ensureFishingSchema } from "../systems/fishing";
 import { ensureFootprintsSchema } from "../systems/footprints";
-import { ensureAchievementSchema } from "../systems/achievements/store.ts";
+import { changedOf, clearChanged, ensureAchievementSchema, forgetRows, markChanged } from "../systems/achievements/store.ts";
 import { ensureBuyPriceColumn, ensureHomeItemIcon, ensureSoulboundColumn, ensureSpriteSheetColumn } from "../systems/items.ts";
 import { ensureMountEditorPermission } from "../systems/mounteditor.ts";
 import worlds from "../systems/worlds.ts";
 import playerCache from "../services/playermanager.ts";
 import { loadTables, forgetPlayer } from "../services/datacache.ts";
 import mapIndex from "../services/mapindex";
+import spatialGrid from "../services/spatialgrid.ts";
+import layerManager from "../services/layermanager.ts";
 import gameLoop from "../services/gameloop";
 import packet from "../modules/packet.ts";
 import fs from "node:fs";
 import query from "../controllers/sqldatabase";
 import { generateKeyPair } from "../modules/cipher.ts";
-import { despawnPlayerFromAllAOI, startAutoPartyLayerSync, startAutoLayerCondensation, findPlayersWithTargetInAOI } from "./aoi.ts";
+import { despawnPlayerFromAllAOI, releasePlayerAOI, startAutoPartyLayerSync, startAutoLayerCondensation, findPlayersWithTargetInAOI } from "./aoi.ts";
 import { loadPlugins, registerAllPlugins, mergePluginSpellsIntoCache } from "../modules/plugin_loader.ts";
 import { pluginHandlers, warpInterceptors, packetInterceptors } from "./receiver.ts";
 import { startWebTransportServer, TransportConnection, frameLimitFor } from "./transport.ts";
-import { checkTicket, type TicketFields } from "./ticket.ts";
+import { checkTicket, nodeTicket, type TicketFields } from "./ticket.ts";
+import { clusterEnabled, nodeId, nodeLinkBindHost, nodeLinkBindWarning, nodeLinkHost, nodeLinkPort, regionId } from "../cluster/config.ts";
+import { broadcastWorld, deliverToPlayer, isOnline } from "../cluster/deliver.ts";
+import { clusterBlocks, clusterNodes, clusterStore, startCluster, stopCluster } from "../cluster/index.ts";
+import { dotCredit } from "../cluster/dotcredit.ts";
+import { forwardTable } from "../cluster/forwarding.ts";
+import { ghosts } from "../cluster/ghosts.ts";
+import { walkOf } from "./arrival.ts";
+import { sendHandoffPrepare } from "./handoffprepare.ts";
+import { HandoffGiveUp, playerHandoff, type NodeAddress as HandoffNode } from "../cluster/handoff.ts";
+import { SHUTDOWN_DEADLINE_MS, arrivalId, boundedStep, guardedTeleport, spendsTicket } from "../cluster/handoffguards.ts";
+import { readyIn as consumableReadyIn, setReadyIn as setConsumableReadyIn } from "../systems/consumables.ts";
+import { packetsInFlight, waitIdle } from "../cluster/inflight.ts";
+import { playerGhostRecord } from "../cluster/kinds/players.ts";
+import { onLinksAttached } from "../cluster/linkhooks.ts";
+import { clearShared } from "../cluster/clearguard.ts";
+import { fencedSaves } from "../cluster/ownerepoch.ts";
+import { spendTicket } from "../cluster/ticketspend.ts";
+import { WebTransportLinks } from "../cluster/wtlinks.ts";
 import { createHttpFilter, blockedSegmentsFrom, windowFromSettings } from "../modules/httpfilter.ts";
 import { topicBus } from "./topics.ts";
 import { WebTransport } from "@lillious-networks/webtransport-bun";
@@ -58,11 +78,11 @@ const httpRouteHandlers = new Map<string, (req: Request) => Promise<Response>>()
 
 import * as settings from "../config/settings.json";
 import assetCache from "../services/assetCache.ts";
-import dots from "../systems/dots.ts";
+import dots, { setRemoteDotCaster } from "../systems/dots.ts";
 import spellEffects, { getStunsForPlayer, getSlowsForPlayer } from "../systems/spelleffects.ts";
-import { saveOnDisconnect as saveSicknessOnDisconnect } from "../systems/resurrection.ts";
+import { forgetSickness, saveOnDisconnect as saveSicknessOnDisconnect } from "../systems/resurrection.ts";
 import effectManager from "../services/effectmanager";
-import { GatewayClient } from "../modules/gateway-client.ts";
+import { GatewayClient, resolveUseSSL } from "../modules/gateway-client.ts";
 import { isWhitelistEnabled, loadRealmWhitelist, onWhitelistSwitch } from "../services/whitelist.ts";
 import { ensureSubscriptionSchema, refreshSubscriptions, subscriptionsReady, refusal as subscriptionRefusal } from "../systems/subscriptions.ts";
 import loot from "../systems/loot";
@@ -70,6 +90,8 @@ import creatures from "../systems/creatures";
 import gathering from "../systems/gathering";
 import achievements from "../systems/achievements";
 import cooldownManager from "../services/cooldownmanager";
+import { installUnhandledRejectionHandler } from "../services/unhandled";
+installUnhandledRejectionHandler();
 
 const _cert = process.env.TLS_CERT_PATH;
 const _key = process.env.TLS_KEY_PATH;
@@ -407,26 +429,35 @@ const httpServers = startHttpsServers({
 });
 
 /**
- * A connection ticket from the Gateway (see ticket.ts): signed, unexpired,
- * from an allowed origin, and not used before. What comes back is the account
- * it is for, which the login must match.
+ * A connection ticket from the Gateway, or from another node (a SWITCH; see
+ * ticket.ts): signed, unexpired, from an allowed origin, and not used before;
+ * in cluster mode, for this node. What comes back is the account it is for,
+ * which the login must match, and the origin it was signed for.
  */
-function validateConnectionToken(fields: TicketFields): { account: string } | null {
+function validateConnectionToken(fields: TicketFields): { account: string; origin: string } | null {
   const sharedSecret = process.env.GATEWAY_GAME_SERVER_SECRET;
   if (!sharedSecret) {
     log.error("GATEWAY_GAME_SERVER_SECRET environment variable is not set");
     return null;
   }
-  const checked = checkTicket(fields, sharedSecret, ALLOWED_ORIGINS);
+  const cluster = clusterEnabled();
+  const checked = checkTicket(fields, sharedSecret, ALLOWED_ORIGINS, Date.now(), cluster ? nodeId() : "", cluster);
   if (!checked.ok) {
     log.warn(`Connection attempt refused: ${checked.reason}`);
     return null;
   }
-  return { account: checked.account };
+  return { account: checked.account, origin: checked.origin };
 }
 
 function onTransportOpen(connection: TransportConnection) {
   const id = connection.data.id;
+  // A node ticket opens one connection in the whole cluster (cells phase 6): spent now, checked by AUTH. Only a
+  // SWITCH ticket: the Gateway's own tickets are not spent. Outside cluster mode there is no store, so none is.
+  const store = clusterStore();
+  const token = String(connection.data.ticketToken ?? "");
+  connection.data.ticketSpent = spendsTicket(store, token)
+    ? spendTicket(store, token, Number(connection.data.ticketExpiresAt) || 0)
+    : null;
 
   connections.add({ id, useragent: connection.data.useragent, chatDecryptionKey: connection.data.chatDecryptionKey });
   packetQueue.set(id, []);
@@ -466,6 +497,9 @@ function broadcastConnectionCount() {
   lastConnectionCountBroadcast = now;
   connectionCountDirty = false;
 
+  // In cluster mode this is the count of this node's connections only. The
+  // region-wide count is the gateway's: it sums the online nodes' connection
+  // counts per region (collapseRegions), and that is what the realm list shows.
   // Loss-tolerant status fan-out: a datagram, not a reliable frame - at 1000+
   // connections the per-second broadcast to every player would otherwise
   // contend for each connection's ordered stream queue.
@@ -656,8 +690,404 @@ const webTransportRateLimits = {
   maxConcurrentStreams: (settings as any)?.webtransport?.rateLimits?.maxConcurrentStreams ?? 16,
 };
 
+const serverHost = process.env.SERVER_HOST || "localhost";
+const publicHost = process.env.PUBLIC_HOST || serverHost;
+
+// Cells phase 6: a player handed to the node that owns the block they walked into. The handoff itself is
+// cluster/handoff.ts; these are its engine side. Nothing here runs outside cluster mode. It sits above
+// startCluster: the link hook below is registered before startCluster runs the hooks, and what the hook
+// reads (the constants here) is set by then.
+
+/** The live nodes' addresses, read every 2 s while the links are up: a handoff finds its target without a store read. */
+const nodeAddresses = new Map<string, HandoffNode>();
+/** Whether the link hook is running: a read that ends after it stopped leaves the addresses empty. */
+let nodeAddressesLive = false;
+
+let nodeAddressesRead: Promise<void> | null = null;
+
+/** Reads the live nodes' addresses again; a read already running is shared. */
+function refreshNodeAddresses(): Promise<void> {
+  nodeAddressesRead ??= readNodeAddresses().finally(() => { nodeAddressesRead = null; });
+  return nodeAddressesRead;
+}
+
+async function readNodeAddresses(): Promise<void> {
+  try {
+    const live = (await clusterNodes()?.live()) ?? [];
+    if (!nodeAddressesLive) return;
+    nodeAddresses.clear();
+    for (const n of live) {
+      nodeAddresses.set(n.nodeId, { nodeId: n.nodeId, publicHost: n.publicHost, port: n.port, wtPort: n.wtPort, useSSL: n.useSSL });
+    }
+  } catch (error) {
+    log.warn(`Node addresses not refreshed (the last ones are kept): ${error}`);
+  }
+}
+
+/** Whether a connection of this node has `id` open. */
+function connectionOpen(id: string): boolean {
+  for (const client of connections) if (String(client.id) === id) return true;
+  return false;
+}
+
+/**
+ * What travels with a handed-off player beside the rows saved to the database (Deviation 18: Task 14's seedArrival
+ * reads exactly these fields). Cooldowns and the last attack are performance.now() values here, so they travel as
+ * remaining or elapsed milliseconds; the effects already hold Date.now() deadlines.
+ */
+function handoffState(p: any): {
+  dots: any[]; barriers: any[]; stuns: any[]; slows: any[];
+  cooldowns: Record<string, number>;
+  lockoutMs: number;
+  sickUntil: number;
+  deadState: 0 | 1 | 2;
+  corpse: any | null;
+  pvp: boolean;
+  lastAttackAgoMs: number | null;
+  mounted: boolean;
+  mount_type: string | null;
+  /** The shared consumable cooldown left (ms, 0 when ready): the arrival sets it with consumables' setReadyIn. */
+  consumableReadyIn: number;
+  /** The direction the player is walking (one of the eight), or null when they stand: the new node goes on walking. */
+  walk: string | null;
+  /** The player's pose revision (socket/posedgram.ts): the new node counts on from it, so it never sends a lower one. */
+  poseRev: number;
+} {
+  const id = String(p.id);
+  const now = performance.now();
+  const cooldowns: Record<string, number> = {};
+  for (const [spellId, end] of Object.entries(cooldownManager.getActiveCooldowns(p.username))) {
+    const left = Math.round(Number(end) - now);
+    if (left > 0) cooldowns[spellId] = left;
+  }
+  const lockout = cooldownManager.getLockout(p.username);
+  return {
+    dots: dots.getPlayerDots(id) || [],
+    barriers: Array.isArray(p.barriers) ? p.barriers : [],
+    stuns: getStunsForPlayer(id) || [],
+    slows: getSlowsForPlayer(id) || [],
+    cooldowns,
+    lockoutMs: lockout > now ? Math.round(lockout - now) : 0,
+    sickUntil: Number(p.resurrectionSickUntil) || 0,
+    deadState: p.isGhost ? 2 : p.isDead ? 1 : 0,
+    corpse: p.corpse ?? null,
+    pvp: !!p.pvp,
+    lastAttackAgoMs: typeof p.last_attack === "number" ? Math.max(0, Math.round(now - p.last_attack)) : null,
+    mounted: !!p.mounted,
+    mount_type: p.mount_type ?? null,
+    consumableReadyIn: consumableReadyIn(p.username),
+    walk: walkOf(p),
+    poseRev: Number.isSafeInteger(p.poseRev) && p.poseRev > 0 ? p.poseRev : 0,
+  };
+}
+
+/**
+ * Takes a handed-off player off this node in the handoff's synchronous step. Not a disconnect: the session, the
+ * row cache, the creature threat and the friends' view of them stay; what travelled in the snapshot is dropped here.
+ * It never throws (handoff.ts): each step is tried on its own, so one that fails cannot stop the ones after it.
+ */
+function releaseHandedOff(p: any): void {
+  const id = String(p.id);
+  const lower = String(p.username || "").toLowerCase();
+  // First: from here on playerCache.set refuses the player, and presence holds its directory entry.
+  p.handedOff = true;
+  if (p.wt?.data) p.wt.data.handedOff = true;
+  const steps: Array<[string, () => void]> = [
+    ["clean up its state", () => {
+      try {
+        cleanupPlayerState(p, { despawn: false });
+      } finally {
+        // Whatever failed in there, the player does not stay live here: the handoff goes on and the client is
+        // sent on, so a player still in the cache would be on two nodes.
+        // Nor does it stay in the spatial indexes, if the cleanup threw before it reached them (each removal is idempotent).
+        const removals: Array<[string, () => void]> = [
+          ["player cache", () => { if (playerCache.get(id) === p) playerCache.remove(id); }],
+          ["map index", () => mapIndex.removePlayer(id)],
+          ["spatial grid", () => spatialGrid.removePlayer(id)],
+          ["layer", () => layerManager.removePlayerFromLayer(id)],
+        ];
+        for (const [where, remove] of removals) {
+          try {
+            remove();
+          } catch (error) {
+            log.error(`Handoff release of ${p.username}: not removed from the ${where}: ${error}`);
+          }
+        }
+      }
+    }],
+    // The login path restores these by username: a later login here must not find stale copies.
+    ["drop its cooldowns", () => cooldownManager.removePlayer(p.username)],
+    ["drop its saved effects", () => {
+      if (!lower) return;
+      effectManager.saveDots(lower, []);
+      effectManager.saveBarriers(lower, []);
+      effectManager.saveStuns(lower, []);
+      effectManager.saveSlows(lower, []);
+    }],
+    ["forget its sickness", () => forgetSickness(p)],
+    // It travels in the snapshot (consumableReadyIn): a hand-back here must not find the old one.
+    ["drop its consumable cooldown", () => setConsumableReadyIn(p.username, 0)],
+    ["close its creature editor", () => creatures.closeEditorFor(id)],
+    ["forget its creatures", () => creatures.sync.forget(id)],
+    ["forget its gathering nodes", () => gathering.sync.forget(id)],
+    ["end its fishing", () => { fishing.endSession(id); }],
+    ["release whom it drags", () => releaseDraggedBy(p.id)],
+    ["clear its login queues", () => {
+      if (p.wt?.data?.connectionToken) removeFromAuthenticationQueues(String(p.wt.data.id || p.id), p.wt.data.connectionToken);
+    }],
+  ];
+  for (const [what, step] of steps) {
+    try {
+      step();
+    } catch (error) {
+      log.error(`Handoff release of ${p.username}: could not ${what}: ${error}`);
+    }
+  }
+}
+
+/**
+ * A handed-off player's stats and place, saved before the SWITCH sends them on. The twin of the saves in the
+ * onDisconnect listener below (the world count, setStats, setLocation); kept apart because that listener is run
+ * by tests with its own names. A failure throws: the handoff logs it (the new node may load older stats).
+ */
+async function saveHandedOff(p: any): Promise<void> {
+  try {
+    // A warp hands off with the location already set to the destination (Task 14): the count it leaves is the old map's.
+    await worlds.adjustPlayerCount(p?.handoffFromMap || p?.location?.map || "", -1);
+  } catch (error) {
+    log.error(`[WorldsFetchError] Failed to update world player count: ${error}`);
+  }
+  if (!p.isGuest && fencedSaves(p)) {
+    // Cluster mode: only while this node still owns the player (cells phase 7). A fenced player with no location
+    // is not saved at all: an unfenced stats write could land after the new owner's. The achievement progress is
+    // dropped only once the save has said another node owns the player (settleFencedLeave); with no save, whether
+    // this node owns the player is not known, and the progress is flushed (max-only, it rolls nothing back).
+    const taken = takeAchievementProgress(p.username);
+    let owned: boolean | null = null;
+    try {
+      if (p.location) {
+        const saved = await player.saveFenced(p.username, p.ownerEpoch, p.stats ?? null, p.location);
+        if (saved === "fenced") log.info(`[Save] ${p.username} was not saved at handoff: another node owns the player now`);
+        owned = saved === "saved";
+      }
+    } finally {
+      await settleFencedLeave(p, owned, taken);
+    }
+    return;
+  }
+  try {
+    // Achievement progress since the last save tick, as a disconnect's PLAYER_DISCONNECT would flush it.
+    await achievements.onLeave({ player: p });
+  } catch (error) {
+    log.error(`Handoff of ${p?.username}: achievement progress not flushed: ${error}`);
+  }
+  if (!p.isGuest) {
+    if (p.stats) await player.setStats(p.username, p.stats);
+    if (p.id && p.location) await player.setLocation(p.id, p.location.map, p.location.position);
+  }
+}
+
+/**
+ * Cluster mode (cells phase 7): a leaving player's achievement progress is written only while this node owns the
+ * player. It is taken from the store before the leave can flush it (a disconnect's PLAYER_DISCONNECT flushes it at
+ * once), and settled by settleFencedLeave once the fenced save has answered. Answers what was taken.
+ */
+function takeAchievementProgress(username: string): Map<number, number> {
+  const taken = changedOf(username);
+  for (const id of taken.keys()) clearChanged(username, id);
+  return taken;
+}
+
+/**
+ * Settles a fenced leave (a disconnect or a handoff) once its save has answered: `owned` is true when the save was
+ * made, false when it was refused, and null when the save threw or there was nothing to save (no location).
+ * Owned, or not known: the taken progress goes back, under anything counted since, and is flushed, as an unfenced
+ * leave does. A refused save means another node owns the player: the progress is dropped, and so are the effects and
+ * sickness kept here for a later login, which are stale now. A newer session of the player live here took the owner
+ * epoch from this one, so this node still owns the player: then nothing is dropped.
+ */
+async function settleFencedLeave(p: any, owned: boolean | null, taken: Map<number, number>): Promise<void> {
+  const username = String(p?.username ?? "");
+  if (!username) return;
+  const live = playerCache.getByUsername(username);
+  const newerHere = !!live && String(live.id) !== String(p.id);
+  if (owned !== false || newerHere) {
+    const since = changedOf(username);
+    for (const [id, progress] of taken) markChanged(username, id, Math.max(progress, since.get(id) ?? 0));
+    try {
+      await achievements.onLeave({ player: p });
+    } catch (error) {
+      log.error(`Leave of ${username}: achievement progress not flushed: ${error}`);
+    }
+    return;
+  }
+  // Anything counted since the take is dropped with it.
+  takeAchievementProgress(username);
+  const lower = username.toLowerCase();
+  const drops: Array<[string, () => unknown]> = [
+    ["achievement rows", () => forgetRows(username)],
+    ["saved effects", () => {
+      effectManager.saveDots(lower, []);
+      effectManager.saveBarriers(lower, []);
+      effectManager.saveStuns(lower, []);
+      effectManager.saveSlows(lower, []);
+    }],
+    ["sickness", () => forgetSickness(p)],
+  ];
+  for (const [what, drop] of drops) {
+    try {
+      await drop();
+    } catch (error) {
+      log.error(`Leave of ${username}: the ${what} kept here were not dropped: ${error}`);
+    }
+  }
+  log.info(`[Save] ${username}'s achievement progress, effects and sickness were dropped here: another node owns the player now`);
+}
+
+/**
+ * How long a shutdown waits for the handoffs still running, at most (and never past the shutdown deadline). A run is
+ * at most drain (2 s) + answer (2 s) + save, then the SWITCH; the save is what must not be cut, and the SWITCH's
+ * wait for the client's close is not needed on a node that is going down.
+ */
+const HANDOFF_IDLE_MS = 6_000;
+
+/**
+ * The part of the shutdown deadline kept for leaving the cluster (stopCluster), at the end: the steps before it end
+ * this long before the deadline, so presence is always released, however long they take.
+ */
+const STOP_MS = 3_000;
+
+/**
+ * How long a shutdown waits for the gateway's unregister, at most (it has no timeout of its own). The time it does
+ * not use goes to the steps after it, so a slow gateway cannot take the achievement flush's time.
+ */
+const UNREGISTER_MS = 2_000;
+
+// Registered at load, before startCluster below runs the hooks; it runs only when startCluster attaches the links.
+onLinksAttached((ctx) => {
+  const secret = process.env.GATEWAY_GAME_SERVER_SECRET || "";
+  playerHandoff.start({
+    calls: ctx.calls,
+    ghosts,
+    self: ctx.self,
+    ownerAt: ctx.ownerAt,
+    now: Date.now,
+    player: (id) => playerCache.get(String(id)) ?? null,
+    playerByUsername: (username) => playerCache.getByUsername(username) ?? null,
+    // Called once the target has said yes (a warp: first), so the player has walked until now.
+    drain: async (p, ms) => {
+      gameLoop.unregisterMovingPlayer(p.id);
+      // A packet still running would be copied half done: the handoff is given up (and tried again soon).
+      if (!(await waitIdle(String(p.id), ms))) throw new HandoffGiveUp(`packets still running after ${ms} ms (${packetsInFlight(String(p.id))} in flight)`);
+      // A move that was running when the drain began may have registered the mover again before it ended.
+      gameLoop.unregisterMovingPlayer(p.id);
+    },
+    recheck: handoffRecheck,
+    // The client is told where the next node is (or to drop the session it opened for it).
+    prepare: (p, node) => sendHandoffPrepare(p.wt, node),
+    // A drained player kept here is stopped where they stand, and the client told so: it was walking, and its moves
+    // during the drain were dropped.
+    undrain: (p) => forceStopPlayerMovement(p),
+    snapshot: (p) => ({
+      id: String(p.id),
+      username: p.username,
+      map: String(p.location?.map ?? "").replace(/\.json$/, ""),
+      x: Number(p.location?.position?.x) || 0,
+      y: Number(p.location?.position?.y) || 0,
+      direction: p.location?.position?.direction || "down",
+      creatureIds: [...creatures.sync.knownBy(String(p.id))],
+      playerIds: [...(p.aoi?.playersInAOI ?? [])].map(String),
+      state: handoffState(p),
+    }),
+    ghostRecord: playerGhostRecord,
+    ticket: (p, target) => (secret
+      ? nodeTicket(secret, String(p.wt?.data?.ticketOrigin ?? ""), String(p.wt?.data?.ticketAccount ?? ""), target)
+      : null),
+    node: (target) => {
+      const address = nodeAddresses.get(target);
+      // A node not known yet (it joined since the last read): read again, for the next try.
+      if (!address) void refreshNodeAddresses();
+      return address ?? null;
+    },
+    release: releaseHandedOff,
+    save: saveHandedOff,
+    // The SWITCH must arrive before the close, as for a login switch. The connection is closed whatever the send
+    // did: the player is released here, and a client left on this node would never be told.
+    sendSwitch: async (p, node, ticket, resume) => {
+      const wt = p.wt;
+      try {
+        await wt.sendThenClose(packetManager.switchNode(node, ticket, { resume }), 1000, "switch");
+      } finally {
+        try {
+          wt?.close?.(1000, "switch");
+        } catch (error) {
+          log.debug(`Handoff of ${p.username}: close after the SWITCH failed: ${error}`);
+        }
+      }
+    },
+    forward: (playerId, username, to) => forwardTable.addPlayer(playerId, username, to),
+  });
+  const previousCaster = setRemoteDotCaster(dotCredit);
+  nodeAddressesLive = true;
+  void refreshNodeAddresses();
+  const refresh = setInterval(() => void refreshNodeAddresses(), 2_000);
+  (refresh as any).unref?.();
+  return () => {
+    clearInterval(refresh);
+    nodeAddressesLive = false;
+    setRemoteDotCaster(previousCaster);
+    playerHandoff.stop();
+    nodeAddresses.clear();
+  };
+});
+
+// The node is announced with the address the gateway registration below advertises.
+// Node links (spec §1): their own WebTransport listener with the engine's certificate. Neighbours pin its
+// hash; a CA-signed certificate cannot be pinned, so it is announced as "" and verified by name instead.
+const linkPort = clusterEnabled() ? nodeLinkPort(gamePort) : 0;
+const linkBindHost = nodeLinkBindHost();
+const linkTransport = linkPort > 0
+  ? new WebTransportLinks({ hostname: linkBindHost, port: linkPort, certPem: webTransportTls!.certPem, keyPem: webTransportTls!.keyPem })
+  : null;
+if (linkTransport) {
+  // Bound to every interface, the link port is only safe behind a firewall: said once, at start.
+  log.info(`Node links listen on ${linkBindHost} UDP port ${linkPort}`);
+  const bindWarning = nodeLinkBindWarning(linkBindHost, linkPort);
+  if (bindWarning) log.warn(bindWarning);
+}
+// The assets are loaded; before the node takes a player (or a handoff), read the NPC and particle lists and the map
+// chunk indexes once, so the first arrival does not wait for them. Never throws.
+await warmStreamDataWithin();
+// A link port in use makes startCluster throw: the node does not start without its links.
+// The link hello is signed with a key derived from CLUSTER_LINK_SECRET (startCluster reads it), not the gateway secret.
+const cluster = await startCluster(
+  undefined,
+  {
+    publicHost, port: gamePort, wtPort: gamePort, useSSL: resolveUseSSL(),
+    linkHost: nodeLinkHost(), linkPort,
+    certHash: certificateSupportsPinning(webTransportTls!.certPem) ? localCertHash : "",
+  },
+  {},
+  { transport: linkTransport }
+).catch((error) => {
+  log.error(`The cluster node could not start${linkPort > 0 ? ` (link port ${linkPort})` : ""}: ${error}`);
+  process.exit(1);
+});
+// The link hook's first read ran inside startCluster, before the node registry was there: read now.
+if (cluster) void refreshNodeAddresses();
+
 const webTransportServer = await startWebTransportServer({
   port: gamePort,
+  allocateId: cluster
+    ? (token: string) => {
+        // A handoff arrival keeps its id, unless a connection here still has it open (a quick hand-back): then it
+        // gets a new one, and its login is a full load (Deviation 4).
+        const kept = arrivalId(playerHandoff.claimArrivalId(token), connectionOpen);
+        if (kept !== null) return kept;
+        const id = cluster.ids.tryNext();
+        return id === null ? null : String(id);
+      }
+    : undefined,
   certPem: webTransportTls!.certPem,
   keyPem: webTransportTls!.keyPem,
   chatDecryptionKey: keyPair.publicKey,
@@ -727,8 +1157,9 @@ try {
   throw error;
 }
 
+// In a cluster only the first node of the region clears the shared guests and parties (cluster/startclear.ts, clearguard.ts).
 listener.on(Events.AWAKE, async () => {
-  await player.clear();
+  await clearShared(() => player.clear());
 });
 
 
@@ -736,10 +1167,10 @@ event.emit("online");
 
 let gatewayClient: GatewayClient | null = null;
 const serverId = process.env.SERVER_ID || `server-${crypto.randomBytes(8).toString("hex")}`;
-const serverHost = process.env.SERVER_HOST || "localhost";
-const publicHost = process.env.PUBLIC_HOST || serverHost;
 
 gatewayClient = new GatewayClient({
+  // Cluster mode: each node of the realm registers under its own node id.
+  ...(cluster ? { nodeId: nodeId(), regionId: regionId() } : {}),
   gatewayUrl: process.env.GATEWAY_INTERNAL_URL || process.env.GATEWAY_URL || "http://localhost:9999",
   serverId,
   description: process.env.SERVER_DESCRIPTION || "",
@@ -752,6 +1183,11 @@ gatewayClient = new GatewayClient({
   heartbeatInterval: settings?.gateway?.heartbeatInterval || 5000,
   assetServerUrl: process.env.ASSET_SERVER_INTERNAL_URL || process.env.ASSET_SERVER_URL || "http://localhost:8000",
 });
+
+// Cluster mode: the Gateway is told who owns which block (on registering, and on each change), so a login can go
+// straight to the owner of the saved point. Set before registering: the first registration sends every table.
+const blockTable = cluster ? clusterBlocks() : null;
+if (blockTable) gatewayClient.reportBlocksFrom(blockTable);
 
 await gatewayClient.registerWithRetry();
 
@@ -804,8 +1240,10 @@ try {
       httpRouteHandlers.set(`${method}:${route}`, handler);
       log.success(`Registered plugin HTTP route: ${method} ${route}`);
     },
-    teleportPlayer: async (playerObj: any, mapName: string, x: number, y: number) => {
-      await teleportPlayerWrapper(playerObj, mapName, x, y);
+    teleportPlayer: async (playerObj: any, mapName: string, x: number, y: number): Promise<boolean> => {
+      // In cluster mode a player being handed off is not moved (false: the plugin may try again after the handoff),
+      // and the move counts as in flight for the handoff's wait.
+      return await guardedTeleport(clusterEnabled(), playerObj, () => teleportPlayerWrapper(playerObj, mapName, x, y));
     },
     registerSpell: async (spell: SpellData) => {
       if (!spell || !spell.name) {
@@ -1001,17 +1439,11 @@ listener.on(Events.SERVER_TICK, async () => {
 
     if (!updated) continue;
 
-    const updateStatsData = {
-      id: playerData.id,
-      target: playerData.id,
-      stats,
-    };
-
-    // Encode once - the frame is byte-identical for the player and every
-    // observer. Latest-wins absolute stats delivered as loss-tolerant
+    // Encode once per audience: the player and their party members get the full stats, other observers the
+    // few fields their client reads (observerStats). Latest-wins absolute stats delivered as loss-tolerant
     // datagrams (this repeats every tick, so a dropped one self-heals).
-    const statsFrame = packetManager.updateStats(updateStatsData)[0];
-    playerData.wt.sendBestEffort(statsFrame);
+    const frames = regenStatsFrames(playerData, stats);
+    playerData.wt.sendBestEffort(frames.full);
 
     // O(observers) via the AOI reverse index - was an O(all players) cache
     // scan per regenerating player, i.e. O(n^2) per tick.
@@ -1021,7 +1453,7 @@ listener.on(Events.SERVER_TICK, async () => {
         other.wt &&
         other.wt.readyState === 1
       ) {
-        other.wt.sendBestEffort(statsFrame);
+        other.wt.sendBestEffort(frames.frameFor(other));
       }
     }
   }
@@ -1043,7 +1475,8 @@ listener.on(Events.SERVER_TICK, async () => {
 
       if (reason === "session_stolen" && stillInCache.wt?.readyState === 1) {
         try {
-          stillInCache.wt.send(
+          sendPacket(
+            stillInCache.wt,
             packetManager.notify({
               message: "You have been logged in from another location.",
             })
@@ -1054,7 +1487,8 @@ listener.on(Events.SERVER_TICK, async () => {
         packetQueue.delete(id);
         ClientRateLimit.delete(id);
         try {
-          stillInCache.wt.close(1000, "Logged in from another location");
+          // drain: the notice above may still wait in the outbox behind a write in flight; a plain close would drop it.
+          stillInCache.wt.close(1000, "Logged in from another location", { drain: true });
         } catch {
           console.error(`Failed to close connection for player ${id}`);
         }
@@ -1077,7 +1511,7 @@ listener.on("onConnection", (data) => {
   if (!data) return;
 });
 
-function cleanupPlayerState(playerData: any) {
+function cleanupPlayerState(playerData: any, { despawn = true }: { despawn?: boolean } = {}) {
     const id = playerData.id;
     const username = playerData.username?.toLowerCase();
 
@@ -1093,13 +1527,17 @@ function cleanupPlayerState(playerData: any) {
     clearPlayerTarget(id);
     removePlayerFromCleanupMaps(id);
     if (username) cooldownManager.removePlayer(username);
-    despawnPlayerFromAllAOI(playerData, "disconnect", despawnBatchQueue);
+    // A handoff (cells phase 6) despawns nothing: the player's mirror takes its place for the viewers.
+    if (despawn) despawnPlayerFromAllAOI(playerData, "disconnect", despawnBatchQueue);
+    else releasePlayerAOI(playerData);
 }
 
 listener.on("onDisconnect", async (data) => {
   if (!data) return;
 
   let left: string | null = null;
+  // Cluster mode: the leave whose achievement progress is held back from PLAYER_DISCONNECT's flush (settleFencedLeave).
+  let fencedLeave: { p: any; taken: Map<number, number> } | null = null;
   try {
     const playerData = playerCache.get(data.id);
     if (!playerData) return;
@@ -1107,7 +1545,8 @@ listener.on("onDisconnect", async (data) => {
 
     if (data.reason === "session_stolen" && playerData.wt?.readyState === 1) {
       try {
-        playerData.wt.send(
+        sendPacket(
+          playerData.wt,
           packetManager.notify({
             message: "You have been logged in from another location.",
           })
@@ -1116,7 +1555,8 @@ listener.on("onDisconnect", async (data) => {
         console.error(`Failed to send session stolen notification to player ${data.id}`);
       }
       try {
-        playerData.wt.close(1000, "Logged in from another location");
+        // drain: the notice above may still wait in the outbox behind a write in flight; a plain close would drop it.
+        playerData.wt.close(1000, "Logged in from another location", { drain: true });
       } catch (err) {
         console.error(`Failed to close connection for player ${data.id}`);
       }
@@ -1137,6 +1577,9 @@ listener.on("onDisconnect", async (data) => {
 
     cleanupPlayerState(playerData);
     releaseDraggedBy(playerData.id);
+    if (!playerData.isGuest && left && fencedSaves(playerData)) {
+      fencedLeave = { p: playerData, taken: takeAchievementProgress(left) };
+    }
     // Before the saves below: they wait on the database, and what listens
     // (creature combat, plugins) should not wait with them or miss a throw.
     listener.emit(Events.PLAYER_DISCONNECT, { player: playerData });
@@ -1150,7 +1593,9 @@ listener.on("onDisconnect", async (data) => {
 
     let worldPlayerCount: number | null = null;
     try {
-      worldPlayerCount = await worlds.adjustPlayerCount(playerData?.location?.map || "", -1);
+      // A warp's handoff sets the location to the destination first (Task 14): a player who leaves while it runs is
+      // counted off the map they were on, as saveHandedOff counts them.
+      worldPlayerCount = await worlds.adjustPlayerCount(playerData?.handoffFromMap || playerData?.location?.map || "", -1);
     } catch (err) {
       log.error(`[WorldsFetchError] Failed to update world player count: ${err}`);
     }
@@ -1164,41 +1609,55 @@ listener.on("onDisconnect", async (data) => {
     }
 
     if (!playerData.isGuest) {
-      if (playerData?.stats) {
-        await player.setStats(playerData.username, playerData.stats);
-      }
+      if (fencedSaves(playerData)) {
+        // Cluster mode: only while this node still owns the player (cells phase 7). With no location nothing is
+        // saved: an unfenced stats write could land after the new owner's. Who owns the player is then not known
+        // (owned stays null), and the leave settles as one this node owns.
+        let owned: boolean | null = null;
+        try {
+          if (playerData.location) {
+            const saved = await player.saveFenced(playerData.username, playerData.ownerEpoch, playerData.stats ?? null, playerData.location);
+            if (saved === "fenced") log.info(`[Save] ${playerData.username} was not saved at disconnect: another node owns the player now`);
+            owned = saved === "saved";
+          }
+        } finally {
+          const settling = fencedLeave;
+          fencedLeave = null;
+          if (settling) await settleFencedLeave(settling.p, owned, settling.taken);
+        }
+      } else {
+        if (playerData?.stats) {
+          await player.setStats(playerData.username, playerData.stats);
+        }
 
-      if (playerData?.id && playerData?.location) {
-        await player.setLocation(
-          playerData.id,
-          playerData.location.map,
-          playerData.location.position
-        );
+        if (playerData?.id && playerData?.location) {
+          await player.setLocation(
+            playerData.id,
+            playerData.location.map,
+            playerData.location.position
+          );
+        }
       }
     }
 
-    if (playerData.friends && Array.isArray(playerData.friends) && playerData.friends.length > 0) {
-      const allPlayers = playerCache.list();
-      const usernameIndex = new Map<string, any>();
-      for (const p of Object.values(allPlayers)) {
-        if (p.wt && p.username) {
-          usernameIndex.set(p.username.toLowerCase(), p);
-        }
-      }
-      for (const friendUsername of playerData.friends) {
-        const onlineFriend = usernameIndex.get(friendUsername.toLowerCase());
-        if (onlineFriend?.wt?.readyState === 1) {
-          try {
-            onlineFriend.wt.send(packetManager.updateOnlineStatus({ online: false, username: playerData.username })[0]);
-          } catch (e) { /* ignore */ }
-        }
-      }
+    // In a cluster, a newer login on another node displaced this session: the player is still online there.
+    const onlineElsewhere = clusterEnabled() && !!left && (await isOnline(left));
+    if (!onlineElsewhere && playerData.friends && Array.isArray(playerData.friends) && playerData.friends.length > 0) {
+      // Friends on any node (cluster/deliver.ts); a friend who is not online is skipped.
+      const offline = packetManager.updateOnlineStatus({ online: false, username: playerData.username });
+      await Promise.all(playerData.friends.map((friendUsername: string) => deliverToPlayer(friendUsername, [offline[0]])));
     }
 
     await player.clearSessionId(playerData.id);
   } catch (e) {
     log.error(e as string);
   } finally {
+    // A throw before the fenced save answered: what was taken goes back, as an unfenced leave would flush it.
+    if (fencedLeave) {
+      const settling: { p: any; taken: Map<number, number> } = fencedLeave;
+      fencedLeave = null;
+      await settleFencedLeave(settling.p, null, settling.taken).catch((e) => log.error(e as string));
+    }
     // Last, so the saves above are not held again once they are forgotten.
     // Not when the player is already back in: those are the new login's rows.
     if (left && !playerCache.getByUsername(left)) {
@@ -1240,7 +1699,8 @@ listener.on(Events.SAVE, async () => {
 
       for (const [playerId, row] of nonGuestPlayers) {
         const dbSid = dbSessionMap.get(String(row.userid)) || "";
-        if (dbSid !== String(playerId)) {
+        // A fenced player's owner epoch decides (the save below is fenced on it), not the session id.
+        if (!fencedSaves(row) && dbSid !== String(playerId)) {
           sessionInvalidSet.add(playerId);
           log.info(
             `[Save] Skipping save for ${row.username} - session stolen (local: ${playerId}, db: ${dbSid || "cleared"})`
@@ -1254,7 +1714,7 @@ listener.on(Events.SAVE, async () => {
         if (subscribed === false && subscriptionRefusal(row, "login")) {
           log.info(`[Subscriptions] Disconnecting ${row.username} - not subscribed, and logging in is locked`);
           try {
-            if (row.wt?.readyState === 1) row.wt.send(packetManager.notify({ message: subscriptionRefusal(row, "login") ?? "" }));
+            if (row.wt?.readyState === 1) sendPacket(row.wt, packetManager.notify({ message: subscriptionRefusal(row, "login") ?? "" }));
           } catch {
             // The connection is going anyway.
           }
@@ -1281,7 +1741,23 @@ listener.on(Events.SAVE, async () => {
     }
 
     try {
-
+      if (fencedSaves(row)) {
+        const saved = await player.saveFenced(row.username, row.ownerEpoch, row.stats, row.location);
+        if (saved === "fenced") {
+          // Another node owns the player now: this session is the stale one.
+          log.info(`[Save] Skipping save for ${row.username} - another node owns the player (epoch ${row.ownerEpoch})`);
+          cleanupPlayerState(row);
+          // Only this connection is closed. player.kick would log out whichever session the name has here, and the
+          // account's session is the new owner's.
+          try {
+            row.wt?.close?.(1000, "Logged in from another location", { drain: true });
+          } catch {
+            // The connection is going anyway.
+          }
+          return { success: false, playerId, reason: "owner_epoch" };
+        }
+        return { success: true, playerId };
+      }
       await Promise.all([
         player.setStats(row.username, row.stats),
         player.setLocation(playerId, row.location.map, row.location.position)
@@ -1313,10 +1789,8 @@ export const events = {
   },
   Broadcast(_packet: string) {
     log.debug(`Broadcasting packet: ${_packet}`);
-    topicBus.publish(
-      "BROADCAST",
-      packet.encode(JSON.stringify(_packet))
-    );
+    // Every logged-in player, on every node when clustered.
+    void broadcastWorld([packet.encode(JSON.stringify(_packet))]).catch((error) => log.error(`Broadcast failed: ${error}`));
   },
   GetClientRequests() {
     return ClientRateLimit;
@@ -1362,12 +1836,33 @@ function handleBackpressure(wt: any, action: () => void, retryCount = 0) {
 }
 
 async function gracefulShutdown(signal: string) {
+  // One deadline for the whole shutdown, from the signal (SHUTDOWN_DEADLINE_MS, under the compose files' 20 s stop
+  // grace): each step below waits at most its own cap and never past it, and a step cut short is logged.
+  const deadline = Date.now() + SHUTDOWN_DEADLINE_MS;
+  // In cluster mode the last STOP_MS of it are kept for leaving the cluster: every step before that one ends by
+  // stepsDeadline. With CLUSTER=false there is no such step, and the steps have the whole deadline.
+  const stepsDeadline = cluster ? deadline - STOP_MS : deadline;
   log.info(`Received ${signal}, shutting down gracefully...`);
 
   gameLoop.stop();
 
+  // Achievement progress is written on the 60 s save tick: write what changed since, so a restart loses none of it
+  // (USER REQUEST 2026-10-17: "flush achievement progress on engine shutdown"). At most ACHIEVEMENT_FLUSH_MS, so a
+  // database that does not answer cannot hold the shutdown. It runs alongside the handoff wait and the unregister, so
+  // running handoffs that take their whole HANDOFF_IDLE_MS cannot leave it no time.
+  const ACHIEVEMENT_FLUSH_MS = 5_000;
+  const achievementsFlushed = boundedStep("writing the achievement progress", () => achievements.onSave(), stepsDeadline, ACHIEVEMENT_FLUSH_MS);
+
+  // Cells phase 6: no handoff starts from here on, and one already running finishes (its release is done, so its
+  // save and SWITCH must be too) before the connections close and the process exits. At most HANDOFF_IDLE_MS.
+  if (cluster) {
+    playerHandoff.stop();
+    await boundedStep("waiting for the running handoffs (their saves may be lost)", () => playerHandoff.idle(), stepsDeadline, HANDOFF_IDLE_MS);
+  }
+
   if (gatewayClient) {
-    await gatewayClient.unregister();
+    const client = gatewayClient;
+    await boundedStep("unregistering from the gateway", () => client.unregister(), stepsDeadline, UNREGISTER_MS);
   }
 
   try {
@@ -1383,17 +1878,17 @@ async function gracefulShutdown(signal: string) {
     log.debug(`Failed to close HTTP servers: ${error}`);
   }
 
-  // Achievement progress is written on the 60 s save tick: write what changed since, so a restart loses none of it
-  // (USER REQUEST 2026-10-17: "flush achievement progress on engine shutdown"). At most ACHIEVEMENT_FLUSH_MS, so a
-  // database that does not answer cannot hold the shutdown.
-  const ACHIEVEMENT_FLUSH_MS = 5_000;
-  let flushTimer: ReturnType<typeof setTimeout> | undefined;
-  const flushed = await Promise.race([
-    achievements.onSave().then(() => true),
-    new Promise<boolean>((resolve) => { flushTimer = setTimeout(() => resolve(false), ACHIEVEMENT_FLUSH_MS); }),
-  ]);
-  clearTimeout(flushTimer);
-  if (!flushed) log.warn(`Achievement progress was not all written within ${ACHIEVEMENT_FLUSH_MS / 1000} s of shutting down.`);
+  // The achievement write started with the shutdown (above): wait for it here, then write once more what was earned
+  // while the connections were still open (the handoff wait and the unregister), before the process exits.
+  await achievementsFlushed;
+  await boundedStep("writing the achievement progress earned since", () => achievements.onSave(), stepsDeadline, ACHIEVEMENT_FLUSH_MS);
+
+  // This node's players are gone with it: stopCluster drops its mirrors and links, clears its directory entries
+  // and makes the node leave the live nodes. It logs a step that fails, and the wait is a little time only, so
+  // Redis cannot hold the shutdown. It has the STOP_MS kept for it at the end of the deadline.
+  if (cluster) {
+    await boundedStep("leaving the cluster", () => stopCluster(), deadline, STOP_MS);
+  }
 
   log.info("Shutdown complete");
   process.exit(0);

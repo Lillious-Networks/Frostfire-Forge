@@ -1,6 +1,7 @@
 import query from "../controllers/sqldatabase";
 import assetCache from "../services/assetCache";
 import { rowCache, dropRows, turns } from "../services/datacache";
+import log from "../modules/logger";
 
 /** A row of the learned_spells table. */
 type LearnedRow = { spell: string };
@@ -72,7 +73,7 @@ const spells = {
       const spells = await assetCache.get("spells") as SpellData[];
       const index = spells.findIndex((s) => s.name === spell.name);
       spells[index] = spell;
-      assetCache.set("spells", spells);
+      assetCache.set("spells", spells).catch((error) => log.error(`The spell ${spell.name} could not be written to the cache: ${error}`));
     }
   },
   async list() {

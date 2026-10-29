@@ -14,7 +14,8 @@ export interface CreatureEngineBridge {
 
 let bridge: CreatureEngineBridge | null = null;
 
-export function setCreatureEngineBridge(next: CreatureEngineBridge): void {
+/** Null clears it: a test that registers its own puts the empty state back. */
+export function setCreatureEngineBridge(next: CreatureEngineBridge | null): void {
   bridge = next;
 }
 

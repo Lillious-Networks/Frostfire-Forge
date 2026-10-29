@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { databaseModule } from "./setup";
-import { readFileSync } from "fs";
-import { join } from "path";
+import { receiverSource } from "./receiver-source";
 
 // Generated at server start (`bun create-config`) and gitignored, so CI has
 // no copy on disk. Mock the values instead of requiring the file.
@@ -282,7 +281,7 @@ const valid = (action: string): Row => ({ ...(VALID[action] ?? { target: "cp_her
 const holder = (permissions: string[]) => online("7105", "cp_temp", { isAdmin: true, permissions });
 
 // The receiver cannot be imported (it starts the server), so its source is read.
-const source = readFileSync(join(import.meta.dir, "..", "socket", "receiver.ts"), "utf8");
+const source = receiverSource();
 const commandsAt = source.indexOf('      case "COMMAND": {');
 /** The body of one chat command's case, up to the next command. */
 function commandBlock(name: string): string {

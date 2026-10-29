@@ -10,8 +10,8 @@
 // restart does not end it.
 
 import query from "../controllers/sqldatabase";
-import assetCache from "../services/assetCache";
 import { rowCache, turns } from "../services/datacache";
+import { readNpcList } from "./npcStreaming";
 
 /** How long (ms) the home item is cast for. Any damage, and any step, breaks the cast. */
 export const HOME_CAST_MS = 10_000;
@@ -131,7 +131,7 @@ const homes = {
   async where(username: string): Promise<Arrival | null> {
     const home = await homes.of(username);
     if (home.npc_id === null) return null;
-    const npc = (((await assetCache.get("npcs")) || []) as Npc[]).find((held) => Number(held.id) === home.npc_id);
+    const npc = (await readNpcList()).find((held) => Number(held.id) === home.npc_id);
     if (!npc || !isInnkeeper(npc)) return null;
     return { map: mapName(npc.map), x: Number(npc.position?.x) + home.offset_x, y: Number(npc.position?.y) + home.offset_y, inn: npc.name || null };
   },

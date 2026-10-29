@@ -212,8 +212,8 @@ function loadAllMaps() {
   const mainMap = maps.find((m) => m.name === `${defaultMap}.json`);
   if (!mainMap) throw new Error(`Default map ${defaultMap} not found in the maps directory`);
 
-  assetCache.add("maps", maps);
-  assetCache.add("mapProperties", mapProperties);
+  assetCache.add("maps", maps).catch((error) => log.error(`The map data ("maps") could not be written to the cache: ${error}`));
+  assetCache.add("mapProperties", mapProperties).catch((error) => log.error(`The map data ("mapProperties") could not be written to the cache: ${error}`));
   log.success(`Loaded ${maps.length} map(s) in ${(performance.now() - now).toFixed(2)}ms`);
 }
 
@@ -271,8 +271,8 @@ export async function addCreatedMap(name: string, kind: "map" | "world", data?: 
     });
     extractAndCompressLayers(map);
   }
-  assetCache.add("maps", maps);
-  assetCache.add("mapProperties", mapProperties);
+  assetCache.add("maps", maps).catch((error) => log.error(`The map data ("maps") could not be written to the cache: ${error}`));
+  assetCache.add("mapProperties", mapProperties).catch((error) => log.error(`The map data ("mapProperties") could not be written to the cache: ${error}`));
 }
 
 // Tiled stores "infinite" maps as per-layer `chunks` arrays instead of a flat
@@ -689,7 +689,7 @@ function extractAndCompressLayers(map: MapData) {
   - Compression Ratio: ${ratio}x
   - Compression Savings: ${savings}%`);
 
-    assetCache.addNested(map.name.replace(".json", ""), label, compressed);
+    assetCache.addNested(map.name.replace(".json", ""), label, compressed).catch((error) => log.error(`The ${label} layer of ${map.name} could not be written to the cache: ${error}`));
   }
 
   if (collisions.length > 0) compressLayer(collisions, "collision");
@@ -1052,8 +1052,8 @@ export async function reloadMap(mapName: string): Promise<MapData> {
       throw new Error(`Failed to load map ${file}`);
     }
 
-    assetCache.removeNested(mapName, "collision");
-    assetCache.removeNested(mapName, "nopvp");
+    assetCache.removeNested(mapName, "collision").catch((error) => log.error(`The collision layer of ${mapName} could not be cleared from the cache: ${error}`));
+    assetCache.removeNested(mapName, "nopvp").catch((error) => log.error(`The nopvp layer of ${mapName} could not be cleared from the cache: ${error}`));
 
     extractAndCompressLayers(newMap);
 
@@ -1088,8 +1088,8 @@ export async function reloadMap(mapName: string): Promise<MapData> {
       mapProps.push(newProps);
     }
 
-    assetCache.add("maps", maps);
-    assetCache.add("mapProperties", mapProps);
+    assetCache.add("maps", maps).catch((error) => log.error(`The map data ("maps") could not be written to the cache: ${error}`));
+    assetCache.add("mapProperties", mapProps).catch((error) => log.error(`The map data ("mapProperties") could not be written to the cache: ${error}`));
 
     return newMap;
   } catch (error) {

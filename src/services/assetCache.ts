@@ -1,4 +1,25 @@
+import { sharedRedis } from "./redisclient";
+
 type RedisValue = any;
+
+// Who wants to know when a key is written here, for what they keep of it in memory (the sheets of the items, say).
+// A write made by another process (a node of the cluster, on a shared Redis) is not heard: a listener that must
+// see those too refreshes on a timer as well.
+const changeListeners = new Map<string, Set<() => void>>();
+
+function changed(key: string): void {
+  for (const listener of changeListeners.get(key) ?? []) {
+    try {
+      listener();
+    } catch {
+      // A listener must not undo a write.
+    }
+  }
+}
+
+function changedAll(): void {
+  for (const key of changeListeners.keys()) changed(key);
+}
 
 interface CacheService {
   add(key: string, value: any): Promise<void>;
@@ -13,6 +34,8 @@ interface CacheService {
   setNested(key: string, nestedKey: string, value: RedisValue): Promise<void>;
   getAll(): Promise<Record<string, RedisValue>>;
   close(): void;
+  /** Calls `listener` after `key` is written or removed through this cache (clear() counts for every key). */
+  onChange(key: string, listener: () => void): void;
 }
 
 class MemoryCacheService implements CacheService {
@@ -30,6 +53,7 @@ class MemoryCacheService implements CacheService {
 
   async add(key: string, value: any): Promise<void> {
     this.cache.set(this.prefixed(key), value);
+    changed(key);
   }
 
   async get(key: string): Promise<any> {
@@ -39,6 +63,7 @@ class MemoryCacheService implements CacheService {
   async remove(key: string): Promise<void> {
     this.cache.delete(this.prefixed(key));
     this.hashes.delete(this.prefixed(key));
+    changed(key);
   }
 
   async clear(): Promise<void> {
@@ -61,6 +86,7 @@ class MemoryCacheService implements CacheService {
     for (const key of hashesToDelete) {
       this.hashes.delete(key);
     }
+    changedAll();
   }
 
   async list(): Promise<Record<string, RedisValue>> {
@@ -112,23 +138,20 @@ class MemoryCacheService implements CacheService {
     this.cache.clear();
     this.hashes.clear();
   }
+
+  onChange(key: string, listener: () => void): void {
+    (changeListeners.get(key) ?? changeListeners.set(key, new Set()).get(key)!).add(listener);
+  }
 }
 
 class RedisCacheService implements CacheService {
   private client: any;
   private prefix: string;
 
-  constructor(prefix = "asset:") {
+  constructor(prefix = "asset:", client: any = sharedRedis()) {
     this.prefix = prefix;
-    try {
-      import("bun").then((mod: any) => {
-        this.client = mod.redis;
-      }).catch((e: any) => {
-        throw new Error(`Failed to initialize Redis client: ${e}`);
-      });
-    } catch (e) {
-      throw new Error(`Failed to initialize Redis client: ${e}`);
-    }
+    // Not Bun's `redis` singleton: that one stops reconnecting after a long outage (services/redisclient.ts).
+    this.client = client;
   }
 
   private prefixed(key: string) {
@@ -185,6 +208,7 @@ class RedisCacheService implements CacheService {
   async add(key: string, value: any) {
     const data = typeof value === "string" ? value : JSON.stringify(value);
     await this.client.set(this.prefixed(key), data);
+    changed(key);
   }
 
   async get(key: string) {
@@ -199,8 +223,27 @@ class RedisCacheService implements CacheService {
     }
   }
 
+  /**
+   * Like get, but when the stored text is the one `digest` was made of (length and hash), nothing is parsed or copied
+   * and `same` is true. Lets a holder of a big list see that it did not change without paying for a copy of it.
+   */
+  async getIfChanged(key: string, digest: string | null): Promise<{ digest: string; same: boolean; value?: any }> {
+    const data = await this.client.get(this.prefixed(key));
+    if (!data) return { digest: "", same: digest === "", value: null };
+    const now = `${data.length}:${Bun.hash(data)}`;
+    if (now === digest) return { digest: now, same: true };
+    let value: any;
+    try {
+      value = this.reconstructBuffers(JSON.parse(data));
+    } catch {
+      value = data;
+    }
+    return { digest: now, same: false, value };
+  }
+
   async remove(key: string): Promise<void> {
     await this.safeSend("DEL", [this.prefixed(key)]);
+    changed(key);
   }
 
   async clear(): Promise<void> {
@@ -213,6 +256,7 @@ class RedisCacheService implements CacheService {
       const chunk = keys.slice(i, i + chunkSize);
       await this.safeSend("DEL", chunk);
     }
+    changedAll();
   }
 
   async list(): Promise<Record<string, RedisValue>> {
@@ -272,6 +316,10 @@ class RedisCacheService implements CacheService {
     if (typeof (this.client as any).close === "function") {
       (this.client as any).close();
     }
+  }
+
+  onChange(key: string, listener: () => void): void {
+    (changeListeners.get(key) ?? changeListeners.set(key, new Set()).get(key)!).add(listener);
   }
 
   async getAll(): Promise<Record<string, RedisValue>> {

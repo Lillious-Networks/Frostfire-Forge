@@ -13,11 +13,22 @@ export const TAUNT_DURATION_MS = 3000;
 /** Threat a unit gets for simply being noticed (proximity aggro). */
 export const PROXIMITY_THREAT = 0.01;
 
+/** The most threat a serialized entry may carry; anything above it is not a threat table of ours. */
+const MAX_THREAT = 1e9;
+
 export interface ThreatEntry {
   threat: number;
   addedAt: number;
   /** When the creature first failed to reach this unit; null while reachable. */
   unreachableSince: number | null;
+}
+
+/** A threat table as it crosses to another node with its creature (all times are Date.now values). */
+export interface ThreatJSON {
+  entries: Array<[string, ThreatEntry]>;
+  victimId: string | null;
+  tauntedBy: string | null;
+  tauntUntil: number;
 }
 
 export class ThreatTable {
@@ -158,6 +169,36 @@ export class ThreatTable {
         pctOfVictim: victimThreat > 0 ? (e.threat / victimThreat) * 100 : 0,
       }))
       .sort((a, b) => b.threat - a.threat);
+  }
+
+  toJSON(): ThreatJSON {
+    return {
+      entries: [...this.entries].map(([unitId, e]) => [unitId, { ...e }]),
+      victimId: this.victimId,
+      tauntedBy: this.tauntedBy,
+      tauntUntil: this.tauntUntil,
+    };
+  }
+
+  static fromJSON(data: ThreatJSON): ThreatTable {
+    const table = new ThreatTable();
+    for (const pair of Array.isArray(data?.entries) ? data.entries : []) {
+      const [unitId, e] = Array.isArray(pair) ? pair : [];
+      if (typeof unitId !== "string" || !unitId || !e) continue;
+      if (!Number.isFinite(e.threat) || e.threat < 0 || e.threat > MAX_THREAT) continue;
+      if (e.unreachableSince != null && !Number.isFinite(e.unreachableSince)) continue;
+      table.entries.set(unitId, {
+        threat: e.threat,
+        addedAt: Number(e.addedAt) || 0,
+        unreachableSince: e.unreachableSince == null ? null : e.unreachableSince,
+      });
+    }
+    table.victimId = typeof data?.victimId === "string" && table.entries.has(data.victimId) ? data.victimId : null;
+    // A taunt on a unit with no entry names no one the creature can attack.
+    const taunted = typeof data?.tauntedBy === "string" && table.entries.has(data.tauntedBy) ? data.tauntedBy : null;
+    table.tauntedBy = taunted;
+    table.tauntUntil = taunted !== null ? Number(data?.tauntUntil) || 0 : 0;
+    return table;
   }
 }
 

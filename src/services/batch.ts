@@ -53,17 +53,58 @@ export interface Batch {
    * the batch wrote is kept.
    */
   after(step: () => unknown): void;
+  /**
+   * The transaction may not open after `deadline` (ms since the epoch): past it the database refuses it whole,
+   * however long it waited for a connection, and does not try it again (LateError, controllers/sqltransaction.ts).
+   * Asked more than once, the earliest deadline holds. A batch that sets none is sent as it always was.
+   */
+  openBy(deadline: number): void;
 }
 
 // One batch at a time for a player.
 const oneAtATime = turns();
 
+/**
+ * Cluster mode: the lock a batch also holds for its players, across every node (cluster/playerlock.ts). Taken
+ * inside the turns of this node, so a batch waits for this node's other batches first and holds the cluster lock
+ * only while it reads and writes. Null (the default, and with the cluster off): the turns alone.
+ *
+ * The work is handed `check`, which the batch calls right before it sends its transaction: it throws when a lock
+ * of the batch was lost (it ran out, or the store failed), and the batch then writes nothing and fails as any
+ * batch whose transaction failed. A transaction already sent when a lock is lost can still overlap the next
+ * holder's; `check` renews every lock to a full ttl first, so that needs one transaction to take longer than it.
+ */
+export type ClusterPlayerLock = <T>(players: string[], work: (check: () => Promise<void>) => Promise<T>) => Promise<T>;
+let clusterLock: ClusterPlayerLock | null = null;
+
+/** Answers the lock set before, so a test can put it back. */
+export function setClusterPlayerLock(lock: ClusterPlayerLock | null): ClusterPlayerLock | null {
+  const previous = clusterLock;
+  clusterLock = lock;
+  return previous;
+}
+
 const lower = (player: string) => String(player).toLowerCase();
+
+// The errors of batches that threw before their transaction was sent (see nothingWritten).
+const unsent = new WeakSet<object>();
+
+/**
+ * Whether `error`, thrown by atomically, was thrown before the batch's transaction was sent: what `work` threw, a
+ * lock check that refused, or a cluster lock that was not taken. Nothing of the batch was written then. Any other
+ * error may come after the rows were written (a kept step that failed after the commit, or a commit whose answer was
+ * lost), so what the batch wrote may be in the database.
+ */
+export function nothingWritten(error: unknown): boolean {
+  return typeof error === "object" && error !== null && unsent.has(error);
+}
 
 /**
  * Runs `work` and sends every statement it added as one transaction. Answers with what `work`
- * answered once the transaction is kept. Throws when nothing was kept: what `work` threw (nothing
- * is sent then), or the transaction's own error (see `transaction`).
+ * answered once the transaction is kept. Throws when the batch failed: what `work` threw or a lock
+ * check refused (nothing is sent then, and nothingWritten says so), the transaction's own error (see
+ * `transaction`; its rows may have been written when the answer was lost), or a kept step that failed
+ * after the commit (the rows are written then).
  *
  * `players` are all the players whose rows the batch changes. It waits for any batch under way for
  * one of them, and a system's turn cannot be held for a player who is not named.
@@ -71,13 +112,25 @@ const lower = (player: string) => String(player).toLowerCase();
 export async function atomically<T>(players: string[], work: (batch: Batch) => Promise<T>): Promise<T> {
   const names = [...new Set(players.map(lower))].sort();
   const afterSteps: Array<() => unknown> = [];
+  const progress = { sent: false };
   // Waited for in order of name: two batches that share players then ask for them in the same
   // order, so neither holds a player the other is waiting for.
   const run = names.reduceRight<() => Promise<T>>(
     (inner, name) => () => oneAtATime(name, inner),
-    () => carryOut(names, work, afterSteps),
+    () => (clusterLock
+      ? clusterLock(names, (check) => carryOut(names, work, afterSteps, progress, check))
+      : carryOut(names, work, afterSteps, progress)),
   );
-  const result = await run();
+  let result: T;
+  try {
+    result = await run();
+  } catch (error) {
+    if (progress.sent) throw error;
+    // Guard (test "an error from before the transaction is told apart from one after it").
+    const marked = typeof error === "object" && error !== null ? error : new Error(String(error));
+    unsent.add(marked);
+    throw marked;
+  }
   for (const step of afterSteps) {
     try {
       await step();
@@ -88,7 +141,13 @@ export async function atomically<T>(players: string[], work: (batch: Batch) => P
   return result;
 }
 
-async function carryOut<T>(names: string[], work: (batch: Batch) => Promise<T>, afterSteps: Array<() => unknown>): Promise<T> {
+async function carryOut<T>(
+  names: string[],
+  work: (batch: Batch) => Promise<T>,
+  afterSteps: Array<() => unknown>,
+  progress: { sent: boolean },
+  check?: () => Promise<void>,
+): Promise<T> {
   const statements: TransactionStatement[] = [];
   const answers: Array<((result: any) => void) | undefined> = [];
   const keptSteps: Array<() => unknown> = [];
@@ -96,6 +155,7 @@ async function carryOut<T>(names: string[], work: (batch: Batch) => Promise<T>, 
   const leftForAfter: Array<() => unknown> = [];
   const held = new Map<Queue, Map<string, Promise<void>>>();
   const states = new Map<object, Map<string, Promise<object>>>();
+  let openDeadline: number | undefined;
 
   let end!: () => void;
   const ended = new Promise<void>((resolve) => { end = resolve; });
@@ -131,6 +191,9 @@ async function carryOut<T>(names: string[], work: (batch: Batch) => Promise<T>, 
     kept(step) { keptSteps.push(step); },
     undone(step) { undoneSteps.push(step); },
     after(step) { leftForAfter.push(step); },
+    openBy(deadline) {
+      openDeadline = openDeadline === undefined ? deadline : Math.min(openDeadline, deadline);
+    },
   };
 
   const undo = async () => { for (const step of undoneSteps) await step(); };
@@ -141,7 +204,12 @@ async function carryOut<T>(names: string[], work: (batch: Batch) => Promise<T>, 
     let results: any[] = [];
     if (statements.length > 0) {
       try {
-        results = await transaction(statements);
+        // Cluster mode: the batch's player locks are still held, or nothing is sent. A failed check
+        // is undone as a failed transaction is: another node may have written these rows meanwhile.
+        if (check) await check();
+        progress.sent = true;
+        // Guard (test "a batch hands its earliest open-by deadline to the transaction, and none when it set none").
+        results = openDeadline === undefined ? await transaction(statements) : await transaction(statements, { openBy: openDeadline });
       } catch (error) {
         await undo();
         throw error;

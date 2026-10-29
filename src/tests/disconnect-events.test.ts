@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "fs";
 import { join } from "path";
+import { receiverSource } from "./receiver-source";
 
 // Neither socket/server.ts nor socket/receiver.ts can be imported (the first
 // starts the server, the second imports the first), so the code under test is
@@ -8,7 +9,7 @@ import { join } from "path";
 
 type Row = Record<string, any>;
 const read = (file: string) => readFileSync(join(import.meta.dir, "..", "socket", file), "utf8");
-const receiver = read("receiver.ts");
+const receiver = receiverSource();
 const server = read("server.ts");
 const transpiler = new Bun.Transpiler({ loader: "ts" });
 
@@ -114,7 +115,7 @@ describe("an admin who leaves", () => {
 
 const dragCases = withNames(
   ["type", "data", "currentPlayer", "wt", "playerCache", "player", "log", "updatePlayerAOI", "spawnBatchQueue", "despawnBatchQueue", "packetManager", "broadcastToAOI", "draggedPlayersMap", "sendPacket", "filterPlayersByMap"],
-  `return (async () => { let globalStateRevision = 0; switch (type) {${cut(receiver, '\n      case "DRAG_PLAYER_STOP": {', /\r?\n {6}}\r?\n/)}\n      }${cut(receiver, '\n      case "DRAG_UPDATE": {', /\r?\n {6}}\r?\n/)}\n      }\n} })();`,
+  `return (async () => { let globalStateRevision = 0; const bumpStateRevision = () => ++globalStateRevision; const stateRevision = () => globalStateRevision; switch (type) {${cut(receiver, '\n      case "DRAG_PLAYER_STOP": {', /\r?\n {6}}\r?\n/)}\n      }${cut(receiver, '\n      case "DRAG_UPDATE": {', /\r?\n {6}}\r?\n/)}\n      }\n} })();`,
 );
 
 /** Where each session's player was last saved. */
@@ -205,7 +206,7 @@ describe("an admin dragging a player", () => {
 const disconnectNames = [
   "playerCache", "packetManager", "effectManager", "dots", "getStunsForPlayer", "getSlowsForPlayer", "saveSicknessOnDisconnect",
   "loot", "cleanupPlayerState", "releaseDraggedBy", "listener", "Events", "removeFromAuthenticationQueues", "worlds", "log", "player", "console",
-  "forgetPlayer",
+  "forgetPlayer", "fencedSaves",
 ];
 const disconnectHandler = withNames(
   disconnectNames,
@@ -237,6 +238,7 @@ function onDisconnect(over: Row = {}): (data: Row) => Promise<void> {
     },
     console: { error: () => {} },
     forgetPlayer: async (username: string) => { order.push(`forget ${username}`); },
+    fencedSaves: () => false,
     ...over,
   });
 }
@@ -293,7 +295,7 @@ describe("a connection that ends", () => {
 
 // ----------------------------------------------------------------- guild join
 
-const inviteNames = ["type", "response", "inviter", "currentPlayer", "wt", "guilds", "sendPacket", "packetManager", "playerCache", "broadcastPlayerUpdate", "player", "listener", "Events", "GuildPermission", "pushGuild"];
+const inviteNames = ["type", "response", "inviterName", "currentPlayer", "wt", "guilds", "sendPacket", "deliverToPlayer", "packetManager", "playerCache", "broadcastPlayerUpdate", "player", "listener", "Events", "GuildPermission", "pushGuild"];
 const guildInvite = withNames(
   inviteNames,
   `return (async () => { switch (type) {${cut(receiver, '\n          case "INVITE_GUILD": {', /\r?\n {10}}\r?\n/)}\n          }\n} })();`,
@@ -316,11 +318,17 @@ function answerInvite(invited: any, inviter: any, response: string): Promise<voi
   return guildInvite({
     type: "INVITE_GUILD",
     response,
-    inviter,
+    inviterName: inviter.username,
     currentPlayer: invited,
     wt: invited.wt,
     guilds,
     sendPacket,
+    // As cluster/deliver.ts on one node: to the player's connection, when they are online.
+    deliverToPlayer: async (username: string, packets: any[]) => {
+      const live = playerCache.getByUsername(username);
+      if (live) sendPacket(live.wt, packets);
+      return !!live;
+    },
     packetManager: { notify: (data: Row) => [{ type: "NOTIFY", data }], updateGuild: (data: Row) => [{ type: "UPDATE_GUILD", data }] },
     playerCache,
     broadcastPlayerUpdate: () => {},
@@ -345,7 +353,20 @@ describe("a guild invitation", () => {
 
     expect(guildOf.newbie).toBe(7);
     expect(newbie.guild_name).toBe("Wolves");
+    // The inviter is reached by name (on whichever node holds them).
+    expect(sent.filter(({ to }) => to === leader.wt).map(({ packets }) => packets)).toEqual([[{ type: "NOTIFY", data: { message: "newbie has joined your guild" } }]]);
     expect(emitted).toEqual([["onGuildChanged", { type: "join", guildId: 7, guildName: "Wolves", playerUsername: "newbie" }]]);
+  });
+
+  test("accepted by a guest (one invited by name from another node) is refused", async () => {
+    const leader = connect("1", "leader");
+    const guest = connect("2", "guest_2", { isGuest: true });
+
+    await answerInvite(guest, leader, "accept");
+
+    expect("guest_2" in guildOf).toBe(false);
+    expect(sent.filter(({ to }) => to === guest.wt).map(({ packets }) => packets)).toEqual([[{ type: "NOTIFY", data: { message: "Please create an account to use that feature." } }]]);
+    expect(emitted).toEqual([]);
   });
 
   test("declined, or accepted by someone already in a guild, is not", async () => {

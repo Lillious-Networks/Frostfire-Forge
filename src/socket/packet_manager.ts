@@ -1,5 +1,8 @@
 import packet from "../modules/packet";
 import type { TradeView } from "../systems/trades";
+import type { NodeTicket } from "./ticket";
+import { TICK_RATE } from "../services/tickrate";
+import { joinCreatureMoves } from "./creature_move_codec";
 
 export const packetManager = {
   disconnect: (id: string) => {
@@ -49,6 +52,8 @@ export const packetManager = {
           data: wt.data.id,
           secret: wt.data.secret,
           chatDecryptionKey: wt.data.chatDecryptionKey,
+          // The movement loop's ticks a second, which the client's movement smoothing is timed by.
+          tickRate: TICK_RATE,
         })
       )
     ] as any[];
@@ -711,6 +716,14 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "SPRITE_SHEET_ANIMATION", data })),
     ] as any[];
   },
+  // A pose change alone (see socket/looks.ts): the client switches the player's animation on the sheets it holds.
+  // `poseRev` (optional) is the pose revision of the stream copy of a datagram pose (socket/posedgram.ts): the client
+  // keeps a newer pose it already shows. Absent, the client applies the pose as it always did.
+  spriteSheetPose: (data: { id: string; animationState: string; poseRev?: number }) => {
+    return [
+      packet.encode(JSON.stringify({ type: "SPRITE_SHEET_POSE", data })),
+    ] as any[];
+  },
   batchSpriteSheetAnimation: (animations: any[]) => {
     return [
       packet.encode(JSON.stringify({ type: "BATCH_SPRITE_SHEET_ANIMATION", data: animations })),
@@ -1189,6 +1202,17 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "CREATURE_MOVE", data: { c: entries } })),
     ] as any[];
   },
+  // Like creatureMove but takes each entry already serialized (see CreatureSync.flushMoves): the same bytes, with
+  // the nested JSON.stringify per viewer replaced by a join.
+  creatureMoveJson: (entriesJson: string[]) => {
+    return [
+      packet.encode(`{"type":"CREATURE_MOVE","data":{"c":[${entriesJson.join(",")}]}}`),
+    ] as any[];
+  },
+  // CREATURE_MOVE as one binary datagram of records made by encodeCreatureMove (socket/creature_move_codec.ts).
+  creatureMoveBinary: (records: readonly Uint8Array[]) => {
+    return [joinCreatureMoves(records)] as any[];
+  },
   creatureState: (data: { id: number; state: string; victimId: string | null }) => {
     return [
       packet.encode(JSON.stringify({ type: "CREATURE_STATE", data })),
@@ -1367,6 +1391,30 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "CHARACTER_REQUIRED", data: null })),
     ] as any[];
   },
+  // Cluster mode: this login belongs on another node. The client connects there with the ticket (signed for that node).
+  // A handoff (cells phase 6) sets `handoff`: the client reconnects at once without counting it as a switch loop,
+  // and with `resume` keeps its world (no map load) until HANDOFF_DONE.
+  switchNode: (node: { nodeId: string; publicHost: string; port: number; wtPort: number; useSSL: boolean }, ticket: NodeTicket, handoff?: { resume: boolean }) => {
+    const { nodeId, publicHost, port, wtPort, useSSL } = node;
+    return [
+      packet.encode(JSON.stringify({ type: "SWITCH", data: { nodeId, publicHost, port, wtPort, useSSL, ticket, ...(handoff ? { handoff: true, resume: handoff.resume } : {}) } })),
+    ] as any[];
+  },
+  // Cluster mode: the player walks toward a border; the node they will be sent to is named so the client can open a
+  // session there first. The address only: no ticket (the SWITCH brings it) and nothing of the player.
+  handoffPrepare: (node: { nodeId: string; publicHost: string; port: number; wtPort: number; useSSL: boolean }) => {
+    const { nodeId, publicHost, port, wtPort, useSSL } = node;
+    return [packet.encode(JSON.stringify({ type: "HANDOFF_PREPARE", data: { nodeId, publicHost, port, wtPort, useSSL } }))] as any[];
+  },
+  // The handoff the client was prepared for will not happen soon: it closes the session it opened.
+  handoffAbort: () => {
+    return [packet.encode(JSON.stringify({ type: "HANDOFF_ABORT", data: null }))] as any[];
+  },
+  // A handoff arrival that kept its world: the client takes its position and lets the player move again. `walk` is the
+  // direction the node walks the player in as it sends this (the direction a MOVEXY names), or null when it does not.
+  handoffDone: (data: { map: string; x: number; y: number; direction: string; walk?: string | null }) => {
+    return [packet.encode(JSON.stringify({ type: "HANDOFF_DONE", data }))] as any[];
+  },
   toggleClassEditor: () => {
     return [
       packet.encode(JSON.stringify({ type: "TOGGLE_CLASS_EDITOR", data: null })),
@@ -1432,9 +1480,48 @@ export const packetManager = {
       packet.encode(JSON.stringify({ type: "CREATURE_DEBUG", data })),
     ] as any[];
   },
+  clusterDebugData: (data: Record<string, unknown>) => {
+    return [
+      packet.encode(JSON.stringify({ type: "CLUSTER_DEBUG_DATA", data })),
+    ] as any[];
+  },
   creatureTargeted: (data: { id: number }) => {
     return [
       packet.encode(JSON.stringify({ type: "CREATURE_TARGETED", data })),
     ] as any[];
   },
 };
+/**
+ * The stats an observer (not the player, not a party member) is sent on the regen tick. The client merges a partial
+ * stats object into what it holds and reads health and stamina, the two totals (it sets max health and max stamina
+ * from them), and, while its inspect window is open on the player, the level and the five stat_ values. Everything
+ * else (xp, the base maxima, stat_health, stat_stamina) it never reads for another player. absorbtion stays: the nameplate and target frame draw the shield from it.
+ */
+export function observerStats(stats: any): Record<string, number> {
+  const out: Record<string, number> = {
+    health: stats.health,
+    stamina: stats.stamina,
+    total_max_health: stats.total_max_health,
+    total_max_stamina: stats.total_max_stamina,
+  };
+  for (const key of ["level", "stat_damage", "stat_armor", "stat_critical_chance", "stat_critical_damage", "stat_avoidance", "absorbtion"]) {
+    if (stats[key] !== undefined) out[key] = stats[key];
+  }
+  return out;
+}
+
+/**
+ * The regen tick's UPDATESTATS for one player: the player and their party members get the full stats, anyone else
+ * who sees them the trimmed ones (observerStats). Each frame is encoded once, the trimmed one only if someone needs it.
+ */
+export function regenStatsFrames(player: { id: string; username?: string }, stats: any): { full: Uint8Array; frameFor: (viewer: { party?: string[] }) => Uint8Array } {
+  const full = packetManager.updateStats({ id: player.id, target: player.id, stats })[0];
+  let trimmed: Uint8Array | null = null;
+  return {
+    full,
+    frameFor: (viewer) =>
+      viewer.party?.includes(player.username as string)
+        ? full
+        : (trimmed ??= packetManager.updateStats({ target: player.id, stats: observerStats(stats) })[0]),
+  };
+}

@@ -64,7 +64,16 @@ function sharedStore(): Store {
   };
 }
 
-const store: Store = process.env.CACHE?.toLowerCase() === "redis" ? sharedStore() : memoryStore();
+/**
+ * Whether the row copies are kept in the shared cache (CACHE=redis) and not in this process. A cluster node needs
+ * them shared: a node that writes another node's player (a trade across a border) must change the copy that
+ * node reads, or its next write puts the old rows back.
+ */
+export function usesSharedCache(env: Record<string, string | undefined> = process.env): boolean {
+  return env.CACHE?.toLowerCase() === "redis";
+}
+
+const store: Store = usesSharedCache() ? sharedStore() : memoryStore();
 
 export interface RowCache<T> {
   /** What is held under `key`, loaded the first time it is asked for. A copy: changing it changes nothing. */
@@ -354,6 +363,21 @@ export async function loadTables(): Promise<void> {
 }
 
 /**
+ * Asked before a login reads a player's rows again (refreshPlayer). The cluster's trade marks use it
+ * (cluster/tradesettle.ts): a player marked on another node is marked here before their rows are read.
+ * Undefined when there is nothing to wait for, so a login then awaits nothing more than it did.
+ */
+export type LoginGate = (username: string) => Promise<unknown> | undefined;
+let loginGate: LoginGate | null = null;
+
+/** Sets the login gate. Answers the one set before, so a test can put it back. */
+export function setLoginGate(gate: LoginGate | null): LoginGate | null {
+  const previous = loginGate;
+  loginGate = gate;
+  return previous;
+}
+
+/**
  * Login: read this player's rows again, so what was written while they were
  * away (by the gateway, say) is what is held. The old rows are always let go;
  * rows that cannot be read now are said and read by whatever asks first, so
@@ -361,6 +385,15 @@ export async function loadTables(): Promise<void> {
  */
 export async function refreshPlayer(username: string): Promise<void> {
   if (!username) return;
+  // Guard (test "a login reads the player's mark before it reads their rows").
+  const gate = loginGate?.(username);
+  if (gate) {
+    try {
+      await gate;
+    } catch (error) {
+      log.error(`The login gate of ${username} failed: ${error}`);
+    }
+  }
   await Promise.all(playerCaches.map((cache) => cache.drop(username)));
   const read = await Promise.allSettled(playerCaches.map((cache) => cache.get(username)));
   for (const result of read) {

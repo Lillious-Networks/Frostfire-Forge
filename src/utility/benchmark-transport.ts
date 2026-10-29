@@ -47,20 +47,22 @@ export interface ConnectionToken {
   signature: string;
   origin: string;
   account: string;
+  nodeId: string;
 }
 
 /**
  * A connection ticket as the Gateway makes one (src/socket/ticket.ts): for the
  * account whose token will log in on it, or for none when the client only
- * connects.
+ * connects. In cluster mode a node takes only tickets bound to it: the node id
+ * is NODE_ID unless one is given ("" binds it to none).
  */
-export function generateConnectionToken(serverSecret: string, origin: string, accountToken?: string): ConnectionToken {
+export function generateConnectionToken(serverSecret: string, origin: string, accountToken?: string, nodeId = process.env.NODE_ID || ""): ConnectionToken {
   const token = crypto.randomBytes(32).toString("hex");
   const timestamp = Date.now().toString();
   const expiresAt = (Date.now() + 60000).toString();
   const account = accountToken ? accountBinding(accountToken) : "";
-  const signature = signTicket(serverSecret, token, timestamp, expiresAt, origin, account);
-  return { token, timestamp, expiresAt, signature, origin, account };
+  const signature = signTicket(serverSecret, token, timestamp, expiresAt, origin, account, nodeId);
+  return { token, timestamp, expiresAt, signature, origin, account, nodeId };
 }
 
 
@@ -194,6 +196,7 @@ export class BenchmarkConnection {
         useragent,
         origin: token.origin,
         account: token.account,
+        nodeId: token.nodeId,
       },
     })));
 

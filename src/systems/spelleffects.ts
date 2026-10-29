@@ -1,11 +1,12 @@
 import playerCache from "../services/playermanager";
-import mapIndex from "../services/mapindex";
+import * as aoiReverse from "../services/aoiReverseIndex";
 import { packetManager } from "../socket/packet_manager";
 import assetCache from "../services/assetCache";
 import { getSpriteUrl } from "../modules/spriteSheetManager";
 import log from "../modules/logger";
 import { listener } from "../modules/event_bus";
 import { Events, PlayerEffectRemovedEvent, PlayerVanishEvent, PlayerAbsorbtionEvent, PlayerEffectEvent } from "./events";
+import { ghosts } from "../cluster/ghosts";
 
 type BroadcastStatsFn = (player: any) => void;
 type BroadcastEffectsFn = (player: any) => void;
@@ -126,23 +127,48 @@ export function getEffectsPayload(player: any) {
   return payload;
 }
 
-// Broadcast a player's current effects to everyone on their map so effects
-// (e.g. debuffs) can be rendered above the affected player's head.
-export function broadcastEffectsUpdate(player: any) {  if (!player?.id) return;
+// Cluster mode: the payload with an absolute `expiresAt` in place of `remaining`, so a mirror's copy stays the
+// same from one scan to the next (`remaining` counts down every second, and every change is sent to the
+// neighbours). Providers report whole seconds only, so the time is worked out from them once and kept while
+// later readings agree with it to within that second; a refreshed effect moves it.
+// Absolute times are compared across nodes, so cluster nodes need NTP-synced clocks: a mirrored timer is off by the clock skew.
+const effectExpiries = new WeakMap<object, Map<string, number>>();
+
+export function getEffectsState(player: any, now: number = Date.now()): any[] {
+  const known = effectExpiries.get(player);
+  const kept = new Map<string, number>();
+  const state = getEffectsPayload(player).map((effect) => {
+    if (typeof effect?.remaining !== "number") return effect;
+    const key = `${effect.kind ?? ""}:${effect.id}`;
+    const seen = known?.get(key);
+    const reading = now + effect.remaining * 1000;
+    // An effect run out but not yet removed reads 0 on every scan: keep its time rather than follow the clock.
+    const expiresAt = seen !== undefined && (effect.remaining <= 0 || Math.abs(reading - seen) < 1000) ? seen : reading;
+    kept.set(key, expiresAt);
+    const { remaining: _remaining, ...rest } = effect;
+    return { ...rest, expiresAt };
+  });
+  effectExpiries.set(player, kept);
+  return state;
+}
+
+// Cluster mode: a mirror's effects (from getEffectsState) as the client payload, counted down on this node's clock.
+export function mirrorEffectsPayload(effects: any, now: number = Date.now()): any[] {
+  if (!Array.isArray(effects)) return [];
+  return effects.map((effect) => {
+    if (typeof effect?.expiresAt !== "number") return effect;
+    const { expiresAt, ...rest } = effect;
+    return { ...rest, remaining: Math.max(0, Math.ceil((expiresAt - now) / 1000)) };
+  });
+}
+
+// Broadcast a player's current effects to everyone who can see them (the AOI
+// reverse index) so effects (e.g. debuffs) can be rendered above the affected
+// player's head. Players further away are shown them when they come into view.
+export function broadcastEffectsUpdate(player: any) {
+  if (!player?.id) return;
   const packets = packetManager.effects({ id: player.id, effects: getEffectsPayload(player) });
-  const map = player.location?.map;
-  if (!map) {
-    if (player.wt?.readyState === 1) {
-      try {
-        packets.forEach((pk: any) => player.wt.send(pk));
-      } catch (e) {
-        log.error(`Failed to send effects update: ${e}`);
-      }
-    }
-    return;
-  }
-  const playerIds = mapIndex.getPlayersOnMap(map);
-  for (const playerId of playerIds) {
+  for (const playerId of aoiReverse.getViewers(player.id)) {
     const p = playerCache.get(playerId);
     if (!p || p.id === player.id) continue;
     // Vanished players' effects are only visible to admins and party
@@ -159,6 +185,10 @@ export function broadcastEffectsUpdate(player: any) {  if (!player?.id) return;
   if (player.wt?.readyState === 1) {
     try { packets.forEach((pk: any) => player.wt.send(pk)); } catch (e) { log.error(`Failed to send effects update: ${e}`); }
   }
+  // Cluster mode: the viewers of this player's mirrors on neighbouring nodes. Not while vanished: the mirror
+  // learns of the vanish with the next state scan, and until then its node would pass this to every viewer.
+  // Admins and party there miss the changes made while vanished; the update sent when it ends catches them up.
+  if (!player.remote && !player.isVanished) ghosts.relay("player", String(player.id), packets, false);
 }
 
 // Subtract incoming damage from active barriers (soonest-expiring first).

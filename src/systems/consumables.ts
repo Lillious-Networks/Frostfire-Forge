@@ -11,7 +11,7 @@
 // receiver's, and where home is and the hour between uses are in systems/homes.
 
 import assetCache from "../services/assetCache";
-import { atomically } from "../services/batch";
+import { atomically, nothingWritten } from "../services/batch";
 import log from "../modules/logger";
 import bags from "./bags";
 import homes, { HOME_CAST_MS } from "./homes";
@@ -77,8 +77,29 @@ export function restoresOf(item: Pick<Item, "type" | "restore_health" | "restore
 // When each player can use a consumable again (ms, as Date.now counts).
 const readyAt = new Map<string, number>();
 
+/** How long (ms) until `username` can use a consumable again: 0 when they can now. Carried across a handoff (cells phase 6). */
+export function readyIn(username: string): number {
+  return Math.max(0, (readyAt.get(lower(username)) ?? 0) - Date.now());
+}
+
+/**
+ * Sets how long (ms) until `username` can use a consumable again; 0 or less clears it. A handoff's arrival sets
+ * what the old node had left; it is never more than a full cooldown, whatever the other node sent.
+ */
+export function setReadyIn(username: string, ms: number): void {
+  const name = lower(username);
+  if (!name) return;
+  const left = Math.min(Number(ms) || 0, CONSUMABLE_COOLDOWN_MS);
+  if (left > 0) readyAt.set(name, Date.now() + left);
+  else readyAt.delete(name);
+}
+
 /** The most of a stat a player can have: what gear adds is counted when the stats say so. */
 const most = (total: unknown, base: unknown) => amount(total) || amount(base);
+
+/** A grant that finds the player's lock held is tried up to this many times, this far apart (about 5 s in all). */
+export const HOME_GIVE_TRIES = 6;
+export const HOME_GIVE_RETRY_MS = 1000;
 
 const consumables = {
   /** How long (ms) until a player can use another consumable. */
@@ -93,22 +114,30 @@ const consumables = {
    * Gives a player the home item when they hold none and have a slot for it. Whether it was given:
    * a player with full bags is asked again the next time.
    */
-  async giveHomeItem(username: string): Promise<boolean> {
+  async giveHomeItem(username: string, retryMs: number = HOME_GIVE_RETRY_MS): Promise<boolean> {
     const name = lower(username);
     const stone = await consumables.homeItem();
     if (!name || !stone) return false;
     const rows = (await inventory.get(name)) as any[];
     if (rows.some((row) => lower(row.item ?? row.name) === lower(stone.name))) return false;
     if (rows.length >= (await bags.capacity(name))) return false;
-    try {
-      return await atomically([name], async (batch) => {
-        // Asked again where nothing else of the player's changes: two logins at once give one.
-        if (await inventory.heldIn(batch, name, stone.name)) return false;
-        return !!(await inventory.add(name, { name: stone.name, quantity: 1 }, batch));
-      });
-    } catch (error) {
-      log.error(`${name} could not be given ${stone.name}: ${error}`);
-      return false;
+    for (let tries = 1; ; tries++) {
+      try {
+        return await atomically([name], async (batch) => {
+          // Asked again where nothing else of the player's changes: two logins at once give one.
+          if (await inventory.heldIn(batch, name, stone.name)) return false;
+          return !!(await inventory.add(name, { name: stone.name, quantity: 1 }, batch));
+        });
+      } catch (error) {
+        // The player's lock is held (a handoff, another login step): the grant ran nothing, so it is tried again.
+        // Only that error; the check above, in the batch, keeps a second try from giving a second stone.
+        if ((error as Error)?.name === "PlayerLockBusy" && nothingWritten(error) && tries < HOME_GIVE_TRIES) {
+          await new Promise((resolve) => setTimeout(resolve, retryMs));
+          continue;
+        }
+        log.error(`${name} could not be given ${stone.name}: ${error}`);
+        return false;
+      }
     }
   },
   /**

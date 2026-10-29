@@ -1,15 +1,18 @@
 import { Worker } from "worker_threads";
 import os from "node:os";
 import log from "../modules/logger.ts";
-import type { MoverSnapshot, ReceiverInfo } from "./movement_batch.ts";
+import { mergeFlushRequests, type MoverSnapshot, type ReceiverDiff, type ReceiverInfo } from "./movement_batch.ts";
 
 export interface WorkerFlushRequest {
   tick: number;
+  // Far movers' interval in flushes for this flush (movement_batch farUpdateEvery).
+  farEvery?: number;
   movers: MoverSnapshot[];
   receiverIds: string[];
   receiverInfo: Record<string, ReceiverInfo>;
-  diffs: Array<{ playerId: string; add: string[]; remove: string[] }>;
-  onBatches: (batches: any[], updatedSeqs?: Record<string, number>) => void;
+  diffs: ReceiverDiff[];
+  // `volume`: the flush's movement volume (movement_batch batchVolume); 0 when the flush failed.
+  onBatches: (batches: any[], updatedSeqs?: Record<string, number>, volume?: number) => void;
   // Set by queueLayerWorkerFlush; used to coalesce repeat flushes per layer
   // when several layers share one worker.
   layerId?: string;
@@ -24,7 +27,7 @@ interface PooledWorker {
 }
 
 // Worker threads are shared across map layers rather than allocated one per
-// layer. Layers are capped at MAX_PLAYERS_PER_LAYER (default 50), so at 2000+
+// layer. Layers used to be capped at 50 players per map, so at 2000+
 // players a per-layer thread meant 40+ OS threads each holding its own heap -
 // hundreds of MB of RSS. A bounded pool keeps the flush off the main event
 // loop without the thread explosion.
@@ -57,7 +60,7 @@ function createWorker(): PooledWorker {
 
   worker.on("message", (message: any) => {
     if (message.type === "flushResult") {
-      finishFlush(pooled, message.batches, message.updatedSeqs);
+      finishFlush(pooled, message.batches, message.updatedSeqs, typeof message.volume === "number" ? message.volume : 0);
     } else if (message.type === "flushError") {
       log.warn(`[MOVEMENT WORKER] ${message.error}`);
       finishFlush(pooled, []);
@@ -105,13 +108,13 @@ function getPooledWorker(layerId: string): PooledWorker {
   return pooled;
 }
 
-function finishFlush(pooled: PooledWorker, batches: any[], updatedSeqs?: Record<string, number>): void {
+function finishFlush(pooled: PooledWorker, batches: any[], updatedSeqs?: Record<string, number>, volume = 0): void {
   const request = pooled.currentFlushRequest;
   pooled.currentFlushRequest = null;
   pooled.flushInFlight = false;
 
   if (request) {
-    request.onBatches(batches, updatedSeqs);
+    request.onBatches(batches, updatedSeqs, volume);
   }
 
   const next = pooled.queue.shift();
@@ -125,9 +128,11 @@ function queueFlushOn(pooled: PooledWorker, request: WorkerFlushRequest): void {
     // Coalesce per layer: a layer only ever needs its most recent flush, but
     // DIFFERENT layers sharing this worker must not overwrite each other (the
     // old single-slot pendingFlushRequest silently dropped one of them).
+    // The replaced request's receiver-set diffs and snapshot are merged into
+    // the new one: the worker's mirror is only updated by what it is sent.
     const queuedIndex = pooled.queue.findIndex((queued) => queued.layerId === request.layerId);
     if (queuedIndex !== -1) {
-      pooled.queue[queuedIndex] = request;
+      pooled.queue[queuedIndex] = mergeFlushRequests(pooled.queue[queuedIndex], request);
     } else {
       pooled.queue.push(request);
     }
@@ -141,6 +146,7 @@ function queueFlushOn(pooled: PooledWorker, request: WorkerFlushRequest): void {
   pooled.worker.postMessage({
     type: "flush",
     tick: request.tick,
+    farEvery: request.farEvery,
     movers: request.movers,
     receiverIds: request.receiverIds,
     receiverInfo: request.receiverInfo,

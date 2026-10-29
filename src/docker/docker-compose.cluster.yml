@@ -1,0 +1,405 @@
+# Frostfire cluster test stack: live multi-server runs in Docker, separate from
+# the local development stack and its database.
+#
+# First copy src/docker/cluster.env.example to src/docker/cluster.env and give
+# every secret in it a fresh random value (cluster.env is git-ignored).
+#
+# Pass cluster.env to every compose command with --env-file: Redis' password
+# and the nodes' REDIS_URL are built from REDIS_PASSWORD, and compose reads
+# that for ${...} only from --env-file, not from a service's env_file.
+#
+# Start (from the engine repo root, F:\Projects\Frostfire-Forge):
+#   docker compose -f src/docker/docker-compose.cluster.yml --env-file src/docker/cluster.env up -d --build
+# Play:    open http://localhost:18081 in Chrome or Edge (WebTransport is
+#          Chromium-only), click "Continue as guest", pick the realm.
+# Logs:    docker compose -f src/docker/docker-compose.cluster.yml --env-file src/docker/cluster.env logs -f
+# Stop:    docker compose -f src/docker/docker-compose.cluster.yml --env-file src/docker/cluster.env down
+# Wipe:    docker compose -f src/docker/docker-compose.cluster.yml --env-file src/docker/cluster.env down -v
+#          (also deletes the test database)
+#
+# Run `down` between runs (not just `stop`, or `up` over a running stack): the
+# redis container keeps the cluster state (block tables, map catalogue, node
+# registry) for as long as it exists, and a new run would reuse the old block
+# split. `down` removes it and keeps the mysql-data volume.
+#
+# CLUSTER_LINK_SECRET (cluster.env, at least 32 characters) signs the node
+# links and the cluster bus: the nodes and the coordinator refuse to start
+# without it. Only they hold it; every other service has it set to "" below
+# (a service's `environment` wins over its env_file).
+#
+# Coordinator failover: with the stack up, start a standby coordinator with
+#   docker compose -f src/docker/docker-compose.cluster.yml --env-file src/docker/cluster.env up -d --scale coordinator=2
+# (the coordinator service has no host ports and no container_name, so it
+# scales), then stop the leader (`docker stop <its container>`; the one whose
+# log says "leads"). The standby takes the lock within the 5 s ttl.
+#
+# Services
+#   redis         shared cache and cluster bus (no host port). Needs REDIS_PASSWORD
+#                 and sits on its own internal network, "redis-net", that only the
+#                 nodes and the coordinator join: the gateway and the asset server
+#                 use the in-memory cache here and cannot reach it.
+#   mysql       fresh test database frostfire_cluster_test (host 127.0.0.1:13306)
+#   assets        asset server, assets baked into its image (host 18000)
+#   db-init-engine, db-init-gateway
+#                 one-shot schema setup, run in that order
+#   gateway       web login (host 18081) and game-server API (host 19999)
+#   coordinator   cluster coordinator (src/cluster/coordinator-main.ts)
+#   node-1..3     engine nodes in cluster mode (host 3101-3103, TCP and UDP)
+# Every host port is bound to 127.0.0.1 only, so the stack is not reachable
+# from the LAN.
+#
+# Start order: redis, mysql, assets -> db-init-engine -> db-init-gateway ->
+# gateway, coordinator -> node-1, node-2 and node-3 together. The coordinator
+# has CLUSTER_EXPECTED_NODES=3: it splits the maps only once all three nodes
+# are live, so the first node up does not take every block.
+#
+# Host ports avoid the local stack: 80/443, 8080, 9998/9999/9443, 3000/3002,
+# 8000/8443 and 6379. Never use host networking here.
+#
+# Images are built from each repo's Dockerfile.prod (BuildKit picks up the
+# Dockerfile.prod.dockerignore next to it). They hold no .env file: all
+# configuration comes from cluster.env and the environment blocks below.
+# Run `up` with --build the first time (or `build` first): the services that
+# share an image only reference it and never pull, so a plain `up` without
+# --build on a fresh machine fails with image-not-found.
+
+name: frostfire-cluster-test
+
+x-env-file: &env-file
+  - cluster.env
+
+x-engine-image: &engine-image
+  image: frostfire-cluster-test-engine:local
+  pull_policy: never
+
+x-engine-env: &engine-env
+  CLUSTER: "true"
+  CACHE: redis
+  REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379
+  CLUSTER_LINK_SECRET: ${CLUSTER_LINK_SECRET:?pass --env-file src/docker/cluster.env}
+  REGION_ID: local
+  DB_WORKER_POOL_SIZE: "3"
+  AUTH_POOL_SIZE: "3"
+  SERVER_DESCRIPTION: Cluster test node
+  WHITELIST: "false"
+  PVP: "true"
+  TLS_CERT_PATH: ./src/certs/cert.pem
+  TLS_KEY_PATH: ./src/certs/key.pem
+  TLS_CA_PATH: ./src/certs/cert.ca-bundle
+  PUBLIC_HOST: localhost
+  CORS_ALLOWED_ORIGINS: http://localhost:18081,http://127.0.0.1:18081
+  GATEWAY_ENABLED: "true"
+  GATEWAY_URL: http://gateway:19999
+  ASSET_SERVER_URL: http://localhost:18000
+  ASSET_SERVER_INTERNAL_URL: http://assets:18000
+
+x-engine-node: &engine-node
+  <<: *engine-image
+  restart: "no"
+  env_file: *env-file
+  # The engine's shutdown takes up to 9 s (running handoffs, achievement flush, leaving the cluster): Docker's
+  # default 10 s grace is too close. `exec` makes bun the process that gets the SIGTERM (sh does not pass it on).
+  stop_grace_period: 20s
+  command:
+    - sh
+    - -c
+    - bun create-config --environment production && exec bun ./src/socket/server.ts --sql-preconnect
+  healthcheck:
+    test:
+      - CMD
+      - bun
+      - --eval
+      - "const r = await fetch('http://localhost:' + process.env.WEBSRV_PORTSSL + '/status').catch(() => ({ ok: false })); process.exit(r.ok ? 0 : 1)"
+    interval: 10s
+    timeout: 5s
+    start_period: 30s
+    retries: 12
+  networks:
+    - cluster
+    - redis-net
+
+services:
+  redis:
+    image: redis:7.4.1-alpine
+    restart: "no"
+    # The password is required: compose refuses to start without --env-file src/docker/cluster.env.
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?pass --env-file src/docker/cluster.env}
+    # The password goes into a config file on a tmpfs (mode 700 directory, file made with umask 077), not onto the
+    # command line, where `ps` in the container would show it. The shell escapes \ and " for the config's quoted string.
+    command:
+      - sh
+      - -c
+      - |
+        umask 077
+        esc=$$(printf %s "$$REDIS_PASSWORD" | sed 's/[\\"]/\\&/g')
+        printf 'requirepass "%s"\n' "$$esc" > /run/redis-conf/redis.conf
+        exec redis-server /run/redis-conf/redis.conf
+    tmpfs:
+      - /run/redis-conf:mode=0700
+    healthcheck:
+      test: ["CMD-SHELL", "[ -z \"$$REDIS_PASSWORD\" ] || export REDISCLI_AUTH=\"$$REDIS_PASSWORD\"; redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks:
+      - redis-net
+
+  mysql:
+    image: mysql:9.0
+    restart: "no"
+    command: --max-connections=500
+    env_file: *env-file
+    environment:
+      CLUSTER_LINK_SECRET: ""
+      REDIS_PASSWORD: ""
+    ports:
+      - "127.0.0.1:13306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 20s
+      retries: 20
+    networks:
+      - cluster
+
+  assets:
+    build:
+      context: ../../../Frostfire-Forge-Assets
+      dockerfile: src/docker/Dockerfile.prod
+    image: frostfire-cluster-test-assets:local
+    pull_policy: never
+    restart: "no"
+    env_file: *env-file
+    command: ["bun", "./src/index.ts"]
+    environment:
+      CLUSTER_LINK_SECRET: ""
+      REDIS_PASSWORD: ""
+      # The user's Mystika assets (the 10240 x 10240 overworld.world), mounted read-only (USER REQUEST 2026-10-23).
+      ASSETS_PATH: /app/mystika-assets
+      WEBSRV_PORT: "18000"
+      WEBSRV_PORTSSL: "18443"
+      WEBSRV_INTERNAL_PORT: "8082"
+    volumes:
+      - ../../../Mystika/Assets:/app/mystika-assets:ro
+    ports:
+      - "127.0.0.1:18000:18000"
+    healthcheck:
+      test:
+        - CMD
+        - bun
+        - --eval
+        - "const r = await fetch('http://localhost:18000/status').catch(() => ({ ok: false })); process.exit(r.ok ? 0 : 1)"
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 12
+    networks:
+      - cluster
+
+  db-init-engine:
+    build:
+      context: ../..
+      dockerfile: src/docker/Dockerfile.prod
+    <<: *engine-image
+    restart: "no"
+    env_file: *env-file
+    command:
+      - sh
+      - -c
+      - bun create-config --environment production && bun ./src/utility/database_setup_dispatch.ts
+    environment:
+      CLUSTER_LINK_SECRET: ""
+      REDIS_PASSWORD: ""
+    healthcheck:
+      disable: true
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - cluster
+
+  db-init-gateway:
+    image: frostfire-cluster-test-gateway:local
+    pull_policy: never
+    restart: "no"
+    env_file: *env-file
+    command: ["bun", "./src/utility/database_setup.ts"]
+    environment:
+      CLUSTER_LINK_SECRET: ""
+      REDIS_PASSWORD: ""
+    healthcheck:
+      disable: true
+    depends_on:
+      db-init-engine:
+        condition: service_completed_successfully
+    networks:
+      - cluster
+
+  gateway:
+    build:
+      context: ../../../Frostfire-Forge-Gateway
+      dockerfile: src/docker/Dockerfile.prod
+    image: frostfire-cluster-test-gateway:local
+    pull_policy: never
+    restart: "no"
+    env_file: *env-file
+    command: ["bun", "src/start.ts"]
+    environment:
+      CLUSTER_LINK_SECRET: ""
+      REDIS_PASSWORD: ""
+      WEBSRV_PORT: "18081"
+      WEBSRV_PORTSSL: "18444"
+      WEBSRV_INTERNAL_PORT: "8080"
+      GATEWAY_PORT: "19999"
+      GATEWAY_PORTSSL: "19443"
+      GATEWAY_INTERNAL_PORT: "9998"
+      GATEWAY_URL: http://localhost:19999
+      ASSET_SERVER_URL: http://localhost:18000
+      GATEWAY_ENABLED: "true"
+      DOMAIN: http://localhost:18081
+      GUEST_MODE_ENABLED: "true"
+    ports:
+      - "127.0.0.1:18081:18081"
+      - "127.0.0.1:19999:19999"
+    depends_on:
+      db-init-gateway:
+        condition: service_completed_successfully
+      assets:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - bun
+        - --eval
+        - "const a = await fetch('http://localhost:19999/status').catch(() => ({ ok: false })); const b = await fetch('http://localhost:18081/status').catch(() => ({ ok: false })); process.exit(a.ok && b.ok ? 0 : 1)"
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 12
+    networks:
+      - cluster
+
+  coordinator:
+    <<: *engine-image
+    restart: "no"
+    env_file: *env-file
+    command: ["bun", "./src/cluster/coordinator-main.ts"]
+    healthcheck:
+      disable: true
+    environment:
+      CLUSTER: "true"
+      CACHE: redis
+      REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379
+      CLUSTER_LINK_SECRET: ${CLUSTER_LINK_SECRET:?pass --env-file src/docker/cluster.env}
+      REGION_ID: local
+      # Change with the number of nodes below (or set CLUSTER_SETTLE_MS to also split after that long).
+      CLUSTER_EXPECTED_NODES: "3"
+    depends_on:
+      redis:
+        condition: service_healthy
+      db-init-engine:
+        condition: service_completed_successfully
+    networks:
+      - cluster
+      - redis-net
+
+  node-1:
+    <<: *engine-node
+    environment:
+      <<: *engine-env
+      NODE_ID: node-1
+      SERVER_ID: local-node-1
+      SERVER_HOST: node-1
+      WEBSRV_PORTSSL: "3101"
+      GAME_PORT: "3101"
+      # Node links (UDP) stay on the cluster network: the nodes reach each other by name, so no `ports` entry.
+      NODE_LINK_PORT: "3201"
+      NODE_LINK_HOST: node-1
+      # Explicit, for the production start check: inside the container only Docker's private networks reach it, and host ports bind 127.0.0.1.
+      NODE_LINK_BIND_HOST: "0.0.0.0"
+    ports:
+      - "127.0.0.1:3101:3101/tcp"
+      - "127.0.0.1:3101:3101/udp"
+    depends_on:
+      redis:
+        condition: service_healthy
+      db-init-engine:
+        condition: service_completed_successfully
+      assets:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+      coordinator:
+        condition: service_started
+
+  node-2:
+    <<: *engine-node
+    environment:
+      <<: *engine-env
+      NODE_ID: node-2
+      SERVER_ID: local-node-2
+      SERVER_HOST: node-2
+      WEBSRV_PORTSSL: "3102"
+      GAME_PORT: "3102"
+      NODE_LINK_PORT: "3202"
+      NODE_LINK_HOST: node-2
+      # Explicit, for the production start check: inside the container only Docker's private networks reach it, and host ports bind 127.0.0.1.
+      NODE_LINK_BIND_HOST: "0.0.0.0"
+    ports:
+      - "127.0.0.1:3102:3102/tcp"
+      - "127.0.0.1:3102:3102/udp"
+    depends_on:
+      redis:
+        condition: service_healthy
+      db-init-engine:
+        condition: service_completed_successfully
+      assets:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+      coordinator:
+        condition: service_started
+
+  node-3:
+    <<: *engine-node
+    environment:
+      <<: *engine-env
+      NODE_ID: node-3
+      SERVER_ID: local-node-3
+      SERVER_HOST: node-3
+      WEBSRV_PORTSSL: "3103"
+      GAME_PORT: "3103"
+      NODE_LINK_PORT: "3203"
+      NODE_LINK_HOST: node-3
+      # Explicit, for the production start check: inside the container only Docker's private networks reach it, and host ports bind 127.0.0.1.
+      NODE_LINK_BIND_HOST: "0.0.0.0"
+    ports:
+      - "127.0.0.1:3103:3103/tcp"
+      - "127.0.0.1:3103:3103/udp"
+    depends_on:
+      redis:
+        condition: service_healthy
+      db-init-engine:
+        condition: service_completed_successfully
+      assets:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+      coordinator:
+        condition: service_started
+
+volumes:
+  mysql-data:
+
+networks:
+  cluster:
+    driver: bridge
+  # Only the nodes and the coordinator join this one, so nothing else (the
+  # gateway, the asset server, MySQL) can open a connection to Redis. `internal`
+  # also gives it no route out of the host.
+  redis-net:
+    driver: bridge
+    internal: true

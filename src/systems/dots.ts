@@ -39,6 +39,22 @@ export function setPlayerDeathHandler(fn: PlayerDeathHandler) {
   playerDeathHandler = fn;
 }
 
+/** What a DoT tick does for a caster who is not on this node (cells phase 6): kill credit and a killer to name. */
+export interface RemoteDotCaster {
+  /** A tick of a DoT whose caster is not on this node landed on `target`; `killed` when it was the last. */
+  credit(dot: DotInstance, target: any, killed: boolean): void;
+  /** The killer handlePlayerDeath is given when the caster is not on this node. */
+  killer(dot: DotInstance): any;
+}
+let remoteCaster: RemoteDotCaster | null = null;
+
+/** Set by the cluster (Task 13). Answers the one set before, so a test can put it back. */
+export function setRemoteDotCaster(remote: RemoteDotCaster | null): RemoteDotCaster | null {
+  const previous = remoteCaster;
+  remoteCaster = remote;
+  return previous;
+}
+
 
 function sendEffectsToTarget(target: any) {
   broadcastEffectsUpdate(target);
@@ -194,6 +210,14 @@ async function tickPlayerDot(targetKey: string, dot: DotInstance): Promise<boole
     setPlayerPvp(caster, true);
     caster.last_attack = performance.now();
   }
+  // A caster on another node (a spell sent as a player_hit, or a caster handed off since): the target still enters
+  // PvP, and the caster's node is told so it can do the same for its player.
+  const remote = !caster && dot.casterId && dot.casterId !== String(target.id) ? remoteCaster : null;
+  if (remote) {
+    setPlayerPvp(target, true);
+    target.last_attack = performance.now();
+    remote.credit(dot, target, target.stats.health <= 0);
+  }
 
   if (damage > 0 && target.isVanished) {
     const vanishId = getVanishedEffectId(target);
@@ -207,7 +231,7 @@ async function tickPlayerDot(targetKey: string, dot: DotInstance): Promise<boole
     playerDots.delete(targetKey);
     if (playerDeathHandler) {
       try {
-        await playerDeathHandler(target, caster || null, { damage, isCrit: false });
+        await playerDeathHandler(target, caster || remote?.killer(dot) || null, { damage, isCrit: false });
       } catch (e) {
         log.error(`DoT death handler failed: ${e}`);
       }

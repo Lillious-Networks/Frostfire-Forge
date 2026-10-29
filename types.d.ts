@@ -702,6 +702,9 @@ declare interface ServerRegistrationConfig {
   wtEnabled?: boolean;
   maxConnections: number;
   heartbeatInterval: number;
+  /** Cluster mode only: this node's id (the registration id, instead of serverId) and the region it serves. */
+  nodeId?: string;
+  regionId?: string;
 }
 
 declare interface LootTableEntry {
@@ -924,7 +927,8 @@ declare interface EngineAPI {
   onWarpCollision(interceptor: (warp: any, wt: any, player: any, sendPacket: any) => Promise<boolean>): void;
   onPacket(interceptor: (type: string, data: any, wt: any, player: any) => boolean): void;
   addHttpRoute(method: string, route: string, handler: (req: Request) => Promise<Response>): void;
-  teleportPlayer(playerObj: any, mapName: string, x: number, y: number): Promise<void>;
+  /** False when the move was refused (in cluster mode, the player is being handed off to another node). */
+  teleportPlayer(playerObj: any, mapName: string, x: number, y: number): Promise<boolean>;
   registerSpell(spell: SpellData): Promise<void>;
 }
 

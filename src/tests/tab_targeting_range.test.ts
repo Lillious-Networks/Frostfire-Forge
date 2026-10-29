@@ -1,6 +1,5 @@
 import { expect, test, describe } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { receiverSource } from "./receiver-source";
 
 // Tab-targeting (TARGETCLOSEST in src/socket/receiver.ts) picks a target within
 // TARGETING_RANGE using a facing cone. TARGETING_RANGE was a hardcoded 500; it is
@@ -70,10 +69,7 @@ describe("tab-targeting cone + range", () => {
 describe("TARGETCLOSEST handler wiring", () => {
   // Guards against the constant regressing to a hardcoded value. Source scan
   // only - no module import, no config dependency.
-  const src = readFileSync(
-    join(import.meta.dir, "..", "socket", "receiver.ts"),
-    "utf8",
-  );
+  const src = receiverSource();
   const handler = src.slice(src.indexOf('case "TARGETCLOSEST"'));
   const block = handler.slice(0, handler.indexOf("break;"));
 

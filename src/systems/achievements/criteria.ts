@@ -30,10 +30,11 @@ export function deedsOf(event: string, payload: any): Deed[] {
       break;
     case Events.PLAYER_DEATH: {
       const victim = nameOf(payload?.player);
-      add(victim, "death", null);
+      // Across a border the death is emitted on both nodes: the victim's counts the death, the killer's the kill.
+      if (!payload?.player?.remote) add(victim, "death", null);
       const killer = payload?.killer;
       // creatures and the tornado kill as stand-ins marked isCreature (socket/receiver.ts)
-      if (killer && !killer.isCreature && nameOf(killer) && lower(nameOf(killer)) !== lower(victim)) add(nameOf(killer), "pvp_kill", null);
+      if (killer && !killer.remote && !killer.isCreature && nameOf(killer) && lower(nameOf(killer)) !== lower(victim)) add(nameOf(killer), "pvp_kill", null);
       break;
     }
     case Events.QUEST_COMPLETED:

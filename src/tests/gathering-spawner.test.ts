@@ -1,4 +1,5 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { resetEntityIds, useWorldIds } from "../cluster/entityids";
 import { GatherSpawner, RETRY_MS } from "../systems/gathering/spawner";
 import type { GatherArea, GatherNode } from "../systems/gathering/types";
 import { openGrid, seeded } from "./gathering-helpers";
@@ -236,5 +237,162 @@ describe("GatherSpawner.nodesNear", () => {
     const { spawner } = started([wide], ["L1", "L2"]);
     spawner.setLayers(layers("L2"), 0);
     expect(spawner.nodesNear("main", "L1", 2000, 2000, 5000)).toEqual([]);
+  });
+});
+
+describe("node ids", () => {
+  afterEach(resetEntityIds);
+
+  test("are the world's entity ids, which are numbers", () => {
+    let next = 700;
+    useWorldIds({ next: () => next++ } as any);
+    const { spawner } = started();
+    expect(spawner.nodesOn("main", "L1").map((n) => n.id).sort()).toEqual([700, 701, 702, 703, 704]);
+  });
+
+  test("a node that cannot get an id is skipped and tried again after the retry wait", () => {
+    useWorldIds({ next: () => { throw new Error("No world ids left"); } } as any);
+    const errors = spyOn(log, "error").mockImplementation(() => {});
+    try {
+      const { spawner, spawned } = started();
+      expect(spawned).toEqual([]);
+      expect(spawner.countOn(1, "L1")).toBe(0);
+      expect(errors.mock.calls[0]![0]).toContain("No world ids left");
+
+      let next = 9;
+      useWorldIds({ next: () => next++ } as any);
+      spawner.tick(RETRY_MS - 1);
+      expect(spawner.countOn(1, "L1")).toBe(0);
+      spawner.tick(RETRY_MS);
+      expect(spawner.countOn(1, "L1")).toBe(5);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+});
+
+describe("overflow layers fill only where they have players", () => {
+  // Players per layer and 4096 px block, as the layer manager counts them.
+  function occupied() {
+    const players = new Map<string, number>();
+    const at = (layerId: string, x: number, y: number) => `${layerId}@${Math.floor(x / 4096)},${Math.floor(y / 4096)}`;
+    const despawned: GatherNode[] = [];
+    const spawner = new GatherSpawner(() => openGrid(), {
+      onDespawn: (n) => despawned.push(n),
+      playersInBlock: (layerId, x, y) => players.get(at(layerId, x, y)) ?? 0,
+    }, seeded(4));
+    spawner.setAreas([area()], 0);
+    spawner.setLayers(layers("main:layer_1", "main:layer_2"), 0);
+    spawner.tick(0);
+    return { spawner, players, despawned, at };
+  }
+
+  test("layer 1 is filled everywhere; an overflow layer only once the area's block has a player", () => {
+    const { spawner, players, at } = occupied();
+    expect(spawner.countOn(1, "main:layer_1")).toBe(5);
+    expect(spawner.countOn(1, "main:layer_2")).toBe(0);
+    players.set(at("main:layer_2", 5000, 500), 1); // another block
+    spawner.tick(100);
+    expect(spawner.countOn(1, "main:layer_2")).toBe(0);
+    players.set(at("main:layer_2", 500, 500), 1);
+    spawner.tick(200);
+    expect(spawner.countOn(1, "main:layer_2")).toBe(5);
+  });
+
+  test("overflow nodes go after the block has been empty for 60 s and come back with a player", () => {
+    const { spawner, players, despawned, at } = occupied();
+    players.set(at("main:layer_2", 500, 500), 1);
+    spawner.tick(100);
+    expect(spawner.countOn(1, "main:layer_2")).toBe(5);
+
+    players.delete(at("main:layer_2", 500, 500));
+    spawner.tick(1000); // seen empty
+    spawner.tick(1000 + 59_000);
+    expect(spawner.countOn(1, "main:layer_2")).toBe(5);
+    spawner.tick(1000 + 60_000);
+    expect(spawner.countOn(1, "main:layer_2")).toBe(0);
+    expect(despawned.length).toBe(5);
+    expect(despawned.every((n) => n.layerId === "main:layer_2")).toBe(true);
+    expect(spawner.countOn(1, "main:layer_1")).toBe(5);
+
+    players.set(at("main:layer_2", 500, 500), 1);
+    spawner.tick(1000 + 61_000);
+    expect(spawner.countOn(1, "main:layer_2")).toBe(5);
+  });
+
+  test("a player coming back within 60 s keeps the overflow nodes", () => {
+    const { spawner, players, at } = occupied();
+    players.set(at("main:layer_2", 500, 500), 1);
+    spawner.tick(100);
+    const ids = spawner.nodesOn("main", "main:layer_2").map((n) => n.id);
+    players.delete(at("main:layer_2", 500, 500));
+    spawner.tick(1000);
+    players.set(at("main:layer_2", 500, 500), 1);
+    spawner.tick(50_000);
+    players.delete(at("main:layer_2", 500, 500));
+    spawner.tick(70_000);
+    spawner.tick(100_000);
+    expect(spawner.nodesOn("main", "main:layer_2").map((n) => n.id)).toEqual(ids);
+  });
+});
+
+describe("cluster: areas in blocks other nodes own", () => {
+  test("an area owned elsewhere has no nodes; one owned here or by no one fills, and so does the first once it is this node's", () => {
+    // Block owners by "map|bx,by"; an absent block has no known owner.
+    const owners = new Map([["main|0,0", "b"], ["main|1,0", "a"]]);
+    const ownerAt = (map: string, x: number, y: number) => owners.get(`${map}|${Math.floor(x / 4096)},${Math.floor(y / 4096)}`);
+    const spawner = new GatherSpawner(() => openGrid(), {
+      spawnsHere: (map, x, y) => { const owner = ownerAt(map, x, y); return owner === undefined || owner === "b"; },
+    }, seeded(4));
+    spawner.setAreas([area({ id: 1 }), area({ id: 2, x: 5000 }), area({ id: 3, y: 5000 })], 0);
+    spawner.setLayers(layers("main:layer_1"), 0);
+    spawner.tick(0);
+    expect(spawner.countOn(1, "main:layer_1")).toBe(5);
+    expect(spawner.countOn(2, "main:layer_1")).toBe(0);
+    expect(spawner.countOn(3, "main:layer_1")).toBe(5);
+
+    owners.set("main|1,0", "b");
+    spawner.tick(100);
+    expect(spawner.countOn(2, "main:layer_1")).toBe(5);
+  });
+
+  test("nodes standing in a block another node takes are left alone", () => {
+    const owners = new Map<string, string>();
+    const spawner = new GatherSpawner(() => openGrid(), {
+      spawnsHere: (map, x, y) => (owners.get(`${map}|${Math.floor(x / 4096)},${Math.floor(y / 4096)}`) ?? "b") === "b",
+    }, seeded(4));
+    spawner.setAreas([area()], 0);
+    spawner.setLayers(layers("main:layer_1"), 0);
+    spawner.tick(0);
+    const [first] = spawner.nodesOn("main", "main:layer_1");
+    owners.set("main|0,0", "a");
+    spawner.tick(100);
+    expect(spawner.countOn(1, "main:layer_1")).toBe(5);
+    // A gathered one is not put back here: the block is node a's now.
+    spawner.take(first!.id, 200);
+    spawner.tick(200 + 20_000);
+    expect(spawner.countOn(1, "main:layer_1")).toBe(4);
+  });
+
+  test("asks about the block only for an area with a node due", () => {
+    let asked = 0;
+    const spawner = new GatherSpawner(() => openGrid(), {
+      spawnsHere: () => { asked++; return true; },
+    }, seeded(4));
+    spawner.setAreas([area()], 0);
+    spawner.setLayers(layers("main:layer_1"), 0);
+    spawner.tick(0);
+    expect(spawner.countOn(1, "main:layer_1")).toBe(5);
+    asked = 0;
+    spawner.tick(100);
+    spawner.tick(200);
+    expect(asked).toBe(0);
+    const [first] = spawner.nodesOn("main", "main:layer_1");
+    spawner.take(first!.id, 300);
+    spawner.tick(400);
+    expect(asked).toBe(0);
+    spawner.tick(300 + 20_000);
+    expect(asked).toBe(1);
+    expect(spawner.countOn(1, "main:layer_1")).toBe(5);
   });
 });

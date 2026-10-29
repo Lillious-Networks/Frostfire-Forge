@@ -122,6 +122,8 @@ const settings = {
   "gateway": {
     "heartbeatInterval": 5000
   },
+  // The movement loop's ticks a second (20-120). The TICK_RATE environment variable, if set, wins.
+  "tickRate": 60,
   "world": "overworld",
   "default_map": "overworld.json",
   "spawn_x": null,
@@ -174,7 +176,14 @@ if (!fs.existsSync(path.join(configPath, "settings.json"))) {
     console.log(`Migrated 'websocket' to 'webtransport'`);
   }
 
-  if (existing.websocketRatelimit || existing.websocket) {
+  // Added with the configurable tick rate: an older file gets the default.
+  const addTickRate = existing.tickRate === undefined;
+  if (addTickRate) {
+    existing.tickRate = settings.tickRate;
+    console.log(`Added 'tickRate' (${settings.tickRate})`);
+  }
+
+  if (existing.websocketRatelimit || existing.websocket || addTickRate) {
     fs.writeFileSync(settingsPath, JSON.stringify(existing, null, 2));
     console.log(`Settings migrated at ${settingsPath}`);
   } else {
@@ -188,7 +197,12 @@ const AOI_CONFIG = {
   GRID_CELL_SIZE: 512,
   USE_SPATIAL_GRID: true,
   SPATIAL_GRID_THRESHOLD: 50,
-  MAX_PLAYERS_PER_LAYER: 50,
+  MAX_PLAYERS_PER_LAYER: 150, // per block of BLOCK_SIZE_PX, not per map; matches MAX_VISIBLE_PLAYERS
+  BLOCK_SIZE_PX: 4096,
+  MAX_VISIBLE_PLAYERS: 150,
+  NEAR_TIER_DISTANCE: 500,
+  FAR_UPDATE_EVERY: 3,
+  EXIT_HYSTERESIS: 1.25,
   DEBUG: false
 };
 

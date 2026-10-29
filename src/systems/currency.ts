@@ -1,6 +1,7 @@
 import query, { type TransactionStatement } from "../controllers/sqldatabase";
 import { rowCache, turns } from "../services/datacache";
 import type { Batch } from "../services/batch";
+import { settledThen } from "../cluster/tradesettle";
 
 const max_copper = 99;
 const max_silver = 99;
@@ -101,13 +102,14 @@ function minus(balance: Currency, amount: Currency): Currency {
 /** A player's balance as `batch` has it so far, the first time with this system's turn taken until the batch ends. */
 async function pendingIn(batch: Batch, username: string): Promise<{ balance: Currency; written: boolean }> {
     await batch.hold(oneAtATime, username);
-    return batch.pending(rows, username, async () => {
+    // Read once the player is settled: a trade lost across a border may still be swapped on its host (cluster/tradesettle.ts).
+    return batch.pending(rows, username, () => settledThen(username, async () => {
         const pending = { balance: await currency.get(username), written: false };
         // A batch that only looked at the balance leaves the one held as it is.
         batch.kept(() => (pending.written ? hold(username, pending.balance) : undefined));
         batch.undone(() => (pending.written ? rows.drop(username) : undefined));
         return pending;
-    });
+    }));
 }
 
 /**
@@ -135,35 +137,38 @@ const currency = {
     },
     async set(username: string, currencyData: Currency) {
         if (!username || !currencyData) return;
-        await oneAtATime(username, () => write(username, currencyData));
+        // Once the player is settled, so that this write is not put under a swap that is still to commit.
+        await oneAtATime(username, () => settledThen(username, () => write(username, currencyData)));
     },
     /** The balance after. With a `batch`, the write is added to it instead of sent (see changeIn). */
     async add(username: string, amount: Currency, batch?: Batch) : Promise<Currency> {
         if (amount.copper < 0 || amount.silver < 0 || amount.gold < 0) return { copper: 0, silver: 0, gold: 0 };
         if (batch) return changeIn(batch, username, (balance) => plus(balance, amount));
 
-        return oneAtATime(username, async () => {
+        // The balance written is worked out from the one held: read once the player is settled.
+        return oneAtATime(username, () => settledThen(username, async () => {
             const currentCurrency = await this.get(username);
             if (!currentCurrency) return { copper: 0, silver: 0, gold: 0 };
 
             const next = plus(currentCurrency, amount);
             await write(username, next);
             return next;
-        });
+        }));
     },
     /** The balance after: a balance too small for `amount` is left with nothing. With a `batch`: as `add` is. */
     async remove(username: string, amount: Currency, batch?: Batch) : Promise<Currency> {
         if (amount.copper < 0 || amount.silver < 0 || amount.gold < 0) return { copper: 0, silver: 0, gold: 0 };
         if (batch) return changeIn(batch, username, (balance) => minus(balance, amount));
 
-        return oneAtATime(username, async () => {
+        // As in add: read once the player is settled.
+        return oneAtATime(username, () => settledThen(username, async () => {
             const currentCurrency = await this.get(username);
             if (!currentCurrency) return { copper: 0, silver: 0, gold: 0 };
 
             const next = minus(currentCurrency, amount);
             await write(username, next);
             return next;
-        });
+        }));
     },
 };
 
