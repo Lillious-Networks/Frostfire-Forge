@@ -19,8 +19,8 @@
 // it has finished.
 //
 // `rebuild`, in order:
-//   1. checks REDIS_URL (with a password) and CLUSTER_LINK_SECRET, and starts Redis
-//      (docker-compose.redis.yml) when REDIS_URL is this machine's port 6379
+//   1. checks REDIS_URL (with a password) and CLUSTER_LINK_SECRET. Redis is the one REDIS_URL names:
+//      this starts none
 //   2. builds the image from Dockerfile.prod, while the old containers still run
 //   3. stops the single engine (docker-compose.prod.yml) and the old cluster: the nodes replace it
 //   4. deletes every cells:* key from Redis, so block tables and nodes of the old run do not carry over
@@ -29,7 +29,7 @@
 // nodes of the same Redis on another machine.
 
 import path from "node:path";
-import { clearClusterState, readRedisUrl, startLocalRedis } from "./cluster-redis";
+import { clearClusterState, readRedisUrl } from "./cluster-redis";
 
 const root = path.resolve(import.meta.dir, "..", "..");
 const PROJECT = "frostfire-forge-prod-cluster";
@@ -167,7 +167,7 @@ if (command === "logs") {
   process.exit(0);
 }
 
-const { url, password } = readRedisUrl(process.env.REDIS_URL);
+const { url } = readRedisUrl(process.env.REDIS_URL);
 if (!process.env.CLUSTER_LINK_SECRET) {
   console.error("CLUSTER_LINK_SECRET is not set in .env.production. Set it to a long random value: cluster nodes do not start without it.");
   process.exit(1);
@@ -178,7 +178,6 @@ for (let i = 1; i <= nodeCount; i++) {
   console.log(`  node-${i}: game/WebTransport port ${baseGamePort + PORT_STEP * i}, internal port ${baseInternalPort + PORT_STEP * i}, ${linksOff ? "links off" : `link port ${baseLinkPort + PORT_STEP * i}`}`);
 }
 
-await startLocalRedis(url, password);
 await compose(["build"]);
 
 console.log("Stopping the single engine (docker-compose.prod.yml) and the old cluster...");
