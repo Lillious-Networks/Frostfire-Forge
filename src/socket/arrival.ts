@@ -32,6 +32,8 @@ export interface HandoffState {
   consumableReadyIn: number;
   /** The direction the player was walking when handed off (one of the eight), or null: the arrival goes on walking. */
   walk: string | null;
+  /** How long the walk had stood still on the old node when the final snapshot was taken (ms, 0 when not walking). */
+  walkIdleMs: number;
 }
 
 /** The directions a MOVEXY names (the same eight as VALID_DIRECTIONS in receiver.ts), as the walk of an arrival may be. */
@@ -46,6 +48,40 @@ export function walkOf(p: any): string | null {
   if (p?.moving !== true || p.isDead) return null;
   const direction = String(p._movementState?.targetDirection ?? p.location?.position?.direction ?? "").toLowerCase();
   return WALK_DIRECTIONS.has(direction) ? direction : null;
+}
+
+/**
+ * How long a walking player's mover has not stepped, at `now` (performance.now()): from the drain, the old node stops
+ * stepping them, while the client walks on. 0 for a player not walking, or one that never stepped here.
+ */
+export function walkIdleMsOf(p: any, now = performance.now()): number {
+  if (!walkOf(p) || typeof p._lastStepAt !== "number") return 0;
+  return Math.max(0, Math.round(now - p._lastStepAt));
+}
+
+/** The longest standstill a resumed walk makes up. Longer, and the client has been told where the player stands since. */
+export const MAX_RESUME_CATCH_UP_MS = 500;
+
+/** What the resumed walk of an arrival makes up (receiver.ts sets it, the first MOVEXY of the connection takes it). */
+export interface ResumeCatchUp {
+  walk: string;
+  /** The standstill on the old node, to the final snapshot (HandoffState.walkIdleMs). */
+  idleMs: number;
+  /** When the commit with that snapshot came, on this node's Date.now() clock. */
+  committedAt: number;
+}
+
+/**
+ * The steps a resumed walk takes at once on top of its first, at `now` (Date.now()): the ticks the player stood still
+ * between the two nodes' movers while the client walked on. The old node's mover last stepped `idleMs` before the
+ * commit, and this node's first step is now: the walk would have taken a step every tick in between, of which the
+ * first step is one. Without them the server is that many steps behind the client for the rest of the walk, and the
+ * client slows down to meet it. Only for the walk the arrival came with, at most MAX_RESUME_CATCH_UP_MS of it.
+ */
+export function resumeCatchUpSteps(catchUp: ResumeCatchUp | null | undefined, direction: string, now: number, tickMs: number): number {
+  if (!catchUp || catchUp.walk !== direction || !(tickMs > 0)) return 0;
+  const idle = Math.min(MAX_RESUME_CATCH_UP_MS, positive(catchUp.idleMs) + Math.max(0, now - catchUp.committedAt));
+  return Math.max(0, Math.round(idle / tickMs) - 1);
 }
 
 /**
@@ -313,6 +349,7 @@ export function handoffStateOf(raw: unknown, limits: ArrivalLimits, who = "an ar
     consumableReadyIn,
     // A dead player does not walk; anything but one of the eight directions is no walk.
     walk: deadState === 0 && typeof r.walk === "string" && WALK_DIRECTIONS.has(r.walk) ? r.walk : null,
+    walkIdleMs: Math.min(MAX_RESUME_CATCH_UP_MS, positive(r.walkIdleMs)),
   };
 }
 

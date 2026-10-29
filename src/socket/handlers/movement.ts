@@ -15,7 +15,7 @@ import { syncNpcChunks, preloadNpcsAt } from "../../systems/npcStreaming";
 import { updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI } from "../aoi";
 import packetReceiver from "../receiver";
 import { PROFILE, VALID_DIRECTIONS, WARP_SCAN_MS, bumpStateRevision, checkGhostReviveProximity, despawnBatchQueue, forceStopPlayerMovement, getDirectionOffsets, getInventorySlots, interruptPlayerCast, isInteriorMap, mapPropertiesCache, maps, movementBatchQueue, prof, queueFinalMovement, resyncNpcChunks, sendPacket, sendPositionAnimation, spawnBatchQueue, stateRevision, subscriptionLocked, transitionPlayerToMap, warpInterceptors } from "../receiver";
-import { recoverResumedWalk } from "../arrival";
+import { recoverResumedWalk, resumeCatchUpSteps } from "../arrival";
 import type { PacketContext } from "./context";
 
 // Packet handlers moved from receiver.ts's packetReceiver switch (phase 6, Task 1). The case bodies are unchanged.
@@ -49,6 +49,10 @@ export async function handle(ctx: PacketContext): Promise<unknown> {
           wt.data.handoffLanding = false;
           playerHandoff.firstMove(String(wt.data.ticketToken ?? ""));
         }
+
+        // The first MOVEXY of a resumed handoff walk takes what it makes up (receiver.ts); any other drops it.
+        const resumeCatchUp = wt.data?.resumeCatchUp;
+        if (resumeCatchUp) wt.data.resumeCatchUp = undefined;
 
         if (direction === "abort") {
           // The key was let go: the next warp walked into is meant (see _warpHold below).
@@ -264,6 +268,8 @@ export async function handle(ctx: PacketContext): Promise<unknown> {
           if (!isColliding || currentPlayer.isNoclip) {
             currentPlayer.location.position.x = Math.round(tempPosition.x);
             currentPlayer.location.position.y = Math.round(tempPosition.y);
+            // A handoff reads how long the walk has stood since (arrival.ts walkIdleMsOf).
+            currentPlayer._lastStepAt = performance.now();
             ghosts.touch("player", currentPlayer.id);
             currentPlayer._stepCarry = { x: moveX.carry, y: moveY.carry };
             checkGhostReviveProximity(currentPlayer);
@@ -614,6 +620,12 @@ export async function handle(ctx: PacketContext): Promise<unknown> {
 
         if (!wasAlreadyMoving) {
           await movePlayer();
+          // A resumed handoff walk takes the steps of the ticks it stood still between the nodes at once. Each is a
+          // step as any other (collisions, warps); a stop or a newer MOVEXY ends them.
+          const catchUp = resumeCatchUpSteps(resumeCatchUp, direction, Date.now(), TICK_MS);
+          for (let i = 0; i < catchUp && currentPlayer._moveSeq === moveSeq && gameLoop.isPlayerMoving(currentPlayer.id); i++) {
+            await movePlayer();
+          }
         }
         break;
       }

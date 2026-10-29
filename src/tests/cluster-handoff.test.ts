@@ -415,6 +415,21 @@ test("an arrival is taken once, by the right player, only after the commit", asy
   }
 });
 
+test("an arrival says when its commit came, on the new node's clock: the resumed walk makes up the time from there", async () => {
+  const { a, b, stop } = pair();
+  try {
+    const snapshot = annSnapshot();
+    await a.calls.call("b", "HANDOFF", { snapshot, token: "switch-1", fullLoad: false });
+    b.clock.now = 1_000_500;
+    a.calls.cast("b", "HANDOFF_COMMIT", { username: "ann", token: "switch-1", snapshot });
+    await settle();
+    b.clock.now = 1_000_570;
+    expect(b.handoff.takeArrival("switch-1", "ann", "7")?.committedAt).toBe(1_000_500);
+  } finally {
+    stop();
+  }
+});
+
 test("an arrival's id is not given while a player with that id is live on the new node", async () => {
   const { a, b, stop } = pair();
   try {

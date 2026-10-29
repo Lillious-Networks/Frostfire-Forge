@@ -171,6 +171,8 @@ interface Arrival {
   fullLoad: boolean;
   expiresAt: number;
   committed: boolean;
+  /** When the commit came (deps.now()): the resumed walk makes up the time from there (socket/arrival.ts). */
+  committedAt: number;
   idClaimed: boolean;
   /** When the new node reached each step of taking this player in. */
   marks: Marks;
@@ -584,7 +586,7 @@ export class PlayerHandoff {
   }
 
   /** The arrival a connection with this ticket brings, once. resume: the client keeps its world. */
-  takeArrival(token: string, username: string, id: string): { snapshot: PlayerSnapshot; resume: boolean } | null {
+  takeArrival(token: string, username: string, id: string): { snapshot: PlayerSnapshot; resume: boolean; committedAt: number } | null {
     const arrival = this.liveArrival(token);
     if (!arrival || !arrival.committed || arrival.snapshot.username !== username) return null;
     this.arrivals.delete(token);
@@ -600,7 +602,7 @@ export class PlayerHandoff {
     const snapshot = arrival.snapshot;
     arrival.snapshot = { id: snapshot.id, username: snapshot.username, map: snapshot.map, x: snapshot.x, y: snapshot.y, direction: snapshot.direction, creatureIds: [], playerIds: [], state: {} };
     this.landing.set(token, arrival);
-    return { snapshot, resume: arrival.snapshot.id === id && !arrival.fullLoad };
+    return { snapshot, resume: arrival.snapshot.id === id && !arrival.fullLoad, committedAt: arrival.committedAt };
   }
 
   /**
@@ -770,7 +772,7 @@ export class PlayerHandoff {
       return { ok: false, reason: "full" };
     }
     this.arrivals.set(token, {
-      snapshot, from, fullLoad: !!body?.fullLoad, expiresAt: deps.now() + ARRIVAL_TTL_MS, committed: false, idClaimed: false, marks: [], takenAt: 0,
+      snapshot, from, fullLoad: !!body?.fullLoad, expiresAt: deps.now() + ARRIVAL_TTL_MS, committed: false, committedAt: 0, idClaimed: false, marks: [], takenAt: 0,
     });
     return { ok: true };
   }
@@ -799,6 +801,7 @@ export class PlayerHandoff {
     const arrival = this.arrivals.get(token);
     if (!deps || !arrival || arrival.from !== from) return;
     arrival.committed = true;
+    arrival.committedAt = deps.now();
     // The final snapshot replaces the first only for the same player. Its position is taken only where this node
     // owns the block, as checked for the first; elsewhere the player arrives at the first snapshot's point.
     const snapshot = validSnapshot(body?.snapshot);

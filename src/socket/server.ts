@@ -56,7 +56,7 @@ import { clusterBlocks, clusterNodes, clusterStore, startCluster, stopCluster } 
 import { dotCredit } from "../cluster/dotcredit.ts";
 import { forwardTable } from "../cluster/forwarding.ts";
 import { ghosts } from "../cluster/ghosts.ts";
-import { walkOf } from "./arrival.ts";
+import { walkIdleMsOf, walkOf } from "./arrival.ts";
 import { sendHandoffPrepare } from "./handoffprepare.ts";
 import { HandoffGiveUp, playerHandoff, type NodeAddress as HandoffNode } from "../cluster/handoff.ts";
 import { SHUTDOWN_DEADLINE_MS, arrivalId, boundedStep, guardedTeleport, spendsTicket } from "../cluster/handoffguards.ts";
@@ -750,6 +750,8 @@ function handoffState(p: any): {
   consumableReadyIn: number;
   /** The direction the player is walking (one of the eight), or null when they stand: the new node goes on walking. */
   walk: string | null;
+  /** How long that walk has not stepped (ms): the drain stopped the mover, and the new node makes the time up. */
+  walkIdleMs: number;
   /** The player's pose revision (socket/posedgram.ts): the new node counts on from it, so it never sends a lower one. */
   poseRev: number;
 } {
@@ -777,6 +779,7 @@ function handoffState(p: any): {
     mount_type: p.mount_type ?? null,
     consumableReadyIn: consumableReadyIn(p.username),
     walk: walkOf(p),
+    walkIdleMs: walkIdleMsOf(p, now),
     poseRev: Number.isSafeInteger(p.poseRev) && p.poseRev > 0 ? p.poseRev : 0,
   };
 }

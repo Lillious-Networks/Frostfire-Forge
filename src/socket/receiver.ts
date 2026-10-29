@@ -1826,7 +1826,7 @@ import { onLinksAttached, type LinkContext } from "../cluster/linkhooks";
 import { forwardTable } from "../cluster/forwarding";
 import { settled, tradeSettle, unsettle } from "../cluster/tradesettle";
 import { arrivedPoseRevision } from "./posedgram";
-import { RESUME_WALK_RECOVER_MS, RESUME_WALK_WAIT_MS, doneWalkOf, waitFor, walkOf, resumeSelfSpawn, adminMoveOf, arrivalFields, arrivalMaps, arrivalLimits, arrivalMount, draggedCheck, handoffStateOf, playersToDespawn, remoteAdminOf, reverseSummonAdmins, seedArrival, warpTarget } from "./arrival";
+import { RESUME_WALK_RECOVER_MS, RESUME_WALK_WAIT_MS, type ResumeCatchUp, doneWalkOf, waitFor, walkOf, resumeSelfSpawn, adminMoveOf, arrivalFields, arrivalMaps, arrivalLimits, arrivalMount, draggedCheck, handoffStateOf, playersToDespawn, remoteAdminOf, reverseSummonAdmins, seedArrival, warpTarget } from "./arrival";
 import { LiveNodeCache, routeLogin } from "../cluster/route";
 import { revivePlayer, type ReviveDeps } from "./revive";
 import { invitations } from "../cluster/invitations";
@@ -3908,6 +3908,9 @@ async function completeLogin(result: any, arriving: ArrivingLogin): Promise<void
       if (arrivalState?.walk) {
         // (movement.ts undoes a stray stop of the superseded mover for this long, for this arrival only)
         wt.data.walkRecoverUntil = Date.now() + RESUME_WALK_RECOVER_MS;
+        // The mover stood still from the old node's drain to here while the client walked on: the resumed walk makes
+        // that time up (movement.ts, resumeCatchUpSteps), so the server is not steps behind the client from here on.
+        wt.data.resumeCatchUp = { walk: arrivalState.walk, idleMs: arrivalState.walkIdleMs, committedAt: arrival?.committedAt ?? Date.now() } satisfies ResumeCatchUp;
         resumedWalk = resumeArrivalWalk(wt, arrivalState.walk);
       }
     } else {
