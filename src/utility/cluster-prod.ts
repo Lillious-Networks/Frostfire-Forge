@@ -13,7 +13,8 @@
 //   coordinator(s)    CLUSTER_EXPECTED_NODES=<nodes>: the maps are split once every node is live
 //   node-<i>          the same per-node values as cluster-local.ts: NODE_ID node-<i>, SERVER_ID
 //                     <REGION_ID>-node-<i>, and the base ports (WEBSRV_PORTSSL or GAME_PORT, WEBSRV_PORT,
-//                     WEBSRV_INTERNAL_PORT, NODE_LINK_PORT) + 10 * i. Links stay on 127.0.0.1.
+//                     WEBSRV_INTERNAL_PORT, NODE_LINK_PORT) + 10 * i. The link listeners bind 127.0.0.1;
+//                     the nodes dial them by PUBLIC_HOST, which each node resolves to 127.0.0.1 (see linkName)
 // A one-shot db-setup container makes the config files and runs the database setup first (what
 // `bun setup-production` does before the single engine starts); the coordinators and nodes start once
 // it has finished.
@@ -28,6 +29,7 @@
 // Every node and coordinator of the region runs here: step 4 would pull the state from under
 // nodes of the same Redis on another machine.
 
+import { isIP } from "node:net";
 import path from "node:path";
 import { clearClusterState, readRedisUrl } from "./cluster-redis";
 
@@ -80,6 +82,15 @@ if (highest > 65535) {
 
 const clusterEnv = { CLUSTER: "true", CACHE: "redis", REGION_ID: regionId };
 
+// A node dials its neighbours' links with the engine's certificate. A CA-signed one cannot be pinned, so the dialler
+// checks the host it dials against the certificate's names, and 127.0.0.1 is not among them: the links would never
+// come up and no node would see the players, creatures or items of another. The nodes dial NODE_LINK_HOST (else
+// PUBLIC_HOST, else SERVER_HOST) instead, a name the certificate covers, and each node container resolves it to
+// 127.0.0.1, where the link listeners are.
+const linkName = (process.env.NODE_LINK_HOST || process.env.PUBLIC_HOST || process.env.SERVER_HOST || "").trim();
+const linkByName = linkName !== "" && linkName !== "localhost" && isIP(linkName) === 0;
+const linkHost = linkByName ? linkName : "127.0.0.1";
+
 const engine = {
   image: IMAGE,
   pull_policy: "never",
@@ -129,7 +140,7 @@ for (let i = 1; i <= nodeCount; i++) {
     GAME_PORT: gamePort,
     WEBSRV_INTERNAL_PORT: String(baseInternalPort + offset),
     NODE_LINK_PORT: linksOff ? "0" : String(baseLinkPort + offset),
-    NODE_LINK_HOST: "127.0.0.1",
+    NODE_LINK_HOST: linkHost,
     NODE_LINK_BIND_HOST: process.env.NODE_LINK_BIND_HOST?.trim() || "127.0.0.1",
   };
   if (baseHttpPort !== null) environment.WEBSRV_PORT = String(baseHttpPort + offset);
@@ -137,6 +148,7 @@ for (let i = 1; i <= nodeCount; i++) {
     ...engine,
     command: ["bun", "./src/socket/server.ts", "--sql-preconnect"],
     environment,
+    ...(linkByName ? { extra_hosts: [`${linkName}:127.0.0.1`] } : {}),
     depends_on: { ...afterSetup, coordinator: { condition: "service_started" } },
   };
 }
@@ -175,7 +187,7 @@ if (!process.env.CLUSTER_LINK_SECRET) {
 
 console.log(`Region ${regionId}: ${coordinatorCount} coordinator(s) and ${nodeCount} node(s) (CLUSTER_NODES, CLUSTER_COORDINATORS)`);
 for (let i = 1; i <= nodeCount; i++) {
-  console.log(`  node-${i}: game/WebTransport port ${baseGamePort + PORT_STEP * i}, internal port ${baseInternalPort + PORT_STEP * i}, ${linksOff ? "links off" : `link port ${baseLinkPort + PORT_STEP * i}`}`);
+  console.log(`  node-${i}: game/WebTransport port ${baseGamePort + PORT_STEP * i}, internal port ${baseInternalPort + PORT_STEP * i}, ${linksOff ? "links off" : `link ${linkHost}:${baseLinkPort + PORT_STEP * i}`}`);
 }
 
 await compose(["build"]);
