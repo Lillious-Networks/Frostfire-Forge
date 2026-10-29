@@ -1,7 +1,14 @@
 import { expect, mock, spyOn, test } from "bun:test";
-import { databaseModule, mockQuery } from "./setup";
+import { databaseModule } from "./setup";
 
-mock.module("../controllers/sqldatabase", () => databaseModule({ default: mockQuery }));
+// The rows the stub database answers with, by table name (no table named: none). Only the last test reads any.
+const tableRows: Record<string, any[]> = {};
+mock.module("../controllers/sqldatabase", () => databaseModule({
+  default: async (sql: string) => {
+    const table = Object.keys(tableRows).find((name) => sql.includes(name));
+    return table ? tableRows[table]! : [];
+  },
+}));
 
 // Generated at server start (`bun create-config`) and gitignored, so CI has
 // no copy on disk. Mock the values instead of requiring the file.
@@ -121,6 +128,8 @@ test("allies called for help skip mirrors, and still answer when local", () => {
 // ------------------------------------------------------------------ the real creature module
 
 const creatures = await import("../systems/creatures");
+// Without --parallel the test files share one process: a creature another file left in the registry is not this file's.
+for (const left of [...creatures.registry.all()]) creatures.registry.remove(left.id);
 const { ghosts } = await import("../cluster/ghosts");
 
 const record = (over: any = {}) => ({
@@ -255,6 +264,8 @@ const { default: assetCache } = await import("../services/assetCache");
 const { CACHE_KEYS } = await import("../systems/creatures/repository");
 const { listener, Events } = await import("../systems/events");
 const playerCache = (await import("../services/playermanager")).default;
+// Without --parallel the test files share one process: a player another file left in the cache is not this file's.
+playerCache.clear();
 const mapIndex = (await import("../services/mapindex")).default;
 const { corpseLoot } = await import("../systems/creatures/kill");
 const { Ghosts } = await import("../cluster/ghosts");
@@ -505,8 +516,16 @@ test("a data change refreshes local creatures only", async () => {
   kind.spawn(record({ id: 777900 }), "a");
   const local = makeCreature(777901, 300, 300);
   creatures.registry.add(local as any);
-  await creatures.applyDataChange({ templateIds: [1] });
-  expect(creatures.getCreature(777901)).toBeUndefined();
-  expect(creatures.getCreature(777900)?.remote).toBe(true);
-  kind.despawn(777900, "left");
+  try {
+    await creatures.applyDataChange({ templateIds: [1] });
+    expect(creatures.getCreature(777901)).toBeUndefined();
+    expect(creatures.getCreature(777900)?.remote).toBe(true);
+  } finally {
+    kind.despawn(777900, "left");
+    // The creature module is shared by the files of a run that is not --parallel, and it was read from a database with no
+    // tables: the Wolf this file set is read again, as it was before.
+    tableRows.creature_templates = [{ id: 1, name: "Wolf", level_min: 5, level_max: 5, sprite_type: "none" }];
+    await creatures.applyDataChange({});
+    delete tableRows.creature_templates;
+  }
 });

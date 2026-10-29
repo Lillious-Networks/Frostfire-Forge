@@ -15,7 +15,9 @@ const { loadWorldMaps, getWorldMap, warpsAndGraveyardsOf } = await import("../mo
 
 type Warp = { name?: string; map: string; x: number; y: number; position: { x: number; y: number }; size: { width: number; height: number } };
 
-const WORLD_DIR = "F:/Projects/Mystika/Assets/maps";
+// The maps folder of a real world (one of the Mystika game's), for the two tests of the real overworld below. Not in
+// this repository: set MYSTIKA_MAPS_DIR to run them; without it they skip.
+const WORLD_DIR = process.env.MYSTIKA_MAPS_DIR ?? "";
 const OVERWORLD_MANIFEST = `${WORLD_DIR}/overworld.world/manifest.json`;
 
 /** Warps as the old code kept them: a record keyed by name, else by index. */
@@ -153,7 +155,7 @@ describe("checkCollisionSync with the flat warp list", () => {
     expect((player.checkCollisionSync("collide_re", { x: 520, y: 520 } as any, {} as any) as any).warp.map).toBe("new");
   });
 
-  const real = fs.existsSync(OVERWORLD_MANIFEST);
+  const real = WORLD_DIR !== "" && fs.existsSync(OVERWORLD_MANIFEST);
   (real ? test : test.skip)("the real overworld (tile path) answers as the for...in loop did", async () => {
     const manifest = JSON.parse(fs.readFileSync(OVERWORLD_MANIFEST, "utf8"));
     const raw = warpsAndGraveyardsOf(manifest).warps ?? [];

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RedisClient } from "bun";
 import log from "../modules/logger";
@@ -251,13 +252,14 @@ describe("validate_config applies the checks (run as a process: it exits on a st
     PATH: process.env.PATH ?? "", SystemRoot: process.env.SystemRoot ?? "",
     DATABASE_ENGINE: "sqlite", DATABASE_PATH: "unused.db",
     CLUSTER: "true", CACHE: "redis", REDIS_URL: "redis://:a-test-only-password@redis:6379",
-    NODE_ID: "n1", REGION_ID: "r1", GATEWAY_GAME_SERVER_SECRET: "test-only", CLUSTER_LINK_SECRET: "x".repeat(40),
+    NODE_ID: "n1", REGION_ID: "r1", GATEWAY_GAME_SERVER_SECRET: "test-only", CLUSTER_LINK_SECRET: "x".repeat(40), GAME_NAME: "test",
     NODE_LINK_BIND_HOST: "10.0.0.5", NODE_ENV: "production",
   };
   const run = (extra: Record<string, string>, drop: string[] = []) => {
     const env = { ...base, ...extra };
     for (const name of drop) delete env[name];
-    const ran = Bun.spawnSync(["bun", "-e", `await import(${JSON.stringify(entry)})`], { env });
+    // --preload: a process is not a test run, so bunfig.toml's preload (stand-ins for the generated config files, absent on a fresh checkout) does not reach it.
+    const ran = Bun.spawnSync(["bun", "--preload", join(import.meta.dir, "preload-config.ts"), "-e", `await import(${JSON.stringify(entry)})`], { env, cwd: tmpdir() }); // from a directory with no .env file, so nothing fills a variable in
     return { code: ran.exitCode, out: (ran.stdout.toString() + ran.stderr.toString()).replace(/[[0-9;]*m/g, "") };
   };
 

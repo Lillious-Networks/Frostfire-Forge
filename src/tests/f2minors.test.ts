@@ -16,7 +16,6 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 const tick = (ms = 5) => new Promise((resolve) => setTimeout(resolve, ms));
 const read = (...parts: string[]) => readFileSync(join(import.meta.dir, "..", ...parts), "utf8");
-const GATEWAY = join(import.meta.dir, "..", "..", "..", "Frostfire-Forge-Gateway", "src", "webserver", "public", "js", "core");
 
 // ---------------------------------------------------------------------- M2
 
@@ -38,13 +37,7 @@ describe("M2: the summary of a crossing is said at debug unless it was slow", ()
     expect(handoff).toContain("sayCrossing(username, deps.self, target, marks);");
     expect(handoff).toContain("sayCrossing(arrival.snapshot.username, arrival.from, this.deps!.self, arrival.marks);");
   });
-
-  test("the client's line is console.debug", () => {
-    const client = readFileSync(join(GATEWAY, "socket.ts"), "utf8");
-    const at = client.indexOf("`[handoff] client switch_rx->");
-    expect(at).toBeGreaterThan(0);
-    expect(client.slice(client.lastIndexOf("console.", at), at)).toStartWith("console.debug(");
-  });
+  // The client's line (console.debug) is tested by the Gateway repository, which owns the client: its src/modules/handoffclient.test.ts.
 });
 
 // ------------------------------------------------------- a transport to watch

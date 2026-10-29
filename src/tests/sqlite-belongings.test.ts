@@ -16,7 +16,8 @@ let out: any;
 
 beforeAll(async () => {
   remove();
-  const run = Bun.spawn(["bun", path.join(import.meta.dir, "sqlite-belongings.fixture.ts")], {
+  // --preload: the fixture is not a test run, so bunfig.toml's preload (stand-ins for the generated config files, absent on a fresh checkout) does not reach it.
+  const run = Bun.spawn(["bun", "--preload", path.join(import.meta.dir, "preload-config.ts"), path.join(import.meta.dir, "sqlite-belongings.fixture.ts")], {
     env: { ...process.env, DATABASE_ENGINE: "sqlite", DATABASE_NAME: name, DB_WORKER_POOL_SIZE: "2", LOG_LEVEL: "error", CACHE: "memory" },
     stdout: "pipe",
     stderr: "pipe",

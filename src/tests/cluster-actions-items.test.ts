@@ -30,6 +30,9 @@ const { delivery } = await import("../cluster/deliver");
 const { playerGhostKind, playerGhostRecord } = await import("../cluster/kinds/players");
 const { Events, listener } = await import("../systems/events");
 
+// Without --parallel the test files share one process: a player another file left in the cache is not this file's.
+playerCache.clear();
+
 // kill.ts sets its grant applier when it loads: this is the one the engine runs with.
 const killGrant = setGrantApplier(null);
 setGrantApplier(killGrant);

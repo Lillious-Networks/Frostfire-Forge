@@ -110,7 +110,7 @@ jobs:
       - name: Run Unit Tests
         run: |
           echo "🧪 Running unit tests..."
-          bun test
+          bun test --parallel
           if [ $? -ne 0 ]; then
             echo "❌ Unit tests failed. Stopping pipeline."
             exit 1

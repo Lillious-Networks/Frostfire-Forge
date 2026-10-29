@@ -7,14 +7,16 @@ import { standInFor } from "./setup";
 
 // ---- the cache tells who is listening when a key is written
 
+// A fresh copy of the real module, loaded here, before this file puts its stand-in in place of the shared one below:
+// the stand-in also answers for the copy once it is in place (it does on Linux), so the copy cannot be made later.
+const saved = process.env.CACHE;
+process.env.CACHE = "memory";
+const fresh = "../services/assetCache.ts?onchange";
+const { default: cache } = (await import(fresh)) as typeof import("../services/assetCache");
+process.env.CACHE = saved;
+if (saved === undefined) delete process.env.CACHE;
+
 test("assetCache.onChange: a write, a removal or a clear of the key is heard; other keys are not; a listener that throws harms nothing", async () => {
-  const saved = process.env.CACHE;
-  process.env.CACHE = "memory";
-  // A fresh copy of the module: other tests put a stand-in in place of the shared one.
-  const fresh = "../services/assetCache.ts?onchange";
-  const { default: cache } = (await import(fresh)) as typeof import("../services/assetCache");
-  process.env.CACHE = saved;
-  if (saved === undefined) delete process.env.CACHE;
   const heard: string[] = [];
   cache.onChange("items", () => { heard.push("items"); });
   cache.onChange("items", () => { throw new Error("a listener that fails"); });

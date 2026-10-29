@@ -1,13 +1,13 @@
 import { describe, expect, mock, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { databaseModule } from "./setup";
 
 // The protocol packet wave:
 //   A. SPRITE_SHEET_POSE: a pose change alone, for viewers that hold the player's sheets (socket/looks.ts).
 //   B. CREATURE_MOVE as a binary datagram (socket/creature_move_codec.ts), split by the transport.
-// The client's decoders (Gateway core/creaturemoves.ts, core/posepacket.ts) are run here when the Gateway repo sits
-// next to this one.
+// The client's decoders are tested by the Gateway repository, which owns them (its src/modules/protoclient.test.ts), against
+// the same layout: the bytes of a known datagram are pinned below.
 
 mock.module("../controllers/sqldatabase", () => databaseModule({
   default: async (_sql: string, _params?: any[]) => [],
@@ -26,12 +26,6 @@ const { default: layerManager } = await import("../services/layermanager");
 const mapIndex = (await import("../services/mapindex")).default;
 const spatialGrid = (await import("../services/spatialgrid")).default;
 const aoiReverse = await import("../services/aoiReverseIndex");
-
-const GATEWAY = join(import.meta.dir, "..", "..", "..", "Frostfire-Forge-Gateway", "src", "webserver", "public", "js", "core");
-const haveClient = existsSync(join(GATEWAY, "creaturemoves.ts")) && existsSync(join(GATEWAY, "posepacket.ts"));
-const client = haveClient ? await import(join(GATEWAY, "creaturemoves.ts")) : null;
-const clientPose = haveClient ? await import(join(GATEWAY, "posepacket.ts")) : null;
-const clientTest = haveClient ? test : test.skip;
 
 const dec = new TextDecoder();
 const DIRS = ["down", "up", "left", "right", "downleft", "downright", "upleft", "upright"];
@@ -61,17 +55,18 @@ describe("binary CREATURE_MOVE codec", () => {
     }
   });
 
-  clientTest("the client's decoder gives the same entries as the server's, for random datagrams", () => {
-    for (let round = 0; round < 200; round++) {
-      const entries = Array.from({ length: int(0, 60) }, randomEntry);
-      const payload = codec.joinCreatureMoves(entries.map((e) => codec.encodeCreatureMove(e)!));
-      expect(client!.decodeCreatureMoves(payload)).toEqual(entries);
-      // as a view into a larger buffer (a datagram is not always at offset 0)
-      const padded = new Uint8Array(payload.length + 7);
-      padded.set(payload, 5);
-      expect(client!.decodeCreatureMoves(padded.subarray(5, 5 + payload.length))).toEqual(entries);
-    }
-    expect(client!.CREATURE_MOVE_HEADER).toBe(codec.CREATURE_MOVE_HEADER);
+  test("the layout the client reads: a known datagram is these exact bytes, and the same view into a larger buffer decodes the same", () => {
+    // The Gateway's src/modules/protoclient.test.ts decodes these same bytes.
+    const payload = codec.joinCreatureMoves([codec.encodeCreatureMove([7, 1, 2, "up", 1])!, codec.encodeCreatureMove([0xffffffff, -0x80000000, 0x7fffffff, "upright", 0])!]);
+    expect([...payload]).toEqual([
+      0x04, 0x02, 0x00,
+      7, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0x09,
+      0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0x7f, 0x07,
+    ]);
+    expect(codec.CREATURE_MOVE_HEADER).toBe(0x04);
+    const padded = new Uint8Array(payload.length + 7);
+    padded.set(payload, 5);
+    expect(codec.decodeCreatureMoves(padded.subarray(5, 5 + payload.length))).toEqual([[7, 1, 2, "up", 1], [0xffffffff, -0x80000000, 0x7fffffff, "upright", 0]]);
   });
 
   test("an entry that does not fit its width has no record, so it goes as JSON", () => {
@@ -85,14 +80,14 @@ describe("binary CREATURE_MOVE codec", () => {
     expect(codec.encodeCreatureMove([1, 0, 0, "toString", 1])).toBeNull();
   });
 
-  clientTest("a short, empty or foreign datagram decodes to nothing and never throws", () => {
+  test("a short, empty or foreign datagram decodes to nothing and never throws", () => {
     for (const bytes of [new Uint8Array(0), new Uint8Array([4]), new Uint8Array([4, 9, 0, 1, 2]), new Uint8Array([1, 0, 0]), new Uint8Array([4, 255, 255])]) {
-      expect(client!.decodeCreatureMoves(bytes)).toEqual([]);
+      expect(codec.decodeCreatureMoves(bytes)).toEqual([]);
     }
     // A count larger than the bytes present is cut to the whole records there are.
     const one = codec.joinCreatureMoves([codec.encodeCreatureMove([7, 1, 2, "up", 1])!]);
     one[1] = 50;
-    expect(client!.decodeCreatureMoves(one)).toEqual([[7, 1, 2, "up", 1]]);
+    expect(codec.decodeCreatureMoves(one)).toEqual([[7, 1, 2, "up", 1]]);
   });
 
   test("the binary datagram is 263 bytes for 20 creatures against the JSON packet", () => {
@@ -394,52 +389,6 @@ describe("pose packet selection", () => {
   test("holdsLook is false for a connection never sent anything, and for a missing one", () => {
     expect(holdsLook({}, "1", "x")).toBe(false);
     expect(holdsLook(null, "1", "x")).toBe(false);
-  });
-});
-
-describe("client pose handling", () => {
-  const changes: string[] = [];
-  const change = async (a: any, name: string) => { changes.push(name); a.currentAnimationName = name; };
-  const mk = (extra: any = {}) => ({ id: "9", lastDirection: "down", layeredAnimation: { currentAnimationName: "idle_down" }, ...extra });
-
-  clientTest("a pose switches the animation on the held sheets and updates the direction", async () => {
-    changes.length = 0;
-    const p = mk();
-    await clientPose!.applyPose(p, "walk_left", change);
-    expect(changes).toEqual(["walk_left"]);
-    expect(p.lastDirection).toBe("left");
-    await clientPose!.applyPose(p, "walk_left", change);
-    expect(changes).toEqual(["walk_left"]);
-    await clientPose!.applyPose(p, "idle", change);
-    expect(changes).toEqual(["walk_left", "idle_left"]);
-  });
-
-  clientTest("a pose for a player with no sheets, or a bad packet, is ignored and never throws", async () => {
-    changes.length = 0;
-    await clientPose!.applyPose(mk({ layeredAnimation: null }), "walk_left", change);
-    await clientPose!.applyPose(null, "walk_left", change);
-    await clientPose!.applyPose(mk(), 5, change);
-    await clientPose!.applyPose(mk(), "", change);
-    await clientPose!.applyPose(mk(), "walk_up", async () => { throw new Error("boom"); });
-    expect(changes).toEqual([]);
-    expect(clientPose!.findPosePlayer(new Set([{ id: "1" }]), new Map([["2", { id: "2" }]]), "2")).toEqual({ id: "2" });
-    expect(clientPose!.findPosePlayer(null, null, "2")).toBeNull();
-  });
-
-  clientTest("a pose that arrives while a full sheet packet is building wins over the packet's older state", async () => {
-    changes.length = 0;
-    const p = mk();
-    const mark = clientPose!.poseMark(p);
-    await clientPose!.applyPose(p, "walk_up", change);
-    // the full packet finishes with its own (older) state
-    p.layeredAnimation = { currentAnimationName: "idle_down" };
-    await clientPose!.reapplyPose(p, mark, change);
-    expect(p.layeredAnimation.currentAnimationName).toBe("walk_up");
-    // nothing arrived meanwhile: left alone
-    const mark2 = clientPose!.poseMark(p);
-    p.layeredAnimation = { currentAnimationName: "idle_left" };
-    await clientPose!.reapplyPose(p, mark2, change);
-    expect(p.layeredAnimation.currentAnimationName).toBe("idle_left");
   });
 });
 

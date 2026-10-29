@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
+import { RedisClient } from "bun";
+import { within } from "../services/redisclient";
 import type { ClusterStore } from "../cluster/store";
 import { MemoryStore } from "../cluster/memorystore";
 import { RedisStore } from "../cluster/redisstore";
@@ -206,6 +208,23 @@ describe("MemoryStore", () => {
   });
 });
 
-describe.skipIf(!redisUrl)("RedisStore", () => {
+// One probe, before the tests, with a deadline of a second: a Redis that does not answer in time skips the RedisStore cases
+// (they never fail on it, and never wait through reconnects). With CLUSTER_TEST_REDIS_URL unset nothing is tried at all.
+async function redisAnswers(url: string | undefined, ms: number): Promise<boolean> {
+  if (!url) return false;
+  const probe = new RedisClient(url, { autoReconnect: false, maxRetries: 0, enableOfflineQueue: false, connectionTimeout: ms });
+  try {
+    await within(probe.connect().then(() => probe.send("PING", [])), ms);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { probe.close(); } catch {}
+  }
+}
+const redisUp = await redisAnswers(redisUrl, 1000);
+if (redisUrl && !redisUp) console.warn("CLUSTER_TEST_REDIS_URL does not answer within 1 s: the RedisStore cases are skipped.");
+
+describe.skipIf(!redisUp)("RedisStore", () => {
   contract(() => new RedisStore(redisUrl));
 });

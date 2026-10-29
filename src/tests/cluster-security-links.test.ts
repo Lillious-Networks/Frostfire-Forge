@@ -559,7 +559,8 @@ test("the coordinator signs with the bus key of the same secret, and refuses to 
   expect(source).toContain("keys = requireClusterKeys();");
   expect(source).toContain("keys.bus)");
   // Run it with no secret, from a directory with no .env file, so nothing fills the secret in.
-  const proc = Bun.spawn([process.execPath, join(import.meta.dir, "..", "cluster", "coordinator-main.ts")], {
+  // --preload: the process is not a test run, so bunfig.toml's preload (stand-ins for the generated config files, absent on a fresh checkout) does not reach it.
+  const proc = Bun.spawn([process.execPath, "--preload", join(import.meta.dir, "preload-config.ts"), join(import.meta.dir, "..", "cluster", "coordinator-main.ts")], {
     cwd: tmpdir(),
     env: { PATH: process.env.PATH ?? "", SystemRoot: process.env.SystemRoot ?? "", REDIS_URL: "redis://127.0.0.1:1", REGION_ID: "test", CLUSTER_LINK_SECRET: "" },
     stdout: "pipe",
