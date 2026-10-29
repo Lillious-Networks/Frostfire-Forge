@@ -128,6 +128,8 @@ export async function handle(ctx: PacketContext): Promise<unknown> {
 
         const wasAlreadyMoving = gameLoop.isPlayerMoving(currentPlayer.id);
 
+        // The steps of a resumed handoff walk's catch-up but the last are taken without the self-echo (below).
+        let muteEcho = false;
         const movePlayer = async () => {
 
           if (!wt || wt.readyState !== 1) {
@@ -577,7 +579,10 @@ export async function handle(ctx: PacketContext): Promise<unknown> {
             // step: the client interpolates across it using the send time
             // each packet carries, and drops any that arrive out of order.
             // Other players learn about this mover via the batched flush below.
-            sendPacket(wt, packetManager.moveXY(movementData));
+            // A handoff catch-up's steps are taken at once: only the last is echoed. The client places that one
+            // on the walk it predicted through the handoff; a burst of points all sent in the same instant would
+            // read as the first of them arriving late and hold the draw back.
+            if (!muteEcho) sendPacket(wt, packetManager.moveXY(movementData));
 
             const layerId = currentPlayer.aoi?.layerId || layerManager.getPlayerLayer(currentPlayer.id);
             const groupKey = layerId || currentPlayer.location.map;
@@ -619,12 +624,18 @@ export async function handle(ctx: PacketContext): Promise<unknown> {
         gameLoop.registerMovingPlayer(currentPlayer.id, movePlayer);
 
         if (!wasAlreadyMoving) {
-          await movePlayer();
           // A resumed handoff walk takes the steps of the ticks it stood still between the nodes at once. Each is a
-          // step as any other (collisions, warps); a stop or a newer MOVEXY ends them.
+          // step as any other (collisions, warps); a stop or a newer MOVEXY ends them. Only the last one is echoed.
           const catchUp = resumeCatchUpSteps(resumeCatchUp, direction, Date.now(), TICK_MS);
-          for (let i = 0; i < catchUp && currentPlayer._moveSeq === moveSeq && gameLoop.isPlayerMoving(currentPlayer.id); i++) {
+          try {
+            muteEcho = catchUp > 0;
             await movePlayer();
+            for (let i = 0; i < catchUp && currentPlayer._moveSeq === moveSeq && gameLoop.isPlayerMoving(currentPlayer.id); i++) {
+              muteEcho = i < catchUp - 1;
+              await movePlayer();
+            }
+          } finally {
+            muteEcho = false;
           }
         }
         break;

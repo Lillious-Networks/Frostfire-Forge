@@ -10,7 +10,7 @@ import { databaseModule } from "./setup";
 mock.module("../controllers/sqldatabase", () => databaseModule({ default: async () => [] }));
 mock.module("../config/settings.json", () => ({ default: { creatures: {} }, creatures: {} }));
 
-const { MAX_RESUME_CATCH_UP_MS, arrivalLimits, handoffStateOf, resumeCatchUpSteps, walkIdleMsOf } = await import("../socket/arrival");
+const { MAX_RESUME_CATCH_UP_MS, arrivalLimits, handoffStateOf, resumeCatchUpMs, resumeCatchUpSteps, walkIdleMsOf } = await import("../socket/arrival");
 
 const TICK = 1000 / 60;
 
@@ -53,16 +53,37 @@ test("the steps made up are the ticks of the standstill less the first step, for
   expect(resumeCatchUpSteps(catchUp, "right", 10_050, 0)).toBe(0);
 });
 
-test("wiring: the receiver hands the resumed walk its standstill; the MOVEXY takes it once and steps it after the first step", () => {
+test("HANDOFF_DONE names the walk the catch-up makes up on top of the first step", () => {
+  const catchUp = { walk: "right", idleMs: 30, committedAt: 10_000 };
+  // 4 steps on top of the first (above): 4 ticks of walk.
+  expect(resumeCatchUpMs(catchUp, 10_050, TICK)).toBe(Math.round(4 * TICK));
+  expect(resumeCatchUpMs({ ...catchUp, idleMs: 5 }, 10_005, TICK)).toBe(0);
+  expect(resumeCatchUpMs(null, 10_050, TICK)).toBe(0);
+  expect(resumeCatchUpMs(catchUp, 60_000, TICK)).toBe(Math.round((Math.round(MAX_RESUME_CATCH_UP_MS / TICK) - 1) * TICK));
+});
+
+test("wiring: the receiver hands the resumed walk its standstill; the MOVEXY takes it once and steps it with the first step, echoing only the last", () => {
   const receiver = readFileSync(join(import.meta.dir, "..", "socket", "receiver.ts"), "utf8");
-  const set = receiver.indexOf("wt.data.resumeCatchUp = { walk: arrivalState.walk, idleMs: arrivalState.walkIdleMs, committedAt: arrival?.committedAt ?? Date.now() }");
-  expect(set).toBeGreaterThan(-1);
+  const built = receiver.indexOf("{ walk: arrivalState.walk, idleMs: arrivalState.walkIdleMs, committedAt: arrival?.committedAt ?? Date.now() }");
+  expect(built).toBeGreaterThan(-1);
+  // The same standstill is told to the client in HANDOFF_DONE, and handed to the MOVEXY that makes it up.
+  const done = receiver.indexOf("catchUpMs: doneWalk ? resumeCatchUpMs(resumeCatchUp, Date.now(), TICK_MS) : 0,");
+  expect(done).toBeGreaterThan(built);
+  const set = receiver.indexOf("wt.data.resumeCatchUp = resumeCatchUp;");
+  expect(set).toBeGreaterThan(done);
   expect(set).toBeLessThan(receiver.indexOf("resumedWalk = resumeArrivalWalk(wt, arrivalState.walk);"));
   const movement = readFileSync(join(import.meta.dir, "..", "socket", "handlers", "movement.ts"), "utf8");
   const take = movement.indexOf("if (resumeCatchUp) wt.data.resumeCatchUp = undefined;");
   expect(take).toBeGreaterThan(-1);
   expect(take).toBeLessThan(movement.indexOf('if (direction === "abort") {'));
-  const first = movement.indexOf("if (!wasAlreadyMoving) {\n          await movePlayer();");
+  const first = movement.indexOf("if (!wasAlreadyMoving) {");
   expect(first).toBeGreaterThan(-1);
-  expect(movement.indexOf("resumeCatchUpSteps(resumeCatchUp, direction, Date.now(), TICK_MS)", first)).toBeGreaterThan(first);
+  const steps = movement.indexOf("resumeCatchUpSteps(resumeCatchUp, direction, Date.now(), TICK_MS)", first);
+  expect(steps).toBeGreaterThan(first);
+  // Every step of the catch-up but the last goes without the self-echo: the client gets one point, not a burst sent at once.
+  const block = movement.slice(steps, movement.indexOf("\n        }\n", steps));
+  expect(block).toContain("muteEcho = catchUp > 0;");
+  expect(block).toContain("muteEcho = i < catchUp - 1;");
+  expect(block).toContain("} finally {\n            muteEcho = false;");
+  expect(movement).toContain("if (!muteEcho) sendPacket(wt, packetManager.moveXY(movementData));");
 });

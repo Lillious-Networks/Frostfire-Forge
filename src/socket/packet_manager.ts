@@ -1412,7 +1412,8 @@ export const packetManager = {
   },
   // A handoff arrival that kept its world: the client takes its position and lets the player move again. `walk` is the
   // direction the node walks the player in as it sends this (the direction a MOVEXY names), or null when it does not.
-  handoffDone: (data: { map: string; x: number; y: number; direction: string; walk?: string | null }) => {
+  // `catchUpMs` is the walk its first MOVEXY makes up on top of the first step (arrival.ts, resumeCatchUpMs).
+  handoffDone: (data: { map: string; x: number; y: number; direction: string; walk?: string | null; catchUpMs?: number }) => {
     return [packet.encode(JSON.stringify({ type: "HANDOFF_DONE", data }))] as any[];
   },
   toggleClassEditor: () => {

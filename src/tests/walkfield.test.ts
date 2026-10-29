@@ -61,11 +61,13 @@ test("the login sends the resumed walk in HANDOFF_DONE, from the arrival's own s
   const done = receiver.indexOf("packetManager.handoffDone({");
   expect(done).toBeGreaterThan(0);
   const call = receiver.slice(done, receiver.indexOf("}));", done));
-  expect(call).toContain("walk: doneWalkOf(arrivalState?.walk, _pcache),");
+  const named = receiver.lastIndexOf("const doneWalk = doneWalkOf(arrivalState?.walk, _pcache);", done);
+  expect(named).toBeGreaterThan(0);
+  expect(call).toContain("walk: doneWalk,");
   expect(call).not.toMatch(/walk:[^\n]*direction/);
   // The walk named is the one resumed just after, from the same state.
   expect(receiver.indexOf("resumedWalk = resumeArrivalWalk(wt, arrivalState.walk);", done)).toBeGreaterThan(done);
-  // Only the one wire change: the packet keeps its type and its place.
+  // Only the wire changes (the walk, and the walk the catch-up makes up): the packet keeps its type and its place.
   const source = readFileSync(join(import.meta.dir, "..", "socket", "packet_manager.ts"), "utf8");
-  expect(source).toContain("handoffDone: (data: { map: string; x: number; y: number; direction: string; walk?: string | null }) => {");
+  expect(source).toContain("handoffDone: (data: { map: string; x: number; y: number; direction: string; walk?: string | null; catchUpMs?: number }) => {");
 });

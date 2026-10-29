@@ -1826,7 +1826,7 @@ import { onLinksAttached, type LinkContext } from "../cluster/linkhooks";
 import { forwardTable } from "../cluster/forwarding";
 import { settled, tradeSettle, unsettle } from "../cluster/tradesettle";
 import { arrivedPoseRevision } from "./posedgram";
-import { RESUME_WALK_RECOVER_MS, RESUME_WALK_WAIT_MS, type ResumeCatchUp, doneWalkOf, waitFor, walkOf, resumeSelfSpawn, adminMoveOf, arrivalFields, arrivalMaps, arrivalLimits, arrivalMount, draggedCheck, handoffStateOf, playersToDespawn, remoteAdminOf, reverseSummonAdmins, seedArrival, warpTarget } from "./arrival";
+import { RESUME_WALK_RECOVER_MS, RESUME_WALK_WAIT_MS, type ResumeCatchUp, doneWalkOf, resumeCatchUpMs, waitFor, walkOf, resumeSelfSpawn, adminMoveOf, arrivalFields, arrivalMaps, arrivalLimits, arrivalMount, draggedCheck, handoffStateOf, playersToDespawn, remoteAdminOf, reverseSummonAdmins, seedArrival, warpTarget } from "./arrival";
 import { LiveNodeCache, routeLogin } from "../cluster/route";
 import { revivePlayer, type ReviveDeps } from "./revive";
 import { invitations } from "../cluster/invitations";
@@ -3894,23 +3894,29 @@ async function completeLogin(result: any, arriving: ArrivingLogin): Promise<void
     // The resumed walk's start, so the spawn below is built after the walk has begun (it reads `moving` and the pose).
     let resumedWalk: Promise<void> | null = null;
     if (resume) {
+      // The mover stood still from the old node's drain to here while the client walked on: the resumed walk makes
+      // that time up (movement.ts, resumeCatchUpSteps), so the server is not steps behind the client from here on.
+      const resumeCatchUp: ResumeCatchUp | null = arrivalState?.walk
+        ? { walk: arrivalState.walk, idleMs: arrivalState.walkIdleMs, committedAt: arrival?.committedAt ?? Date.now() }
+        : null;
+      // The walk about to be resumed below, not the facing (a cast keeps the facing while the player walks another way).
+      const doneWalk = doneWalkOf(arrivalState?.walk, _pcache);
       // The client keeps its world (Task 12): it is told where it stands, and the spawns that follow are deduped by id.
       sendPacket(wt, packetManager.handoffDone({
         map: _pcache.location.map,
         x: _pcache.location.position.x,
         y: _pcache.location.position.y,
         direction: _pcache.location.position.direction,
-        // The walk about to be resumed below, not the facing (a cast keeps the facing while the player walks another way).
-        walk: doneWalkOf(arrivalState?.walk, _pcache),
+        walk: doneWalk,
+        // The walk the catch-up adds to the first step: the client keeps its walk when it is that far past the point.
+        catchUpMs: doneWalk ? resumeCatchUpMs(resumeCatchUp, Date.now(), TICK_MS) : 0,
       }));
       // The player was walking when handed off: they walk on from the committed position, as if the client had just
       // sent the move. A different direction or a stop from the client after this wins as usual.
       if (arrivalState?.walk) {
         // (movement.ts undoes a stray stop of the superseded mover for this long, for this arrival only)
         wt.data.walkRecoverUntil = Date.now() + RESUME_WALK_RECOVER_MS;
-        // The mover stood still from the old node's drain to here while the client walked on: the resumed walk makes
-        // that time up (movement.ts, resumeCatchUpSteps), so the server is not steps behind the client from here on.
-        wt.data.resumeCatchUp = { walk: arrivalState.walk, idleMs: arrivalState.walkIdleMs, committedAt: arrival?.committedAt ?? Date.now() } satisfies ResumeCatchUp;
+        wt.data.resumeCatchUp = resumeCatchUp;
         resumedWalk = resumeArrivalWalk(wt, arrivalState.walk);
       }
     } else {

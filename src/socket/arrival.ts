@@ -85,6 +85,16 @@ export function resumeCatchUpSteps(catchUp: ResumeCatchUp | null | undefined, di
 }
 
 /**
+ * The walking time the catch-up of resumeCatchUpSteps makes up at `now`, in ms (HANDOFF_DONE's `catchUpMs`): the steps it
+ * takes on top of the first, times the tick. The client weighs its walked position against the point moved on by this much
+ * walk, where the node's first echo will be, not against the point the player stood at.
+ */
+export function resumeCatchUpMs(catchUp: ResumeCatchUp | null | undefined, now: number, tickMs: number): number {
+  if (!catchUp) return 0;
+  return Math.round(resumeCatchUpSteps(catchUp, catchUp.walk, now, tickMs) * tickMs);
+}
+
+/**
  * The walk the new node has the player in when it sends HANDOFF_DONE: the direction of the resumed walk (the MOVEXY it
  * is about to run for the arrival, as walkOf read it on the old node), or null when it does not walk the player. A dead
  * or stunned player, or one a teleport holds, is not walked, so they are null. The dead, stun and teleport checks are
