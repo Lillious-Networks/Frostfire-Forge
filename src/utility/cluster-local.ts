@@ -76,9 +76,9 @@
 // graceful save. If every coordinator dies, the nodes are left running and a
 // loud warning is printed.
 
-import { RedisClient } from "bun";
 import path from "node:path";
 import fs from "node:fs";
+import { clearClusterState } from "./cluster-redis";
 
 const root = path.resolve(import.meta.dir, "..", "..");
 const bun = process.execPath;
@@ -260,24 +260,6 @@ process.on("exit", () => {
 });
 
 const clusterEnv = { CLUSTER: "true", CACHE: "redis", REGION_ID: regionId };
-
-/** Deletes every `cells:*` key (SCAN, not KEYS: it does not block Redis on a large keyspace). How many it deleted. */
-async function clearClusterState(url: string): Promise<number> {
-  const redis = new RedisClient(url);
-  try {
-    await redis.connect();
-    let cursor = "0";
-    let cleared = 0;
-    do {
-      const [next, keys] = (await redis.send("SCAN", [cursor, "MATCH", "cells:*", "COUNT", "1000"])) as [string | number, string[]];
-      cursor = String(next);
-      if (keys.length > 0) cleared += Number(await redis.send("UNLINK", keys));
-    } while (cursor !== "0");
-    return cleared;
-  } finally {
-    redis.close();
-  }
-}
 
 // Before any child: block tables and the rest from an earlier run (other nodes, an old split) must not carry over.
 try {
