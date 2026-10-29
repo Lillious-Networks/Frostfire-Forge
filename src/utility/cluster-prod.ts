@@ -14,8 +14,9 @@
 //   node-<i>          the same per-node values as cluster-local.ts: NODE_ID node-<i>, SERVER_ID
 //                     <REGION_ID>-node-<i>, and the base ports (WEBSRV_PORTSSL or GAME_PORT, WEBSRV_PORT,
 //                     WEBSRV_INTERNAL_PORT, NODE_LINK_PORT) + 10 * i. Links stay on 127.0.0.1.
-// A one-shot db-setup container runs the database setup first (what `bun setup-production` does
-// before the single engine starts); the coordinators and nodes start once it has finished.
+// A one-shot db-setup container makes the config files and runs the database setup first (what
+// `bun setup-production` does before the single engine starts); the coordinators and nodes start once
+// it has finished.
 //
 // `rebuild`, in order:
 //   1. checks REDIS_URL (with a password) and CLUSTER_LINK_SECRET, and starts Redis
@@ -26,7 +27,6 @@
 //   5. starts db-setup, the coordinators and the nodes
 // Every node and coordinator of the region runs here: step 4 would pull the state from under
 // nodes of the same Redis on another machine.
-// Run `bun create-config --environment production` first (the package.json scripts do).
 
 import path from "node:path";
 import { clearClusterState, readRedisUrl, startLocalRedis } from "./cluster-redis";
@@ -102,7 +102,9 @@ const services: Record<string, unknown> = {
     ...engine,
     build: { context: root, dockerfile: "src/docker/Dockerfile.prod" },
     restart: "no",
-    command: ["bun", "./src/utility/database_setup_dispatch.ts"],
+    // The config files are made in the container, like the single engine's: src/config on the host belongs to
+    // the container's user, so the deploy user may not be able to write it.
+    command: ["sh", "-c", "bun create-config --environment production && exec bun ./src/utility/database_setup_dispatch.ts"],
     healthcheck: { disable: true },
   },
 };
