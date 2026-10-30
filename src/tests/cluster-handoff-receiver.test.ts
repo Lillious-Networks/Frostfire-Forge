@@ -440,6 +440,15 @@ test("the login takes the arrival before the login switch, seeds it before the c
   expect(login).toContain("mount_type: mount.mount_type,");
 });
 
+// The client walks the handoff gap and paces the draw after HANDOFF_DONE at the speed the node steps: the spawn the
+// player gets of themselves says whether they are mounted, and shows the mount sheet only then.
+test("the self spawn carries the mounted state, and the mount sheet only while mounted", () => {
+  const login = body("if (await classes.characterRequired(playerData.characterClass))", LOGIN_END);
+  const spawn = login.slice(login.indexOf("const spawnDataForAll = {"), login.indexOf("sendPacket(wt, packetManager.spawnPlayer(spawnDataForAll));"));
+  expect(spawn).toContain("mounted: currentPlayer.mounted === true,");
+  expect(login).toContain("mountSprite: _pcache?.mounted === true && _pcache?.mount_type ? getMountSpriteUrl(_pcache.mount_type) : null,");
+});
+
 test("every login on a cluster node forgets the forward left for the player, a fresh one too (Task 8)", () => {
   const login = body("if (await classes.characterRequired(playerData.characterClass))", LOGIN_END);
   const forget = login.indexOf("    if (clusterEnabled()) forwardTable.forgetPlayer(String(_pcache.id), playerData.username);");

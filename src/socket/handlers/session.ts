@@ -6,6 +6,7 @@ import { Events } from "../../systems/events";
 import { listener } from "../../modules/event_bus";
 import { packetManager } from "../packet_manager";
 import { ticketAllows } from "../ticket";
+import { gapInputOf, newerGap } from "../arrival";
 import { authWorker, authentication_queue, authentication_session_queue, loginPrefetch, pendingAuthentications, releaseDraggedBy, sendPacket } from "../receiver";
 import type { PacketContext } from "./context";
 
@@ -49,6 +50,12 @@ export async function handle(ctx: PacketContext): Promise<unknown> {
 
         // A handoff arrival's mark; any other connection has no arrival under its ticket and is ignored.
         playerHandoff.landed(String(wt.data?.ticketToken ?? ""), "auth_rx");
+
+        // What the client of a resumed handoff did in the gap (arrival.ts gapInputOf): the login replays it before
+        // HANDOFF_DONE (receiver.ts). Read here, before anything is awaited, so the login always finds it. It is report
+        // 0: a HANDOFF_GAP handled before this AUTH (they are not queued alike) is newer and is kept.
+        const authGap = gapInputOf(parsedMessage?.gap);
+        wt.data.gapUpdate = newerGap(wt.data.gapUpdate, authGap ? { seq: 0, input: authGap } : null) ?? undefined;
 
         // The connection ticket was issued for one account: a ticket fetched
         // for one account (or for none) logs in no other.

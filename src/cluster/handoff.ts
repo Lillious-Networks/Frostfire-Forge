@@ -131,6 +131,14 @@ export interface HandoffDeps {
    * their movement, so the client is not left walking a player the server no longer moves.
    */
   undrain?(player: any): void | Promise<void>;
+  /**
+   * The player is stopped for a handoff that keeps their walk (not a warp): called right before the drain. From here
+   * this node sends them no more steps, so their client walks them on by itself (HANDOFF_BEGIN) until the new node has
+   * them; told at the SWITCH, it drew the player standing through the drain and the save first.
+   */
+  begin?(player: any): void;
+  /** A begun player stays here (the handoff was given up after begin): their client stops walking them on. Called before undrain. */
+  stay?(player: any): void;
   snapshot(player: any): PlayerSnapshot;
   /** The record a mirror of the player is built from (the player ghost kind's record). */
   ghostRecord(player: any): any;
@@ -381,6 +389,8 @@ export class PlayerHandoff {
     const t0 = marks[0][1];
     // Set once the player's moves are dropped and their mover is gone: only then is there anything to undo.
     let drained = false;
+    // Set once the client was told it walks the player on (begin): a handoff given up then tells it to stay.
+    let begun = false;
     let switched = false;
     let token = "";
     // The player's cluster lock, while held: let go right after the save, or in finally on any other way out.
@@ -399,6 +409,15 @@ export class PlayerHandoff {
     const drain = async () => {
       drained = true;
       player.handoff = true;
+      // A walk that goes on (not a warp): the client walks the player on from their last step, as the new node does.
+      if (!opts.fullLoad && deps.begin) {
+        begun = true;
+        try {
+          deps.begin(player);
+        } catch (error) {
+          log.warn(`Handoff of ${username} to ${target}: the client was not told the walk is handed on: ${error}`);
+        }
+      }
       await deps.drain(player, DRAIN_MS);
       mark("drained");
     };
@@ -575,6 +594,13 @@ export class PlayerHandoff {
       if (!switched && drained) player.handoff = false;
       // Kept here after the drain: their movement is put right. A player who left ("gone") is not touched, and
       // neither is one who was never drained (the handoff was refused first and they never stopped).
+      if (!switched && begun && deps.stay && deps.player(id) === player) {
+        try {
+          deps.stay(player);
+        } catch (error) {
+          log.warn(`Handoff of ${username} to ${target}: the client was not told to stay: ${error}`);
+        }
+      }
       if (!switched && drained && deps.undrain && deps.player(id) === player) {
         try {
           await deps.undrain(player);

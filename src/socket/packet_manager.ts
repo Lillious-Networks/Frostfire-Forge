@@ -1393,11 +1393,13 @@ export const packetManager = {
   },
   // Cluster mode: this login belongs on another node. The client connects there with the ticket (signed for that node).
   // A handoff (cells phase 6) sets `handoff`: the client reconnects at once without counting it as a switch loop,
-  // and with `resume` keeps its world (no map load) until HANDOFF_DONE.
+  // and with `resume` keeps its world (no map load) until HANDOFF_DONE. `report`: the client sends what it did in the gap
+  // with its AUTH on the new node (session.ts), which walks it there before HANDOFF_DONE. `gapUpdates`: and each change of
+  // key after AUTH as a HANDOFF_GAP (movement.ts), which the new node walks even after HANDOFF_DONE (applyLateGap).
   switchNode: (node: { nodeId: string; publicHost: string; port: number; wtPort: number; useSSL: boolean }, ticket: NodeTicket, handoff?: { resume: boolean }) => {
     const { nodeId, publicHost, port, wtPort, useSSL } = node;
     return [
-      packet.encode(JSON.stringify({ type: "SWITCH", data: { nodeId, publicHost, port, wtPort, useSSL, ticket, ...(handoff ? { handoff: true, resume: handoff.resume } : {}) } })),
+      packet.encode(JSON.stringify({ type: "SWITCH", data: { nodeId, publicHost, port, wtPort, useSSL, ticket, ...(handoff ? { handoff: true, resume: handoff.resume, report: true, gapUpdates: true } : {}) } })),
     ] as any[];
   },
   // Cluster mode: the player walks toward a border; the node they will be sent to is named so the client can open a
@@ -1410,11 +1412,28 @@ export const packetManager = {
   handoffAbort: () => {
     return [packet.encode(JSON.stringify({ type: "HANDOFF_ABORT", data: null }))] as any[];
   },
+  // The node stops stepping the player for a handoff: the client walks them on by itself until HANDOFF_DONE or HANDOFF_STAY.
+  // `report`: the client reports the gap with its AUTH (as the SWITCH's `report`), so it walks a key let go or turned as it is.
+  // `gapUpdates`: and each change of key after it (as the SWITCH's `gapUpdates`).
+  // `at`: where the node stopped stepping the player (rounded; null: not known). The movement datagram of the last step
+  // can come after this frame or not at all, so the client walks the gap on from here.
+  handoffBegin: (at: { x: number; y: number } | null) => {
+    return [packet.encode(JSON.stringify({ type: "HANDOFF_BEGIN", data: { report: true, gapUpdates: true, ...(at ?? {}) } }))] as any[];
+  },
+  // The handoff was given up after HANDOFF_BEGIN: the node keeps the player, standing at this point (null: not known).
+  handoffStay: (at: { x: number; y: number } | null) => {
+    return [packet.encode(JSON.stringify({ type: "HANDOFF_STAY", data: at }))] as any[];
+  },
   // A handoff arrival that kept its world: the client takes its position and lets the player move again. `walk` is the
   // direction the node walks the player in as it sends this (the direction a MOVEXY names), or null when it does not.
-  // `catchUpMs` is the walk its first MOVEXY makes up on top of the first step (arrival.ts, resumeCatchUpMs).
-  handoffDone: (data: { map: string; x: number; y: number; direction: string; walk?: string | null; catchUpMs?: number }) => {
+  // `catchUpMs` is the walk its first MOVEXY makes up on top of the first step (arrival.ts, resumeCatchUpMs). `gapSeq` is
+  // the number of the newest gap report walked (-1 for none).
+  handoffDone: (data: { map: string; x: number; y: number; direction: string; walk?: string | null; catchUpMs?: number; gapSeq?: number }) => {
     return [packet.encode(JSON.stringify({ type: "HANDOFF_DONE", data }))] as any[];
+  },
+  /** The answer to a gap report that came after HANDOFF_DONE (receiver.ts applyLateGap): where the player is now, as at DONE. */
+  handoffGapDone: (data: { seq: number; x: number; y: number; direction: string; walk: string | null; catchUpMs: number; t: number }) => {
+    return [packet.encode(JSON.stringify({ type: "HANDOFF_GAP_DONE", data }))] as any[];
   },
   toggleClassEditor: () => {
     return [

@@ -10,6 +10,8 @@ declare interface Packet {
   language: Nullable<string>;
   publicKey: Nullable<string>;
   chatDecryptionKey: Nullable<string>;
+  /** With AUTH on a resumed handoff: what the client did in the gap (socket/arrival.ts gapInputOf). */
+  gap?: unknown;
 }
 
 declare interface PacketType {

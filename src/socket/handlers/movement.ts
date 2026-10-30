@@ -14,17 +14,172 @@ import { packetManager } from "../packet_manager";
 import { syncNpcChunks, preloadNpcsAt } from "../../systems/npcStreaming";
 import { updatePlayerAOI, shouldUpdateAOI, broadcastToAOI, handleMapChangeAOI } from "../aoi";
 import packetReceiver from "../receiver";
-import { PROFILE, VALID_DIRECTIONS, WARP_SCAN_MS, bumpStateRevision, checkGhostReviveProximity, despawnBatchQueue, forceStopPlayerMovement, getDirectionOffsets, getInventorySlots, interruptPlayerCast, isInteriorMap, mapPropertiesCache, maps, movementBatchQueue, prof, queueFinalMovement, resyncNpcChunks, sendPacket, sendPositionAnimation, spawnBatchQueue, stateRevision, subscriptionLocked, transitionPlayerToMap, warpInterceptors } from "../receiver";
-import { recoverResumedWalk, resumeCatchUpSteps } from "../arrival";
+import { PROFILE, VALID_DIRECTIONS, WARP_SCAN_MS, applyLateGap, bumpStateRevision, checkGhostReviveProximity, despawnBatchQueue, forceStopPlayerMovement, getDirectionOffsets, getInventorySlots, interruptPlayerCast, isInteriorMap, mapPropertiesCache, maps, movementBatchQueue, prof, queueFinalMovement, resyncNpcChunks, sendPacket, sendPositionAnimation, spawnBatchQueue, stateRevision, subscriptionLocked, transitionPlayerToMap, warpInterceptors } from "../receiver";
+import { gapUpdateOf, newerGap, recoverResumedWalk, resumeCatchUpSteps } from "../arrival";
 import type { PacketContext } from "./context";
 
 // Packet handlers moved from receiver.ts's packetReceiver switch (phase 6, Task 1). The case bodies are unchanged.
 
-export const handles: ReadonlySet<string> = new Set(["MOVEXY", "TELEPORTXY", "MOUNT"]);
+export const handles: ReadonlySet<string> = new Set(["MOVEXY", "TELEPORTXY", "MOUNT", "HANDOFF_GAP"]);
+
+// px per 30 Hz tick (180 px a second); scaledStep keeps that speed at any TICK_RATE.
+const BASE_SPEED = 6;
+const MOUNT_SPEED_MULTIPLIER = 1.35;
+const PLAYER_WIDTH = 24;
+const PLAYER_HEIGHT = 40;
+
+/** The px a 30 Hz tick of walking takes the player: more mounted or as a ghost, less when slowed. */
+function walkSpeedOf(currentPlayer: any): number {
+  return (currentPlayer.mounted || currentPlayer.isGhost ? BASE_SPEED * MOUNT_SPEED_MULTIPLIER : BASE_SPEED) * (currentPlayer.slowMultiplier || 1);
+}
+
+/**
+ * One step of a walk in `direction` (the collisions are checked for it) by the offset (stepX, stepY) of a 30 Hz tick.
+ * The player moves unless the step is blocked; a noclip player moves anyway. Returns what the step ran into.
+ */
+function takeStep(currentPlayer: any, direction: string, stepX: number, stepY: number) {
+  const tempPosition = { ...currentPlayer.location.position };
+
+  // At 30 Hz the move is the offset rounded to whole px, as it always was. At another TICK_RATE it covers the
+  // same px a second in smaller steps, the part of a px each leaves over carried to the next (_stepCarry).
+  let moveX = scaledStep(stepX, currentPlayer._stepCarry?.x ?? 0);
+  let moveY = scaledStep(stepY, currentPlayer._stepCarry?.y ?? 0);
+  tempPosition.x = tempPosition.x + moveX.move;
+  tempPosition.y = tempPosition.y + moveY.move;
+
+  // Round for collision detection only
+  const _profCollStart = PROFILE ? performance.now() : 0;
+  const checkAt = (x: number, y: number) => player.checkCollisionSync(
+    currentPlayer.location.map,
+    {
+      x: Math.round(x),
+      y: Math.round(y),
+      direction,
+    },
+    {
+      width: PLAYER_WIDTH,
+      height: PLAYER_HEIGHT,
+    }
+  );
+  let collision = checkAt(tempPosition.x, tempPosition.y);
+
+  // A diagonal step into a wall only loses the blocked axis: the player slides along
+  // the open one (e.g. moving upright under a wall keeps going right) instead of stopping.
+  // Diagonal is read from the offset, not this tick's move: above 30 Hz a slow step can
+  // move 0 px on one axis for a tick, and that tick's slide is then just no move.
+  const startX = currentPlayer.location.position.x;
+  const startY = currentPlayer.location.position.y;
+  if (
+    collision?.reason === "tile_collision" &&
+    Math.round(stepX) !== 0 &&
+    Math.round(stepY) !== 0
+  ) {
+    for (const slide of [{ x: tempPosition.x, y: startY }, { x: startX, y: tempPosition.y }]) {
+      const slideCollision = checkAt(slide.x, slide.y);
+      if (slideCollision?.reason !== "tile_collision") {
+        tempPosition.x = slide.x;
+        tempPosition.y = slide.y;
+        collision = slideCollision;
+        // The blocked axis carries nothing on.
+        if (slide.y === startY) moveY = { move: 0, carry: 0 };
+        else moveX = { move: 0, carry: 0 };
+        break;
+      }
+    }
+  }
+  if (PROFILE) prof.collisionMs += performance.now() - _profCollStart;
+
+  const isColliding = collision?.value === true;
+
+  if (PROFILE && isColliding && !currentPlayer.isNoclip) {
+    prof.collisionBlocks++;
+    prof.collisionReasons[collision?.reason || "unknown"] =
+      (prof.collisionReasons[collision?.reason || "unknown"] || 0) + 1;
+  }
+
+  if (!isColliding || currentPlayer.isNoclip) {
+    currentPlayer.location.position.x = Math.round(tempPosition.x);
+    currentPlayer.location.position.y = Math.round(tempPosition.y);
+    // A handoff reads how long the walk has stood since (arrival.ts walkIdleMsOf).
+    currentPlayer._lastStepAt = performance.now();
+    ghosts.touch("player", currentPlayer.id);
+    currentPlayer._stepCarry = { x: moveX.carry, y: moveY.carry };
+    checkGhostReviveProximity(currentPlayer);
+  }
+
+  return { collision, isColliding };
+}
+
+/**
+ * Walks a resumed handoff arrival through the steps the client took in the gap before this node took over (arrival.ts
+ * gapPlanOf; receiver.ts runs it before HANDOFF_DONE): a tick's step each, in its direction, with no echo, pose or
+ * mover, the way the client walked them. A blocked step is not taken, and a warp is not walked into: the walk that goes
+ * on takes it. The player is left facing the way they last stepped (a cast's facing stays), in their spatial grid cell.
+ * `from`: the steps start there, not where the player is (a later report walks the gap again from where the arrival
+ * stood, applyLateGap). Returns whether they moved.
+ */
+export async function replayGapSteps(currentPlayer: any, steps: readonly string[], from?: { x: number; y: number; direction: string }): Promise<boolean> {
+  if (steps.length === 0 && !from) return false;
+  await player.preloadMapCollision(currentPlayer.location.map);
+  const directionOffsets = getDirectionOffsets(walkSpeedOf(currentPlayer));
+  const fromX = currentPlayer.location.position.x;
+  const fromY = currentPlayer.location.position.y;
+  if (from) {
+    currentPlayer.location.position.x = from.x;
+    currentPlayer.location.position.y = from.y;
+    currentPlayer.location.position.direction = from.direction;
+  }
+  let last = "";
+  for (const direction of steps) {
+    const offset = directionOffsets[direction];
+    if (!offset) continue;
+    // A new direction starts its own sub-px carry, as a MOVEXY's does.
+    if (direction !== last) currentPlayer._stepCarry = undefined;
+    last = direction;
+    takeStep(currentPlayer, direction, offset.dx, offset.dy);
+  }
+  if (last && !(currentPlayer.casting && !currentPlayer.castOnSelf)) currentPlayer.location.position.direction = last;
+  const moved = currentPlayer.location.position.x !== fromX || currentPlayer.location.position.y !== fromY;
+  if (moved && AOI_CONFIG.USE_SPATIAL_GRID && spatialGrid.hasPlayer(currentPlayer.id)) {
+    spatialGrid.updatePlayer(
+      currentPlayer.id,
+      Number(currentPlayer.location.position.x),
+      Number(currentPlayer.location.position.y),
+      String(currentPlayer.location.map).replaceAll(".json", "")
+    );
+  }
+  return moved;
+}
+
+/** The player's own position, echoed to them as a step's is (the binary moveXY), and to no one else. */
+function echoSelf(wt: any, currentPlayer: any): void {
+  if (!wt || wt.readyState !== 1) return;
+  sendPacket(wt, packetManager.moveXY({
+    i: wt.data.id,
+    d: {
+      x: Number(currentPlayer.location.position.x),
+      y: Number(currentPlayer.location.position.y),
+      dr: currentPlayer.location.position.direction,
+    },
+    r: stateRevision(),
+    s: currentPlayer.isStealth ? 1 : 0,
+  }));
+}
 
 export async function handle(ctx: PacketContext): Promise<unknown> {
   const { currentPlayer, data, server, type, wt } = ctx;
   switch (type) {
+
+      case "HANDOFF_GAP": {
+        // A change of key the client made in a resumed handoff's gap after AUTH, with the whole gap so far (arrival.ts
+        // gapUpdateOf). The login reads the newest it has; one that comes after it walked the gap is walked again from
+        // where the arrival stood (applyLateGap). Before the player is in the cache (the login runs), there is none.
+        const update = gapUpdateOf(data);
+        if (!update) return;
+        if (wt.data?.gapApplied) return applyLateGap(wt, update);
+        wt.data.gapUpdate = newerGap(wt.data.gapUpdate, update) ?? undefined;
+        return;
+      }
 
       case "MOVEXY": {
         if (!currentPlayer) return;
@@ -38,10 +193,6 @@ export async function handle(ctx: PacketContext): Promise<unknown> {
 
         await player.preloadMapCollision(currentPlayer.location.map);
 
-        // px per 30 Hz tick (180 px a second); scaledStep keeps that speed at any TICK_RATE.
-        const baseSpeed = 6;
-        const mountSpeedMultiplier = 1.35;
-
         const direction = data.toString().toLowerCase();
 
         // The first move of a player who came by a handoff: the new node says how long taking them in took.
@@ -53,11 +204,21 @@ export async function handle(ctx: PacketContext): Promise<unknown> {
         // The first MOVEXY of a resumed handoff walk takes what it makes up (receiver.ts); any other drops it.
         const resumeCatchUp = wt.data?.resumeCatchUp;
         if (resumeCatchUp) wt.data.resumeCatchUp = undefined;
+        // A stop or a turn handled before the resumed walk took its first step: the walk's steps up to now are taken
+        // first, as the walk would have taken them, so the player stops or turns where the client walked them to. The
+        // client is told where that is (a stop echoes nothing; a turn's first echo is from there).
+        const missed = resumeCatchUp && direction !== resumeCatchUp.walk
+          ? resumeCatchUpSteps(resumeCatchUp, resumeCatchUp.walk, Date.now(), TICK_MS) + 1
+          : 0;
+        if (missed > 0 && !currentPlayer.isDead && !currentPlayer.ghostTeleportPending && !(currentPlayer.stunnedUntil > Date.now())) {
+          await replayGapSteps(currentPlayer, Array(missed).fill(resumeCatchUp.walk));
+        }
 
         if (direction === "abort") {
           // The key was let go: the next warp walked into is meant (see _warpHold below).
           currentPlayer._warpHold = undefined;
           await forceStopPlayerMovement(currentPlayer);
+          if (missed > 0) echoSelf(wt, currentPlayer);
           return;
         }
 
@@ -153,16 +314,10 @@ export async function handle(ctx: PacketContext): Promise<unknown> {
             return;
           }
 
-          const tempPosition = { ...currentPlayer.location.position };
-          const playerHeight = 40;
-          const playerWidth = 24;
-
-          const speed = (currentPlayer.mounted || currentPlayer.isGhost ? baseSpeed * mountSpeedMultiplier : baseSpeed) * (currentPlayer.slowMultiplier || 1);
-
           // Offsets are derived from a shared static unit table (see
           // DIRECTION_UNIT_OFFSETS) rather than rebuilding a 9-object literal
           // on every tick of every moving player.
-          const directionOffsets = getDirectionOffsets(speed);
+          const directionOffsets = getDirectionOffsets(walkSpeedOf(currentPlayer));
 
           // This tick's offset, as a 30 Hz tick takes it (scaledStep below makes it this tick's move).
           let stepX = 0;
@@ -210,72 +365,7 @@ export async function handle(ctx: PacketContext): Promise<unknown> {
             }
           }
 
-          // At 30 Hz the move is the offset rounded to whole px, as it always was. At another TICK_RATE it covers the
-          // same px a second in smaller steps, the part of a px each leaves over carried to the next (_stepCarry).
-          let moveX = scaledStep(stepX, currentPlayer._stepCarry?.x ?? 0);
-          let moveY = scaledStep(stepY, currentPlayer._stepCarry?.y ?? 0);
-          tempPosition.x = tempPosition.x + moveX.move;
-          tempPosition.y = tempPosition.y + moveY.move;
-
-          // Round for collision detection only
-          const _profCollStart = PROFILE ? performance.now() : 0;
-          const checkAt = (x: number, y: number) => player.checkCollisionSync(
-            currentPlayer.location.map,
-            {
-              x: Math.round(x),
-              y: Math.round(y),
-              direction,
-            },
-            {
-              width: playerWidth,
-              height: playerHeight,
-            }
-          );
-          let collision = checkAt(tempPosition.x, tempPosition.y);
-
-          // A diagonal step into a wall only loses the blocked axis: the player slides along
-          // the open one (e.g. moving upright under a wall keeps going right) instead of stopping.
-          // Diagonal is read from the offset, not this tick's move: above 30 Hz a slow step can
-          // move 0 px on one axis for a tick, and that tick's slide is then just no move.
-          const startX = currentPlayer.location.position.x;
-          const startY = currentPlayer.location.position.y;
-          if (
-            collision?.reason === "tile_collision" &&
-            Math.round(stepX) !== 0 &&
-            Math.round(stepY) !== 0
-          ) {
-            for (const slide of [{ x: tempPosition.x, y: startY }, { x: startX, y: tempPosition.y }]) {
-              const slideCollision = checkAt(slide.x, slide.y);
-              if (slideCollision?.reason !== "tile_collision") {
-                tempPosition.x = slide.x;
-                tempPosition.y = slide.y;
-                collision = slideCollision;
-                // The blocked axis carries nothing on.
-                if (slide.y === startY) moveY = { move: 0, carry: 0 };
-                else moveX = { move: 0, carry: 0 };
-                break;
-              }
-            }
-          }
-          if (PROFILE) prof.collisionMs += performance.now() - _profCollStart;
-
-          const isColliding = collision?.value === true;
-
-          if (PROFILE && isColliding && !currentPlayer.isNoclip) {
-            prof.collisionBlocks++;
-            prof.collisionReasons[collision?.reason || "unknown"] =
-              (prof.collisionReasons[collision?.reason || "unknown"] || 0) + 1;
-          }
-
-          if (!isColliding || currentPlayer.isNoclip) {
-            currentPlayer.location.position.x = Math.round(tempPosition.x);
-            currentPlayer.location.position.y = Math.round(tempPosition.y);
-            // A handoff reads how long the walk has stood since (arrival.ts walkIdleMsOf).
-            currentPlayer._lastStepAt = performance.now();
-            ghosts.touch("player", currentPlayer.id);
-            currentPlayer._stepCarry = { x: moveX.carry, y: moveY.carry };
-            checkGhostReviveProximity(currentPlayer);
-          }
+          const { collision, isColliding } = takeStep(currentPlayer, direction, stepX, stepY);
 
           if (isColliding && !currentPlayer.isNoclip) {
             queueFinalMovement(currentPlayer);

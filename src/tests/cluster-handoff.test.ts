@@ -851,13 +851,13 @@ test("link hooks run on attach and are undone at detach", () => {
 test("the SWITCH packet carries the handoff flags, and HANDOFF_DONE exists", () => {
   const source = readFileSync(join(import.meta.dir, "..", "socket", "packet_manager.ts"), "utf8");
   expect(source).toContain("switchNode: (node: { nodeId: string; publicHost: string; port: number; wtPort: number; useSSL: boolean }, ticket: NodeTicket, handoff?: { resume: boolean }) => {");
-  expect(source).toContain("...(handoff ? { handoff: true, resume: handoff.resume } : {})");
+  expect(source).toContain("...(handoff ? { handoff: true, resume: handoff.resume, report: true, gapUpdates: true } : {})");
   expect(source).toContain('type: "HANDOFF_DONE"');
   const decode = (bytes: any) => JSON.parse(new TextDecoder().decode(bytes));
   const address = { nodeId: "b", publicHost: "h", port: 1, wtPort: 2, useSSL: true };
   const ticket = ticketFor("b");
   expect(decode(packetManager.switchNode(address, ticket)[0]).data).toEqual({ ...address, ticket });
-  expect(decode(packetManager.switchNode(address, ticket, { resume: false })[0]).data).toEqual({ ...address, ticket, handoff: true, resume: false });
+  expect(decode(packetManager.switchNode(address, ticket, { resume: false })[0]).data).toEqual({ ...address, ticket, handoff: true, resume: false, report: true, gapUpdates: true });
   const done = { map: "main", x: 1, y: 2, direction: "up" };
   expect(decode(packetManager.handoffDone(done)[0])).toEqual({ type: "HANDOFF_DONE", data: done });
 });
@@ -892,6 +892,105 @@ test("a drained player kept here gets their movement back; one switched or gone 
     } finally {
       stop();
     }
+  }
+});
+
+test("a walking handoff tells the client as the player is stopped (begin, right before the drain); a warp, or a refusal first, does not", async () => {
+  const steps: string[] = [];
+  const begin = (p: any) => { steps.push(`begin ${p.id} ${p.handoff}`); };
+  const drain = async () => { steps.push("drain"); };
+  const player = (): any => ({ id: "7", username: "ann", x: 10, hp: 50 });
+  const cases: Array<[string, Partial<HandoffDeps>, { fullLoad?: boolean }, string, string[]]> = [
+    // The old node stops stepping the player at the drain: the client walks them on from there, not from the SWITCH.
+    ["walking", {}, {}, "switched", ["begin 7 true", "drain"]],
+    // A warp loads the destination: there is no walk to go on with.
+    ["a warp", {}, { fullLoad: true }, "switched", ["drain"]],
+    // Refused before the drain: the player never stopped.
+    ["refused by the target", { ownerAt: () => "c" }, {}, "refused", []],
+  ];
+  for (const [name, overB, opts, result, expected] of cases) {
+    steps.length = 0;
+    const { a, stop } = pair({ begin, drain }, overB);
+    try {
+      const p = player();
+      a.players.set("7", p);
+      expect(`${name}: ${await a.handoff.handOff(p, "b", opts)}`).toBe(`${name}: ${result}`);
+      expect({ name, steps }).toEqual({ name, steps: expected });
+    } finally {
+      stop();
+    }
+  }
+});
+
+test("a begun handoff that keeps the player here tells the client to stay, before the movement is restored; one switched or gone does not", async () => {
+  const steps: string[] = [];
+  const boom = () => { throw new Error("boom"); };
+  const hooks = (): Partial<HandoffDeps> => ({
+    begin: () => { steps.push("begin"); },
+    stay: (p: any) => { steps.push(`stay ${p.id} ${p.handoff}`); },
+    undrain: () => { steps.push("undrain"); },
+    drain: async () => { steps.push("drain"); },
+  });
+  const kept = ["begin", "drain", "stay 7 false", "undrain"];
+  const cases: Array<[string, Partial<HandoffDeps>, Partial<HandoffDeps>, string, string[]]> = [
+    ["a trade begun during the answer", { recheck: () => "trading" }, {}, "refused", kept],
+    ["walked out of the target's block", { ownerAt: (_m: string, x: number) => (x > 100 ? "b" : "a") }, {}, "refused", kept],
+    ["drain gives up", { drain: async () => { steps.push("drain"); throw new HandoffGiveUp("busy"); } }, {}, "refused", kept],
+    ["release throws, player still here", { release: boom }, {}, "refused", kept],
+    ["switched", {}, {}, "switched", ["begin", "drain"]],
+  ];
+  for (const [name, overA, overB, result, expected] of cases) {
+    steps.length = 0;
+    const { a, stop } = pair({ ...hooks(), ...overA }, overB);
+    try {
+      const p: any = { id: "7", username: "ann", x: 10, hp: 50 };
+      a.players.set("7", p);
+      expect(`${name}: ${await a.handoff.handOff(p, "b")}`).toBe(`${name}: ${result}`);
+      expect({ name, steps }).toEqual({ name, steps: expected });
+    } finally {
+      stop();
+    }
+  }
+  // A player who left during the drain has no client to tell.
+  steps.length = 0;
+  const { a, stop } = pair(hooks());
+  try {
+    const p: any = { id: "7", username: "ann", x: 10, hp: 50 };
+    a.players.set("7", p);
+    a.deps.drain = async () => { steps.push("drain"); a.players.delete("7"); };
+    expect(await a.handoff.handOff(p, "b")).toBe("gone");
+    expect(steps).toEqual(["begin", "drain"]);
+  } finally {
+    stop();
+  }
+});
+
+test("a begin or stay that throws is logged: the handoff goes on, and the movement is still restored", async () => {
+  const warn = spyOn(log, "warn").mockImplementation(() => {});
+  try {
+    const { a, stop } = pair({ begin: () => { throw new Error("no wt"); } });
+    try {
+      const p: any = { id: "7", username: "ann", x: 10, hp: 50 };
+      a.players.set("7", p);
+      expect(await a.handoff.handOff(p, "b")).toBe("switched");
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("not told the walk is handed on"))).toBe(true);
+    } finally {
+      stop();
+    }
+    warn.mockClear();
+    let undrained = 0;
+    const kept = pair({ recheck: () => "trading", begin: () => {}, stay: () => { throw new Error("no wt"); }, undrain: () => { undrained++; } });
+    try {
+      const p: any = { id: "7", username: "ann", x: 10, hp: 50 };
+      kept.a.players.set("7", p);
+      expect(await kept.a.handoff.handOff(p, "b")).toBe("refused");
+      expect(undrained).toBe(1);
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("not told to stay"))).toBe(true);
+    } finally {
+      kept.stop();
+    }
+  } finally {
+    warn.mockRestore();
   }
 });
 

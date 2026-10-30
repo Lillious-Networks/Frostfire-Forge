@@ -69,6 +69,13 @@ export interface ResumeCatchUp {
   idleMs: number;
   /** When the commit with that snapshot came, on this node's Date.now() clock. */
   committedAt: number;
+  /** The part of that standstill the gap replay walked already (GapPlan.spentMs), 0 without one. */
+  spentMs?: number;
+}
+
+/** The standstill a resumed walk makes up at `now`: from the old node's last step to now, at most MAX_RESUME_CATCH_UP_MS. */
+function catchUpBudgetMs(catchUp: ResumeCatchUp, now: number): number {
+  return Math.min(MAX_RESUME_CATCH_UP_MS, positive(catchUp.idleMs) + Math.max(0, now - catchUp.committedAt));
 }
 
 /**
@@ -76,12 +83,13 @@ export interface ResumeCatchUp {
  * between the two nodes' movers while the client walked on. The old node's mover last stepped `idleMs` before the
  * commit, and this node's first step is now: the walk would have taken a step every tick in between, of which the
  * first step is one. Without them the server is that many steps behind the client for the rest of the walk, and the
- * client slows down to meet it. Only for the walk the arrival came with, at most MAX_RESUME_CATCH_UP_MS of it.
+ * client slows down to meet it. Only for the walk the arrival goes on with, at most MAX_RESUME_CATCH_UP_MS of it, less
+ * what the gap replay walked of it (`spentMs`).
  */
 export function resumeCatchUpSteps(catchUp: ResumeCatchUp | null | undefined, direction: string, now: number, tickMs: number): number {
   if (!catchUp || catchUp.walk !== direction || !(tickMs > 0)) return 0;
-  const idle = Math.min(MAX_RESUME_CATCH_UP_MS, positive(catchUp.idleMs) + Math.max(0, now - catchUp.committedAt));
-  return Math.max(0, Math.round(idle / tickMs) - 1);
+  const idle = catchUpBudgetMs(catchUp, now);
+  return Math.max(0, Math.round(idle / tickMs) - Math.round(positive(catchUp.spentMs) / tickMs) - 1);
 }
 
 /**
@@ -92,6 +100,131 @@ export function resumeCatchUpSteps(catchUp: ResumeCatchUp | null | undefined, di
 export function resumeCatchUpMs(catchUp: ResumeCatchUp | null | undefined, now: number, tickMs: number): number {
   if (!catchUp) return 0;
   return Math.round(resumeCatchUpSteps(catchUp, catchUp.walk, now, tickMs) * tickMs);
+}
+
+/** The most stretches a gap report (the `gap` of AUTH) is read for; the rest are dropped. */
+export const MAX_GAP_SEGMENTS = 16;
+
+/** A stretch of a handoff's gap as the client went through it: the direction it walked ("" when it stood), for `ms`. */
+export interface GapSegment {
+  walk: string;
+  ms: number;
+}
+
+/**
+ * What the client did in the gap of a handoff, from the old node's last step on, as the `gap` it sends with AUTH says: the stretches it
+ * walked or stood in order, each ended by a change of key, and the direction it holds now ("" for none). The client
+ * walked them from the point the old node last echoed, which is the point the arrival stands at.
+ */
+export interface GapInput {
+  segments: GapSegment[];
+  held: string;
+}
+
+const gapWalkOf = (value: unknown): string | null => {
+  if (value === "" || value == null) return "";
+  const walk = String(value).toLowerCase();
+  return WALK_DIRECTIONS.has(walk) ? walk : null;
+};
+
+/**
+ * A gap report as this node takes it, or null when it is not one: the directions must be ones a MOVEXY names (or
+ * "" for standing), each stretch a finite length of 0 or more, at most MAX_RESUME_CATCH_UP_MS. Only the first
+ * MAX_GAP_SEGMENTS stretches are read.
+ */
+export function gapInputOf(data: unknown): GapInput | null {
+  if (!data || typeof data !== "object") return null;
+  const r = data as { segments?: unknown; held?: unknown };
+  const held = gapWalkOf(r.held);
+  if (held === null || !Array.isArray(r.segments)) return null;
+  const segments: GapSegment[] = [];
+  for (const s of r.segments.slice(0, MAX_GAP_SEGMENTS)) {
+    const walk = gapWalkOf((s as any)?.walk);
+    const ms = Number((s as any)?.ms);
+    if (walk === null || !Number.isFinite(ms) || ms < 0) return null;
+    segments.push({ walk, ms: Math.min(ms, MAX_RESUME_CATCH_UP_MS) });
+  }
+  return { segments, held };
+}
+
+/** How a resumed arrival goes through the gap the client reported (gapPlanOf). */
+export interface GapPlan {
+  /** The direction of each step the replay takes before HANDOFF_DONE, a tick's step each, in order. */
+  steps: string[];
+  /** The standstill the replayed stretches took up (ms): the walk that goes on makes up only the rest. */
+  spentMs: number;
+  /** The walk that goes on after the replay: the direction the client holds, or null when it stands. */
+  walk: string | null;
+}
+
+/**
+ * The replay of the gap of a resumed arrival that walked (`catchUp`), at `now` (Date.now()): the stretches the client
+ * reported as ended, walked a tick's step at a time (each stretch in the whole steps nearest its length: the client walks
+ * every stretch to a whole tick before it turns or stops, so the node ends where the client drew the player), as far as
+ * the standstill the walk would make up reaches; then the walk goes on in the direction the client holds, or stops. Without it the node walks the whole standstill the way the player walked into the handoff,
+ * past where a client that let go or turned in the gap is. Null without a report or a walk to make up.
+ */
+export function gapPlanOf(input: GapInput | null | undefined, catchUp: ResumeCatchUp | null | undefined, now: number, tickMs: number): GapPlan | null {
+  if (!input || !catchUp || !(tickMs > 0)) return null;
+  const budget = catchUpBudgetMs(catchUp, now);
+  const steps: string[] = [];
+  let spent = 0;
+  for (const segment of input.segments) {
+    if (!(budget - spent > 0)) break;
+    const ms = Math.min(segment.ms, budget - spent);
+    if (!(ms > 0)) continue;
+    if (segment.walk) {
+      for (let i = 0; i < Math.round(ms / tickMs); i++) steps.push(segment.walk);
+    }
+    spent += ms;
+  }
+  return { steps, spentMs: spent, walk: input.held || null };
+}
+
+/** The most reports one gap is taken in: the one with AUTH and the HANDOFF_GAP updates after it. */
+export const MAX_GAP_UPDATES = 32;
+/** How long after HANDOFF_DONE a later report is still walked (applyLateGap); one after it is only answered. */
+export const MAX_GAP_LATE_MS = 1000;
+
+/**
+ * A gap report and its number, in the order the client sent them: the one with AUTH is 0, each HANDOFF_GAP after it one
+ * more. From AUTH to HANDOFF_DONE the client sends one at each change of the direction it holds, with the whole gap so far.
+ */
+export interface GapUpdate {
+  seq: number;
+  input: GapInput;
+}
+
+/** A HANDOFF_GAP as this node takes it: a report (gapInputOf) numbered 1 to MAX_GAP_UPDATES; else null. */
+export function gapUpdateOf(data: unknown): GapUpdate | null {
+  const seq = Number((data as { seq?: unknown } | null)?.seq);
+  if (!Number.isInteger(seq) || seq < 1 || seq > MAX_GAP_UPDATES) return null;
+  const input = gapInputOf(data);
+  return input ? { seq, input } : null;
+}
+
+/** The later of two reports (the higher number). The packets of a connection are handled as they come, so an older one may come second. */
+export function newerGap(kept: GapUpdate | null | undefined, update: GapUpdate | null | undefined): GapUpdate | null {
+  if (!update) return kept ?? null;
+  if (!kept) return update;
+  return update.seq > kept.seq ? update : kept;
+}
+
+/**
+ * The gap of a resumed arrival as its login walked it (receiver.ts), kept for the reports that come after (applyLateGap):
+ * the number of the newest report read, where the arrival stood before the replay, and what the walk makes up. `catchUp`
+ * is null when the arrival did not walk: a later report is then only answered.
+ */
+export interface GapApplied {
+  seq: number;
+  map: string;
+  from: { x: number; y: number; direction: string };
+  catchUp: ResumeCatchUp | null;
+  /** When HANDOFF_DONE went (Date.now()). */
+  at: number;
+  /** The walk was resumed after HANDOFF_DONE: a later report may be walked. Before, it waits in `pending`. */
+  ready: boolean;
+  pending: GapUpdate | null;
 }
 
 /**

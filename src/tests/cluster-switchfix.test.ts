@@ -50,7 +50,7 @@ test("a registered mover is a walk even when a stray stop cleared moving; a stan
 
 test("the deferred spawn waits for the resumed walk and sends the live pose, not the stored point's idle", async () => {
   const src = (await Bun.file(new URL("../socket/receiver.ts", import.meta.url)).text()).replaceAll("\r", "");
-  expect(src).toContain("resumedWalk = resumeArrivalWalk(wt, arrivalState.walk);");
+  expect(src).toContain("resumedWalk = resumeArrivalWalk(wt, walk);");
   expect(src).toContain("if (resumedWalk) await waitFor(resumedWalk, RESUME_WALK_WAIT_MS);");
   expect(src).toContain("wt.data.walkRecoverUntil = Date.now() + RESUME_WALK_RECOVER_MS;");
   // The idle pose built from the stored position (a "down" default) is the login path only.
@@ -106,9 +106,10 @@ test("a resumed arrival recovers the walk after a stray stop; a normal player, a
   expect(recoverResumedWalk({ moving: true } as any, now + 1000, now)).toBe(false);
 });
 
-test("movement.ts asks the helper with the arrival's window, and nothing else sets the window but the resume", async () => {
+test("movement.ts asks the helper with the arrival's window, and nothing else sets the window but the resume (and its late gap report)", async () => {
   const mv = (await Bun.file(new URL("../socket/handlers/movement.ts", import.meta.url)).text()).replaceAll("\r", "");
   expect(mv).toContain("if (recoverResumedWalk(currentPlayer, wt.data?.walkRecoverUntil, Date.now())) {");
   const rc = (await Bun.file(new URL("../socket/receiver.ts", import.meta.url)).text()).replaceAll("\r", "");
-  expect(rc.split("walkRecoverUntil").length - 1).toBe(1);
+  expect(rc.split("walkRecoverUntil").length - 1).toBe(2);
+  expect(rc.slice(rc.indexOf("export async function applyLateGap(")).split("walkRecoverUntil").length - 1).toBe(1);
 });

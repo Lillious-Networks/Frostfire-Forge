@@ -30,9 +30,9 @@ test("every handler module names the labels it handles, and no label is handled 
       seen.set(label, file);
     }
   }
-  // The count is the coverage check: the receiver's switch had 181 labels, plus CLUSTER_DEBUG, so a label that lost its handler fails here.
+  // The count is the coverage check: the receiver's switch had 181 labels, plus CLUSTER_DEBUG and HANDOFF_GAP, so a label that lost its handler fails here.
   // (There is no list of the packets a client sends, only validPacketTypes, which holds the server's own as well.)
-  expect(seen.size).toBe(182);
+  expect(seen.size).toBe(183);
 });
 
 test("every label a module names is a case of its own switch", () => {

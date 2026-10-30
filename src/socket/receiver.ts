@@ -1826,7 +1826,7 @@ import { onLinksAttached, type LinkContext } from "../cluster/linkhooks";
 import { forwardTable } from "../cluster/forwarding";
 import { settled, tradeSettle, unsettle } from "../cluster/tradesettle";
 import { arrivedPoseRevision } from "./posedgram";
-import { RESUME_WALK_RECOVER_MS, RESUME_WALK_WAIT_MS, type ResumeCatchUp, doneWalkOf, resumeCatchUpMs, waitFor, walkOf, resumeSelfSpawn, adminMoveOf, arrivalFields, arrivalMaps, arrivalLimits, arrivalMount, draggedCheck, handoffStateOf, playersToDespawn, remoteAdminOf, reverseSummonAdmins, seedArrival, warpTarget } from "./arrival";
+import { MAX_GAP_LATE_MS, RESUME_WALK_RECOVER_MS, RESUME_WALK_WAIT_MS, type GapApplied, type GapUpdate, type ResumeCatchUp, doneWalkOf, gapPlanOf, newerGap, resumeCatchUpMs, waitFor, walkOf, resumeSelfSpawn, adminMoveOf, arrivalFields, arrivalMaps, arrivalLimits, arrivalMount, draggedCheck, handoffStateOf, playersToDespawn, remoteAdminOf, reverseSummonAdmins, seedArrival, warpTarget } from "./arrival";
 import { LiveNodeCache, routeLogin } from "../cluster/route";
 import { revivePlayer, type ReviveDeps } from "./revive";
 import { invitations } from "../cluster/invitations";
@@ -3899,8 +3899,41 @@ async function completeLogin(result: any, arriving: ArrivingLogin): Promise<void
       const resumeCatchUp: ResumeCatchUp | null = arrivalState?.walk
         ? { walk: arrivalState.walk, idleMs: arrivalState.walkIdleMs, committedAt: arrival?.committedAt ?? Date.now() }
         : null;
+      // The client walked that time from where the old node left the player, as its keys said, and reported it as it
+      // logged in here (the `gap` of its AUTH, session.ts, and a HANDOFF_GAP at each change of key since). A key it let
+      // go of or turned in the gap is walked here the way the client walked it, before the client is told where it
+      // stands: the walk then goes on the way the client holds, or stops. Without a report, the walk goes on the way it came.
+      // The replay and the resumed walk step on the map's collision: it is loaded first, so nothing from the report's
+      // read to the walk's first step waits (a stop the client sends after HANDOFF_DONE would come before that step).
+      const movement = await import("./handlers/movement");
+      await player.preloadMapCollision(_pcache.location.map);
+      const gap: GapUpdate | undefined = wt.data.gapUpdate;
+      wt.data.gapUpdate = undefined;
+      const replayable = !!resumeCatchUp && !!doneWalkOf(arrivalState?.walk, _pcache);
+      // A report that comes from here on is walked from the same point (applyLateGap), once the walk below has begun.
+      const position = _pcache.location.position;
+      const applied: GapApplied = {
+        seq: gap?.seq ?? -1,
+        map: _pcache.location.map,
+        from: { x: position.x, y: position.y, direction: position.direction },
+        catchUp: replayable ? resumeCatchUp : null,
+        at: 0,
+        ready: false,
+        pending: null,
+      };
+      wt.data.gapApplied = applied;
+      const gapPlan = replayable ? gapPlanOf(gap?.input, resumeCatchUp, Date.now(), TICK_MS) : null;
+      let walk = arrivalState?.walk ?? null;
+      let catchUp = resumeCatchUp;
+      if (gapPlan) {
+        const moved = await movement.replayGapSteps(_pcache, gapPlan.steps);
+        walk = gapPlan.walk;
+        catchUp = walk && resumeCatchUp ? { ...resumeCatchUp, walk, spentMs: gapPlan.spentMs } : null;
+        // They stand where the replay left them: their viewers are told.
+        if (moved && !walk) queueFinalMovement(_pcache);
+      }
       // The walk about to be resumed below, not the facing (a cast keeps the facing while the player walks another way).
-      const doneWalk = doneWalkOf(arrivalState?.walk, _pcache);
+      const doneWalk = doneWalkOf(walk, _pcache);
       // The client keeps its world (Task 12): it is told where it stands, and the spawns that follow are deduped by id.
       sendPacket(wt, packetManager.handoffDone({
         map: _pcache.location.map,
@@ -3909,15 +3942,25 @@ async function completeLogin(result: any, arriving: ArrivingLogin): Promise<void
         direction: _pcache.location.position.direction,
         walk: doneWalk,
         // The walk the catch-up adds to the first step: the client keeps its walk when it is that far past the point.
-        catchUpMs: doneWalk ? resumeCatchUpMs(resumeCatchUp, Date.now(), TICK_MS) : 0,
+        catchUpMs: doneWalk ? resumeCatchUpMs(catchUp, Date.now(), TICK_MS) : 0,
+        // The newest report walked (-1 for none): the client walks the gap on until the answer to a newer one it sent.
+        gapSeq: applied.seq,
       }));
-      // The player was walking when handed off: they walk on from the committed position, as if the client had just
-      // sent the move. A different direction or a stop from the client after this wins as usual.
-      if (arrivalState?.walk) {
+      applied.at = Date.now();
+      // The player was walking when handed off: they walk on from the committed position (or the replay's), as if the
+      // client had just sent the move. A different direction or a stop from the client after this wins as usual.
+      if (walk) {
         // (movement.ts undoes a stray stop of the superseded mover for this long, for this arrival only)
         wt.data.walkRecoverUntil = Date.now() + RESUME_WALK_RECOVER_MS;
-        wt.data.resumeCatchUp = resumeCatchUp;
-        resumedWalk = resumeArrivalWalk(wt, arrivalState.walk);
+        wt.data.resumeCatchUp = catchUp;
+        resumedWalk = resumeArrivalWalk(wt, walk);
+      }
+      // (resumeArrivalWalk numbered its move before returning: a report walked now supersedes it)
+      applied.ready = true;
+      if (applied.pending) {
+        const pending = applied.pending;
+        applied.pending = null;
+        void applyLateGap(wt, pending);
       }
     } else {
       sendPacket(wt, packetManager.loadMap(mapMetadata));
@@ -3969,7 +4012,7 @@ async function completeLogin(result: any, arriving: ArrivingLogin): Promise<void
       if (selfSpriteData.bodySprite || selfSpriteData.headSprite) {
         // Sprite URLs are now sent to the client, which fetches them from the asset server
         spriteDataForSelf = {
-          mountSprite: _pcache?.mount_type ? getMountSpriteUrl(_pcache.mount_type) : null,
+          mountSprite: _pcache?.mounted === true && _pcache?.mount_type ? getMountSpriteUrl(_pcache.mount_type) : null,
           bodySprite: selfSpriteData.bodySprite || null,
           headSprite: selfSpriteData.headSprite || null,
           armorHelmetSprite: selfSpriteData.armorHelmetSprite || null,
@@ -4000,6 +4043,7 @@ async function completeLogin(result: any, arriving: ArrivingLogin): Promise<void
         isNoclip: playerData.isNoclip,
         isDead: currentPlayer.isDead || false,
         isGhost: currentPlayer.isGhost || false,
+        mounted: currentPlayer.mounted === true,
         ghostTeleportPending: currentPlayer.ghostTeleportPending || false,
         corpse: currentPlayer.corpse || null,
         stats: currentPlayer.stats || {},
@@ -4381,6 +4425,74 @@ async function resumeArrivalWalk(wt: any, direction: string): Promise<void> {
   } catch (error) {
     log.warn(`The walk of an arrival was not resumed: ${error}`);
   }
+}
+
+/**
+ * A gap report that came after the login walked the gap (HANDOFF_GAP: a change of key the client made while the login
+ * ran, or as HANDOFF_DONE was on its way). The arrival is walked through the gap again from where it stood, as this
+ * report says, and the walk goes on in the direction now held, or stops: as if the login had read this report. The
+ * client walks the gap on until the answer (HANDOFF_GAP_DONE, which says where the player is as HANDOFF_DONE does), so
+ * nothing it drew is set back; it drops the echoes sent before it. An older report than one walked is ignored. Every
+ * report is answered: one that cannot be walked (the arrival did not walk, it changed map, MAX_GAP_LATE_MS passed, or
+ * it died or was stunned) is answered with where the player is and the walk they are in. One report is walked at a
+ * time: a newer one that comes meanwhile waits, and replaces any older one waiting.
+ */
+export async function applyLateGap(wt: any, update: GapUpdate): Promise<void> {
+  const applied: GapApplied | undefined = wt.data?.gapApplied;
+  if (!applied || update.seq <= applied.seq) return;
+  if (!applied.ready) {
+    applied.pending = newerGap(applied.pending, update);
+    return;
+  }
+  applied.seq = update.seq;
+  const p = playerCache.get(wt.data.id);
+  if (!p || wt.readyState !== 1) return;
+  applied.ready = false;
+  // (resumeArrivalWalk numbers its move before returning: the next report, walked after the finally, supersedes it)
+  let resumed: Promise<void> | null = null;
+  try {
+    const now = Date.now();
+    const walkable = !!applied.catchUp && p.location.map === applied.map && now - applied.at <= MAX_GAP_LATE_MS && !!doneWalkOf(applied.catchUp.walk, p);
+    const plan = walkable ? gapPlanOf(update.input, applied.catchUp, now, TICK_MS) : null;
+    if (plan) {
+      // The walk under way, and a MOVEXY of it still running, give way: their move number is older.
+      p._moveSeq = (p._moveSeq ?? 0) + 1;
+      gameLoop.unregisterMovingPlayer(p.id);
+      wt.data.resumeCatchUp = undefined;
+      p._stepCarry = undefined;
+      await (await import("./handlers/movement")).replayGapSteps(p, plan.steps, applied.from);
+    }
+    const walk = doneWalkOf(plan ? plan.walk : walkOf(p), p);
+    const catchUp = plan && walk ? { ...applied.catchUp!, walk, spentMs: plan.spentMs } : null;
+    sendPacket(wt, packetManager.handoffGapDone({
+      seq: update.seq,
+      x: p.location.position.x,
+      y: p.location.position.y,
+      direction: p.location.position.direction,
+      walk,
+      catchUpMs: catchUp ? resumeCatchUpMs(catchUp, Date.now(), TICK_MS) : 0,
+      // The client drops its own echoes sent before this (same clock as their send time).
+      t: Date.now(),
+    }));
+    if (!plan) return;
+    if (walk) {
+      wt.data.walkRecoverUntil = Date.now() + RESUME_WALK_RECOVER_MS;
+      wt.data.resumeCatchUp = catchUp;
+      resumed = resumeArrivalWalk(wt, walk);
+    } else {
+      // They stand where the replay left them: they are posed standing, and their viewers are told where.
+      await forceStopPlayerMovement(p);
+      queueFinalMovement(p);
+    }
+  } catch (error) {
+    log.warn(`A gap report of an arrival was not walked: ${error}`);
+  } finally {
+    applied.ready = true;
+    const next = applied.pending;
+    applied.pending = null;
+    if (next) void applyLateGap(wt, next);
+  }
+  if (resumed) await resumed;
 }
 
 /**

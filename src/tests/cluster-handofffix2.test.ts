@@ -22,7 +22,7 @@ const { LinkCalls } = await import("../cluster/linkcalls");
 const { linkPair, settle } = await import("./cluster-fakelink");
 const { WALK_DIRECTIONS, handoffStateOf, arrivalLimits, walkOf } = await import("../socket/arrival");
 const { packetManager } = await import("../socket/packet_manager");
-const { sendHandoffPrepare } = await import("../socket/handoffprepare");
+const { sendHandoffPrepare, sendHandoffBegin, sendHandoffStay } = await import("../socket/handoffprepare");
 const { FrameDecoder } = await import("../socket/framing");
 const { TransportConnection, PREOPEN_AUTH_TIMEOUT_MS, authTimeoutFor, startAuthTimer } = await import("../socket/transport");
 const { default: log } = await import("../modules/logger");
@@ -283,6 +283,45 @@ test("the prepare and the withdrawal reach the client as frames it can read, thr
   expect(server).toContain("prepare: (p, node) => sendHandoffPrepare(p.wt, node),");
 });
 
+test("the begin says the gap is reported and where the node stopped stepping the player; the stay carries where the node keeps the player", () => {
+  expect(decode(packetManager.handoffBegin({ x: 110675, y: 93000 }))).toEqual({ type: "HANDOFF_BEGIN", data: { report: true, gapUpdates: true, x: 110675, y: 93000 } });
+  expect(decode(packetManager.handoffBegin(null))).toEqual({ type: "HANDOFF_BEGIN", data: { report: true, gapUpdates: true } });
+  expect(decode(packetManager.handoffStay({ x: 12, y: -3 }))).toEqual({ type: "HANDOFF_STAY", data: { x: 12, y: -3 } });
+});
+
+test("the begin and the stay reach the client as frames it can read, through the node's own send", async () => {
+  const writes: Uint8Array[] = [];
+  const connection = new TransportConnection({ queuedBytes: 0n, close: () => {} } as any, 1200, 1024 * 1024);
+  connection.attachStream({ getWriter: () => ({ write: (chunk: Uint8Array) => { writes.push(chunk); return Promise.resolve(); } }) });
+  connection.readyState = 1;
+  const read = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const decoder = new FrameDecoder(1024 * 1024);
+    const frames = writes.splice(0).flatMap((w) => decoder.push(w));
+    return frames.map((f) => JSON.parse(dec.decode(f)));
+  };
+  // The player's own position (rounded): the point of their last step, whose echo (a datagram) may come after the begin.
+  sendHandoffBegin(connection as any, { location: { position: { x: 110675.4, y: 93000 } } });
+  expect(await read()).toEqual([{ type: "HANDOFF_BEGIN", data: { report: true, gapUpdates: true, x: 110675, y: 93000 } }]);
+  sendHandoffBegin(connection as any, {});
+  expect(await read()).toEqual([{ type: "HANDOFF_BEGIN", data: { report: true, gapUpdates: true } }]);
+  // The player's own position: where the node stood them through the drain.
+  sendHandoffStay(connection as any, { location: { position: { x: 40.4, y: 7 } } });
+  expect(await read()).toEqual([{ type: "HANDOFF_STAY", data: { x: 40, y: 7 } }]);
+  // No position: nothing to take back to, the stay still ends the client's walk.
+  sendHandoffStay(connection as any, {});
+  expect(await read()).toEqual([{ type: "HANDOFF_STAY", data: null }]);
+  connection.readyState = 3;
+  sendHandoffBegin(connection as any, { location: { position: { x: 1, y: 2 } } });
+  sendHandoffStay(connection as any, { location: { position: { x: 1, y: 2 } } });
+  sendHandoffBegin(null, null);
+  expect(await read()).toEqual([]);
+  // The node's deps are these functions.
+  const server = readFileSync(join(import.meta.dir, "..", "socket", "server.ts"), "utf8");
+  expect(server).toContain("begin: (p) => sendHandoffBegin(p.wt, p),");
+  expect(server).toContain("stay: (p) => sendHandoffStay(p.wt, p),");
+});
+
 // ---- an idle session
 
 test("an unauthenticated session holds no player and is closed by the node's timeout; a cluster node waits long enough for a pre-opened one", async () => {
@@ -350,9 +389,9 @@ test("the arrival reads the walk, drops one that is not a direction, and a dead 
 
 test("a resumed arrival goes on walking: the MOVEXY handler is run for its direction, counted in flight; a standing one is not", async () => {
   const receiver = readFileSync(join(import.meta.dir, "..", "socket", "receiver.ts"), "utf8");
-  // Wiring: after HANDOFF_DONE, resume only, from the arrival's own state.
+  // Wiring: after HANDOFF_DONE, resume only, from the arrival's own state (or the walk the client held in its gap report).
   const done = receiver.indexOf("packetManager.handoffDone({");
-  const wiring = receiver.indexOf("resumedWalk = resumeArrivalWalk(wt, arrivalState.walk);", done);
+  const wiring = receiver.indexOf("resumedWalk = resumeArrivalWalk(wt, walk);", done);
   expect(wiring).toBeGreaterThan(done);
   expect(wiring).toBeLessThan(receiver.indexOf("sendPacket(wt, packetManager.loadMap(mapMetadata));", done));
 

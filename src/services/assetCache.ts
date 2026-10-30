@@ -21,6 +21,14 @@ function changedAll(): void {
   for (const key of changeListeners.keys()) changed(key);
 }
 
+// The key of a Redis value's stamp, written with the value (RedisCacheService.add). Outside the cache's prefix, so
+// listing the cache does not see it, and in the value's hash slot (the braces), so the two are set in one command.
+const stampOf = (fullKey: string) => `{${fullKey}}#stamp`;
+
+// What a stamp holds: made of the text, so writing the same value again (every node writes the lists when it starts)
+// leaves the stamp as it was and no holder of the value reads it again.
+const digestOf = (text: string) => `${text.length}:${Bun.hash(text)}`;
+
 interface CacheService {
   add(key: string, value: any): Promise<void>;
   get(key: string): Promise<any>;
@@ -144,7 +152,7 @@ class MemoryCacheService implements CacheService {
   }
 }
 
-class RedisCacheService implements CacheService {
+export class RedisCacheService implements CacheService {
   private client: any;
   private prefix: string;
 
@@ -207,7 +215,9 @@ class RedisCacheService implements CacheService {
 
   async add(key: string, value: any) {
     const data = typeof value === "string" ? value : JSON.stringify(value);
-    await this.client.set(this.prefixed(key), data);
+    // The value and its stamp in one command: a process holding a copy of the value learns from the stamp alone
+    // whether it changed (getIfChanged).
+    await this.client.send("MSET", [this.prefixed(key), data, stampOf(this.prefixed(key)), digestOf(data)]);
     changed(key);
   }
 
@@ -224,14 +234,32 @@ class RedisCacheService implements CacheService {
   }
 
   /**
-   * Like get, but when the stored text is the one `digest` was made of (length and hash), nothing is parsed or copied
-   * and `same` is true. Lets a holder of a big list see that it did not change without paying for a copy of it.
+   * Like get, but when the value is the one `digest` was made of, nothing is read, parsed or copied and `same` is
+   * true. Lets a holder of a big list see that it did not change without paying for a copy of it: the digest is the
+   * value's stamp (add) and length, a few bytes, where reading the value (the NPC list is tens of MB) would hold the
+   * event loop for as long as it takes to arrive.
    */
   async getIfChanged(key: string, digest: string | null): Promise<{ digest: string; same: boolean; value?: any }> {
-    const data = await this.client.get(this.prefixed(key));
-    if (!data) return { digest: "", same: digest === "", value: null };
-    const now = `${data.length}:${Bun.hash(data)}`;
-    if (now === digest) return { digest: now, same: true };
+    // The stamp is read before the value. A write between the two leaves the newer value under the older stamp, and
+    // the next look reads the value again; a newer stamp is never kept with an older value. The length catches a
+    // write that left the stamp as it was.
+    const [stamp, length] = await Promise.all([
+      this.client.get(stampOf(this.prefixed(key))),
+      this.client.send("STRLEN", [this.prefixed(key)]),
+    ]);
+    let now: string;
+    let data: string | null;
+    if (stamp) {
+      now = `${stamp}:${length}`;
+      if (now === digest) return { digest: now, same: true };
+      data = await this.client.get(this.prefixed(key));
+    } else {
+      // A value written without a stamp: its text is hashed.
+      data = await this.client.get(this.prefixed(key));
+      now = data ? digestOf(data) : "";
+      if (now === digest) return { digest: now, same: true };
+    }
+    if (!data) return { digest: now, same: false, value: null };
     let value: any;
     try {
       value = this.reconstructBuffers(JSON.parse(data));
@@ -242,7 +270,7 @@ class RedisCacheService implements CacheService {
   }
 
   async remove(key: string): Promise<void> {
-    await this.safeSend("DEL", [this.prefixed(key)]);
+    await this.safeSend("DEL", [this.prefixed(key), stampOf(this.prefixed(key))]);
     changed(key);
   }
 
@@ -254,7 +282,7 @@ class RedisCacheService implements CacheService {
     const chunkSize = 500;
     for (let i = 0; i < keys.length; i += chunkSize) {
       const chunk = keys.slice(i, i + chunkSize);
-      await this.safeSend("DEL", chunk);
+      await this.safeSend("DEL", [...chunk, ...chunk.map(stampOf)]);
     }
     changedAll();
   }

@@ -57,7 +57,7 @@ import { dotCredit } from "../cluster/dotcredit.ts";
 import { forwardTable } from "../cluster/forwarding.ts";
 import { ghosts } from "../cluster/ghosts.ts";
 import { walkIdleMsOf, walkOf } from "./arrival.ts";
-import { sendHandoffPrepare } from "./handoffprepare.ts";
+import { sendHandoffBegin, sendHandoffPrepare, sendHandoffStay } from "./handoffprepare.ts";
 import { HandoffGiveUp, playerHandoff, type NodeAddress as HandoffNode } from "../cluster/handoff.ts";
 import { SHUTDOWN_DEADLINE_MS, arrivalId, boundedStep, guardedTeleport, spendsTicket } from "../cluster/handoffguards.ts";
 import { readyIn as consumableReadyIn, setReadyIn as setConsumableReadyIn } from "../systems/consumables.ts";
@@ -578,7 +578,8 @@ function onTransportClose(connection: TransportConnection) {
 // Latency-sensitive packets that bypass the backpressure queue. Hoisted to a
 // module-level Set: this was an array literal rebuilt and linearly scanned on
 // every single inbound packet.
-const PROCESS_IMMEDIATELY = new Set(["MOVEXY", "STATS", "SERVER_TIME", "ANIMATION"]);
+// HANDOFF_GAP with them: a change of key in a handoff's gap is taken in the order of the moves around it.
+const PROCESS_IMMEDIATELY = new Set(["MOVEXY", "STATS", "SERVER_TIME", "ANIMATION", "HANDOFF_GAP"]);
 
 const MSG_PROFILE = process.env.BENCHMARK_PROFILE === "1" || process.env.BENCHMARK_PROFILE === "true";
 const msgProf: Record<string, { n: number; ms: number }> = {};
@@ -988,6 +989,9 @@ onLinksAttached((ctx) => {
     recheck: handoffRecheck,
     // The client is told where the next node is (or to drop the session it opened for it).
     prepare: (p, node) => sendHandoffPrepare(p.wt, node),
+    // The client walks the player on from the drain (this node sends no more steps), and stops if the handoff is given up.
+    begin: (p) => sendHandoffBegin(p.wt, p),
+    stay: (p) => sendHandoffStay(p.wt, p),
     // A drained player kept here is stopped where they stand, and the client told so: it was walking, and its moves
     // during the drain were dropped.
     undrain: (p) => forceStopPlayerMovement(p),
