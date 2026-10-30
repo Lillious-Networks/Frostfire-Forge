@@ -6,7 +6,7 @@ Contributions are welcome: bug reports, fixes, features and documentation.
 
 ## Before your first pull request: the CLA
 
-This project has two licenses (see [LICENSING.md](LICENSING.md)): it is free for noncommercial use, and commercial use needs a paid license from Lillious Networks. For that to be possible, every contributor signs the [Contributor License Agreement](CLA.md) once. You keep the copyright in your work; the agreement gives Lillious Networks the right to distribute it under both licenses, including the paid one, without payment to you.
+This project has two licenses (see [LICENSING.md](LICENSING.md)): it is free for noncommercial use, and commercial use needs a paid license from Frostfire Interactive. For that to be possible, every contributor signs the [Contributor License Agreement](CLA.md) once. You keep the copyright in your work; the agreement gives Frostfire Interactive the right to distribute it under both licenses, including the paid one, without payment to you.
 
 Signing takes one comment:
 
@@ -29,4 +29,4 @@ Open an issue with what you did, what you expected and what happened, and the ve
 
 ## Security
 
-Please do not report a security problem in a public issue. Contact Lillious Networks privately through https://github.com/Lillious-Networks first.
+Please do not report a security problem in a public issue. Contact Frostfire Interactive privately through https://github.com/Frostfire-Interactive first.

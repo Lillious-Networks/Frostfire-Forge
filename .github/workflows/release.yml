@@ -189,13 +189,13 @@ jobs:
       - name: Checkout Gateway Repository
         uses: actions/checkout@v6
         with:
-          repository: Lillious-Networks/Frostfire-Forge-Gateway
+          repository: Frostfire-Forge/Frostfire-Forge-Gateway
           path: gateway
 
       - name: Checkout Asset Server Repository
         uses: actions/checkout@v6
         with:
-          repository: Lillious-Networks/Frostfire-Forge-Assets
+          repository: Frostfire-Forge/Frostfire-Forge-Assets
           path: assets
 
       - name: Log in to GitHub Container Registry

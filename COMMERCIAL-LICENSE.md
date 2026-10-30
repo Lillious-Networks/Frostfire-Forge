@@ -2,9 +2,9 @@
 
 Project: Frostfire Forge
 
-This project is free for noncommercial use under the PolyForm Noncommercial License 1.0.0 (see [LICENSE](LICENSE)). Any commercial use requires a paid commercial license from Lillious Networks.
+This project is free for noncommercial use under the PolyForm Noncommercial License 1.0.0 (see [LICENSE](LICENSE)). Any commercial use requires a paid commercial license from Frostfire Interactive.
 
-This file describes the commercial license. It is not itself a license: no commercial rights are granted until a commercial license agreement has been signed by you and Lillious Networks and its fee has been paid.
+This file describes the commercial license. It is not itself a license: no commercial rights are granted until a commercial license agreement has been signed by you and Frostfire Interactive and its fee has been paid.
 
 ## When you need one
 
@@ -30,4 +30,4 @@ The exact terms and the price are set in the agreement.
 
 ## How to get one
 
-Contact Lillious Networks through https://github.com/Lillious-Networks and say which project you want to license and how you plan to use it.
+Contact Frostfire Interactive through https://github.com/Frostfire-Interactive and say which project you want to license and how you plan to use it.

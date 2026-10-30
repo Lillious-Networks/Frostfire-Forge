@@ -17,7 +17,7 @@ Under it you may use, change and share the software for those purposes, as long 
 
 ## 2. Commercial use: paid, always
 
-Every commercial use needs a paid commercial license from Lillious Networks. Nothing in the noncommercial license allows it. See [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md).
+Every commercial use needs a paid commercial license from Frostfire Interactive. Nothing in the noncommercial license allows it. See [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md).
 
 Commercial use includes, for example:
 
@@ -36,4 +36,4 @@ Versions of this project published before this change were released under the GN
 
 So that the project can be offered under both licenses, every contributor signs the Contributor License Agreement in [CLA.md](CLA.md) before a contribution is merged. You keep the copyright in your contribution. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Copyright (c) Lillious Networks and contributors.
+Copyright (c) Frostfire Interactive and contributors.

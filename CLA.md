@@ -4,7 +4,7 @@ Project: Frostfire Forge
 
 Version 1.0
 
-Thank you for contributing to this project. This agreement says under which terms Lillious Networks ("the Project Owner") may use what you contribute. It lets the project be offered both under a free license for noncommercial use and under paid commercial licenses (see [LICENSING.md](LICENSING.md)). You keep the copyright in your contributions.
+Thank you for contributing to this project. This agreement says under which terms Frostfire Interactive ("the Project Owner") may use what you contribute. It lets the project be offered both under a free license for noncommercial use and under paid commercial licenses (see [LICENSING.md](LICENSING.md)). You keep the copyright in your contributions.
 
 By signing this agreement as described in [CONTRIBUTING.md](CONTRIBUTING.md), you accept these terms for all your present and future contributions to this project.
 

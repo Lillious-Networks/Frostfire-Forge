@@ -12,9 +12,9 @@
 Frostfire Forge is an upcoming 2D MMO engine platform designed to empower developers and hobbyists alike to bring their dream games and worlds to life. Built with cutting-edge technology, it offers a highly secure and optimized foundation for MMO development. With a focus on simplicity and performance, Frostfire Forge makes creating your own multiplayer universe easier than ever.
 </p>
 <p align="center">
-  <img src="https://img.shields.io/github/actions/workflow/status/Lillious-Networks/Frostfire-Forge/release.yml?branch=main&label=Docker&style=flat-square" alt="Docker">
+  <img src="https://img.shields.io/github/actions/workflow/status/Frostfire-Interactive/Frostfire-Forge/release.yml?branch=main&label=Docker&style=flat-square" alt="Docker">
   <img src="https://img.shields.io/badge/status-Beta-blue?style=flat-square&label=Status" alt="Beta">
-  <img src="https://img.shields.io/github/stars/Lillious-Networks/Frostfire-Forge?style=flat-square&label=Stars&color=tomato" alt="GitHub Stars">
+  <img src="https://img.shields.io/github/stars/Frostfire-Interactive/Frostfire-Forge?style=flat-square&label=Stars&color=tomato" alt="GitHub Stars">
 </p>
 
 ---
@@ -68,8 +68,8 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
 > **Required Software**:
 > - [Bun](https://bun.sh/) - JavaScript runtime & package manager
 > - [MySQL](https://www.mysql.com/downloads/) - Database
-> - [Frostfire Forge Gateway](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) - Authentication and reverse proxy gateway (required for all deployments)
-> - [Frostfire Forge Assets](https://github.com/Lillious-Networks/Frostfire-Forge-Assets) - Asset server for map data, sprites, and resources (required for all deployments)
+> - [Frostfire Forge Gateway](https://github.com/Frostfire-Interactive/Frostfire-Forge-Gateway) - Authentication and reverse proxy gateway (required for all deployments)
+> - [Frostfire Forge Assets](https://github.com/Frostfire-Interactive/Frostfire-Forge-Assets) - Asset server for map data, sprites, and resources (required for all deployments)
 > - [Docker](https://www.docker.com/) (Optional) - For containerized deployment
 
 ---
@@ -78,7 +78,7 @@ Frostfire Forge is an upcoming 2D MMO engine platform designed to empower develo
 
 ### Gateway (Authentication & Reverse Proxy)
 
-Frostfire Forge requires the [Frostfire Forge Gateway](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) for all deployments. The gateway handles centralized user authentication, game server registration and management, automatic failover, and request routing to game servers.
+Frostfire Forge requires the [Frostfire Forge Gateway](https://github.com/Frostfire-Interactive/Frostfire-Forge-Gateway) for all deployments. The gateway handles centralized user authentication, game server registration and management, automatic failover, and request routing to game servers.
 
 #### Setup
 
@@ -91,7 +91,7 @@ Game servers automatically register with the gateway on startup using the `GATEW
 
 ### Asset Server (Media & Resources)
 
-Frostfire Forge requires the [Frostfire Forge Assets](https://github.com/Lillious-Networks/Frostfire-Forge-Assets) server for all deployments. The asset server manages and distributes critical game data including:
+Frostfire Forge requires the [Frostfire Forge Assets](https://github.com/Frostfire-Interactive/Frostfire-Forge-Assets) server for all deployments. The asset server manages and distributes critical game data including:
 
 - **Map Data** - Tile maps, collision layers, spawn points, and warps
 - **World Maps** - Large worlds (up to 10240 x 10240 tiles) kept as a `.world` directory next to the `.json` maps and served in chunks like any other map. The game server syncs only a world's manifest and its collision and no-PvP data
@@ -255,7 +255,7 @@ The realm will display a "whitelist" badge in the realm selection UI while its w
 
 **Option 1: Use prebuilt Docker image:**
 ```bash
-docker run -d --name frostfire-forge-dev -p 3000:3000 -p 3000:3000/udp --ulimit nofile=1048576:1048576 ghcr.io/lillious-networks/frostfire-forge-dev:latest
+docker run -d --name frostfire-forge-dev -p 3000:3000 -p 3000:3000/udp --ulimit nofile=1048576:1048576 ghcr.io/Frostfire-Interactive/frostfire-forge-dev:latest
 ```
 
 **Option 2: Build and run from source:**
@@ -267,7 +267,7 @@ bun development
 
 **Create your admin account**
 
-Setup creates no accounts. Make the first admin from the [Gateway](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) repository, then open the link it prints to set the password:
+Setup creates no accounts. Make the first admin from the [Gateway](https://github.com/Frostfire-Interactive/Frostfire-Forge-Gateway) repository, then open the link it prints to set the password:
 ```bash
 bun create-admin-development <username> <email>
 ```
@@ -1328,7 +1328,7 @@ import { listener } from "@engine/systems/events";
 
 ## License
 
-Free for noncommercial use under the [PolyForm Noncommercial License 1.0.0](LICENSE). Every commercial use needs a paid [commercial license](COMMERCIAL-LICENSE.md) from Lillious Networks. See [LICENSING.md](LICENSING.md) for which one applies to you.
+Free for noncommercial use under the [PolyForm Noncommercial License 1.0.0](LICENSE). Every commercial use needs a paid [commercial license](COMMERCIAL-LICENSE.md) from Frostfire Interactive. See [LICENSING.md](LICENSING.md) for which one applies to you.
 
 Contributions are welcome and need a signed [Contributor License Agreement](CLA.md); see [CONTRIBUTING.md](CONTRIBUTING.md).
 

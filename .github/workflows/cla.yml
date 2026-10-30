@@ -27,6 +27,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           path-to-signatures: signatures/version1/cla.json
-          path-to-document: https://github.com/Lillious-Networks/Frostfire-Forge/blob/main/CLA.md
+          path-to-document: https://github.com/Frostfire-Forge/Frostfire-Forge/blob/main/CLA.md
           branch: cla-signatures
           allowlist: dependabot[bot],github-actions[bot]
